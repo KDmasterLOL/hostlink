@@ -6,6 +6,7 @@ use super::*;
 use onec_agent_protocol::{NativeExecutionEffect, NativeInvocationIdentity, RunLocalJobIdentity};
 use std::time::Duration;
 
+/// Binds the exact immutable job launch request to its authenticated native-invocation digest.
 pub(super) fn invocation_sha256(request: &JobRequestFile) -> io::Result<String> {
     let run_local = request.run_local.as_ref().ok_or_else(|| {
         io::Error::new(
@@ -313,6 +314,7 @@ pub(crate) fn lock_run_local_identity(jobs_root: &Path, run_id: &str) -> io::Res
     )
 }
 
+/// Refuses unsafe preexisting directory entries before creating per-run ownership locks.
 fn ensure_run_local_lock_directory(jobs_root: &Path) -> io::Result<()> {
     let locks_root = jobs_root.join("run-local-locks");
     for path in [jobs_root, locks_root.as_path()] {
@@ -410,6 +412,7 @@ pub(crate) fn mark_run_local_abandoned(jobs_root: &Path, run_id: &str) -> io::Re
     write_new_private_bytes(&tombstones.join(run_id), b"abandoned\n")
 }
 
+/// Admits only the exact staged executable and mapped files under the owned run workspace.
 pub(super) fn validate_run_local_candidate(
     jobs_root: &Path,
     program: &str,
@@ -594,6 +597,7 @@ pub fn status(jobs_root: &Path, job_id: &str) -> io::Result<AgentJobInfo> {
     status_unlocked(jobs_root, job_id)
 }
 
+/// Examines state while the caller owns the job lock, preserving unknown live PID identities.
 fn status_unlocked(jobs_root: &Path, job_id: &str) -> io::Result<AgentJobInfo> {
     let job_dir = job_dir(jobs_root, job_id)?;
     let mut record = read_latest_state_file(&job_dir)?;
@@ -647,6 +651,7 @@ fn status_unlocked(jobs_root: &Path, job_id: &str) -> io::Result<AgentJobInfo> {
     Ok(record.job)
 }
 
+/// Distinguishes proven-dead workers from live or PID-reused processes of unknown identity.
 pub(super) fn process_status(
     pid: Option<u32>,
     identity: Option<&ProcessIdentity>,
@@ -671,6 +676,7 @@ pub(super) fn process_status(
     }
 }
 
+/// A job can be reconciled only after all required process identities are confirmed dead.
 fn should_reconcile_stale(record: &JobStateFile) -> bool {
     let worker = process_status(
         record.job.worker_pid,
@@ -691,10 +697,12 @@ fn should_reconcile_stale(record: &JobStateFile) -> bool {
     }
 }
 
+/// Identifies persisted records predating durable worker start-token tracking.
 fn record_uses_legacy_identity(record: &JobStateFile) -> bool {
     record.process_identities.version == 0
 }
 
+/// Legacy PID-only records cannot prove ownership while a recorded PID still exists.
 fn legacy_identity_is_ambiguous(record: &JobStateFile) -> bool {
     if record.process_identities.version != 0 {
         return false;
@@ -939,7 +947,10 @@ pub async fn run_worker(job_dir: &Path) -> io::Result<()> {
         }
     };
     if let Some(workspace) = &result_workspace {
-        command = command.env(hostlink_core::ONEC_RESULT_DIR_ENV, workspace.incoming_path());
+        command = command.env(
+            hostlink_core::ONEC_RESULT_DIR_ENV,
+            workspace.incoming_path(),
+        );
     }
 
     // Durable job identity is agent-owned. Apply it after both request environment layers so the
@@ -1221,6 +1232,7 @@ pub async fn run_worker(job_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Preserves output-persistence failures distinctly from other process-tree failures.
 fn processkit_worker_error(error: processkit::Error) -> io::Error {
     match error.into_reason() {
         processkit::ErrorReason::RawSink { stream, source } => io::Error::new(
@@ -1231,6 +1243,7 @@ fn processkit_worker_error(error: processkit::Error) -> io::Error {
     }
 }
 
+/// Retains stream-level storage failure details for the durable terminal record.
 fn raw_sink_failure_message(error: &processkit::Error) -> Option<String> {
     match error.reason() {
         processkit::ErrorReason::RawSink { stream, source } => Some(format!(
@@ -1240,6 +1253,7 @@ fn raw_sink_failure_message(error: &processkit::Error) -> Option<String> {
     }
 }
 
+/// Classifies which ProcessKit outcomes prove that the owned process tree was reaped.
 fn processkit_teardown_confirmed(result: &processkit::Result<processkit::Outcome>) -> bool {
     match result {
         Ok(_) => true,
@@ -1255,6 +1269,7 @@ fn processkit_teardown_confirmed(result: &processkit::Result<processkit::Outcome
     }
 }
 
+/// Serializes cancellation checks and prelaunch state publication under the job lock.
 fn publish_prelaunch_terminal(job_dir: &Path, current: &mut AgentJobInfo) -> io::Result<()> {
     let _control = acquire_job_control_lock(job_dir)?;
     if job_dir.join("cancel.request").exists() {
@@ -1264,6 +1279,7 @@ fn publish_prelaunch_terminal(job_dir: &Path, current: &mut AgentJobInfo) -> io:
     write_next_state(job_dir, current)
 }
 
+/// Propagates cleanup errors instead of treating an uncommitted result workspace as disposable.
 fn try_discard_result_workspace(
     workspace: &mut Option<crate::results::ResultWorkspace>,
 ) -> io::Result<()> {
@@ -1273,6 +1289,7 @@ fn try_discard_result_workspace(
     Ok(())
 }
 
+/// Combines the primary failure with any failure to discard run-owned result state.
 fn discard_result_workspace_with_primary(
     workspace: &mut Option<crate::results::ResultWorkspace>,
     primary: String,
@@ -1284,6 +1301,7 @@ fn discard_result_workspace_with_primary(
     )
 }
 
+/// Preserves both errors and allows an injected cleanup implementation in regression tests.
 pub(super) fn discard_result_workspace_with_primary_and(
     workspace: &mut Option<crate::results::ResultWorkspace>,
     primary: String,

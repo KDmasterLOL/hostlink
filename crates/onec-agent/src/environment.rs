@@ -2,10 +2,10 @@
 
 #![deny(clippy::missing_docs_in_private_items)]
 
-use onec_agent_protocol::SecretEnvironment;
 use hostlink_core::{
     ONEC_EXEC_DEADLINE_UNIX_MS_ENV, ONEC_JOB_ID_ENV, ONEC_JOB_SYSTEM_ENV, ONEC_RESULT_DIR_ENV,
 };
+use onec_agent_protocol::SecretEnvironment;
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -14,10 +14,14 @@ use std::process::Command;
 
 /// Internal one-shot environment handoff carrying serialized durable-job secret environment.
 pub(crate) const INTERNAL_JOB_SECRET_ENV: &str = "ONEC_AGENT_JOB_SECRET_ENV_JSON";
+/// Reserved switch for the Agent-owned SSH askpass child; callers may not set it.
 const INTERNAL_ASKPASS_ENV: &str = "ONEC_OPS_INTERNAL_SSH_ASKPASS";
+/// SSH askpass credential handoff kept out of ordinary requested environments.
 const INTERNAL_ASKPASS_PASSWORD_ENV: &str = "ONEC_OPS_SSH_ASKPASS_PASSWORD";
+/// Historical default control token name; changing it requires explicit configuration migration.
 const DEFAULT_CONTROL_SECRET_ENV: &str = "ONEC_AGENT_SECRET";
 
+/// Narrow ambient baseline inherited by spawned processes on all platforms.
 const COMMON_SAFE_BASE: &[&str] = &[
     "PATH",
     "HOME",
@@ -39,6 +43,7 @@ const COMMON_SAFE_BASE: &[&str] = &[
     "XDG_RUNTIME_DIR",
 ];
 
+/// Additional ambient variables required for Windows user-profile and process compatibility.
 #[cfg(windows)]
 const WINDOWS_SAFE_BASE: &[&str] = &[
     "SystemRoot",
@@ -72,6 +77,7 @@ const WINDOWS_SAFE_BASE: &[&str] = &[
 #[derive(Debug, Clone)]
 /// Policy that builds a narrow inherited environment before applying request-owned variables.
 pub(crate) struct AgentEnvironmentPolicy {
+    /// Source name excluded from child inheritance to prevent control-token leakage.
     control_secret_env: String,
 }
 
@@ -164,6 +170,7 @@ impl AgentEnvironmentPolicy {
         Ok(())
     }
 
+    /// Applies host OS case rules when comparing names against the configured secret.
     fn is_control_secret_name(&self, name: &OsStr) -> bool {
         !self.control_secret_env.is_empty() && environment_name_eq(name, &self.control_secret_env)
     }
@@ -193,6 +200,7 @@ pub(crate) fn validate_control_secret_env_name(name: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Rejects internal handoffs in all jobs and durable-job identity injection in immediate Exec.
 fn validate_request_name(name: &str, kind: RequestedChildKind) -> io::Result<()> {
     if is_internal_reserved_name(name) {
         return Err(invalid_environment(format!(
@@ -210,6 +218,7 @@ fn validate_request_name(name: &str, kind: RequestedChildKind) -> io::Result<()>
     Ok(())
 }
 
+/// Recognizes environment slots owned exclusively by the agent and its workers.
 fn is_internal_reserved_name(name: &str) -> bool {
     environment_name_eq(OsStr::new(name), INTERNAL_JOB_SECRET_ENV)
         || environment_name_eq(OsStr::new(name), INTERNAL_ASKPASS_ENV)
@@ -218,6 +227,7 @@ fn is_internal_reserved_name(name: &str) -> bool {
         || environment_name_eq(OsStr::new(name), ONEC_EXEC_DEADLINE_UNIX_MS_ENV)
 }
 
+/// Keeps remote environment policy errors classified as invalid requests.
 fn invalid_environment(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
@@ -237,6 +247,7 @@ pub(crate) fn is_safe_base_environment_name(name: &OsStr) -> bool {
                 .any(|candidate| environment_name_eq_str(name, candidate))
 }
 
+/// Retains locale overrides without allowing arbitrary inherited environment variables.
 fn locale_environment_name(name: &str) -> bool {
     if cfg!(windows) {
         name.get(..3)
@@ -248,11 +259,13 @@ fn locale_environment_name(name: &str) -> bool {
     }
 }
 
+/// Compares an OS-native key using platform-specific environment key rules.
 fn environment_name_eq(name: &OsStr, expected: &str) -> bool {
     name.to_str()
         .is_some_and(|name| environment_name_eq_str(name, expected))
 }
 
+/// Windows environment keys are case-insensitive; Unix keys are case-sensitive.
 fn environment_name_eq_str(name: &str, expected: &str) -> bool {
     if cfg!(windows) {
         name.eq_ignore_ascii_case(expected)
@@ -261,6 +274,7 @@ fn environment_name_eq_str(name: &str, expected: &str) -> bool {
     }
 }
 
+/// Empty Windows-only baseline on other platforms.
 #[cfg(not(windows))]
 const WINDOWS_SAFE_BASE: &[&str] = &[];
 

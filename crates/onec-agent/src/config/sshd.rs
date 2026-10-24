@@ -20,8 +20,8 @@ impl SshServerConfig {
                 format!("ssh_server program not found: {}", self.program.display()),
             ));
         }
-        let bytes =
-            hostlink_core::read_file_bounded(&self.config, SSHD_CONFIG_MAX_BYTES).map_err(|error| {
+        let bytes = hostlink_core::read_file_bounded(&self.config, SSHD_CONFIG_MAX_BYTES).map_err(
+            |error| {
                 io::Error::new(
                     error.kind(),
                     format!(
@@ -29,7 +29,8 @@ impl SshServerConfig {
                         self.config.display()
                     ),
                 )
-            })?;
+            },
+        )?;
         let text = std::str::from_utf8(&bytes).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,

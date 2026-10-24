@@ -571,7 +571,10 @@ async fn run_immediate_exec(
         }
     };
     if let Some(workspace) = &result_workspace {
-        command = command.env(hostlink_core::ONEC_RESULT_DIR_ENV, workspace.incoming_path());
+        command = command.env(
+            hostlink_core::ONEC_RESULT_DIR_ENV,
+            workspace.incoming_path(),
+        );
     }
     if let Some(cwd) = cwd {
         command = command.current_dir(cwd);

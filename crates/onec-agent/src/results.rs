@@ -10,13 +10,13 @@ use cap_fs_ext::OsMetadataExt as _;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, Metadata, OpenOptions};
-use onec_agent_protocol::{
-    ResultArtifactInfo, ResultArtifactSpec, ResultOwner, ResultSetInfo, validate_result_name,
-    validate_result_set_id, validate_result_specs,
-};
 use hostlink_core::{
     create_private_directory, ensure_private_directory, move_file_atomically, remove_path_scoped,
     restrict_private_directory, write_new_json_file,
+};
+use onec_agent_protocol::{
+    ResultArtifactInfo, ResultArtifactSpec, ResultOwner, ResultSetInfo, validate_result_name,
+    validate_result_set_id, validate_result_specs,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

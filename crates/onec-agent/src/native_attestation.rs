@@ -1044,7 +1044,8 @@ mod tests {
         let key_dir = dir.path().join(KEY_DIR);
         hostlink_core::create_private_directory(&key_dir).expect("key directory");
         fs::write(key_dir.join(KEY_FILE), b"short").expect("malformed key fixture");
-        hostlink_core::restrict_private_file(&key_dir.join(KEY_FILE)).expect("restrict malformed file");
+        hostlink_core::restrict_private_file(&key_dir.join(KEY_FILE))
+            .expect("restrict malformed file");
         assert!(load_or_create_key(dir.path()).is_err());
     }
 

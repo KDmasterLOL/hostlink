@@ -224,8 +224,8 @@ impl AgentConfig {
     /// resolved safely.
     pub fn runtime(&self) -> io::Result<AgentRuntime> {
         let (secret, source) = if let Some(path) = &self.secret_file {
-            let bytes = hostlink_core::read_file_bounded(path, AGENT_SECRET_FILE_MAX_BYTES).map_err(
-                |source| {
+            let bytes = hostlink_core::read_file_bounded(path, AGENT_SECRET_FILE_MAX_BYTES)
+                .map_err(|source| {
                     io::Error::new(
                         source.kind(),
                         format!(
@@ -233,8 +233,7 @@ impl AgentConfig {
                             path.display()
                         ),
                     )
-                },
-            )?;
+                })?;
             let secret = std::str::from_utf8(&bytes).map_err(|error| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,

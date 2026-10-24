@@ -124,15 +124,17 @@ pub(super) fn handle(mut stream: TcpStream, request: AgentRequestKind) -> io::Re
         } => {
             let root = PathBuf::from(root);
             let path = PathBuf::from(path);
-            let response = match hostlink_core::remove_path_scoped(&root, &path, recursive, missing_ok)
-            {
-                Ok(removed) => AgentResponse::success(AgentResponseKind::PathRemoved { removed }),
-                Err(error) => AgentResponse::failure(format!(
-                    "refused scoped path removal root={} path={}: {error}",
-                    root.display(),
-                    path.display()
-                )),
-            };
+            let response =
+                match hostlink_core::remove_path_scoped(&root, &path, recursive, missing_ok) {
+                    Ok(removed) => {
+                        AgentResponse::success(AgentResponseKind::PathRemoved { removed })
+                    }
+                    Err(error) => AgentResponse::failure(format!(
+                        "refused scoped path removal root={} path={}: {error}",
+                        root.display(),
+                        path.display()
+                    )),
+                };
             write_json_line(&mut stream, &response)
         }
         AgentRequestKind::PathRename {

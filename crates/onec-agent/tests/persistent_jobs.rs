@@ -1,3 +1,4 @@
+use hostlink_core::{ONEC_JOB_ID_ENV, ONEC_JOB_SYSTEM_ENV, ONEC_PARENT_RUN_ID_ENV};
 use onec_agent_protocol::{
     AgentJobState, AgentRequest, AgentRequestKind, AgentResponse, AgentResponseKind,
     ONEC_AGENT_JOB_SYSTEM, ResultArtifactSpec, ResultOwner, SecretEnvironment, read_json_line,
@@ -5,7 +6,6 @@ use onec_agent_protocol::{
 };
 #[cfg(unix)]
 use onec_agent_protocol::{MAX_STDIN_PAYLOAD_BYTES, StdinPayload};
-use onec_core::{ONEC_JOB_ID_ENV, ONEC_JOB_SYSTEM_ENV, ONEC_PARENT_RUN_ID_ENV};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
@@ -218,7 +218,7 @@ fn result_command() -> (String, Vec<String>) {
 #[test]
 #[ignore = "test-only durable result writer invoked by the Windows integration fixture"]
 fn regression_inv_130_windows_result_writer_fixture() {
-    let result_dir = std::env::var_os(onec_core::ONEC_RESULT_DIR_ENV)
+    let result_dir = std::env::var_os(hostlink_core::ONEC_RESULT_DIR_ENV)
         .expect("agent must inject ONEC_RESULT_DIR");
     fs::write(
         std::path::PathBuf::from(result_dir).join("report.bin"),
