@@ -662,7 +662,7 @@ mod tests {
         fs::create_dir(&root).expect("root");
         let target = root.join("database");
         fs::create_dir(&target).expect("target");
-        fs::write(target.join("1Cv8.1CD"), b"owned database").expect("database marker");
+        fs::write(target.join("state.db"), b"owned data").expect("data marker");
         let root_identity = ScopedDirectoryIdentity::capture(&root).expect("root identity");
         let target_identity = ScopedDirectoryIdentity::capture(&target).expect("target identity");
 
@@ -687,7 +687,7 @@ mod tests {
             fs::read(replacement.join("keep")).expect("replacement survives"),
             b"unrelated"
         );
-        assert!(displaced_root.join("database/1Cv8.1CD").is_file());
+        assert!(displaced_root.join("database/state.db").is_file());
     }
 
     #[test]
@@ -697,7 +697,7 @@ mod tests {
         fs::create_dir(&root).expect("root");
         let target = root.join("database");
         fs::create_dir(&target).expect("target");
-        fs::write(target.join("1Cv8.1CD"), b"owned database").expect("database marker");
+        fs::write(target.join("state.db"), b"owned data").expect("data marker");
         let root_identity = ScopedDirectoryIdentity::capture(&root).expect("root identity");
         let target_identity = ScopedDirectoryIdentity::capture(&target).expect("target identity");
 
@@ -722,7 +722,7 @@ mod tests {
             fs::read(quarantine.join("payload/keep")).expect("replacement survives"),
             b"unrelated"
         );
-        assert!(displaced.join("1Cv8.1CD").is_file());
+        assert!(displaced.join("state.db").is_file());
     }
 
     #[test]
@@ -732,7 +732,7 @@ mod tests {
         fs::create_dir(&root).expect("root");
         let target = root.join("database");
         fs::create_dir(&target).expect("target");
-        fs::write(target.join("1Cv8.1CD"), b"owned database").expect("database marker");
+        fs::write(target.join("state.db"), b"owned data").expect("data marker");
         let root_identity = ScopedDirectoryIdentity::capture(&root).expect("root identity");
         let target_identity = ScopedDirectoryIdentity::capture(&target).expect("target identity");
         let mut quarantine_path = None;
@@ -767,7 +767,7 @@ mod tests {
             "{error}"
         );
         assert!(
-            target.join("1Cv8.1CD").is_file(),
+            target.join("state.db").is_file(),
             "original target is preserved"
         );
         let quarantine_path = quarantine_path.expect("quarantined substitute path");
