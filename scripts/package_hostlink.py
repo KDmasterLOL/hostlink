@@ -60,6 +60,7 @@ def package(component: str, target: str, source: Path, output: Path) -> tuple[Pa
 
     fd, temporary = tempfile.mkstemp(prefix=f".{stem}.", suffix=".tmp", dir=output)
     staged = Path(temporary)
+    published_archive = False
     try:
         with os.fdopen(fd, "wb") as sink, ZipFile(
             sink, mode="w", compression=ZIP_DEFLATED, compresslevel=9
@@ -82,8 +83,10 @@ def package(component: str, target: str, source: Path, output: Path) -> tuple[Pa
                 raise ValueError("ZIP CRC verification failed")
             if check.namelist() != [f"{stem}/{name}" for name in required]:
                 raise ValueError("ZIP member inventory mismatch")
-        digest = hashlib.sha256(staged.read_bytes()).hexdigest()
+        with staged.open("rb") as source:
+            digest = hashlib.file_digest(source, "sha256").hexdigest()
         os.link(staged, archive)  # Atomic create-new publication (no overwrite).
+        published_archive = True
         fd_sidecar, pending_sidecar = tempfile.mkstemp(
             prefix=f".{stem}.", suffix=".sha.tmp", dir=output
         )
@@ -95,6 +98,18 @@ def package(component: str, target: str, source: Path, output: Path) -> tuple[Pa
             os.link(pending_sidecar, checksum)  # Never overwrite concurrent publisher.
         finally:
             Path(pending_sidecar).unlink(missing_ok=True)
+    except BaseException:
+        if published_archive:
+            # Revoke only the hardlink we created. A concurrent publisher's
+            # replacement must not be removed after a failed sidecar publish.
+            try:
+                candidate = archive.lstat()
+                owned = staged.lstat()
+                if (candidate.st_dev, candidate.st_ino) == (owned.st_dev, owned.st_ino):
+                    archive.unlink()
+            except FileNotFoundError:
+                pass
+        raise
     finally:
         staged.unlink(missing_ok=True)
     return archive, checksum

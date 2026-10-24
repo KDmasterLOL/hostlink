@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+from unittest.mock import patch
 from pathlib import Path
 import tempfile
 import unittest
@@ -55,6 +57,26 @@ class PackageTest(unittest.TestCase):
             ValueError, package, "controller", "x86_64-pc-windows-msvc", self.source, self.output
         )
         self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_concurrent_sidecar_collision_preserves_other_output(self) -> None:
+        target = "x86_64-pc-windows-msvc"
+        self.source_files("controller", target)
+        stem = f"hostlink-controller-{target}"
+        archive = self.output / f"{stem}.zip"
+        sidecar = self.output / f"{stem}.zip.sha256"
+        original_link = os.link
+
+        def concurrent_publish(source: str | os.PathLike[str], dest: str | os.PathLike[str]) -> None:
+            if Path(dest) == sidecar:
+                sidecar.write_text("other-publisher\\n")
+                raise FileExistsError("concurrent publication")
+            original_link(source, dest)
+
+        with patch("package_hostlink.os.link", side_effect=concurrent_publish):
+            with self.assertRaises(FileExistsError):
+                package("controller", target, self.source, self.output)
+        self.assertFalse(archive.exists(), "partial archive must be withdrawn")
+        self.assertEqual(sidecar.read_text(), "other-publisher\\n")
 
     def test_hub_linux_archive(self) -> None:
         target = "x86_64-unknown-linux-gnu"
