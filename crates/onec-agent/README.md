@@ -35,10 +35,14 @@ entry, adopts an existing toolkit root, or claims to migrate installed hosts. Po
 kept compatible with Windows PowerShell 2; actual Windows and Windows 7 runtime acceptance has not
 been performed by this source-only change.
 
-The embedded SSH server currently supports SFTP and direct TCP forwarding. SSH `exec` and `shell`
-requests remain rejected. Safe generic command execution still needs an owned process-tree
-lifecycle with exact exit status, stdout/stderr handling, stdin policy, and timeout/cancellation
-coverage before SSH hooks can use it.
+The embedded SSH server supports SFTP, direct TCP forwarding, and bounded
+non-interactive SSH `exec`. Unix runs a command string via `sh -c`; Windows
+uses PowerShell only under a verified non-elevated, non-LocalSystem Agent
+process token. SSH username authentication does **not** impersonate an OS user:
+the command inherits the Agent's OS identity. Stdin EOF, separate stdout and
+stderr channels, terminal exit status, timeout and process-tree cancellation
+are implemented. Interactive `shell`/PTY requests remain rejected. Windows
+and Win7 native parity is still pending; existing Agent RPC stays available.
 
 The Agent now depends on the standalone `hostlink-core` crate, not on Toolkit's `onec-core`.
 Shared generic runtime operations use the following neutral core symbols:

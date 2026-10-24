@@ -14,9 +14,11 @@ sh/bash on Unix) and expected outcome; Hub does not execute user scripts.
 
 - Existing Agent control RPC is how current Nextest run-local dispatches a
   cached executable and gets stdout/stderr/exit status.
-- Embedded target russh currently offers SFTP and TCP forwarding, but explicitly
-  refuses SSH exec and shell requests. Do not route run-local over SSH exec
-  before the independent SSH-exec phase passes end-to-end native tests.
+- Embedded target russh offers SFTP, TCP forwarding, and bounded non-interactive
+  SSH `exec` with stdout/stderr separation, stdin, terminal exit status, and
+  process-tree cancellation. Interactive `shell` and PTY requests are rejected.
+  The SSH request is a single shell command string, not typed Agent RPC argv.
+  `run-local` continues using Agent RPC until native parity is accepted.
 - Outbound Agent-to-gateway tunnel, Hub enrollment/identity, and pinned
   target host keys are owned by the new product, never by its callers.
 - No inferred fallback from a missing/ambiguous Hub alias to direct DNS SSH.
@@ -58,12 +60,14 @@ explicit interpreter execution, timeout, output and exit code. No new package
 manager, no embedded bootstrap magic and no executable arbitrary PowerShell
 from unauthenticated Hub metadata.
 
-Windows non-admin user-session scripts execute under their own user; service
-mode must not accidentally grant them LocalSystem. For Windows NT 6.1, the
-selected shell must actually exist on the host and be compatible with old
-PowerShell. Pre-SSH bootstrap cannot be implemented using SSH hooks.
+Unix SSH `exec` uses `sh -c` under the Agent's operating-system identity.
+Windows uses `powershell.exe -NoProfile -NonInteractive -Command` only after
+checking that the Agent process is non-elevated and not LocalSystem. The SSH
+authentication username is **not** an OS-level impersonation identity. Scripts
+in a privileged Windows service context are rejected rather than gaining
+LocalSystem rights. PowerShell 2 and Win7 native acceptance remain unproven.
 
-An SSH exec implementation must retain channel stdout/stderr ordering and
-exit-status semantics, guard argument quoting/argv round trips, and scope
-subprocess teardown including errors and cancellation. A pure SFTP service is
-not a substitute for command execution.
+The convenient `hostlink run HOST LOCAL_SCRIPT` CLI is not implemented yet;
+callers may compose SFTP upload and explicit SSH exec themselves. SSH hooks
+cannot bootstrap initial SSH access. No built-in pre/post workflow or package
+manager exists.

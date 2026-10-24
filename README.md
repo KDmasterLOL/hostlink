@@ -3,11 +3,13 @@
 A standalone, generic managed-machine access product: a controller, a Hub/gateway,
 an outbound reverse-SSH Agent, SFTP, process execution and port forwarding.
 
-Status: additive extraction in progress. The copied four-crate snapshot has
-been adapted with a neutral shared core; controller and Hub binaries are named
-`hostlink` and `hostlink-hub`. Agent-only packaging remains under integration.
-Legacy protocol/config identities are intentionally preserved. No standalone
-release has passed native acceptance.
+Status: additive extraction in progress. The independent workspace contains
+neutral Rust packages `hostlink-access`, `hostlink-agent`, `hostlink-hub`,
+`hostlink-protocol`, and `hostlink-core`; the three binaries and standalone
+Agent-only package contract are separate from OneC Toolkit. Embedded SSH exec
+has Linux loopback regression coverage. External Windows/Win7 acceptance is
+still pending. Legacy wire and config identities remain preserved; no standalone
+release has yet passed native acceptance.
 
 - No dependency on 1C domain concepts in the target architecture.
 - Existing installed Agent configurations, protocol fields, SSH keys and signed
