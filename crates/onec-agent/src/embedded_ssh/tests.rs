@@ -438,7 +438,7 @@ async fn embedded_server_windows_exec_streams_binary_stdio_and_exit_status() {
     channel
         .exec(
             true,
-            r#"$stdinStream = [Console]::OpenStandardInput(); $stdoutStream = [Console]::OpenStandardOutput(); $memory = New-Object System.IO.MemoryStream; $stdinStream.CopyTo($memory); $bytes = $memory.ToArray(); $stdoutStream.Write($bytes, 0, $bytes.Length); $stderrStream = [Console]::OpenStandardError(); $errorBytes = [byte[]](0, 255, 69, 82, 82, 13, 10); $stderrStream.Write($errorBytes, 0, $errorBytes.Length); exit 7"#,
+            r#"$stdinStream = [Console]::OpenStandardInput(); $stdoutStream = [Console]::OpenStandardOutput(); $buffer = New-Object byte[] 8192; while (($read = $stdinStream.Read($buffer, 0, $buffer.Length)) -gt 0) { $stdoutStream.Write($buffer, 0, $read) }; $stdoutStream.Flush(); $stderrStream = [Console]::OpenStandardError(); $errorBytes = [byte[]](0, 255, 69, 82, 82, 13, 10); $stderrStream.Write($errorBytes, 0, $errorBytes.Length); $stderrStream.Flush(); exit 7"#,
         )
         .await
         .expect("exec request");
