@@ -237,7 +237,7 @@ fn read_initial_request(
     // application response that the dispatch path historically returned.
     let mut reader = BufReader::new(stream.try_clone()?);
     let line =
-        onec_core::read_line_bounded(&mut reader, onec_agent_protocol::MAX_CONTROL_LINE_BYTES)?
+        hostlink_core::read_line_bounded(&mut reader, onec_agent_protocol::MAX_CONTROL_LINE_BYTES)?
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::UnexpectedEof,

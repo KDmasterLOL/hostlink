@@ -8,8 +8,8 @@ use onec_agent_protocol::{
     AgentJobInfo, AgentJobState, ONEC_AGENT_JOB_SYSTEM, SecretEnvironment, StdinPayload,
 };
 #[cfg(windows)]
-use onec_core::configure_background_process_with_flags;
-use onec_core::{
+use hostlink_core::configure_background_process_with_flags;
+use hostlink_core::{
     ONEC_JOB_ID_ENV, ONEC_JOB_SYSTEM_ENV, RedactingWriter, RetainedLog,
     acquire_exclusive_file_lock, create_private_directory, ensure_private_directory,
     read_json_file_bounded, unix_time_ms as unix_ms, write_new_json_file, write_new_private_bytes,

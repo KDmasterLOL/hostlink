@@ -115,7 +115,7 @@ pub(super) fn write_state_with_identities(
             process_identities,
         },
     )?;
-    onec_core::move_file_atomically(&temp, &final_path)?;
+    hostlink_core::move_file_atomically(&temp, &final_path)?;
     Ok(())
 }
 

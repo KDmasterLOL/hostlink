@@ -339,7 +339,7 @@ async fn native_invocation_signs_worker_published_result_manifest_after_cleanup(
         manifest.artifacts()[0].sha256(),
         format!("{:x}", sha2::Sha256::digest(bytes))
     );
-    onec_core::remove_path_scoped(&job_dir, &job_dir.join("results"), true, false)
+    hostlink_core::remove_path_scoped(&job_dir, &job_dir.join("results"), true, false)
         .expect("simulate retrieved result cleanup");
     let terminal_state_path = fs::read_dir(&job_dir)
         .expect("job directory")
@@ -361,7 +361,7 @@ async fn native_invocation_signs_worker_published_result_manifest_after_cleanup(
         serde_json::to_vec(&changed_state).expect("changed terminal state"),
     )
     .expect("tamper terminal result manifest");
-    onec_core::restrict_private_file(&terminal_state_path).expect("keep state private");
+    hostlink_core::restrict_private_file(&terminal_state_path).expect("keep state private");
     assert!(
         crate::native_attestation::observe_run_local_invocation(
             root.path(),
@@ -372,7 +372,7 @@ async fn native_invocation_signs_worker_published_result_manifest_after_cleanup(
         .is_err()
     );
     fs::write(&terminal_state_path, &original_state).expect("restore terminal state");
-    onec_core::restrict_private_file(&terminal_state_path).expect("keep state private");
+    hostlink_core::restrict_private_file(&terminal_state_path).expect("keep state private");
 
     let seal_path = job_dir.join("native-output-logs.json");
     let original_seal = fs::read(&seal_path).expect("worker seal bytes");
@@ -385,7 +385,7 @@ async fn native_invocation_signs_worker_published_result_manifest_after_cleanup(
         serde_json::to_vec(&changed_seal).expect("changed worker seal"),
     )
     .expect("tamper worker result seal");
-    onec_core::restrict_private_file(&seal_path).expect("keep worker seal private");
+    hostlink_core::restrict_private_file(&seal_path).expect("keep worker seal private");
     assert!(
         crate::native_attestation::observe_run_local_invocation(
             root.path(),
@@ -396,7 +396,7 @@ async fn native_invocation_signs_worker_published_result_manifest_after_cleanup(
         .is_err()
     );
     fs::write(&seal_path, original_seal).expect("restore worker seal");
-    onec_core::restrict_private_file(&seal_path).expect("keep worker seal private");
+    hostlink_core::restrict_private_file(&seal_path).expect("keep worker seal private");
 
     let (record, _) = crate::native_attestation::observe_run_local_invocation(
         root.path(),
@@ -434,7 +434,7 @@ async fn native_invocation_signs_worker_published_result_manifest_after_cleanup(
         serde_json::to_vec(&changed_state).expect("changed state JSON"),
     )
     .expect("tamper terminal result manifest");
-    onec_core::restrict_private_file(&state_path).expect("keep state private");
+    hostlink_core::restrict_private_file(&state_path).expect("keep state private");
     let seal_path = job_dir.join("native-output-logs.json");
     let original_seal = fs::read(&seal_path).expect("worker seal bytes");
     let mut changed_seal: serde_json::Value =
@@ -446,7 +446,7 @@ async fn native_invocation_signs_worker_published_result_manifest_after_cleanup(
         serde_json::to_vec(&changed_seal).expect("changed seal JSON"),
     )
     .expect("tamper worker result seal to match terminal state");
-    onec_core::restrict_private_file(&seal_path).expect("keep worker seal private");
+    hostlink_core::restrict_private_file(&seal_path).expect("keep worker seal private");
     assert!(
         crate::native_attestation::fetch_run_local_invocation_observation(
             root.path(),
@@ -1602,7 +1602,7 @@ async fn native_suite_inventory_tamper_fails_owned_job_before_any_runner_launch(
     assert!(!marker.exists(), "no list or test process may launch");
     assert!(!job_dir.join("stdout.log").exists());
     assert_eq!(
-        onec_core::sha256_file(&candidate_path).expect("pinned runner remains unchanged"),
+        hostlink_core::sha256_file(&candidate_path).expect("pinned runner remains unchanged"),
         request
             .run_local
             .as_ref()
@@ -1646,7 +1646,7 @@ async fn native_invocation_rejects_candidate_changed_by_successful_process() {
             .contains("executable or mapped input changed during execution")
     );
     assert_ne!(
-        onec_core::sha256_file(&candidate_path).expect("changed candidate digest"),
+        hostlink_core::sha256_file(&candidate_path).expect("changed candidate digest"),
         candidate_sha256
     );
     assert!(
@@ -1683,9 +1683,9 @@ async fn native_invocation_rejects_mapped_file_changed_by_successful_process() {
         results,
     );
     let original_candidate_sha256 =
-        onec_core::sha256_file(&candidate_path).expect("candidate digest before run");
+        hostlink_core::sha256_file(&candidate_path).expect("candidate digest before run");
     let mapped_path = mapped_paths.first().expect("mapped support file");
-    let original_mapped_sha256 = onec_core::sha256_file(mapped_path).expect("mapped digest");
+    let original_mapped_sha256 = hostlink_core::sha256_file(mapped_path).expect("mapped digest");
     let mapped_path_text = mapped_path.to_string_lossy().into_owned();
 
     run_worker(&root.path().join(job_id))
@@ -1707,12 +1707,12 @@ async fn native_invocation_rejects_mapped_file_changed_by_successful_process() {
         "postflight error must not expose mapped file contents"
     );
     assert_eq!(
-        onec_core::sha256_file(&candidate_path).expect("candidate digest after run"),
+        hostlink_core::sha256_file(&candidate_path).expect("candidate digest after run"),
         original_candidate_sha256,
         "the executable must remain unchanged to isolate mapped-file validation"
     );
     assert_ne!(
-        onec_core::sha256_file(mapped_path).expect("mutated mapped digest"),
+        hostlink_core::sha256_file(mapped_path).expect("mutated mapped digest"),
         original_mapped_sha256
     );
     assert!(

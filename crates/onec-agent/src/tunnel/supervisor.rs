@@ -588,7 +588,7 @@ mod tests {
                 .expect("embedded host key encoding"),
         )
         .expect("write embedded host key");
-        onec_core::restrict_private_file(&host_key_path).expect("private embedded host key");
+        hostlink_core::restrict_private_file(&host_key_path).expect("private embedded host key");
         fs::write(
             &authorized_keys_path,
             authorized_key

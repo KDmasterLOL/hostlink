@@ -3,7 +3,7 @@
 #![deny(clippy::missing_docs_in_private_items)]
 
 use onec_agent_protocol::SecretEnvironment;
-use onec_core::{
+use hostlink_core::{
     ONEC_EXEC_DEADLINE_UNIX_MS_ENV, ONEC_JOB_ID_ENV, ONEC_JOB_SYSTEM_ENV, ONEC_RESULT_DIR_ENV,
 };
 use std::collections::BTreeMap;

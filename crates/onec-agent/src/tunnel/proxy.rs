@@ -2,7 +2,7 @@
 
 use crate::config::{SshGatewayEndpoint, SshTlsProxyConfig};
 use crate::environment::AgentEnvironmentPolicy;
-use onec_core::background_command;
+use hostlink_core::background_command;
 use processkit::{ProcessStdin, RawOutputSink, RawSinkFuture, RunningProcess};
 use std::future::Future;
 use std::io::{self, Error as IoError};

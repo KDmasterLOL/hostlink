@@ -306,7 +306,7 @@ pub(crate) fn lock_run_local_identity(jobs_root: &Path, run_id: &str) -> io::Res
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    onec_core::acquire_exclusive_file_lock(
+    hostlink_core::acquire_exclusive_file_lock(
         lock_path,
         Duration::from_secs(60),
         Duration::from_millis(10),
@@ -321,7 +321,7 @@ fn ensure_run_local_lock_directory(jobs_root: &Path) -> io::Result<()> {
                 if metadata.is_dir()
                     && !crate::results::std_metadata_is_symlink_or_reparse(&metadata) =>
             {
-                onec_core::ensure_private_directory(path)?;
+                hostlink_core::ensure_private_directory(path)?;
             }
             Ok(_) => {
                 return Err(io::Error::new(
@@ -331,9 +331,9 @@ fn ensure_run_local_lock_directory(jobs_root: &Path) -> io::Result<()> {
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 if path == jobs_root {
-                    onec_core::ensure_private_directory(path)?;
+                    hostlink_core::ensure_private_directory(path)?;
                 } else {
-                    onec_core::create_private_directory(path)?;
+                    hostlink_core::create_private_directory(path)?;
                 }
             }
             Err(error) => return Err(error),
@@ -463,7 +463,7 @@ pub(super) fn validate_run_local_candidate(
     let candidate_meta = fs::symlink_metadata(&candidate_path)?;
     if !candidate_meta.is_file()
         || crate::results::std_metadata_is_symlink_or_reparse(&candidate_meta)
-        || onec_core::sha256_file(&candidate_path)? != identity.candidate_sha256()
+        || hostlink_core::sha256_file(&candidate_path)? != identity.candidate_sha256()
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -498,7 +498,7 @@ pub(super) fn validate_run_local_candidate(
         let metadata = fs::symlink_metadata(&path)?;
         if !metadata.is_file()
             || crate::results::std_metadata_is_symlink_or_reparse(&metadata)
-            || onec_core::sha256_file(&path)? != mapped.sha256()
+            || hostlink_core::sha256_file(&path)? != mapped.sha256()
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -939,7 +939,7 @@ pub async fn run_worker(job_dir: &Path) -> io::Result<()> {
         }
     };
     if let Some(workspace) = &result_workspace {
-        command = command.env(onec_core::ONEC_RESULT_DIR_ENV, workspace.incoming_path());
+        command = command.env(hostlink_core::ONEC_RESULT_DIR_ENV, workspace.incoming_path());
     }
 
     // Durable job identity is agent-owned. Apply it after both request environment layers so the

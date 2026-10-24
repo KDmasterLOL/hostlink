@@ -14,7 +14,7 @@ cap-fs-ext.workspace = true
 cap-std.workspace = true
 clap.workspace = true
 onec-agent-protocol = { path = "../onec-agent-protocol" }
-onec-core = { path = "../onec-core" }
+hostlink-core = { path = "../hostlink-core" }
 ed25519-dalek = { version = "=2.2.0", features = ["rand_core"] }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 processkit.workspace = true

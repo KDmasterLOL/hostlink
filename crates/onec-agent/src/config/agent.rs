@@ -17,7 +17,7 @@ impl AgentConfig {
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         let mut wire: AgentConfigWire =
-            onec_core::read_json_file_bounded(path, AGENT_CONFIG_MAX_BYTES)?;
+            hostlink_core::read_json_file_bounded(path, AGENT_CONFIG_MAX_BYTES)?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         wire.resolve_relative_paths(base);
         let config = Self::try_from(wire)?;
@@ -224,7 +224,7 @@ impl AgentConfig {
     /// resolved safely.
     pub fn runtime(&self) -> io::Result<AgentRuntime> {
         let (secret, source) = if let Some(path) = &self.secret_file {
-            let bytes = onec_core::read_file_bounded(path, AGENT_SECRET_FILE_MAX_BYTES).map_err(
+            let bytes = hostlink_core::read_file_bounded(path, AGENT_SECRET_FILE_MAX_BYTES).map_err(
                 |source| {
                     io::Error::new(
                         source.kind(),
@@ -386,7 +386,7 @@ mod tests {
                 .as_bytes(),
         )
         .expect("host key file");
-        onec_core::restrict_private_file(&host_key_path).expect("private host key");
+        hostlink_core::restrict_private_file(&host_key_path).expect("private host key");
         fs::write(
             &authorized_keys_path,
             client_key

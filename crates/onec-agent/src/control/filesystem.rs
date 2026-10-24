@@ -62,9 +62,9 @@ pub(super) fn handle(mut stream: TcpStream, request: AgentRequestKind) -> io::Re
             // Close the staging handle before Windows atomic rename while retaining RAII cleanup.
             let temp = temp.into_temp_path();
             let publication = if overwrite {
-                onec_core::replace_file_atomically(temp.as_ref(), &path)
+                hostlink_core::replace_file_atomically(temp.as_ref(), &path)
             } else {
-                onec_core::move_file_atomically(temp.as_ref(), &path)
+                hostlink_core::move_file_atomically(temp.as_ref(), &path)
             };
             if let Err(error) = publication {
                 write_json_line(
@@ -124,7 +124,7 @@ pub(super) fn handle(mut stream: TcpStream, request: AgentRequestKind) -> io::Re
         } => {
             let root = PathBuf::from(root);
             let path = PathBuf::from(path);
-            let response = match onec_core::remove_path_scoped(&root, &path, recursive, missing_ok)
+            let response = match hostlink_core::remove_path_scoped(&root, &path, recursive, missing_ok)
             {
                 Ok(removed) => AgentResponse::success(AgentResponseKind::PathRemoved { removed }),
                 Err(error) => AgentResponse::failure(format!(
@@ -143,9 +143,9 @@ pub(super) fn handle(mut stream: TcpStream, request: AgentRequestKind) -> io::Re
             let from = PathBuf::from(from);
             let to = PathBuf::from(to);
             let response = match if overwrite {
-                onec_core::replace_file_atomically(&from, &to)
+                hostlink_core::replace_file_atomically(&from, &to)
             } else {
-                onec_core::move_file_atomically(&from, &to)
+                hostlink_core::move_file_atomically(&from, &to)
             } {
                 Ok(()) => AgentResponse::success(AgentResponseKind::PathRenamed),
                 Err(error) => AgentResponse::failure(format!(
@@ -161,7 +161,7 @@ pub(super) fn handle(mut stream: TcpStream, request: AgentRequestKind) -> io::Re
 }
 
 fn path_sha256_response(path: &Path) -> AgentResponse {
-    match onec_core::digest_file(path) {
+    match hostlink_core::digest_file(path) {
         Ok(digest) => AgentResponse::success(AgentResponseKind::PathSha256 {
             bytes: digest.bytes(),
             sha256: digest.sha256().to_owned(),

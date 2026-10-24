@@ -571,7 +571,7 @@ async fn run_immediate_exec(
         }
     };
     if let Some(workspace) = &result_workspace {
-        command = command.env(onec_core::ONEC_RESULT_DIR_ENV, workspace.incoming_path());
+        command = command.env(hostlink_core::ONEC_RESULT_DIR_ENV, workspace.incoming_path());
     }
     if let Some(cwd) = cwd {
         command = command.current_dir(cwd);
@@ -913,8 +913,8 @@ fn prepare_run_local_paths(
             validate_run_local_directory(jobs_root)?;
             ensure_run_local_private_directory(&cache_root)?;
             ensure_run_local_private_directory(&run_root_parent)?;
-            onec_core::create_private_directory(&run_root)?;
-            onec_core::create_private_directory(&run_root.join("mapped"))?;
+            hostlink_core::create_private_directory(&run_root)?;
+            hostlink_core::create_private_directory(&run_root.join("mapped"))?;
         } else {
             fs::create_dir_all(&cache_root)?;
             fs::create_dir_all(&run_root_parent)?;
@@ -949,14 +949,14 @@ fn ensure_run_local_private_directory(path: &Path) -> io::Result<()> {
             if metadata.is_dir()
                 && !crate::results::std_metadata_is_symlink_or_reparse(&metadata) =>
         {
-            onec_core::restrict_private_directory(path).map_err(io::Error::other)
+            hostlink_core::restrict_private_directory(path).map_err(io::Error::other)
         }
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "run-local cache/workspace parent must be an owned regular directory",
         )),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            onec_core::create_private_directory(path)
+            hostlink_core::create_private_directory(path)
         }
         Err(error) => Err(error),
     }
@@ -1002,7 +1002,7 @@ fn finalize_run_local_job(jobs_root: &Path, job_id: &str) -> io::Result<bool> {
     }
     let parent = jobs_root.join("run-local-runs");
     let workspace = parent.join(identity.run_id());
-    onec_core::remove_path_scoped(&parent, &workspace, true, true)
+    hostlink_core::remove_path_scoped(&parent, &workspace, true, true)
 }
 
 fn abandon_run_local_workspace(jobs_root: &Path, run_id: &str) -> io::Result<bool> {
@@ -1025,7 +1025,7 @@ fn abandon_run_local_workspace(jobs_root: &Path, run_id: &str) -> io::Result<boo
     }
     jobs::mark_run_local_abandoned(jobs_root, run_id)?;
     let parent = jobs_root.join("run-local-runs");
-    onec_core::remove_path_scoped(&parent, &parent.join(run_id), true, true)
+    hostlink_core::remove_path_scoped(&parent, &parent.join(run_id), true, true)
 }
 
 fn discard_result_workspace_with(
@@ -1101,7 +1101,7 @@ fn processkit_teardown_confirmed(teardown: &processkit::Result<processkit::Outco
 }
 
 fn immediate_exec_deadline_unix_ms(timeout_ms: u64) -> u64 {
-    onec_core::unix_time_ms().saturating_add(timeout_ms)
+    hostlink_core::unix_time_ms().saturating_add(timeout_ms)
 }
 
 fn with_immediate_exec_deadline(
@@ -1109,7 +1109,7 @@ fn with_immediate_exec_deadline(
     timeout_ms: u64,
 ) -> processkit::Command {
     command.env(
-        onec_core::ONEC_EXEC_DEADLINE_UNIX_MS_ENV,
+        hostlink_core::ONEC_EXEC_DEADLINE_UNIX_MS_ENV,
         immediate_exec_deadline_unix_ms(timeout_ms).to_string(),
     )
 }
@@ -1152,9 +1152,9 @@ mod tests {
     #[test]
     fn immediate_exec_deadline_covers_the_requested_agent_timeout() {
         let timeout_ms = 60_000;
-        let before = onec_core::unix_time_ms();
+        let before = hostlink_core::unix_time_ms();
         let deadline = immediate_exec_deadline_unix_ms(timeout_ms);
-        let after = onec_core::unix_time_ms();
+        let after = hostlink_core::unix_time_ms();
 
         assert!(deadline >= before + timeout_ms);
         assert!(deadline <= after + timeout_ms);
@@ -1183,7 +1183,7 @@ mod tests {
             .expect("UTF-8 deadline")
             .parse::<u64>()
             .expect("agent-owned deadline value");
-        let now = onec_core::unix_time_ms();
+        let now = hostlink_core::unix_time_ms();
 
         assert!(deadline >= now);
         assert!(deadline <= now + timeout_ms + 1_000);
@@ -1194,7 +1194,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         let jobs = root.path().join("jobs");
         std::fs::create_dir(&jobs).expect("jobs root");
-        onec_core::ensure_private_directory(&jobs).expect("private jobs root");
+        hostlink_core::ensure_private_directory(&jobs).expect("private jobs root");
         let run_id = "0123456789abcdef0123456789abcdef";
 
         let response = prepare_run_local_paths(&jobs, run_id, false);
@@ -1253,7 +1253,7 @@ mod tests {
             let root = tempfile::tempdir().expect("root");
             let jobs = root.path().join("jobs");
             std::fs::create_dir(&jobs).expect("jobs root");
-            onec_core::ensure_private_directory(&jobs).expect("private jobs root");
+            hostlink_core::ensure_private_directory(&jobs).expect("private jobs root");
             let outside = root.path().join("outside");
             std::fs::create_dir(&outside).expect("outside directory");
             symlink(&outside, jobs.join(linked_name)).expect("linked agent-owned root");
@@ -1279,7 +1279,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         let jobs = root.path().join("jobs");
         fs::create_dir(&jobs).expect("jobs root");
-        onec_core::ensure_private_directory(&jobs).expect("private jobs root");
+        hostlink_core::ensure_private_directory(&jobs).expect("private jobs root");
         let run_id = "2123456789abcdef0123456789abcdef";
         let job_id = "job-run-local-ownership-race";
         let response = prepare_run_local_paths(&jobs, run_id, true);
@@ -1309,7 +1309,7 @@ mod tests {
 
         let job_dir = jobs.join(job_id);
         fs::create_dir(&job_dir).expect("job directory");
-        onec_core::ensure_private_directory(&job_dir).expect("private job directory");
+        hostlink_core::ensure_private_directory(&job_dir).expect("private job directory");
         let job = onec_agent_protocol::AgentJobInfo {
             job_id: job_id.to_owned(),
             state: onec_agent_protocol::AgentJobState::Queued,
@@ -1365,13 +1365,13 @@ mod tests {
         let run_parent = jobs.join("run-local-runs");
         let workspace = run_parent.join(run_id);
         std::fs::create_dir_all(workspace.join("mapped")).expect("owned workspace");
-        onec_core::ensure_private_directory(&run_parent).expect("private run parent");
-        onec_core::ensure_private_directory(&workspace).expect("private run workspace");
-        onec_core::ensure_private_directory(&workspace.join("mapped"))
+        hostlink_core::ensure_private_directory(&run_parent).expect("private run parent");
+        hostlink_core::ensure_private_directory(&workspace).expect("private run workspace");
+        hostlink_core::ensure_private_directory(&workspace.join("mapped"))
             .expect("private mapped workspace");
         let job_dir = jobs.join(job_id);
         std::fs::create_dir(&job_dir).expect("job directory");
-        onec_core::ensure_private_directory(&job_dir).expect("private job directory");
+        hostlink_core::ensure_private_directory(&job_dir).expect("private job directory");
 
         let mut job = onec_agent_protocol::AgentJobInfo {
             job_id: job_id.to_owned(),

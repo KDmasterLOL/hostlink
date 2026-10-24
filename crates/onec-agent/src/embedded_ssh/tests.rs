@@ -69,7 +69,7 @@ async fn start_fixture() -> RunningFixture {
             .as_bytes(),
     )
     .expect("host key file");
-    onec_core::restrict_private_file(&host_key_path).expect("private host key");
+    hostlink_core::restrict_private_file(&host_key_path).expect("private host key");
     fs::write(
         &host_public_key_path,
         format!(
@@ -463,7 +463,7 @@ fn embedded_server_key_material_is_bounded_private_and_fail_closed() {
     let authorized_keys_path = dir.path().join("authorized");
 
     fs::write(&host_key_path, vec![b'x'; HOST_KEY_MAX_BYTES + 1]).expect("oversized host");
-    onec_core::restrict_private_file(&host_key_path).expect("private oversized host");
+    hostlink_core::restrict_private_file(&host_key_path).expect("private oversized host");
     let error = load_host_key(&host_key_path).expect_err("oversized host key must fail");
     assert!(
         error.to_string().contains("exceeds") || error.to_string().contains("limit"),
@@ -478,7 +478,7 @@ fn embedded_server_key_material_is_bounded_private_and_fail_closed() {
             .as_bytes(),
     )
     .expect("host key");
-    onec_core::restrict_private_file(&host_key_path).expect("private host key");
+    hostlink_core::restrict_private_file(&host_key_path).expect("private host key");
     load_host_key(&host_key_path).expect("valid private host key");
 
     let encrypted = host
@@ -492,7 +492,7 @@ fn embedded_server_key_material_is_bounded_private_and_fail_closed() {
             .as_bytes(),
     )
     .expect("encrypted host key file");
-    onec_core::restrict_private_file(&host_key_path).expect("private encrypted host key");
+    hostlink_core::restrict_private_file(&host_key_path).expect("private encrypted host key");
     let error = load_host_key(&host_key_path).expect_err("encrypted host key must fail closed");
     assert!(error.to_string().contains("unencrypted"), "{error}");
 
@@ -540,7 +540,7 @@ async fn embedded_server_candidate_preflight_exercises_exact_transport_surface()
             .as_bytes(),
     )
     .expect("host key");
-    onec_core::restrict_private_file(&host_key_path).expect("private host key");
+    hostlink_core::restrict_private_file(&host_key_path).expect("private host key");
     fs::write(
         &host_public_key_path,
         format!(
@@ -568,7 +568,7 @@ async fn embedded_server_candidate_preflight_exercises_exact_transport_surface()
             .as_bytes(),
     )
     .expect("controller identity");
-    onec_core::restrict_private_file(&identity_path).expect("private controller identity");
+    hostlink_core::restrict_private_file(&identity_path).expect("private controller identity");
 
     let occupied_runtime_port =
         std::net::TcpListener::bind("127.0.0.1:0").expect("occupied final runtime port");
@@ -651,7 +651,7 @@ async fn embedded_server_refuses_non_loopback_listener() {
             .as_bytes(),
     )
     .expect("host key");
-    onec_core::restrict_private_file(&host_key_path).expect("private host key");
+    hostlink_core::restrict_private_file(&host_key_path).expect("private host key");
     fs::write(
         &authorized_keys_path,
         client.public_key().to_openssh().expect("client public key"),

@@ -126,7 +126,7 @@ mod tests {
                 .expect("host encoding"),
         )
         .expect("host key file");
-        onec_core::restrict_private_file(&host_key_path).expect("private host key");
+        hostlink_core::restrict_private_file(&host_key_path).expect("private host key");
         fs::write(
             &authorized_keys_path,
             client_key

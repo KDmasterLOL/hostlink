@@ -97,7 +97,7 @@ pub(super) fn write_agent_event(
     severity: &'static str,
     fields: AgentEventFields,
 ) -> io::Result<()> {
-    let timestamp_unix_ms = onec_core::unix_time_ms();
+    let timestamp_unix_ms = hostlink_core::unix_time_ms();
     let record = AgentEventRecord {
         schema_version: AGENT_EVENT_SCHEMA_VERSION,
         timestamp_unix_ms,
@@ -107,5 +107,5 @@ pub(super) fn write_agent_event(
         process_id: std::process::id(),
         fields,
     };
-    onec_core::append_json_line(path, &record)
+    hostlink_core::append_json_line(path, &record)
 }

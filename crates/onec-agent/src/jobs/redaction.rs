@@ -13,7 +13,7 @@ pub(super) fn secret_patterns(secret_env: &SecretEnvironment) -> Vec<Vec<u8>> {
 
 /// Fail-visible durable byte sink applied before bounded log storage.
 pub(super) struct DurableJobLogSink {
-    writer: Option<RedactingWriter<onec_core::RetainedLogWriter>>,
+    writer: Option<RedactingWriter<hostlink_core::RetainedLogWriter>>,
 }
 
 impl DurableJobLogSink {

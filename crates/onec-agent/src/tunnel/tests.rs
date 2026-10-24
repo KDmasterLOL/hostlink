@@ -146,7 +146,7 @@ async fn start_gateway_at(
             .expect("client key encoding"),
     )
     .expect("identity");
-    onec_core::restrict_private_file(&identity).expect("private identity");
+    hostlink_core::restrict_private_file(&identity).expect("private identity");
 
     let remote_listener =
         tokio::net::TcpListener::bind(SocketAddr::from((bind_ip, remote_port.unwrap_or(0))))
@@ -377,7 +377,7 @@ async fn regression_inv_222_reverse_tunnel_embedded_sftp_large_transfer_does_not
             .expect("host key encoding"),
     )
     .expect("write embedded host key");
-    onec_core::restrict_private_file(&host_key_path).expect("restrict host key");
+    hostlink_core::restrict_private_file(&host_key_path).expect("restrict host key");
     fs::write(
         &authorized_keys_path,
         controller_key
@@ -1024,7 +1024,7 @@ async fn start_reconnect_gateway(
             .expect("client key encoding"),
     )
     .expect("identity");
-    onec_core::restrict_private_file(&identity).expect("private identity");
+    hostlink_core::restrict_private_file(&identity).expect("private identity");
 
     let ssh_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1187,7 +1187,7 @@ async fn start_forward_probe_gateway(
             .expect("client key encoding"),
     )
     .expect("identity");
-    onec_core::restrict_private_file(&identity).expect("private identity");
+    hostlink_core::restrict_private_file(&identity).expect("private identity");
 
     let ssh_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1328,7 +1328,7 @@ async fn russh_reverse_tunnel_rejects_wrong_host_key_and_client_key() {
             .expect("wrong client encoding"),
     )
     .expect("wrong identity");
-    onec_core::restrict_private_file(&fixture.identity).expect("private wrong identity");
+    hostlink_core::restrict_private_file(&fixture.identity).expect("private wrong identity");
     wrong_host_config.identity = Some(fixture.identity.clone());
     let auth_error = ReverseTunnel::connect(
         &wrong_host_config,

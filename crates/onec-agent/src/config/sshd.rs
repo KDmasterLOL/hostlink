@@ -21,7 +21,7 @@ impl SshServerConfig {
             ));
         }
         let bytes =
-            onec_core::read_file_bounded(&self.config, SSHD_CONFIG_MAX_BYTES).map_err(|error| {
+            hostlink_core::read_file_bounded(&self.config, SSHD_CONFIG_MAX_BYTES).map_err(|error| {
                 io::Error::new(
                     error.kind(),
                     format!(

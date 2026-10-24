@@ -4,7 +4,7 @@ use crate::jobs;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
-use onec_core::{
+use hostlink_core::{
     Sha256Digest, acquire_exclusive_file_lock, read_file_bounded, write_file_atomically,
 };
 use self_update::backends::custom::Update;

@@ -342,8 +342,8 @@ fn load_host_key(path: &Path) -> io::Result<PrivateKey> {
 }
 
 fn load_private_ed25519_key(path: &Path, purpose: &str) -> io::Result<PrivateKey> {
-    onec_core::validate_private_file(path).map_err(io::Error::other)?;
-    let bytes = onec_core::read_file_bounded(path, HOST_KEY_MAX_BYTES)?;
+    hostlink_core::validate_private_file(path).map_err(io::Error::other)?;
+    let bytes = hostlink_core::read_file_bounded(path, HOST_KEY_MAX_BYTES)?;
     let key = PrivateKey::from_openssh(&bytes)
         .map_err(|error| invalid_data(format!("invalid {purpose}: {error}")))?;
     if key.is_encrypted() {
@@ -361,7 +361,7 @@ fn load_private_ed25519_key(path: &Path, purpose: &str) -> io::Result<PrivateKey
 }
 
 fn load_public_ed25519_key(path: &Path, purpose: &str) -> io::Result<PublicKey> {
-    let bytes = onec_core::read_file_bounded(path, HOST_KEY_MAX_BYTES)?;
+    let bytes = hostlink_core::read_file_bounded(path, HOST_KEY_MAX_BYTES)?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|error| invalid_data(format!("{purpose} is not UTF-8: {error}")))?;
     let key = PublicKey::from_openssh(text.trim())
@@ -376,7 +376,7 @@ fn load_public_ed25519_key(path: &Path, purpose: &str) -> io::Result<PublicKey> 
 }
 
 fn load_authorized_keys(path: &Path) -> io::Result<Vec<PublicKey>> {
-    let bytes = onec_core::read_file_bounded(path, AUTHORIZED_KEYS_MAX_BYTES)?;
+    let bytes = hostlink_core::read_file_bounded(path, AUTHORIZED_KEYS_MAX_BYTES)?;
     let text = std::str::from_utf8(&bytes).map_err(|error| {
         invalid_data(format!("authorized controller keys are not UTF-8: {error}"))
     })?;

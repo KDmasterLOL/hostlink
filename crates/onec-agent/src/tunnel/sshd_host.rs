@@ -489,7 +489,7 @@ fn validate_start_event_name(name: &str) -> io::Result<()> {
 
 #[cfg(any(windows, test))]
 fn sshd_command_line(program: &Path, config: &Path) -> String {
-    onec_core::windows_command_line([
+    hostlink_core::windows_command_line([
         program.as_os_str().to_string_lossy().into_owned(),
         "-D".to_owned(),
         "-e".to_owned(),

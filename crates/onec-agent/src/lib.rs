@@ -31,7 +31,7 @@ use onec_agent_protocol::{
     AgentErrorCode, AgentRequest, AgentRequestKind, AgentResponse, AgentResponseKind,
     PROTOCOL_VERSION, write_json_line,
 };
-use onec_core::{
+use hostlink_core::{
     OwnedProcess, RedactingWriter, background_command, constant_time_str_eq, system_hostname,
 };
 use secrecy::{ExposeSecret, SecretString};

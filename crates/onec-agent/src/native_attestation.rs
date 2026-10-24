@@ -110,7 +110,7 @@ pub(crate) fn observe_run_local_invocation(
 
     let workspace_parent = jobs_root.join("run-local-runs");
     let workspace = workspace_parent.join(identity.run_id());
-    let removed = onec_core::remove_path_scoped(&workspace_parent, &workspace, true, false)?;
+    let removed = hostlink_core::remove_path_scoped(&workspace_parent, &workspace, true, false)?;
     if !removed {
         return Err(invalid(
             "invocation observation requires owned workspace cleanup to complete",
@@ -154,7 +154,7 @@ pub(crate) fn observe_run_local_invocation(
         "record": &record,
         "signature_hex": &signature_hex,
     });
-    onec_core::write_new_private_bytes(&record_path, &serde_json::to_vec(&envelope)?)?;
+    hostlink_core::write_new_private_bytes(&record_path, &serde_json::to_vec(&envelope)?)?;
     Ok((record, signature_hex))
 }
 
@@ -351,8 +351,8 @@ pub(crate) fn read_complete_invocation_output_logs(
     }
     let stdout_path = job_dir.join("stdout.log");
     let stderr_path = job_dir.join("stderr.log");
-    if onec_core::RetainedLog::new(stdout_path.clone())?.storage_truncated()?
-        || onec_core::RetainedLog::new(stderr_path.clone())?.storage_truncated()?
+    if hostlink_core::RetainedLog::new(stdout_path.clone())?.storage_truncated()?
+        || hostlink_core::RetainedLog::new(stderr_path.clone())?.storage_truncated()?
     {
         return Err(invalid(
             "invocation output logs have discarded retained history",
@@ -438,7 +438,7 @@ pub(crate) fn write_completed_invocation_output_logs(
         result_set,
     };
     let path = super::jobs::job_dir(jobs_root, &job.job_id)?.join("native-output-logs.json");
-    onec_core::write_new_private_bytes(&path, &serde_json::to_vec(&stored)?)
+    hostlink_core::write_new_private_bytes(&path, &serde_json::to_vec(&stored)?)
 }
 
 fn validate_result_set_commitment(
@@ -478,7 +478,7 @@ fn hash_private_bounded_log(path: &Path) -> io::Result<(String, u64)> {
             "Agent-owned invocation output log is not a regular file",
         ));
     }
-    onec_core::validate_private_file(path).map_err(io::Error::other)?;
+    hostlink_core::validate_private_file(path).map_err(io::Error::other)?;
     let mut file = open_private_log_nofollow(path)?;
     let opened_metadata = file.metadata()?;
     if !opened_metadata.is_file()
@@ -616,7 +616,7 @@ fn validate_candidate_bytes(
     let metadata = fs::symlink_metadata(&path)?;
     if !metadata.is_file()
         || is_link_or_reparse(&metadata)
-        || onec_core::sha256_file(&path)? != identity.candidate_sha256()
+        || hostlink_core::sha256_file(&path)? != identity.candidate_sha256()
     {
         return Err(invalid(
             "run-local candidate bytes do not match the persisted executable digest",
@@ -637,7 +637,7 @@ fn read_invocation_commitment(
             "native invocation commitment is not a bounded regular file",
         ));
     }
-    onec_core::read_json_file_bounded(&path, 16 * 1024).map_err(io::Error::other)
+    hostlink_core::read_json_file_bounded(&path, 16 * 1024).map_err(io::Error::other)
 }
 
 fn validate_invocation_job(
@@ -727,7 +727,7 @@ pub(crate) fn attest_run_local_success(
 
     let parent = jobs_root.join("run-local-runs");
     let workspace = parent.join(identity.run_id());
-    let removed = onec_core::remove_path_scoped(&parent, &workspace, true, false)?;
+    let removed = hostlink_core::remove_path_scoped(&parent, &workspace, true, false)?;
     if !removed {
         return Err(invalid(
             "native attestation requires this request to complete owned workspace cleanup",
@@ -756,7 +756,7 @@ pub(crate) fn attest_run_local_success(
         "signature_hex": hex(&signature),
     });
     // A durable create-new receipt makes signing single-use for each job, including after restart.
-    onec_core::write_new_private_bytes(&record_path, &serde_json::to_vec(&envelope)?)?;
+    hostlink_core::write_new_private_bytes(&record_path, &serde_json::to_vec(&envelope)?)?;
     Ok((record, hex(&signature)))
 }
 
@@ -846,7 +846,7 @@ fn read_stored_record<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result
             "stored native attestation is not a bounded regular file",
         ));
     }
-    onec_core::validate_private_file(path).map_err(io::Error::other)?;
+    hostlink_core::validate_private_file(path).map_err(io::Error::other)?;
     let file = fs::File::open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ATTESTATION_BYTES {
@@ -888,7 +888,7 @@ fn load_or_create_key(jobs_root: &Path) -> io::Result<SigningKey> {
     match fs::symlink_metadata(&directory) {
         Ok(_) => ensure_private_directory(&directory)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            onec_core::create_private_directory(&directory)?
+            hostlink_core::create_private_directory(&directory)?
         }
         Err(error) => return Err(error),
     }
@@ -900,7 +900,7 @@ fn load_or_create_key(jobs_root: &Path) -> io::Result<SigningKey> {
     }
     let key = SigningKey::generate(&mut OsRng);
     let bytes = key.to_bytes();
-    match onec_core::write_new_private_bytes(&path, &bytes) {
+    match hostlink_core::write_new_private_bytes(&path, &bytes) {
         Ok(()) => Ok(key),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => read_key(&path),
         Err(error) => Err(error),
@@ -914,7 +914,7 @@ fn read_key(path: &Path) -> io::Result<SigningKey> {
             "native attestation key must be a regular non-linked file",
         ));
     }
-    onec_core::validate_private_file(path).map_err(io::Error::other)?;
+    hostlink_core::validate_private_file(path).map_err(io::Error::other)?;
     let bytes = fs::read(path)?;
     let bytes: [u8; 32] = bytes
         .try_into()
@@ -948,13 +948,13 @@ fn signer_id(verifying_key: &[u8; 32]) -> String {
 fn ensure_private_directory(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !is_link_or_reparse(&metadata) => {
-            onec_core::restrict_private_directory(path).map_err(io::Error::other)
+            hostlink_core::restrict_private_directory(path).map_err(io::Error::other)
         }
         Ok(_) => Err(invalid(
             "native attestation directory is not a regular directory",
         )),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            onec_core::create_private_directory(path)
+            hostlink_core::create_private_directory(path)
         }
         Err(error) => Err(error),
     }
@@ -1042,9 +1042,9 @@ mod tests {
     fn malformed_key_file_fails_closed() {
         let dir = tempdir().expect("temporary root");
         let key_dir = dir.path().join(KEY_DIR);
-        onec_core::create_private_directory(&key_dir).expect("key directory");
+        hostlink_core::create_private_directory(&key_dir).expect("key directory");
         fs::write(key_dir.join(KEY_FILE), b"short").expect("malformed key fixture");
-        onec_core::restrict_private_file(&key_dir.join(KEY_FILE)).expect("restrict malformed file");
+        hostlink_core::restrict_private_file(&key_dir.join(KEY_FILE)).expect("restrict malformed file");
         assert!(load_or_create_key(dir.path()).is_err());
     }
 
@@ -1055,10 +1055,10 @@ mod tests {
 
         let dir = tempdir().expect("temporary root");
         let key_dir = dir.path().join(KEY_DIR);
-        onec_core::create_private_directory(&key_dir).expect("key directory");
+        hostlink_core::create_private_directory(&key_dir).expect("key directory");
         let external = dir.path().join("external.key");
         fs::write(&external, [0_u8; 32]).expect("external key fixture");
-        onec_core::restrict_private_file(&external).expect("restrict external key fixture");
+        hostlink_core::restrict_private_file(&external).expect("restrict external key fixture");
         symlink(external, key_dir.join(KEY_FILE)).expect("linked key");
         assert!(load_or_create_key(dir.path()).is_err());
     }
@@ -1179,7 +1179,7 @@ mod tests {
             serde_json::to_vec(&envelope).expect("encode foreign-job fixture"),
         )
         .expect("write foreign-job fixture");
-        onec_core::restrict_private_file(&record_path).expect("keep fixture private");
+        hostlink_core::restrict_private_file(&record_path).expect("keep fixture private");
         assert!(fetch_run_local_attestation(dir.path(), &job_id, &challenge).is_err());
 
         envelope["record"]["job_id"] = serde_json::Value::String(job_id.clone());
@@ -1189,7 +1189,7 @@ mod tests {
             serde_json::to_vec(&envelope).expect("encode corrupt receipt"),
         )
         .expect("replace fixture receipt");
-        onec_core::restrict_private_file(&record_path).expect("keep fixture private");
+        hostlink_core::restrict_private_file(&record_path).expect("keep fixture private");
         assert!(fetch_run_local_attestation(dir.path(), &job_id, &challenge).is_err());
     }
 
@@ -1289,7 +1289,7 @@ mod tests {
         assert_eq!(fetched, (record, signature_hex));
         fs::write(dir.path().join(&job_id).join("stdout.log"), b"tampered")
             .expect("tamper durable output");
-        onec_core::restrict_private_file(&dir.path().join(&job_id).join("stdout.log"))
+        hostlink_core::restrict_private_file(&dir.path().join(&job_id).join("stdout.log"))
             .expect("keep tampered output private");
         assert!(
             fetch_run_local_invocation_observation(dir.path(), &job_id, &challenge, &invocation,)
@@ -1339,7 +1339,7 @@ mod tests {
             serde_json::to_vec(&output_commitment).expect("encode cross-run commitment"),
         )
         .expect("replace worker commitment fixture");
-        onec_core::restrict_private_file(&commitment_path).expect("keep commitment private");
+        hostlink_core::restrict_private_file(&commitment_path).expect("keep commitment private");
         assert!(
             observe_run_local_invocation(dir.path(), &job_id, &challenge, &invocation,).is_err(),
             "completion commitments must be bound to the exact run"
@@ -1368,7 +1368,7 @@ mod tests {
             b"caller supplied",
         )
         .expect("tamper output before signing");
-        onec_core::restrict_private_file(&dir.path().join(&job_id).join("stdout.log"))
+        hostlink_core::restrict_private_file(&dir.path().join(&job_id).join("stdout.log"))
             .expect("keep tampered output private");
         assert!(
             observe_run_local_invocation(dir.path(), &job_id, &challenge, &invocation,).is_err(),
@@ -1438,8 +1438,8 @@ mod tests {
         let job_dir = dir.path().join(&job_id);
         fs::write(job_dir.join("stdout.log"), stdout).expect("replace stdout fixture");
         fs::write(job_dir.join("stderr.log"), stderr).expect("replace stderr fixture");
-        onec_core::restrict_private_file(&job_dir.join("stdout.log")).expect("private stdout");
-        onec_core::restrict_private_file(&job_dir.join("stderr.log")).expect("private stderr");
+        hostlink_core::restrict_private_file(&job_dir.join("stdout.log")).expect("private stdout");
+        hostlink_core::restrict_private_file(&job_dir.join("stderr.log")).expect("private stderr");
 
         let job = super::super::jobs::status(dir.path(), &job_id).expect("terminal Agent state");
         fs::remove_file(job_dir.join("native-output-logs.json"))
@@ -1616,17 +1616,17 @@ mod tests {
     ) -> (String, String, PathBuf, PathBuf, String) {
         use sha2::Digest as _;
 
-        onec_core::ensure_private_directory(root).expect("jobs root");
+        hostlink_core::ensure_private_directory(root).expect("jobs root");
         let run_id = "0123456789abcdef0123456789abcdef".to_owned();
         let job_id = "job-native-invocation".to_owned();
         let run_parent = root.join("run-local-runs");
         let workspace = run_parent.join(&run_id);
-        onec_core::ensure_private_directory(&run_parent).expect("run parent");
-        onec_core::ensure_private_directory(&workspace).expect("run root");
+        hostlink_core::ensure_private_directory(&run_parent).expect("run parent");
+        hostlink_core::ensure_private_directory(&workspace).expect("run root");
         let candidate_bytes = b"pinned-native-test-executable";
         let candidate_sha256 = format!("{:x}", Sha256::digest(candidate_bytes));
         let candidate_dir = root.join("run-local-cache");
-        onec_core::ensure_private_directory(&candidate_dir).expect("candidate cache");
+        hostlink_core::ensure_private_directory(&candidate_dir).expect("candidate cache");
         let candidate_name = format!("sha256-{candidate_sha256}.exe");
         let candidate_path = candidate_dir.join(&candidate_name);
         fs::write(&candidate_path, candidate_bytes).expect("candidate file");
@@ -1638,7 +1638,7 @@ mod tests {
         )
         .expect("run-local identity");
         let job_dir = root.join(&job_id);
-        onec_core::create_private_directory(&job_dir).expect("job directory");
+        hostlink_core::create_private_directory(&job_dir).expect("job directory");
         let args = vec!["--exact".to_owned(), "fixture::approved_case".to_owned()];
         let program = candidate_path.to_string_lossy().into_owned();
         let effect = onec_agent_protocol::NativeExecutionEffect::ReadOnly;
@@ -1656,7 +1656,7 @@ mod tests {
         }
         .sha256()
         .expect("invocation digest");
-        onec_core::write_new_json_file(
+        hostlink_core::write_new_json_file(
             &job_dir.join("request.json"),
             &serde_json::json!({
                 "version": 1,
@@ -1688,7 +1688,7 @@ mod tests {
             result_set: None,
             run_local: Some(identity),
         };
-        onec_core::write_new_json_file(
+        hostlink_core::write_new_json_file(
             &job_dir.join("native-invocation.json"),
             &crate::jobs::NativeInvocationCommitment {
                 version: 1,
@@ -1705,9 +1705,9 @@ mod tests {
                 .expect("state encoding"),
         )
         .expect("persist state");
-        onec_core::write_new_private_bytes(&job_dir.join("stdout.log"), b"[REDACTED] stdout\n")
+        hostlink_core::write_new_private_bytes(&job_dir.join("stdout.log"), b"[REDACTED] stdout\n")
             .expect("Agent-owned redacted stdout log");
-        onec_core::write_new_private_bytes(&job_dir.join("stderr.log"), b"stderr\n")
+        hostlink_core::write_new_private_bytes(&job_dir.join("stderr.log"), b"stderr\n")
             .expect("Agent-owned stderr log");
         let output_logs = AgentNativeInvocationOutputLogs {
             stdout_sha256: format!("{:x}", Sha256::digest(b"[REDACTED] stdout\n")),
@@ -1726,7 +1726,7 @@ mod tests {
         exit_code: Option<i32>,
     ) -> (String, String, PathBuf) {
         let jobs = root.to_path_buf();
-        onec_core::ensure_private_directory(&jobs).expect("private jobs root");
+        hostlink_core::ensure_private_directory(&jobs).expect("private jobs root");
         let run_id = "0123456789abcdef0123456789abcdef".to_owned();
         let job_id = format!(
             "job-attest-{}",
@@ -1740,11 +1740,11 @@ mod tests {
         let run_parent = jobs.join("run-local-runs");
         let workspace = run_parent.join(&run_id);
         fs::create_dir_all(&workspace).expect("owned workspace");
-        onec_core::ensure_private_directory(&run_parent).expect("private run parent");
-        onec_core::ensure_private_directory(&workspace).expect("private workspace");
+        hostlink_core::ensure_private_directory(&run_parent).expect("private run parent");
+        hostlink_core::ensure_private_directory(&workspace).expect("private workspace");
         let job_dir = jobs.join(&job_id);
         fs::create_dir(&job_dir).expect("job directory");
-        onec_core::ensure_private_directory(&job_dir).expect("private job directory");
+        hostlink_core::ensure_private_directory(&job_dir).expect("private job directory");
         let job = onec_agent_protocol::AgentJobInfo {
             job_id: job_id.clone(),
             state,
@@ -1785,8 +1785,8 @@ mod tests {
         let replacement = dir.path().join("replacement.log");
         fs::write(&path, b"signed bytes").expect("original output");
         fs::write(&replacement, b"otherd bytes").expect("same-size foreign output");
-        onec_core::restrict_private_file(&path).expect("private signed output");
-        onec_core::restrict_private_file(&replacement).expect("private replacement");
+        hostlink_core::restrict_private_file(&path).expect("private signed output");
+        hostlink_core::restrict_private_file(&replacement).expect("private replacement");
         let opened = open_private_log_nofollow(&path).expect("open original inode");
         assert!(opened_log_matches_path(&opened, &path).expect("original inode check"));
 

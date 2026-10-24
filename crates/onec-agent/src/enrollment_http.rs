@@ -28,7 +28,7 @@ pub fn post_enrollment_json(
     validate_secret_file(token_file)?;
     ensure_output_absent(output)?;
 
-    let token = onec_core::read_file_bounded(token_file, MAX_ENROLLMENT_TOKEN_BYTES)?;
+    let token = hostlink_core::read_file_bounded(token_file, MAX_ENROLLMENT_TOKEN_BYTES)?;
     let token = std::str::from_utf8(&token)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
         .trim();
@@ -39,7 +39,7 @@ pub fn post_enrollment_json(
         ));
     }
 
-    let body = onec_core::read_file_bounded(body_file, MAX_ENROLLMENT_REQUEST_BYTES)?;
+    let body = hostlink_core::read_file_bounded(body_file, MAX_ENROLLMENT_REQUEST_BYTES)?;
     serde_json::from_slice::<serde_json::Value>(&body).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -72,7 +72,7 @@ pub fn post_enrollment_json(
         )
     })?;
 
-    onec_core::write_new_private_bytes(output, &response)
+    hostlink_core::write_new_private_bytes(output, &response)
 }
 
 fn validate_secret_file(path: &Path) -> io::Result<()> {
@@ -83,7 +83,7 @@ fn validate_secret_file(path: &Path) -> io::Result<()> {
             "enrollment token path must be a regular non-symlink file",
         ));
     }
-    onec_core::validate_private_file(path).map_err(io::Error::other)
+    hostlink_core::validate_private_file(path).map_err(io::Error::other)
 }
 
 fn ensure_output_absent(path: &Path) -> io::Result<()> {
@@ -157,7 +157,7 @@ mod tests {
         let body = dir.path().join("body.json");
         let output = dir.path().join("response.json");
         std::fs::write(&token, "a".repeat(64)).expect("token");
-        onec_core::restrict_private_file(&token).expect("private token");
+        hostlink_core::restrict_private_file(&token).expect("private token");
         std::fs::write(&body, "{}").expect("body");
         std::fs::write(&output, "{}").expect("existing output");
 
@@ -177,7 +177,7 @@ mod tests {
         let body = dir.path().join("body.json");
         let output = dir.path().join("response.json");
         std::fs::write(&token, "a".repeat(64)).expect("token");
-        onec_core::restrict_private_file(&token).expect("private token");
+        hostlink_core::restrict_private_file(&token).expect("private token");
         std::fs::write(&body, "{}").expect("body");
         symlink(dir.path().join("missing-response.json"), &output).expect("dangling output link");
 
