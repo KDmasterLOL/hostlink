@@ -1,17 +1,18 @@
 use clap::{Args, Parser, Subcommand};
 use onec_agent::embedded_ssh::preflight_embedded_ssh;
 use onec_agent::{
-    AgentConfig, DirectPackageUpdateRequest, RuntimeUpdateOutcome, RuntimeUpdatePreflightOutcome,
-    install_service, post_enrollment_json, preflight_runtime_update, probe_tunnel, run_job_worker,
-    run_service, run_sshd_host, run_with_tunnel, serve, service_status, start_service,
-    stop_service, uninstall_service, update_direct_package,
+    AgentConfig, AgentPackageUpdateRequest, DirectPackageUpdateRequest, RuntimeUpdateOutcome,
+    RuntimeUpdatePreflightOutcome, install_service, post_enrollment_json, preflight_runtime_update,
+    probe_tunnel, run_job_worker, run_service, run_sshd_host, run_with_tunnel, serve,
+    service_status, start_service, stop_service, uninstall_service, update_agent_package,
+    update_direct_package,
 };
 use std::io;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "onec-agent",
+    name = "hostlink-agent",
     version,
     about = "Outbound managed remote-control agent for HostLink"
 )]
@@ -135,6 +136,9 @@ struct SelfUpdateArgs {
     /// Check durable-job blockers without downloading or replacing runtime files.
     #[arg(long)]
     preflight: bool,
+    /// Select the independent HostLink Agent-only archive format.
+    #[arg(long)]
+    agent_only: bool,
 }
 
 impl SelfUpdateArgs {
@@ -149,7 +153,13 @@ impl SelfUpdateArgs {
         .filter(|present| *present)
         .count();
         let direct = has_source || direct_metadata_count != 0;
-        if self.preflight && direct {
+        if self.agent_only && !direct {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--agent-only requires an exact archive, SHA-256, version, and target",
+            ));
+        }
+        if self.preflight && (direct || self.agent_only) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "--preflight cannot be combined with update selection arguments",
@@ -204,20 +214,20 @@ fn main() {
         match run_sshd_host(&args.program, &args.config, &args.start_event) {
             Ok(exit_code) => std::process::exit(exit_code as i32),
             Err(error) => {
-                eprintln!("onec-agent sshd host: {error}");
+                eprintln!("hostlink-agent sshd host: {error}");
                 std::process::exit(1);
             }
         }
     }
     if let Command::EmbeddedSshPreflight(args) = command {
         if let Err(error) = run_embedded_ssh_preflight_cli(args) {
-            eprintln!("onec-agent: {error}");
+            eprintln!("hostlink-agent: {error}");
             std::process::exit(1);
         }
         return;
     }
     if let Err(error) = run(command) {
-        eprintln!("onec-agent: {error}");
+        eprintln!("hostlink-agent: {error}");
         std::process::exit(1);
     }
 }
@@ -277,14 +287,28 @@ fn run(command: Command) -> io::Result<()> {
                 );
                 return Ok(());
             }
-            let outcome = update_direct_package(&DirectPackageUpdateRequest {
-                root: args.root,
-                archive_url: args.archive_url,
-                archive_file: args.archive_file,
-                archive_sha256: args.archive_sha256.expect("validated direct mode"),
-                package_version: args.package_version.expect("validated direct mode"),
-                target: args.target.expect("validated direct mode"),
-            })?;
+            let archive_sha256 = args.archive_sha256.expect("validated direct mode");
+            let package_version = args.package_version.expect("validated direct mode");
+            let target = args.target.expect("validated direct mode");
+            let outcome = if args.agent_only {
+                update_agent_package(&AgentPackageUpdateRequest {
+                    root: args.root,
+                    archive_url: args.archive_url,
+                    archive_file: args.archive_file,
+                    archive_sha256,
+                    package_version,
+                    target,
+                })?
+            } else {
+                update_direct_package(&DirectPackageUpdateRequest {
+                    root: args.root,
+                    archive_url: args.archive_url,
+                    archive_file: args.archive_file,
+                    archive_sha256,
+                    package_version,
+                    target,
+                })?
+            };
             let value = match outcome {
                 RuntimeUpdateOutcome::DeferredActiveJobs { job_ids } => {
                     serde_json::json!({"status":"deferred_active_jobs","job_ids":job_ids})
@@ -377,10 +401,10 @@ mod tests {
     #[test]
     fn root_help_uses_standard_clap_layout_and_hides_internal_commands() {
         let help = Cli::command()
-            .try_get_matches_from(["onec-agent", "--help"])
+            .try_get_matches_from(["hostlink-agent", "--help"])
             .expect_err("help exits through DisplayHelp")
             .to_string();
-        assert!(help.contains("Usage: onec-agent <COMMAND>"));
+        assert!(help.contains("Usage: hostlink-agent <COMMAND>"));
         assert!(help.contains("Commands:"));
         assert!(help.contains("Options:"));
         assert!(help.contains("probe-tunnel"));
@@ -397,7 +421,7 @@ mod tests {
     fn probe_tunnel_seconds_are_validated_by_clap() {
         for seconds in ["1", "300"] {
             Cli::try_parse_from([
-                "onec-agent",
+                "hostlink-agent",
                 "probe-tunnel",
                 "--config",
                 "agent.json",
@@ -409,7 +433,7 @@ mod tests {
         for seconds in ["0", "301", "not-a-number"] {
             assert!(
                 Cli::try_parse_from([
-                    "onec-agent",
+                    "hostlink-agent",
                     "probe-tunnel",
                     "--config",
                     "agent.json",
@@ -424,11 +448,15 @@ mod tests {
 
     #[test]
     fn internal_commands_remain_parseable() {
-        assert!(Cli::try_parse_from(["onec-agent", "service", "--config", "agent.json"]).is_ok());
-        assert!(Cli::try_parse_from(["onec-agent", "__job-worker", "--job-dir", "job"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["hostlink-agent", "service", "--config", "agent.json"]).is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["hostlink-agent", "__job-worker", "--job-dir", "job"]).is_ok()
+        );
         assert!(
             Cli::try_parse_from([
-                "onec-agent",
+                "hostlink-agent",
                 "__sshd-host",
                 "--program",
                 "sshd.exe",
@@ -441,7 +469,7 @@ mod tests {
         );
         assert!(
             Cli::try_parse_from([
-                "onec-agent",
+                "hostlink-agent",
                 "__self-update",
                 "--root",
                 "toolkit-root",
@@ -450,7 +478,7 @@ mod tests {
             .is_ok()
         );
         let no_selection =
-            Cli::try_parse_from(["onec-agent", "__self-update", "--root", "toolkit-root"])
+            Cli::try_parse_from(["hostlink-agent", "__self-update", "--root", "toolkit-root"])
                 .expect("empty selection parses before semantic validation");
         let Command::SelfUpdate(no_selection) = no_selection.command else {
             panic!("expected self-update command");
@@ -463,7 +491,7 @@ mod tests {
         );
 
         let direct = Cli::try_parse_from([
-            "onec-agent",
+            "hostlink-agent",
             "__self-update",
             "--root",
             "toolkit-root",
@@ -483,7 +511,7 @@ mod tests {
         direct.validate_mode().expect("direct mode");
 
         let local = Cli::try_parse_from([
-            "onec-agent",
+            "hostlink-agent",
             "__self-update",
             "--root",
             "C:\\ToolKit",
@@ -502,9 +530,43 @@ mod tests {
         };
         local.validate_mode().expect("local direct mode");
 
+        let agent_only = Cli::try_parse_from([
+            "hostlink-agent",
+            "__self-update",
+            "--root",
+            "agent-root",
+            "--agent-only",
+            "--archive-file",
+            "agent-root/package.zip",
+            "--archive-sha256",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--package-version",
+            "1.2.3",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+        ])
+        .expect("Agent-only arguments");
+        let Command::SelfUpdate(agent_only) = agent_only.command else {
+            panic!("expected self-update command")
+        };
+        agent_only.validate_mode().expect("valid Agent-only mode");
+
+        let malformed = Cli::try_parse_from([
+            "hostlink-agent",
+            "__self-update",
+            "--root",
+            "agent-root",
+            "--agent-only",
+        ])
+        .expect("malformed selection parses before semantic validation");
+        let Command::SelfUpdate(malformed) = malformed.command else {
+            panic!("expected self-update command")
+        };
+        assert!(malformed.validate_mode().is_err());
+
         assert!(
             Cli::try_parse_from([
-                "onec-agent",
+                "hostlink-agent",
                 "__enroll-http",
                 "--url",
                 "https://hub.example.test/v1/enroll",
@@ -519,7 +581,7 @@ mod tests {
         );
         assert!(
             Cli::try_parse_from([
-                "onec-agent",
+                "hostlink-agent",
                 "__embedded-ssh-preflight",
                 "--config",
                 "agent.json",

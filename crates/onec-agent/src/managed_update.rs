@@ -69,6 +69,23 @@ pub struct DirectPackageUpdateRequest {
     pub target: String,
 }
 
+/// Request to install one independently selected HostLink Agent-only archive.
+#[derive(Debug, Clone)]
+pub struct AgentPackageUpdateRequest {
+    /// User-owned HostLink root containing the job store and update lock.
+    pub root: PathBuf,
+    /// Exact externally selected HTTPS URL, or `None` for a root-contained ZIP.
+    pub archive_url: Option<String>,
+    /// Absolute ZIP path contained by `root`, or `None` for an HTTPS download.
+    pub archive_file: Option<PathBuf>,
+    /// Trusted SHA-256 of the exact ZIP bytes.
+    pub archive_sha256: String,
+    /// Externally selected package semantic version.
+    pub package_version: String,
+    /// Externally selected Rust target triple.
+    pub target: String,
+}
+
 /// Read-only result of checking whether a runtime update may begin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeUpdatePreflightOutcome {
@@ -237,6 +254,341 @@ pub fn update_direct_package(
     })
 }
 
+/// Install or verify an Agent-only package below `root/hostlink-agent`.
+///
+/// Existing Toolkit files remain outside this isolated subtree. An identical package is a no-op
+/// only when every installed package file still matches its recorded size and SHA-256.
+///
+/// # Errors
+///
+/// Returns an error for unsafe roots or archive paths, invalid selection metadata, archive
+/// inventory/digest failures, target conflicts, tampered installed files, or publication errors.
+pub fn update_agent_package(
+    request: &AgentPackageUpdateRequest,
+) -> io::Result<RuntimeUpdateOutcome> {
+    let digest = Sha256Digest::from_str(&request.archive_sha256)
+        .map_err(|_| invalid("archive_sha256 must contain 64 hex characters"))?;
+    validate_agent_package(request)?;
+    validate_agent_install_scope(&request.root)?;
+    let install_root = request.root.join("hostlink-agent");
+    validate_agent_install_subtree(&request.root, &install_root)?;
+
+    let _writer = acquire_exclusive_file_lock(
+        request.root.join("update.lock"),
+        UPDATE_LOCK_TIMEOUT,
+        UPDATE_LOCK_POLL,
+    )?;
+    if let RuntimeUpdatePreflightOutcome::DeferredActiveJobs { job_ids } =
+        preflight_runtime_update(&request.root)?
+    {
+        return Ok(RuntimeUpdateOutcome::DeferredActiveJobs { job_ids });
+    }
+
+    // Validate a local selection even when the installed digest later proves to be a no-op.
+    let validated_local_archive = if let Some(source_path) = request.archive_file.as_deref() {
+        let mut staged = tempfile::tempfile_in(&request.root)?;
+        let mut source = open_scoped_archive(&request.root, source_path)?;
+        copy_archive_bounded(&mut source, &mut staged)?;
+        verify_open_archive_digest(&mut staged, &digest)?;
+        validate_agent_archive(&mut staged, &request.target)?;
+        Some(staged)
+    } else {
+        None
+    };
+
+    let metadata_path = install_root.join("install.json");
+    let has_metadata = match std::fs::symlink_metadata(&metadata_path) {
+        Ok(metadata)
+            if metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && !is_reparse_point(&metadata) =>
+        {
+            true
+        }
+        Ok(_) => {
+            return Err(invalid(
+                "HostLink Agent install metadata is not a safe regular file",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    if has_metadata {
+        let metadata_file = open_scoped_archive(&request.root, &metadata_path)?;
+        let mut metadata_bytes = Vec::new();
+        metadata_file
+            .take(INSTALL_METADATA_MAX_BYTES as u64 + 1)
+            .read_to_end(&mut metadata_bytes)?;
+        if metadata_bytes.len() > INSTALL_METADATA_MAX_BYTES {
+            return Err(invalid(
+                "HostLink Agent install metadata exceeds size limit",
+            ));
+        }
+        let metadata: Value = serde_json::from_slice(&metadata_bytes).map_err(|error| {
+            invalid_owned(format!(
+                "HostLink Agent install metadata is invalid: {error}"
+            ))
+        })?;
+        let object = metadata
+            .as_object()
+            .ok_or_else(|| invalid("HostLink Agent install metadata must be a JSON object"))?;
+        if required_string(object, "target")? != request.target {
+            return Err(invalid(
+                "selected target does not match installed HostLink Agent target",
+            ));
+        }
+        let expected = object.get("installed_files").ok_or_else(|| {
+            invalid("installed HostLink Agent file integrity metadata is missing")
+        })?;
+        let actual = package_file_identities(
+            &install_root.join("bin"),
+            &agent_package_files(&request.target),
+        )?;
+        if expected != &actual {
+            return Err(invalid(
+                "installed HostLink Agent files do not match install metadata",
+            ));
+        }
+        if object
+            .get("installed_package_sha256")
+            .and_then(Value::as_str)
+            == Some(digest.to_string().as_str())
+        {
+            let installed_version = required_string(object, "installed_version")?;
+            if semver::Version::parse(installed_version).ok()
+                != semver::Version::parse(&request.package_version).ok()
+            {
+                return Err(invalid(
+                    "selected package version conflicts with the installed archive digest",
+                ));
+            }
+            return Ok(RuntimeUpdateOutcome::DirectUpToDate {
+                package_version: request.package_version.clone(),
+                archive_sha256: digest.to_string(),
+            });
+        }
+    }
+
+    let mut staged_archive = if let Some(staged) = validated_local_archive {
+        staged
+    } else {
+        let mut staged = tempfile::tempfile_in(&request.root)?;
+        let url = request
+            .archive_url
+            .as_deref()
+            .ok_or_else(|| invalid("Agent update requires an archive source"))?;
+        let mut download = Download::from_url(url);
+        download
+            .timeout(Duration::from_secs(30))
+            .max_download_size(DIRECT_ARCHIVE_MAX_COMPRESSED_BYTES);
+        download.download_to(&mut staged).map_err(update_error)?;
+        staged
+    };
+    verify_open_archive_digest(&mut staged_archive, &digest)?;
+    validate_agent_archive(&mut staged_archive, &request.target)?;
+
+    // self_update publishes a staged directory by rename and requires its parent to exist.
+    std::fs::create_dir_all(install_root.join("bin"))?;
+    validate_agent_install_subtree(&request.root, &install_root)?;
+
+    let archive_url = request
+        .archive_url
+        .clone()
+        .unwrap_or_else(|| format!("{LOCAL_ARCHIVE_URL_PREFIX}{digest}"));
+    let exact = ExactBundleUpdateRequest {
+        package_version: request.package_version.clone(),
+        release_id: format!("direct:{}:{digest}", request.package_version),
+        target: request.target.clone(),
+        archive_url,
+        archive_name: format!("hostlink-agent-{}.zip", request.target),
+        archive_sha256: digest,
+        bundle_path_in_archive: format!("hostlink-agent-{}", request.target),
+        bundle_install_path: install_root.join("bin"),
+        binary_name: "hostlink-agent".to_owned(),
+        required_files: agent_package_files(&request.target),
+    };
+    install_exact_bundle_unlocked_with_local_file(&exact, Some(staged_archive))?;
+    let metadata = serde_json::json!({
+        "format": 1,
+        "target": request.target,
+        "installed_version": request.package_version,
+        "installed_package_sha256": digest.to_string(),
+        "installed_files": package_file_identities(&install_root.join("bin"), &agent_package_files(&request.target))?,
+    });
+    let mut bytes = serde_json::to_vec_pretty(&metadata).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    write_file_atomically(&metadata_path, &bytes)?;
+    Ok(RuntimeUpdateOutcome::DirectUpdated {
+        package_version: request.package_version.clone(),
+        archive_sha256: digest.to_string(),
+    })
+}
+
+const SUPPORTED_AGENT_TARGETS: [&str; 4] = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-win7-windows-msvc",
+    "i686-win7-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+];
+
+fn agent_package_files(target: &str) -> Vec<PathBuf> {
+    let executable = if target.contains("windows") {
+        "hostlink-agent.exe"
+    } else {
+        "hostlink-agent"
+    };
+    let mut files = vec![PathBuf::from(executable)];
+    if target.contains("windows") {
+        files.extend(
+            [
+                "Install-HostLink-Agent.ps1",
+                "Run-HostLink-Agent.ps1",
+                "Update-HostLink-Agent.ps1",
+            ]
+            .into_iter()
+            .map(PathBuf::from),
+        );
+    }
+    files
+}
+
+fn validate_agent_package(request: &AgentPackageUpdateRequest) -> io::Result<()> {
+    if !SUPPORTED_AGENT_TARGETS.contains(&request.target.as_str()) {
+        return Err(invalid("unsupported Agent package target triple"));
+    }
+    if !target_matches_running_agent(&request.target) {
+        return Err(invalid(
+            "selected Agent target does not match this Agent runtime OS and architecture",
+        ));
+    }
+    validate_package_version(&request.package_version)?;
+    if !request.root.is_absolute() || request.root.as_os_str().is_empty() {
+        return Err(invalid("Agent root must be an absolute non-empty path"));
+    }
+    match (&request.archive_url, &request.archive_file) {
+        (Some(url), None) => validate_direct_archive_url(url)?,
+        (None, Some(path))
+            if path.is_absolute()
+                && !path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir)) => {}
+        _ => {
+            return Err(invalid(
+                "Agent update requires exactly one absolute root-contained archive source",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn target_matches_running_agent(target: &str) -> bool {
+    matches!(
+        target,
+        "x86_64-pc-windows-msvc" | "x86_64-win7-windows-msvc"
+    )
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86"))]
+fn target_matches_running_agent(target: &str) -> bool {
+    target == "i686-win7-windows-msvc"
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn target_matches_running_agent(target: &str) -> bool {
+    target == "x86_64-unknown-linux-gnu"
+}
+
+#[cfg(not(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "windows", target_arch = "x86"),
+    all(target_os = "linux", target_arch = "x86_64")
+)))]
+fn target_matches_running_agent(_target: &str) -> bool {
+    false
+}
+
+fn validate_agent_install_scope(root: &Path) -> io::Result<()> {
+    #[cfg(all(windows, not(test)))]
+    {
+        let local_app_data = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
+            invalid("LOCALAPPDATA is required for user-scoped HostLink Agent installation")
+        })?;
+        let expected = Path::new(&local_app_data).join("HostLink").join("Agent");
+        if std::fs::canonicalize(root)? != std::fs::canonicalize(expected)? {
+            return Err(invalid(
+                "HostLink Agent root must be the current user's LOCALAPPDATA/HostLink/Agent directory",
+            ));
+        }
+    }
+    #[cfg(not(all(windows, not(test))))]
+    let _ = root;
+    Ok(())
+}
+
+fn validate_agent_install_subtree(root: &Path, install_root: &Path) -> io::Result<()> {
+    for path in [root, install_root, &install_root.join("bin")] {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta)
+                if !meta.is_dir() || meta.file_type().is_symlink() || is_reparse_point(&meta) =>
+            {
+                return Err(invalid(
+                    "HostLink Agent install path contains an unsafe directory",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn validate_agent_archive(file: &mut File, target: &str) -> io::Result<()> {
+    validate_exact_archive(
+        file,
+        &format!("hostlink-agent-{target}"),
+        &agent_package_files(target),
+    )
+}
+
+fn package_file_identities(root: &Path, required: &[PathBuf]) -> io::Result<Value> {
+    let mut identities = serde_json::Map::new();
+    for relative in required {
+        let path = root.join(relative);
+        let mut file = open_regular_file_no_links(&path)?;
+        let size = file.metadata()?.len();
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+        }
+        identities.insert(
+            relative.to_string_lossy().into_owned(),
+            serde_json::json!({"size": size, "sha256": format!("{:x}", hasher.finalize())}),
+        );
+    }
+    Ok(Value::Object(identities))
+}
+
+fn open_regular_file_no_links(path: &Path) -> io::Result<File> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+        return Err(invalid(
+            "installed HostLink Agent file is missing or unsafe",
+        ));
+    }
+    let file = File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(invalid("installed HostLink Agent file is not regular"));
+    }
+    Ok(file)
+}
+
 fn validate_direct_package(request: &DirectPackageUpdateRequest) -> io::Result<()> {
     if !SUPPORTED_TARGETS.contains(&request.target.as_str()) {
         return Err(invalid("unsupported package target triple"));
@@ -281,6 +633,7 @@ fn direct_bundle_request(
         archive_sha256,
         bundle_path_in_archive: format!("onec-toolkit-{}", request.target),
         bundle_install_path: request.root.join("bin"),
+        binary_name: "onec-toolkit".to_owned(),
         required_files: required_runtime_files(),
     }
 }
@@ -505,17 +858,29 @@ fn validate_direct_archive(file: &mut File, target: &str) -> io::Result<()> {
             "direct package archive exceeds compressed size limit",
         ));
     }
+    let package = format!("onec-toolkit-{target}");
+    validate_exact_archive(file, &package, &required_runtime_files())
+}
+
+fn validate_exact_archive(
+    file: &mut File,
+    package: &str,
+    required_files: &[PathBuf],
+) -> io::Result<()> {
+    let archive_size = file.metadata()?.len();
+    if archive_size == 0 || archive_size > DIRECT_ARCHIVE_MAX_COMPRESSED_BYTES {
+        return Err(invalid("package archive exceeds compressed size limit"));
+    }
     file.seek(SeekFrom::Start(0))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|error| invalid_owned(error.to_string()))?;
-    let package = format!("onec-toolkit-{target}");
-    let expected = required_runtime_files()
-        .into_iter()
+    let expected = required_files
+        .iter()
         .map(|path| format!("{package}/{}", path.to_string_lossy()))
         .collect::<std::collections::BTreeSet<_>>();
     if archive.len() != expected.len() {
         return Err(invalid(
-            "direct package archive must contain exactly five files",
+            "package archive must contain exactly its whitelisted files",
         ));
     }
     let mut seen = std::collections::BTreeSet::new();
@@ -535,7 +900,7 @@ fn validate_direct_archive(file: &mut File, target: &str) -> io::Result<()> {
             || !seen.insert(name.to_owned())
         {
             return Err(invalid(
-                "direct package archive contains an unsafe or unexpected entry",
+                "package archive contains an unsafe or unexpected entry",
             ));
         }
         if !matches!(
@@ -543,29 +908,27 @@ fn validate_direct_archive(file: &mut File, target: &str) -> io::Result<()> {
             zip::CompressionMethod::Stored | zip::CompressionMethod::Deflated
         ) {
             return Err(invalid(
-                "direct package archive uses an unsupported compression method",
+                "package archive uses an unsupported compression method",
             ));
         }
         if let Some(mode) = entry.unix_mode() {
             let file_type = mode & 0o170000;
             if file_type != 0 && file_type != 0o100000 {
-                return Err(invalid(
-                    "direct package archive contains a non-regular file",
-                ));
+                return Err(invalid("package archive contains a non-regular file"));
             }
         }
         let declared_size = entry.size();
         if declared_size > DIRECT_ARCHIVE_MAX_ENTRY_BYTES
             || entry.compressed_size() > DIRECT_ARCHIVE_MAX_COMPRESSED_BYTES
         {
-            return Err(invalid("direct package archive entry exceeds size limit"));
+            return Err(invalid("package archive entry exceeds size limit"));
         }
         total_uncompressed = total_uncompressed
             .checked_add(declared_size)
             .ok_or_else(|| invalid("direct package uncompressed size overflow"))?;
         if total_uncompressed > DIRECT_ARCHIVE_MAX_TOTAL_BYTES {
             return Err(invalid(
-                "direct package archive exceeds total uncompressed size limit",
+                "package archive exceeds total uncompressed size limit",
             ));
         }
         let mut actual_size = 0_u64;
@@ -578,17 +941,15 @@ fn validate_direct_archive(file: &mut File, target: &str) -> io::Result<()> {
                 .checked_add(count as u64)
                 .ok_or_else(|| invalid("direct package entry size overflow"))?;
             if actual_size > DIRECT_ARCHIVE_MAX_ENTRY_BYTES || actual_size > declared_size {
-                return Err(invalid("direct package entry exceeds its declared size"));
+                return Err(invalid("package entry exceeds its declared size"));
             }
         }
         if actual_size != declared_size {
-            return Err(invalid(
-                "direct package entry size does not match its declaration",
-            ));
+            return Err(invalid("package entry size does not match its declaration"));
         }
     }
     if seen != expected {
-        return Err(invalid("direct package archive is missing a required file"));
+        return Err(invalid("package archive is missing a required file"));
     }
     Ok(())
 }
@@ -708,6 +1069,8 @@ struct ExactBundleUpdateRequest {
     pub bundle_path_in_archive: String,
     /// Installed immutable runtime directory to replace.
     pub bundle_install_path: PathBuf,
+    /// Executable stem used by self_update replacement bookkeeping.
+    pub binary_name: String,
     /// Relative files that must exist in the staged runtime before publication.
     pub required_files: Vec<PathBuf>,
 }
@@ -748,7 +1111,7 @@ fn install_exact_bundle_unlocked_with_local_file(
     let mut builder = Update::configure();
     builder
         .source(source)
-        .bin_name("onec-toolkit")
+        .bin_name(&request.binary_name)
         .current_version(&request.package_version)
         // Explicitly select this package version so self_update cannot substitute another tag.
         .release_tag(&request.package_version)
@@ -947,6 +1310,361 @@ mod tests {
             package_version: "1.2.3".to_owned(),
             target: "x86_64-pc-windows-msvc".to_owned(),
         }
+    }
+
+    fn make_agent_archive(
+        root: &Path,
+        entries: &[(&str, &[u8], zip::write::SimpleFileOptions)],
+    ) -> (PathBuf, String) {
+        let archive_path = root.join("agent-package.zip");
+        let mut archive = zip::ZipWriter::new(File::create(&archive_path).expect("archive"));
+        for (name, body, options) in entries {
+            archive.start_file(*name, *options).expect("entry");
+            archive.write_all(body).expect("entry bytes");
+        }
+        archive.finish().expect("finish archive");
+        let bytes = std::fs::read(&archive_path).expect("archive bytes");
+        (archive_path, format!("{:x}", Sha256::digest(bytes)))
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn current_agent_target() -> &'static str {
+        "x86_64-unknown-linux-gnu"
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    fn current_agent_target() -> &'static str {
+        "x86_64-pc-windows-msvc"
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86"))]
+    fn current_agent_target() -> &'static str {
+        "i686-win7-windows-msvc"
+    }
+
+    fn mismatched_agent_target() -> &'static str {
+        if current_agent_target().contains("windows") {
+            "x86_64-unknown-linux-gnu"
+        } else {
+            "x86_64-pc-windows-msvc"
+        }
+    }
+
+    fn host_agent_archive(root: &Path) -> (PathBuf, String) {
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let package = format!("hostlink-agent-{}", current_agent_target());
+        #[cfg(target_os = "windows")]
+        let entries = vec![
+            (
+                format!("{package}/hostlink-agent.exe"),
+                b"hostlink-agent-v1".as_slice(),
+                options,
+            ),
+            (
+                format!("{package}/Install-HostLink-Agent.ps1"),
+                include_bytes!("../assets/Install-HostLink-Agent.ps1").as_slice(),
+                options,
+            ),
+            (
+                format!("{package}/Run-HostLink-Agent.ps1"),
+                include_bytes!("../assets/Run-HostLink-Agent.ps1").as_slice(),
+                options,
+            ),
+            (
+                format!("{package}/Update-HostLink-Agent.ps1"),
+                include_bytes!("../assets/Update-HostLink-Agent.ps1").as_slice(),
+                options,
+            ),
+        ];
+        #[cfg(target_os = "linux")]
+        let entries = [(
+            format!("{package}/hostlink-agent"),
+            b"hostlink-agent-v1".as_slice(),
+            options,
+        )];
+        let owned = entries
+            .iter()
+            .map(|(name, body, options)| (name.as_str(), *body, *options))
+            .collect::<Vec<_>>();
+        make_agent_archive(root, &owned)
+    }
+
+    fn host_agent_executable(root: &Path) -> PathBuf {
+        root.join("hostlink-agent/bin")
+            .join(if current_agent_target().contains("windows") {
+                "hostlink-agent.exe"
+            } else {
+                "hostlink-agent"
+            })
+    }
+
+    fn agent_request(root: &TempDir, archive: &Path, digest: String) -> AgentPackageUpdateRequest {
+        AgentPackageUpdateRequest {
+            root: root.path().to_path_buf(),
+            archive_url: None,
+            archive_file: Some(archive.to_path_buf()),
+            archive_sha256: digest,
+            package_version: "1.2.3".to_owned(),
+            target: current_agent_target().to_owned(),
+        }
+    }
+
+    #[test]
+    fn agent_only_package_installs_idempotently_and_preserves_legacy_files() {
+        let root = TempDir::new().expect("root");
+        let (archive, digest) = host_agent_archive(root.path());
+        std::fs::create_dir_all(root.path().join("bin")).expect("legacy bin");
+        std::fs::write(root.path().join("bin/onec-agent.exe"), b"legacy agent")
+            .expect("legacy binary");
+        std::fs::write(root.path().join("agent.json"), b"legacy config").expect("legacy config");
+        let request = agent_request(&root, &archive, digest.clone());
+        assert_eq!(
+            update_agent_package(&request).expect("install"),
+            RuntimeUpdateOutcome::DirectUpdated {
+                package_version: "1.2.3".to_owned(),
+                archive_sha256: digest.clone()
+            }
+        );
+        assert_eq!(
+            std::fs::read(host_agent_executable(root.path())).expect("installed agent"),
+            b"hostlink-agent-v1"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("bin/onec-agent.exe")).expect("legacy binary"),
+            b"legacy agent"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("agent.json")).expect("legacy config"),
+            b"legacy config"
+        );
+        assert_eq!(
+            update_agent_package(&request).expect("idempotent update"),
+            RuntimeUpdateOutcome::DirectUpToDate {
+                package_version: "1.2.3".to_owned(),
+                archive_sha256: digest
+            }
+        );
+    }
+
+    #[test]
+    fn agent_only_package_rejects_digest_inventory_target_and_installed_file_mismatches() {
+        let root = TempDir::new().expect("root");
+        let (archive, digest) = host_agent_archive(root.path());
+        let mut wrong_digest = agent_request(&root, &archive, "0".repeat(64));
+        assert!(update_agent_package(&wrong_digest).is_err());
+        wrong_digest.archive_sha256 = digest.clone();
+        wrong_digest.target = mismatched_agent_target().to_owned();
+        assert!(update_agent_package(&wrong_digest).is_err());
+
+        let request = agent_request(&root, &archive, digest);
+        update_agent_package(&request).expect("initial install");
+        let executable = host_agent_executable(root.path());
+        std::fs::write(&executable, b"tampered").expect("tamper executable");
+        assert!(
+            update_agent_package(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("do not match")
+        );
+        std::fs::remove_file(&executable).expect("remove executable");
+        assert!(update_agent_package(&request).is_err());
+    }
+
+    #[test]
+    fn agent_only_package_rejects_cross_os_target_without_changing_installed_state() {
+        let root = TempDir::new().expect("root");
+        let (archive, digest) = host_agent_archive(root.path());
+        let request = agent_request(&root, &archive, digest);
+        update_agent_package(&request).expect("initial install");
+        let metadata_path = root.path().join("hostlink-agent/install.json");
+        let before_metadata = std::fs::read(&metadata_path).expect("metadata");
+        let executable_path = host_agent_executable(root.path());
+        let before_executable = std::fs::read(&executable_path).expect("installed executable");
+
+        let mut mismatched = request;
+        mismatched.target = mismatched_agent_target().to_owned();
+        let error = update_agent_package(&mismatched).expect_err("cross-OS target");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match this Agent runtime")
+        );
+        assert_eq!(
+            std::fs::read(metadata_path).expect("unchanged metadata"),
+            before_metadata
+        );
+        assert_eq!(
+            std::fs::read(executable_path).expect("unchanged executable"),
+            before_executable
+        );
+    }
+
+    #[test]
+    fn agent_only_archive_rejects_extra_onec_traversal_and_symlink_members() {
+        let root = TempDir::new().expect("root");
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let (extra, _) = make_agent_archive(
+            root.path(),
+            &[
+                (
+                    "hostlink-agent-x86_64-unknown-linux-gnu/hostlink-agent",
+                    b"agent",
+                    options,
+                ),
+                (
+                    "hostlink-agent-x86_64-unknown-linux-gnu/onec.exe",
+                    b"controller",
+                    options,
+                ),
+            ],
+        );
+        let mut file = File::open(extra).expect("extra archive");
+        assert!(validate_agent_archive(&mut file, "x86_64-unknown-linux-gnu").is_err());
+
+        let (traversal, _) = make_agent_archive(
+            root.path(),
+            &[(
+                "hostlink-agent-x86_64-unknown-linux-gnu/../outside",
+                b"bad",
+                options,
+            )],
+        );
+        let mut file = File::open(traversal).expect("traversal archive");
+        assert!(validate_agent_archive(&mut file, "x86_64-unknown-linux-gnu").is_err());
+
+        let (symlink, _) = make_agent_archive(
+            root.path(),
+            &[(
+                "hostlink-agent-x86_64-unknown-linux-gnu/hostlink-agent",
+                b"target",
+                options,
+            )],
+        );
+        let mut bytes = std::fs::read(&symlink).expect("symlink archive bytes");
+        let central = bytes
+            .windows(4)
+            .position(|window| window == b"PK\x01\x02")
+            .expect("central file header");
+        bytes[central + 38..central + 42].copy_from_slice(&(0o120777_u32 << 16).to_le_bytes());
+        std::fs::write(&symlink, bytes).expect("mark ZIP member as symlink");
+        let mut file = File::open(symlink).expect("symlink archive");
+        assert!(validate_agent_archive(&mut file, "x86_64-unknown-linux-gnu").is_err());
+    }
+
+    #[test]
+    fn agent_only_install_rejects_target_conflict_and_unsafe_root_or_archive_scope() {
+        let root = TempDir::new().expect("root");
+        let (archive, digest) = host_agent_archive(root.path());
+        std::fs::create_dir_all(root.path().join("hostlink-agent")).expect("install root");
+        std::fs::write(
+            root.path().join("hostlink-agent/install.json"),
+            format!(r#"{{"target":"{}"}}"#, mismatched_agent_target()).as_bytes(),
+        )
+        .expect("metadata");
+        let request = agent_request(&root, &archive, digest);
+        assert!(
+            update_agent_package(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match")
+        );
+
+        let mut request = request;
+        request.archive_file = Some(root.path().parent().expect("parent").join("outside.zip"));
+        assert!(validate_agent_package(&request).is_ok());
+        assert!(
+            open_scoped_archive(root.path(), request.archive_file.as_deref().unwrap()).is_err()
+        );
+        request.target = "../../linux".to_owned();
+        assert!(validate_agent_package(&request).is_err());
+        request.target = current_agent_target().to_owned();
+        request.archive_file = None;
+        request.archive_url = Some("file:///tmp/package.zip".to_owned());
+        assert!(validate_agent_package(&request).is_err());
+    }
+
+    #[test]
+    fn agent_only_update_defers_when_a_durable_job_is_active() {
+        let root = TempDir::new().expect("root");
+        let (archive, digest) = host_agent_archive(root.path());
+        let job_dir = root.path().join("jobs/job-active");
+        std::fs::create_dir_all(&job_dir).expect("job directory");
+        std::fs::write(
+            job_dir.join("state-000000.json"),
+            br#"{"version":1,"job":{"job_id":"job-active","state":"running","created_unix_ms":1},"process_identities":{"version":0}}"#,
+        )
+        .expect("active job state");
+        assert_eq!(
+            update_agent_package(&agent_request(&root, &archive, digest)).expect("deferred update"),
+            RuntimeUpdateOutcome::DeferredActiveJobs {
+                job_ids: vec!["job-active".to_owned()]
+            }
+        );
+        assert!(!host_agent_executable(root.path()).exists());
+    }
+
+    #[cfg(all(unix, target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn agent_only_update_rejects_symlinked_install_root() {
+        let parent = TempDir::new().expect("parent");
+        let actual = TempDir::new().expect("actual root");
+        let root_link = parent.path().join("root-link");
+        std::os::unix::fs::symlink(actual.path(), &root_link).expect("root symlink");
+        let archive = actual.path().join("package.zip");
+        let options = SimpleFileOptions::default();
+        let mut zip = zip::ZipWriter::new(File::create(&archive).expect("archive"));
+        zip.start_file(
+            format!("hostlink-agent-{}/hostlink-agent", current_agent_target()).as_str(),
+            options,
+        )
+        .expect("entry");
+        zip.write_all(b"agent").expect("body");
+        zip.finish().expect("finish");
+        let bytes = std::fs::read(&archive).expect("archive bytes");
+        let request = AgentPackageUpdateRequest {
+            root: root_link,
+            archive_url: None,
+            archive_file: Some(archive),
+            archive_sha256: format!("{:x}", Sha256::digest(bytes)),
+            package_version: "1.2.3".to_owned(),
+            target: current_agent_target().to_owned(),
+        };
+        assert!(update_agent_package(&request).is_err());
+        assert!(!actual.path().join("update.lock").exists());
+    }
+
+    #[test]
+    fn windows_agent_inventory_matches_the_hostlink_packager_names() {
+        let root = TempDir::new().expect("root");
+        let options = SimpleFileOptions::default();
+        let entries = [
+            (
+                "hostlink-agent-x86_64-win7-windows-msvc/hostlink-agent.exe",
+                b"exe".as_slice(),
+                options,
+            ),
+            (
+                "hostlink-agent-x86_64-win7-windows-msvc/Install-HostLink-Agent.ps1",
+                b"install".as_slice(),
+                options,
+            ),
+            (
+                "hostlink-agent-x86_64-win7-windows-msvc/Run-HostLink-Agent.ps1",
+                b"run".as_slice(),
+                options,
+            ),
+            (
+                "hostlink-agent-x86_64-win7-windows-msvc/Update-HostLink-Agent.ps1",
+                b"update".as_slice(),
+                options,
+            ),
+        ];
+        let (archive, _) = make_agent_archive(root.path(), &entries);
+        let mut file = File::open(archive).expect("archive file");
+        validate_agent_archive(&mut file, "x86_64-win7-windows-msvc")
+            .expect("exact Windows inventory");
     }
 
     fn write_direct_install_metadata(root: &Path, extra: Value) {

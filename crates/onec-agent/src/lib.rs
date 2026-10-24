@@ -87,8 +87,9 @@ pub use service::{
 };
 
 pub use managed_update::{
-    DirectPackageUpdateRequest, RuntimeUpdateOutcome, RuntimeUpdatePreflightOutcome,
-    preflight_runtime_update, update_direct_package,
+    AgentPackageUpdateRequest, DirectPackageUpdateRequest, RuntimeUpdateOutcome,
+    RuntimeUpdatePreflightOutcome, preflight_runtime_update, update_agent_package,
+    update_direct_package,
 };
 
 /// Runs the durable-job worker for one already-created agent job directory.

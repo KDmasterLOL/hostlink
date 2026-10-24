@@ -27,6 +27,21 @@ const LEGACY_MANAGED_POWERSHELL_ASSETS: [(&str, &str); 3] = [
     ),
 ];
 
+const HOSTLINK_AGENT_POWERSHELL_ASSETS: [(&str, &str); 3] = [
+    (
+        "Install-HostLink-Agent.ps1",
+        include_str!("../assets/Install-HostLink-Agent.ps1"),
+    ),
+    (
+        "Run-HostLink-Agent.ps1",
+        include_str!("../assets/Run-HostLink-Agent.ps1"),
+    ),
+    (
+        "Update-HostLink-Agent.ps1",
+        include_str!("../assets/Update-HostLink-Agent.ps1"),
+    ),
+];
+
 const LEGACY_POWERSHELL_DENYLIST: &[LegacyPowerShellRule] = &[
     LegacyPowerShellRule {
         name: "ConvertFrom-Json",
@@ -126,6 +141,77 @@ fn regression_inv_118_managed_target_powershell_obeys_legacy_compatibility_contr
         vec!["Get-Content -Raw"],
         "line continuations must not bypass the compatibility guard"
     );
+}
+
+#[test]
+fn hostlink_agent_assets_expose_only_the_fresh_root_and_exact_update_flow() {
+    for (name, script) in HOSTLINK_AGENT_POWERSHELL_ASSETS {
+        assert!(
+            script.is_ascii(),
+            "{name} must remain Windows PowerShell 2 compatible ASCII"
+        );
+        assert!(
+            !script.contains("$PSScriptRoot"),
+            "PowerShell 2 has no PSScriptRoot"
+        );
+        assert!(!script.to_ascii_lowercase().contains("get-filehash"));
+        let violations = legacy_powershell_violations(script);
+        assert!(
+            violations.is_empty(),
+            "{name} uses unsupported PowerShell syntax: {}",
+            violations.join(", ")
+        );
+    }
+    let install = HOSTLINK_AGENT_POWERSHELL_ASSETS[0].1;
+    let run = HOSTLINK_AGENT_POWERSHELL_ASSETS[1].1;
+    let update = HOSTLINK_AGENT_POWERSHELL_ASSETS[2].1;
+    for required in [
+        "$ArchiveFile",
+        "$ArchiveSha256",
+        "$PackageVersion",
+        "$Target",
+        "Is64BitOperatingSystem",
+        "HostLink\\Agent",
+        "LocalApplicationData",
+        "hostlink-agent.exe",
+        "ZipArchive",
+        "__self-update",
+        "--agent-only",
+        "CreateNew",
+    ] {
+        assert!(
+            install.contains(required),
+            "fresh installer lacks {required}"
+        );
+    }
+    assert!(run.contains("hostlink-agent.exe"));
+    assert!(run.contains("sha256"));
+    assert!(run.contains("$agent = Join-Path $bin 'hostlink-agent.exe'"));
+    for required in [
+        "ArchiveFile",
+        "ArchiveSha256",
+        "PackageVersion",
+        "--agent-only",
+        "--archive-file",
+        "--target",
+        "Is64BitOperatingSystem",
+        "LocalApplicationData",
+        "ReparsePoint",
+    ] {
+        assert!(update.contains(required), "Agent updater lacks {required}");
+    }
+    for forbidden in [
+        "onec.exe",
+        "onec-toolkit",
+        "Register-Service",
+        "New-Service",
+        "CurrentVersion\\Run",
+    ] {
+        assert!(
+            !install.contains(forbidden),
+            "fresh installer contains {forbidden}"
+        );
+    }
 }
 
 #[test]

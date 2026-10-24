@@ -45,7 +45,7 @@ fn request(port: u16, kind: AgentRequestKind) -> AgentResponse {
 }
 
 fn agent_binary() -> std::path::PathBuf {
-    if let Some(path) = std::env::var_os("ONEC_AGENT_TEST_BINARY") {
+    if let Some(path) = std::env::var_os("HOSTLINK_AGENT_TEST_BINARY") {
         return std::path::PathBuf::from(path);
     }
     #[cfg(windows)]
@@ -53,13 +53,13 @@ fn agent_binary() -> std::path::PathBuf {
         if let Ok(current) = std::env::current_exe()
             && let Some(parent) = current.parent()
         {
-            let sibling = parent.join("onec-agent.exe");
+            let sibling = parent.join("hostlink-agent.exe");
             if sibling.is_file() {
                 return sibling;
             }
         }
     }
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_onec-agent"))
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_hostlink-agent"))
 }
 
 fn start_agent(root: &Path, port: u16) -> Child {

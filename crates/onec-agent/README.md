@@ -1,13 +1,13 @@
 # HostLink Agent
 
-`onec-agent` is the extracted runtime-side component of HostLink for managed Windows and Unix
-hosts. Its package and executable names remain historical compatibility identifiers because the
-workspace lockfile and installed service/process contracts are owned outside this crate slice.
-They are not HostLink domain APIs.
+The `onec-agent` Rust package provides HostLink's runtime-side library and standalone
+`hostlink-agent` executable for managed Windows and Unix hosts. Existing installed executables,
+service identities and wire values retain their historical `onec-agent` names; the new standalone
+artifact has no competing legacy-named binary target.
 
 It is intentionally separate from the `onec` controller:
 
-- `onec-agent` owns connectivity and a minimal remote-control protocol.
+- `hostlink-agent` owns connectivity and a minimal remote-control protocol.
 - `onec` owns the controller/orchestration CLI and composes the focused domain/backend crates.
 - the customer server does not need the toolkit repository or Rust toolchain.
 - the control listener is loopback-only.
@@ -16,12 +16,24 @@ It is intentionally separate from the `onec` controller:
 
 ## Compatibility and extraction status
 
-This extracted source still carries the legacy pinned `onec-toolkit-<target>.zip` installer and
-updater. That path is retained for migration compatibility and still expects the historical
-`onec.exe` bundle member. It is not an independent HostLink Agent bootstrap/update package, and
-must not be used as the HostLink package contract. A separate exact-digest Agent-only bootstrap
-and updater is pending. Do not infer existing-host migration or service takeover from generic CLI
-wording.
+This extracted source retains the legacy pinned `onec-toolkit-<target>.zip` updater for already
+installed agents; it still validates and installs its historical five-file package including
+`onec.exe`. The separate HostLink Agent-only package contains `hostlink-agent.exe` plus the three
+PowerShell assets on Windows, and only `hostlink-agent` on Linux. Its `__self-update --agent-only`
+route accepts one externally selected HTTPS URL or root-contained local ZIP, trusted SHA-256,
+semver and target. It validates the exact whitelist and ZIP member types before publishing into
+`<root>/hostlink-agent/bin`; `install.json` records the package digest and each installed file's
+size and SHA-256. Repeating the same digest verifies current installed bytes before returning
+`up_to_date`. Target changes, active durable jobs, unsafe paths, extra ZIP members and missing or
+changed installed files fail closed or defer as appropriate. The legacy `bin`, config, jobs and SSH
+identity are not modified by this path.
+
+The Windows bootstrap installs only to a fresh `%LOCALAPPDATA%\HostLink\Agent` user root and
+prints an explicit `Run-HostLink-Agent.ps1` command. The updater script invokes the Agent-only Rust
+route with the exact selected package inputs. Neither script registers a service or autostart
+entry, adopts an existing toolkit root, or claims to migrate installed hosts. PowerShell syntax is
+kept compatible with Windows PowerShell 2; actual Windows and Windows 7 runtime acceptance has not
+been performed by this source-only change.
 
 The embedded SSH server currently supports SFTP and direct TCP forwarding. SSH `exec` and `shell`
 requests remain rejected. Safe generic command execution still needs an owned process-tree
@@ -163,15 +175,15 @@ The former generic `EnvironmentGet` / `environment.read-v1` control surface was 
 ## Commands
 
 ```text
-onec-agent check --config agent.json
-onec-agent serve --config agent.json
-onec-agent run          --config agent.json
-onec-agent probe-tunnel --config agent.json --seconds 10
-onec-agent install-service --config agent.json [--start]
-onec-agent start-service
-onec-agent stop-service
-onec-agent service-status
-onec-agent uninstall-service [--stop]
+hostlink-agent check --config agent.json
+hostlink-agent serve --config agent.json
+hostlink-agent run          --config agent.json
+hostlink-agent probe-tunnel --config agent.json --seconds 10
+hostlink-agent install-service --config agent.json [--start]
+hostlink-agent start-service
+hostlink-agent stop-service
+hostlink-agent service-status
+hostlink-agent uninstall-service [--stop]
 ```
 
 `agent.json` is a toolkit-owned versioned schema and rejects unknown fields at the root and nested SSH/TLS objects. Supported omitted fields continue to use documented defaults; misspelled or retired keys fail instead of being silently ignored.

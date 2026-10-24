@@ -1,5 +1,6 @@
 [package]
 name = "onec-agent"
+autobins = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,6 +8,10 @@ license.workspace = true
 publish = false
 repository.workspace = true
 homepage.workspace = true
+
+[[bin]]
+name = "hostlink-agent"
+path = "src/main.rs"
 
 [dependencies]
 base64.workspace = true
