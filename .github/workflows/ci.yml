@@ -34,7 +34,7 @@ jobs:
       - name: Static architecture and packaging tests
         run: python -m unittest discover -s scripts -p 'test_*.py' -v
       - name: Build source-exact Linux binaries
-        run: cargo +1.98.1 build --locked --release -p hostlink-access -p hostlink-hub -p onec-agent
+        run: cargo +1.98.1 build --locked --release --bin hostlink --bin hostlink-hub --bin hostlink-agent
       - name: Verify independent Linux ZIP inventories and digests
         shell: bash
         run: |
@@ -63,7 +63,7 @@ jobs:
       - name: Strict Windows Clippy
         run: cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings
       - name: Build Windows controller and Agent
-        run: cargo +1.98.1 build --locked --release -p hostlink-access -p onec-agent
+        run: cargo +1.98.1 build --locked --release --bin hostlink --bin hostlink-agent
       - name: Verify independent Windows ZIP inventories
         shell: pwsh
         run: |

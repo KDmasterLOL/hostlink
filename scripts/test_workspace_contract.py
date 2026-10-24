@@ -37,6 +37,20 @@ class ArchitectureContractTest(unittest.TestCase):
                 self.assertTrue(crate_path.resolve().is_relative_to(CRATES))
                 self.assertNotIn(data["package"]["name"], FORBIDDEN)
 
+    def test_public_cargo_packages_have_neutral_names(self) -> None:
+        packages = {data["package"]["name"] for _, data in workspace_crates()}
+        self.assertEqual(
+            packages,
+            {
+                "hostlink-access",
+                "hostlink-agent",
+                "hostlink-core",
+                "hostlink-hub",
+                "hostlink-protocol",
+            },
+            "Legacy 1C package names must not remain in HostLink's public Cargo API",
+        )
+
     def test_dependency_graph_never_imports_toolkit_source_or_domain(self) -> None:
         for crate_path, data in workspace_crates():
             for section in ("dependencies", "dev-dependencies", "build-dependencies"):
