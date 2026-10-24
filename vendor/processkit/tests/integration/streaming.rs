@@ -1,0 +1,550 @@
+//! Line streaming and incremental output: stdout_lines, finish,
+//! line handlers, bounded buffers, and interactive stdin.
+
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use processkit::{Command, Finished, Outcome, OutputBufferPolicy};
+
+use crate::common::*;
+
+fn byte_counter_child() -> (Command, usize, usize) {
+    if cfg!(windows) {
+        // cmd's echo emits CRLF, so the expected totals include both bytes of
+        // each line terminator.
+        (
+            Command::new("cmd").args(["/c", "echo alpha&echo beta&echo gamma&echo error>&2"]),
+            b"alpha\r\nbeta\r\ngamma\r\n".len(),
+            b"error\r\n".len(),
+        )
+    } else {
+        (
+            Command::new("sh").args([
+                "-c",
+                "printf 'alpha\\nbeta\\ngamma\\n'; printf 'error\\n' >&2",
+            ]),
+            b"alpha\nbeta\ngamma\n".len(),
+            b"error\n".len(),
+        )
+    }
+}
+
+#[tokio::test]
+#[ignore = "spawns a real subprocess and exercises the live pumps"]
+async fn byte_counters_include_dropped_lines_and_all_pipe_bytes() {
+    use tokio_stream::StreamExt;
+
+    let policies = [
+        OutputBufferPolicy::unbounded(),
+        OutputBufferPolicy::bounded(1),
+        OutputBufferPolicy::bounded(1).with_overflow(processkit::OverflowMode::DropNewest),
+    ];
+
+    for policy in policies {
+        let (cmd, expected_stdout, expected_stderr) = byte_counter_child();
+        let mut process = cmd
+            .output_buffer(policy)
+            .start()
+            .await
+            .expect("start byte-counter child");
+        let mut stdout = process.stdout_lines().expect("take stdout stream");
+        while stdout.next().await.is_some() {}
+
+        assert_eq!(
+            process.stdout_bytes_seen(),
+            expected_stdout,
+            "stdout total must include bytes discarded by {policy:?}"
+        );
+        assert_eq!(
+            process.stderr_bytes_seen(),
+            expected_stderr,
+            "stderr total must include bytes discarded by {policy:?}"
+        );
+        let _ = process.finish().await.expect("finish byte-counter child");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "spawns a real subprocess with non-UTF-8 output"]
+async fn byte_counters_count_non_utf8_pipe_bytes() {
+    use tokio_stream::StreamExt;
+
+    let mut process = Command::new("sh")
+        .args(["-c", r"printf '\377\376\n'"])
+        .start()
+        .await
+        .expect("start non-UTF-8 child");
+    let mut stdout = process.stdout_lines().expect("take stdout stream");
+    while stdout.next().await.is_some() {}
+
+    assert_eq!(
+        process.stdout_bytes_seen(),
+        3,
+        "two invalid bytes plus the newline are counted before decoding"
+    );
+    let _ = process.finish().await.expect("finish non-UTF-8 child");
+}
+
+#[tokio::test]
+#[ignore = "spawns a real subprocess"]
+async fn byte_counters_are_stable_after_the_pumps_complete() {
+    use tokio_stream::StreamExt;
+
+    let (cmd, expected_stdout, expected_stderr) = byte_counter_child();
+    let mut process = cmd.start().await.expect("start byte-counter child");
+    let mut stdout = process.stdout_lines().expect("take stdout stream");
+    while stdout.next().await.is_some() {}
+
+    let stdout_seen = process.stdout_bytes_seen();
+    let stderr_seen = process.stderr_bytes_seen();
+    assert_eq!(stdout_seen, expected_stdout);
+    assert_eq!(stderr_seen, expected_stderr);
+    tokio::task::yield_now().await;
+    assert_eq!(process.stdout_bytes_seen(), stdout_seen);
+    assert_eq!(process.stderr_bytes_seen(), stderr_seen);
+    let _ = process.finish().await.expect("finish byte-counter child");
+}
+
+#[tokio::test]
+#[ignore = "spawns real subprocesses with non-pumped output"]
+async fn byte_counters_report_zero_for_non_pumped_streams() {
+    let null = byte_counter_child()
+        .0
+        .stdout(processkit::StdioMode::Null)
+        .stderr(processkit::StdioMode::Null)
+        .start()
+        .await
+        .expect("start null-output child");
+    assert_eq!(null.stdout_bytes_seen(), 0);
+    assert_eq!(null.stderr_bytes_seen(), 0);
+    null.wait().await.expect("wait null-output child");
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (file_cmd, _, _) = byte_counter_child();
+    let file = file_cmd
+        .stdout_file(dir.path().join("stdout.log"))
+        .stderr_file(dir.path().join("stderr.log"))
+        .start()
+        .await
+        .expect("start file-output child");
+    assert_eq!(file.stdout_bytes_seen(), 0);
+    assert_eq!(file.stderr_bytes_seen(), 0);
+    file.wait().await.expect("wait file-output child");
+
+    let (inherit_cmd, _, _) = byte_counter_child();
+    let inherited = inherit_cmd
+        .stdout(processkit::StdioMode::Inherit)
+        .stderr(processkit::StdioMode::Inherit)
+        .start()
+        .await
+        .expect("start inherited-output child");
+    assert_eq!(inherited.stdout_bytes_seen(), 0);
+    assert_eq!(inherited.stderr_bytes_seen(), 0);
+    inherited.wait().await.expect("wait inherited-output child");
+}
+
+#[tokio::test]
+#[ignore = "spawns a real subprocess that outlives its timeout"]
+async fn streaming_honors_timeout() {
+    use tokio_stream::StreamExt;
+
+    // Emit one line, then idle well past the timeout. The deadline must end the
+    // stream (kill the tree) rather than hang.
+    let cmd = if cfg!(windows) {
+        Command::new("cmd").args(["/c", "echo one& ping -n 30 127.0.0.1 >NUL"])
+    } else {
+        Command::new("sh").args(["-c", "echo one; sleep 30"])
+    }
+    .timeout(Duration::from_millis(500));
+
+    let start = Instant::now();
+    let mut run = cmd.start().await.expect("start");
+    let mut lines = run.stdout_lines().unwrap();
+    let mut seen = Vec::new();
+    while let Some(line) = lines.next().await {
+        seen.push(line);
+    }
+    drop(lines);
+    let Finished { outcome, .. } = run.finish().await.expect("finish");
+
+    // Generous anti-hang bound (the sleeper runs ~30s if the deadline is
+    // broken): under full-suite load cold spawns have been seen to push a
+    // 500ms-timeout run past 5s.
+    assert!(
+        start.elapsed() < Duration::from_secs(15),
+        "stream did not end at the deadline (took {:?})",
+        start.elapsed()
+    );
+    // B1: a timed-out streamed run reports `Outcome::TimedOut` deterministically
+    // on every platform — the watchdog sets the shared `timed_out` flag before
+    // killing the tree, even on this no-grace path — so we assert it exactly
+    // rather than just "not a clean success".
+    assert_eq!(
+        outcome,
+        Outcome::TimedOut,
+        "a timed-out streamed run must report TimedOut (got {outcome:?})"
+    );
+    assert!(seen.iter().any(|l| l.contains("one")), "saw: {seen:?}");
+}
+
+#[tokio::test]
+#[ignore = "spawns a real subprocess in a shared group that outlives its timeout"]
+async fn shared_group_streaming_honors_timeout() {
+    use processkit::ProcessGroup;
+    use tokio_stream::StreamExt;
+
+    // A1: `Command::timeout` must bound a stream on a SHARED-group handle too.
+    // Before the fix the deadline watchdog armed only for own-group handles, so a
+    // quiet never-exiting child left the stream pending forever. A single-process
+    // idle keeps the shared-group pid-only kill sufficient (a forking tree is the
+    // separate teardown gap).
+    let group = ProcessGroup::new().expect("group");
+    let cmd = if cfg!(windows) {
+        // ping is a single process that emits lines then idles.
+        Command::new("ping").args(["-n", "30", "127.0.0.1"])
+    } else {
+        // `exec` replaces the shell so the idle is one process (fork-free).
+        Command::new("sh").args(["-c", "echo one; exec sleep 30"])
+    }
+    .timeout(Duration::from_millis(500));
+
+    let start = Instant::now();
+    let mut run = group.start(&cmd).await.expect("start");
+    let mut lines = run.stdout_lines().unwrap();
+    // Bound the drain so a broken deadline fails loud instead of hanging forever.
+    let seen = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut seen = Vec::new();
+        while let Some(line) = lines.next().await {
+            seen.push(line);
+        }
+        seen
+    })
+    .await
+    .expect("the deadline must end the stream, not hang");
+    drop(lines);
+    let Finished { outcome, .. } = run.finish().await.expect("finish");
+
+    assert!(
+        start.elapsed() < Duration::from_secs(15),
+        "shared-group stream did not end at the deadline (took {:?})",
+        start.elapsed()
+    );
+    assert_eq!(
+        outcome,
+        Outcome::TimedOut,
+        "a timed-out shared-group streamed run must report TimedOut (got {outcome:?})"
+    );
+    assert!(
+        !seen.is_empty(),
+        "the stream should have seen some output first"
+    );
+}
+
+#[tokio::test]
+#[ignore = "spawns a real subprocess"]
+async fn stdout_line_handler_sees_every_line() {
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let captured = seen.clone();
+    let result = five_lines()
+        .on_stdout_line(move |line| captured.lock().unwrap().push(line.to_owned()))
+        .output_string()
+        .await
+        .expect("run");
+    assert!(result.is_success());
+    let lines = seen.lock().unwrap();
+    assert_eq!(lines.len(), 5, "handler saw: {lines:?}");
+}
+
+#[tokio::test]
+#[ignore = "spawns a real subprocess"]
+async fn stdout_line_handler_panic_is_isolated_on_a_real_subprocess() {
+    // F: the real-subprocess analogue of `pump::panicking_handler_is_isolated_
+    // and_capture_completes` (unit-covered only until now) — a handler that
+    // panics on the second line must not fail the run, hang the pump, or lose
+    // any already-produced output. Called `#[ignore]`'d suite-wide; this test
+    // proves the contract holds against the real pump wiring, not a hand-fed
+    // in-memory byte stream.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    let result = five_lines()
+        .on_stdout_line(move |_line| {
+            if counted.fetch_add(1, Ordering::SeqCst) == 1 {
+                panic!("boom on the second line");
+            }
+        })
+        .output_string()
+        .await
+        .expect("a panicking handler must not fail the run");
+    assert!(result.is_success(), "result: {result:?}");
+    assert_eq!(
+        result.stdout().lines().count(),
+        5,
+        "every line is still captured despite the panic: {:?}",
+        result.stdout()
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the handler is disabled after its panic (called for lines 1 and 2 only)"
+    );
+}
+
+#[tokio::test]
+#[ignore = "spawns a real subprocess fed stdin from a file"]
+async fn stdin_from_file_round_trips_end_to_end() {
+    // F: `Stdin::from_file` end-to-end — write a real file, feed it as stdin,
+    // and confirm the child sees the exact bytes.
+    let path = std::env::temp_dir().join(format!(
+        "processkit_t052_stdin_from_file_{}.txt",
+        std::process::id()
+    ));
+    std::fs::write(&path, "banana\napple\n").expect("write fixture file");
+
+    let program = if cfg!(windows) {
+        Command::new("cmd").args(["/c", "sort"])
+    } else {
+        Command::new("sort")
+    };
+    let result = program
+        .stdin(processkit::Stdin::from_file(&path))
+        .output_string()
+        .await
+        .expect("run sort fed from a file");
+    let _ = std::fs::remove_file(&path);
+
+    assert!(result.is_success(), "result: {result:?}");
+    let first = result
+        .stdout()
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    assert_eq!(first, "apple", "sorted output: {:?}", result.stdout());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "spawns a real subprocess and writes to its stdin after it exits"]
+async fn write_after_child_exit_reports_the_windows_pipe_error_code() {
+    // F: the Windows broken-pipe error-code gap — a write to a pipe whose
+    // reader is gone commonly surfaces here as raw OS error 109
+    // (`ERROR_BROKEN_PIPE`) or 232 (`ERROR_NO_DATA`), which don't always map
+    // to `ErrorKind::BrokenPipe` (see `is_broken_pipe` in
+    // `src/running/mod.rs`). The POSIX EPIPE-equivalent forgiveness is already
+    // covered cross-platform by
+    // `capture::early_exiting_child_does_not_fail_a_large_stdin_feed`; this
+    // pins the raw Windows code on the interactive writer, which hands the
+    // caller a bare `io::Error` instead of forgiving it internally.
+    let exits_zero = Command::new("cmd").args(["/c", "exit", "0"]);
+    let mut process = exits_zero.keep_stdin_open().start().await.expect("start");
+    let mut stdin = process.take_stdin().expect("stdin kept open");
+
+    let outcome = completes_within(Duration::from_secs(10), "child exit", process.wait())
+        .await
+        .expect("wait");
+    assert_eq!(outcome, Outcome::Exited(0));
+
+    let err = stdin
+        .write_line("data")
+        .await
+        .expect_err("a write after the child exited must fail");
+    assert!(
+        err.kind() == std::io::ErrorKind::BrokenPipe
+            || matches!(err.raw_os_error(), Some(109 | 232)),
+        "expected a broken-pipe-shaped error, got kind={:?} raw={:?}",
+        err.kind(),
+        err.raw_os_error()
+    );
+}
+
+#[tokio::test]
+#[ignore = "spawns a real subprocess"]
+async fn output_buffer_drops_oldest_lines() {
+    // Keep only the last two lines; the rest are dropped from the buffer.
+    let result = five_lines()
+        .output_buffer(OutputBufferPolicy::bounded(2))
+        .output_string()
+        .await
+        .expect("run");
+    let kept: Vec<&str> = result.stdout().lines().collect();
+    assert_eq!(kept.len(), 2, "retained: {:?}", result.stdout());
+    assert!(kept.iter().all(|l| l.trim() == "4" || l.trim() == "5"));
+}
+
+#[tokio::test]
+#[ignore = "spawns a real subprocess driven via interactive stdin"]
+async fn interactive_stdin_round_trips() {
+    // `sort` reads stdin until EOF, then writes the sorted lines.
+    let program = if cfg!(windows) {
+        Command::new("cmd").args(["/c", "sort"])
+    } else {
+        Command::new("sort")
+    };
+    let mut process = program.keep_stdin_open().start().await.expect("start sort");
+    let mut stdin = process.take_stdin().expect("stdin kept open");
+    stdin.write_line("banana").await.expect("write");
+    stdin.write_line("apple").await.expect("write");
+    stdin.finish().await.expect("eof");
+
+    let result = process.output_string().await.expect("collect");
+    assert!(result.is_success());
+    let first = result
+        .stdout()
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    assert_eq!(first, "apple", "sorted output: {:?}", result.stdout());
+}
+
+#[tokio::test]
+#[ignore = "spawns a real subprocess and streams its stdout"]
+async fn stdout_lines_streams_incrementally() {
+    use tokio_stream::StreamExt;
+
+    let mut process = two_line_echo().start().await.expect("start echo");
+    let mut lines = process.stdout_lines().unwrap();
+    let mut collected: Vec<String> = Vec::new();
+    while let Some(line) = lines.next().await {
+        collected.push(line);
+    }
+    assert!(
+        collected.iter().any(|l| l.contains("first")),
+        "lines: {collected:?}"
+    );
+    assert!(
+        collected.iter().any(|l| l.contains("second")),
+        "lines: {collected:?}"
+    );
+}
+
+/// A `stdout_lines` future and the non-consuming `wait_for_output` probe can
+/// legitimately park on the same sink. The scripted prompt is emitted only
+/// after both futures have registered (the current-thread runtime cannot poll
+/// the spawned pump until this task yields), so one tail publication must wake
+/// both observers without needing a later line or EOF.
+#[tokio::test]
+async fn stdout_stream_and_output_probe_share_an_unterminated_prompt() {
+    use processkit::ProcessRunner;
+    use processkit::testing::{Reply, ScriptedRunner};
+    use tokio_stream::StreamExt;
+
+    let mut process = ScriptedRunner::new()
+        .fallback(Reply::dialog("Password: ", "accepted\n"))
+        .start(&Command::new("login").keep_stdin_open())
+        .await
+        .expect("scripted dialog start");
+    let mut lines = process.stdout_lines().expect("take stdout stream");
+    let mut next_line = Box::pin(lines.next());
+    let mut prompt =
+        Box::pin(process.wait_for_output(|tail| tail == "Password: ", Duration::from_secs(1)));
+
+    let matched = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            biased;
+            line = &mut next_line => panic!("the stream completed before the prompt probe: {line:?}"),
+            result = &mut prompt => result,
+        }
+    })
+    .await
+    .expect("both observers were woken by the prompt publication")
+    .expect("the prompt matched");
+    assert_eq!(matched, "Password: ");
+    drop(prompt);
+
+    process
+        .take_stdin()
+        .expect("dialog stdin")
+        .write_line("secret")
+        .await
+        .expect("answer prompt");
+    let completed = tokio::time::timeout(Duration::from_secs(2), &mut next_line)
+        .await
+        .expect("the stream received the completed prompt line");
+    assert_eq!(completed.as_deref(), Some("Password: accepted"));
+    drop(next_line);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), lines.next())
+            .await
+            .expect("the stream observed EOF")
+            .is_none()
+    );
+    assert_eq!(
+        process.finish().await.expect("finish dialog").outcome,
+        Outcome::Exited(0)
+    );
+}
+
+#[tokio::test]
+#[ignore = "spawns a real subprocess: stream stdout, then collect exit + stderr"]
+async fn finish_returns_code_and_stderr() {
+    use tokio_stream::StreamExt;
+
+    // Emit one stdout line and one stderr line, exit 0, per platform.
+    let cmd = if cfg!(windows) {
+        Command::new("cmd").args(["/c", "echo out& echo err 1>&2"])
+    } else {
+        Command::new("sh").args(["-c", "echo out; echo err 1>&2"])
+    };
+    let mut process = cmd.start().await.expect("start");
+    let mut lines = process.stdout_lines().unwrap();
+    let mut out = Vec::new();
+    while let Some(line) = lines.next().await {
+        out.push(line);
+    }
+    drop(lines);
+    let Finished {
+        outcome, stderr, ..
+    } = process.finish().await.expect("finish");
+    assert_eq!(outcome, Outcome::Exited(0));
+    assert!(out.iter().any(|l| l.contains("out")), "stdout: {out:?}");
+    assert!(stderr.contains("err"), "stderr: {stderr:?}");
+}
+
+#[tokio::test]
+#[ignore = "spawns a real subprocess"]
+async fn second_stdout_lines_call_is_a_loud_error() {
+    use tokio_stream::StreamExt;
+
+    let mut process = five_lines().start().await.expect("start");
+    let mut first = process.stdout_lines().expect("first stdout_lines");
+    let mut seen = 0;
+    while tokio::time::timeout(Duration::from_secs(10), first.next())
+        .await
+        .expect("first stream ends")
+        .is_some()
+    {
+        seen += 1;
+    }
+    assert_eq!(seen, 5);
+
+    // D2: "Call this once." A second call is a LOUD error (stdout streams once),
+    // not a silently-empty stream.
+    let err = process
+        .stdout_lines()
+        .expect_err("a second stdout_lines must be a loud error");
+    assert!(
+        matches!(err.reason(), processkit::ErrorReason::Io(_)),
+        "expected ErrorReason::Io, got {err:?}"
+    );
+
+    let _ = process.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "spawns a real subprocess"]
+async fn finish_without_streaming_first_drains_and_exits() {
+    // Skipping stdout_lines() leaves both pipes untaken — finish must
+    // drain them itself or a chatty child would block forever.
+    let process = two_line_echo().start().await.expect("start");
+    let finish = tokio::time::timeout(Duration::from_secs(15), process.finish())
+        .await
+        .expect("finish must not hang without a prior stdout_lines")
+        .expect("finish");
+    assert_eq!(finish.outcome, Outcome::Exited(0));
+}

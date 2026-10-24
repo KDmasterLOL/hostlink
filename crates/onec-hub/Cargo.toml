@@ -1,0 +1,58 @@
+[package]
+name = "onec-hub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+homepage.workspace = true
+description = "Zero-touch enrollment and discovery hub for onec-agent fleets"
+
+[[bin]]
+name = "onec-hub"
+path = "src/main.rs"
+required-features = ["server"]
+
+[features]
+default = ["server"]
+server = [
+    "dep:axum",
+    "dep:chrono",
+    "dep:clap",
+    "dep:getrandom",
+    "dep:hex",
+    "dep:hmac",
+    "dep:onec-core",
+    "dep:secrecy",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:ssh-key",
+    "dep:tokio",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:uuid",
+]
+
+[dependencies]
+axum = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+onec-core = { path = "../onec-core", optional = true }
+secrecy = { workspace = true, features = ["serde"], optional = true }
+serde.workspace = true
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+ssh-key = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+url.workspace = true
+uuid = { workspace = true, optional = true }
+
+[dev-dependencies]
+base64.workspace = true
+tempfile.workspace = true

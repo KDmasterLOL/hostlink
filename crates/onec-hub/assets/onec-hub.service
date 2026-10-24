@@ -1,0 +1,26 @@
+[Unit]
+Description=onec-toolkit enrollment and discovery hub
+After=network-online.target ssh.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=onec-agent
+Group=onec-agent
+EnvironmentFile=/etc/onec-hub/secret.env
+ExecStart=/usr/local/bin/onec-hub serve --config /etc/onec-hub/hub.json
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/onec-hub
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

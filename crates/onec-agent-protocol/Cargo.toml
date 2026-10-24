@@ -1,0 +1,20 @@
+[package]
+name = "onec-agent-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+base64.workspace = true
+mime.workspace = true
+onec-core = { path = "../onec-core" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+strum.workspace = true
+
+[dev-dependencies]

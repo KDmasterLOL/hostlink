@@ -1,0 +1,57 @@
+use clap::ValueEnum;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum Persistence {
+    UserSession,
+    WindowsService,
+}
+
+impl Persistence {
+    pub(crate) fn installer_value(self) -> &'static str {
+        match self {
+            Self::UserSession => "user-session",
+            Self::WindowsService => "windows-service",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum TargetEffect {
+    ReadOnly,
+    RunOwned,
+    Disposable,
+}
+
+impl From<TargetEffect> for onec_access::ManagedTargetEffect {
+    fn from(value: TargetEffect) -> Self {
+        match value {
+            TargetEffect::ReadOnly => Self::ReadOnly,
+            TargetEffect::RunOwned => Self::RunOwned,
+            TargetEffect::Disposable => Self::Disposable,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum NativeExecutionEffect {
+    RunOwned,
+    Disposable,
+}
+
+impl From<NativeExecutionEffect> for onec_agent_protocol::NativeExecutionEffect {
+    fn from(value: NativeExecutionEffect) -> Self {
+        match value {
+            NativeExecutionEffect::RunOwned => Self::RunOwned,
+            NativeExecutionEffect::Disposable => Self::Disposable,
+        }
+    }
+}
+
+impl From<NativeExecutionEffect> for onec_access::ManagedTargetEffect {
+    fn from(value: NativeExecutionEffect) -> Self {
+        match value {
+            NativeExecutionEffect::RunOwned => Self::RunOwned,
+            NativeExecutionEffect::Disposable => Self::Disposable,
+        }
+    }
+}

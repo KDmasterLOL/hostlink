@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "listen": "127.0.0.1:27400",
+  "public_url": "https://ops.example.com",
+  "gateways": [
+    {
+      "host": "gateway-a.example.com",
+      "user": "onec-agent",
+      "port": 22,
+      "host_public_key": "ssh-ed25519 REPLACE_WITH_GATEWAY_A_PUBLIC_HOST_KEY"
+    },
+    {
+      "host": "gateway-b.example.com",
+      "user": "onec-agent",
+      "port": 22,
+      "host_public_key": "ssh-ed25519 REPLACE_WITH_GATEWAY_B_PUBLIC_HOST_KEY"
+    }
+  ],
+  "controller_ssh_user": "onec-agent-access",
+  "authorized_keys": "/var/lib/onec-hub/.ssh/authorized_keys",
+  "state_file": "/var/lib/onec-hub/state.json",
+  "operator_token_env": "ONEC_HUB_OPERATOR_TOKEN",
+  "agent_secret_key_env": "ONEC_HUB_AGENT_SECRET_KEY",
+  "port_from": 41000,
+  "port_to": 41999,
+  "reserved_ports": [],
+  "ssh_lookup_token_env": "ONEC_HUB_SSH_LOOKUP_TOKEN",
+  "probe_gateway_ports_locally": true
+}

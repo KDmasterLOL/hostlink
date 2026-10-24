@@ -1,0 +1,54 @@
+[package]
+name = "onec-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+base64.workspace = true
+cap-fs-ext.workspace = true
+cap-std.workspace = true
+clap.workspace = true
+onec-agent-protocol = { path = "../onec-agent-protocol" }
+onec-core = { path = "../onec-core" }
+ed25519-dalek = { version = "=2.2.0", features = ["rand_core"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+processkit.workspace = true
+semver = "1.0.27"
+serde.workspace = true
+serde_json.workspace = true
+strum.workspace = true
+secrecy.workspace = true
+self_update.workspace = true
+sha2.workspace = true
+zip.workspace = true
+russh.workspace = true
+russh-sftp.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["fs", "macros", "sync"] }
+ureq.workspace = true
+
+[dev-dependencies]
+rand = "0.10.2"
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8.1"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_SystemInformation",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
+    "Wdk_System_SystemServices",
+] }
