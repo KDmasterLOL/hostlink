@@ -181,9 +181,11 @@ fn observed_windows_facts() -> io::Result<Option<hostlink_protocol::ObservedWind
         }
     }
 
-    let mut version = OSVERSIONINFOW::default();
-    version.dwOSVersionInfoSize =
-        u32::try_from(size_of::<OSVERSIONINFOW>()).map_err(io::Error::other)?;
+    let mut version = OSVERSIONINFOW {
+        dwOSVersionInfoSize: u32::try_from(size_of::<OSVERSIONINFOW>())
+            .map_err(io::Error::other)?,
+        ..Default::default()
+    };
     // SAFETY: `version` is a writable, correctly sized OSVERSIONINFOW as required by RtlGetVersion.
     let status = unsafe { RtlGetVersion(&mut version) };
     if status != 0
