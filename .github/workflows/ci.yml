@@ -83,6 +83,16 @@ jobs:
             $actual = (Get-FileHash (Join-Path $_.DirectoryName $archive) -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($actual -ne $expected) { throw "Artifact SHA mismatch" }
           }
+      # These short-lived, source-exact CI outputs are test fixtures for disposable
+      # Windows native acceptance. They are NOT signed releases or deployment inputs.
+      - name: Upload pinned Windows native test artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hostlink-win-x64-${{ github.sha }}
+          path: .dist/
+          retention-days: 3
+          if-no-files-found: error
+          compression-level: 0
 
 # Win7 x64/x86 are Tier-3 custom toolchains, not covered by this workflow.
 # Neither this workflow nor packaging claims NT6.1 native/runtime acceptance.
