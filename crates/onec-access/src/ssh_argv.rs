@@ -44,9 +44,9 @@ pub fn encode_remote_command(argv: &[String], remote_os: &str) -> AppResult<Stri
 fn encode_windows_powershell_argv(argv: &[String]) -> String {
     // Windows PowerShell 5.1 re-serializes native argv for `& $program @args` and can drop
     // literal quotes embedded in an argument. Serialize the native Windows command line here
-    // and launch it through ProcessStartInfo so 1C connection strings remain byte-for-byte intact.
+    // and launch it through ProcessStartInfo so arbitrary caller arguments remain byte-for-byte intact.
     let program = BASE64_STANDARD.encode(argv[0].as_bytes());
-    let arguments = onec_core::windows_command_line(&argv[1..]);
+    let arguments = hostlink_core::windows_command_line(&argv[1..]);
     let arguments = BASE64_STANDARD.encode(arguments.as_bytes());
     let script = format!(
         "$ErrorActionPreference='Stop';$e=New-Object System.Text.UTF8Encoding($false);\
@@ -77,11 +77,11 @@ mod tests {
     #[test]
     fn windows_remote_command_preserves_argv_without_shell_interpolation() {
         let argv = vec![
-            r"C:\Program Files\1C OT\onec.exe".to_owned(),
+            r"C:\Program Files\HostLink Tools\caller.exe".to_owned(),
             "profile".to_owned(),
             "add".to_owned(),
-            r#"Srvr="websrv";Ref="test 2";"#.to_owned(),
-            "snapshot: FBS test 2".to_owned(),
+            r#"server="websrv";path="test 2";"#.to_owned(),
+            "snapshot: fixture test 2".to_owned(),
             "it's a commit".to_owned(),
         ];
         let command = encode_remote_command(&argv, "windows").expect("windows command");
@@ -105,7 +105,7 @@ mod tests {
             .map(|pair| u16::from_le_bytes(*pair))
             .collect::<Vec<_>>();
         let script = String::from_utf16(&utf16).expect("UTF-16LE script");
-        let serialized_arguments = onec_core::windows_command_line(&argv[1..]);
+        let serialized_arguments = hostlink_core::windows_command_line(&argv[1..]);
         assert!(script.contains(&BASE64_STANDARD.encode(argv[0].as_bytes())));
         assert!(script.contains(&BASE64_STANDARD.encode(serialized_arguments.as_bytes())));
         assert!(script.contains("System.Diagnostics.ProcessStartInfo"));
@@ -119,12 +119,12 @@ mod tests {
             "plain",
             "",
             "a b",
-            r#"Srvr="websrv";Ref="test 2";"#,
+            r#"server="websrv";path="test 2";"#,
             r"C:\path with space\",
         ];
         assert_eq!(
-            onec_core::windows_command_line(args),
-            r#"plain "" "a b" "Srvr=\"websrv\";Ref=\"test 2\";" "C:\path with space\\""#
+            hostlink_core::windows_command_line(args),
+            r#"plain "" "a b" "server=\"websrv\";path=\"test 2\";" "C:\path with space\\""#
         );
     }
 
@@ -182,7 +182,7 @@ mod tests {
             "雪だるま ☃".to_owned(),
             "literal \"double\" and 'single' quotes".to_owned(),
             r"trailing slash\".to_owned(),
-            r"C:\Program Files\OneC\bin".to_owned(),
+            r"C:\Program Files\HostLink Tools\bin".to_owned(),
             "semi;colon".to_owned(),
             "ampersand & value".to_owned(),
             "line one\nline two".to_owned(),
@@ -203,7 +203,7 @@ mod tests {
         String::from_utf16(&units).expect("PowerShell script UTF-16")
     }
 
-    // Test decoder for the Microsoft CRT quoting rules used by onec_core::windows_command_line.
+    // Test decoder for the Microsoft CRT quoting rules used by hostlink_core::windows_command_line.
     fn decode_windows_command_line(command_line: &str) -> Vec<String> {
         let mut args = Vec::new();
         let mut chars = command_line.chars().peekable();

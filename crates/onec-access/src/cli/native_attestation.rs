@@ -90,7 +90,7 @@ pub(super) async fn collect(
     };
 
     let receipt_dir = data_root.join(RECEIPT_DIRECTORY);
-    onec_core::ensure_private_directory(&receipt_dir).map_err(|source| {
+    hostlink_core::ensure_private_directory(&receipt_dir).map_err(|source| {
         anyhow::Error::new(source).context("cannot secure native attestation receipt directory")
     })?;
     let receipt_path = receipt_dir.join(format!("{reserved_job_id}.json"));
@@ -171,7 +171,7 @@ pub(super) async fn collect(
         }
         // Reserve only after the read-only key check, and before the one-shot cleanup/sign RPC.
         // This keeps harmless preflight failures retryable without making signing replayable.
-        let pending = onec_core::create_new_private_file(&pending_path).map_err(|source| {
+        let pending = hostlink_core::create_new_private_file(&pending_path).map_err(|source| {
             anyhow::Error::new(source)
                 .context("cannot reserve create-new native attestation before one-shot RPC")
         })?;
@@ -401,7 +401,7 @@ fn require_empty_pending(path: &Path) -> AppResult<()> {
             "pending attestation reservation is not an empty regular file".to_owned(),
         ));
     }
-    onec_core::validate_private_file(path).map_err(|source| {
+    hostlink_core::validate_private_file(path).map_err(|source| {
         anyhow::Error::new(source).context("pending attestation reservation is not private")
     })?;
     Ok(())
@@ -432,7 +432,7 @@ fn publish_receipt_create_new(
     bytes: &[u8],
 ) -> std::io::Result<()> {
     let temporary_path = directory.join(format!(".{job_id}.{}.tmp", uuid::Uuid::new_v4()));
-    onec_core::write_new_private_bytes(&temporary_path, bytes)?;
+    hostlink_core::write_new_private_bytes(&temporary_path, bytes)?;
     match fs::hard_link(&temporary_path, receipt_path) {
         Ok(()) => {
             fs::remove_file(temporary_path)?;
@@ -584,7 +584,7 @@ mod tests {
     #[test]
     fn receipt_creation_is_create_new_and_preserves_original() {
         let dir = tempfile::tempdir().expect("tempdir");
-        onec_core::ensure_private_directory(dir.path()).expect("private directory");
+        hostlink_core::ensure_private_directory(dir.path()).expect("private directory");
         let path = dir.path().join("job-10-20-1.json");
         publish_receipt_create_new(dir.path(), &path, "job-10-20-1", b"first")
             .expect("atomically publish receipt");
@@ -595,16 +595,16 @@ mod tests {
     #[test]
     fn recovery_requires_an_existing_empty_private_reservation_and_preserves_foreign_data() {
         let dir = tempfile::tempdir().expect("tempdir");
-        onec_core::ensure_private_directory(dir.path()).expect("private directory");
+        hostlink_core::ensure_private_directory(dir.path()).expect("private directory");
         let path = dir.path().join("job-10-20-1.pending.json");
         assert!(
             require_empty_pending(&path).is_err(),
             "missing is not a reservation"
         );
-        onec_core::write_new_private_bytes(&path, b"").expect("create empty reservation");
+        hostlink_core::write_new_private_bytes(&path, b"").expect("create empty reservation");
         require_empty_pending(&path).expect("empty private reservation is recoverable");
         fs::write(&path, b"foreign evidence").expect("make marker non-empty");
-        onec_core::restrict_private_file(&path).expect("keep marker private");
+        hostlink_core::restrict_private_file(&path).expect("keep marker private");
         assert!(require_empty_pending(&path).is_err());
         assert!(remove_empty_pending(&path).is_err());
         assert_eq!(

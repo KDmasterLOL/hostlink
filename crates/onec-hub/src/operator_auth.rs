@@ -10,7 +10,7 @@ pub(super) fn require_operator(headers: &HeaderMap, app: &App) -> io::Result<()>
             "missing operator token",
         ));
     };
-    if !onec_core::constant_time_str_eq(token, app.operator_token.expose_secret()) {
+    if !hostlink_core::constant_time_str_eq(token, app.operator_token.expose_secret()) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "invalid operator token",

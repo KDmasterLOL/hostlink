@@ -23,7 +23,7 @@ server = [
     "dep:getrandom",
     "dep:hex",
     "dep:hmac",
-    "dep:onec-core",
+    "dep:hostlink-core",
     "dep:secrecy",
     "dep:serde_json",
     "dep:sha2",
@@ -41,7 +41,7 @@ clap = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
-onec-core = { path = "../onec-core", optional = true }
+hostlink-core = { path = "../hostlink-core", optional = true }
 secrecy = { workspace = true, features = ["serde"], optional = true }
 serde.workspace = true
 serde_json = { workspace = true, optional = true }

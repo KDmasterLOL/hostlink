@@ -320,9 +320,9 @@ pub(super) async fn publish_staged_file(
         }
     }
     let publication = if overwrite {
-        onec_core::replace_file_atomically(temp, local_path)
+        hostlink_core::replace_file_atomically(temp, local_path)
     } else {
-        onec_core::move_file_atomically(temp, local_path)
+        hostlink_core::move_file_atomically(temp, local_path)
     };
     if let Err(source) = publication {
         let _ = fs::remove_file(temp);

@@ -151,10 +151,10 @@ fn verify_result_file(path: &Path, expected_bytes: u64, expected_sha256: &str) -
                 .to_owned(),
         ));
     }
-    onec_core::validate_private_file(path).map_err(|source| {
+    hostlink_core::validate_private_file(path).map_err(|source| {
         anyhow::Error::new(source).context("local result artifact is not private")
     })?;
-    let file = onec_core::RegularFile::open(path).map_err(|source| {
+    let file = hostlink_core::RegularFile::open(path).map_err(|source| {
         anyhow::Error::new(source).context("cannot safely open local result artifact")
     })?;
     let first = file.observe_digest().map_err(|source| {
@@ -169,7 +169,7 @@ fn verify_result_file(path: &Path, expected_bytes: u64, expected_sha256: &str) -
         anyhow::Error::new(source)
             .context("cannot recheck local result artifact identity and bytes")
     })?;
-    let path_identity_after = onec_core::RegularFile::open(path).map_err(|source| {
+    let path_identity_after = hostlink_core::RegularFile::open(path).map_err(|source| {
         anyhow::Error::new(source).context("cannot recheck local result artifact file identity")
     })?;
     let after = fs::symlink_metadata(path).map_err(|source| {
@@ -185,7 +185,7 @@ fn verify_result_file(path: &Path, expected_bytes: u64, expected_sha256: &str) -
             "local result artifact changed while it was being verified".to_owned(),
         ));
     }
-    onec_core::validate_private_file(path).map_err(|source| {
+    hostlink_core::validate_private_file(path).map_err(|source| {
         anyhow::Error::new(source).context("local result artifact is no longer private")
     })?;
     Ok(())
@@ -284,10 +284,10 @@ fn read_stable_private_log(path: &Path, stream: &str) -> AppResult<(u64, String)
             "local {stream} log must be a regular non-linked file no larger than 8 MiB"
         )));
     }
-    onec_core::validate_private_file(path).map_err(|source| {
+    hostlink_core::validate_private_file(path).map_err(|source| {
         anyhow::Error::new(source).context(format!("local {stream} log is not private"))
     })?;
-    let file = onec_core::RegularFile::open(path).map_err(|source| {
+    let file = hostlink_core::RegularFile::open(path).map_err(|source| {
         anyhow::Error::new(source).context(format!("cannot safely open local {stream} log"))
     })?;
     let first = read_log_pass(&file, stream)?;
@@ -304,14 +304,14 @@ fn read_stable_private_log(path: &Path, stream: &str) -> AppResult<(u64, String)
             "local {stream} log changed while it was being verified"
         )));
     }
-    onec_core::validate_private_file(path).map_err(|source| {
+    hostlink_core::validate_private_file(path).map_err(|source| {
         anyhow::Error::new(source).context(format!("local {stream} log is no longer private"))
     })?;
     let digest = format!("{:x}", Sha256::digest(&first));
     Ok((first.len() as u64, digest))
 }
 
-fn read_log_pass(file: &onec_core::RegularFile, stream: &str) -> AppResult<Vec<u8>> {
+fn read_log_pass(file: &hostlink_core::RegularFile, stream: &str) -> AppResult<Vec<u8>> {
     file.read_bounded(MAX_SIGNED_OUTPUT_LOG_BYTES as usize)
         .map_err(|source| {
             anyhow::Error::new(source).context(format!(
@@ -394,7 +394,7 @@ pub(super) async fn collect(
         challenge: challenge.to_owned(),
     };
     let receipt_dir = data_root.join(RECEIPT_DIRECTORY);
-    onec_core::ensure_private_directory(&receipt_dir).map_err(|source| {
+    hostlink_core::ensure_private_directory(&receipt_dir).map_err(|source| {
         anyhow::Error::new(source).context("cannot secure native invocation receipt directory")
     })?;
     let receipt_path = receipt_dir.join(format!("{reserved_job_id}.json"));
@@ -479,7 +479,7 @@ pub(super) async fn collect(
                     .to_owned(),
             ));
         }
-        let pending = onec_core::create_new_private_file(&pending_path).map_err(|source| {
+        let pending = hostlink_core::create_new_private_file(&pending_path).map_err(|source| {
             anyhow::Error::new(source)
                 .context("cannot create private one-shot invocation observation marker")
         })?;
@@ -717,7 +717,7 @@ fn read_receipt(path: &Path) -> AppResult<InvocationObservationReceipt> {
             "existing invocation receipt is not a bounded regular file".to_owned(),
         ));
     }
-    onec_core::validate_private_file(path).map_err(|source| {
+    hostlink_core::validate_private_file(path).map_err(|source| {
         anyhow::Error::new(source).context("existing invocation receipt is not private")
     })?;
     let bytes = fs::read(path).map_err(|source| {
@@ -739,7 +739,7 @@ fn require_empty_pending(path: &Path) -> AppResult<()> {
             "pending invocation reservation is not an empty regular file".to_owned(),
         ));
     }
-    onec_core::validate_private_file(path).map_err(|source| {
+    hostlink_core::validate_private_file(path).map_err(|source| {
         anyhow::Error::new(source).context("pending invocation reservation is not private")
     })?;
     Ok(())
@@ -770,7 +770,7 @@ fn publish_receipt_create_new(
     bytes: &[u8],
 ) -> std::io::Result<()> {
     let temporary_path = directory.join(format!(".{job_id}.{}.tmp", uuid::Uuid::new_v4()));
-    onec_core::write_new_private_bytes(&temporary_path, bytes)?;
+    hostlink_core::write_new_private_bytes(&temporary_path, bytes)?;
     match fs::hard_link(&temporary_path, receipt_path) {
         Ok(()) => {
             fs::remove_file(temporary_path)?;
@@ -941,14 +941,14 @@ mod tests {
         let directory = tempfile::tempdir().expect("local log directory");
         let stdout_path = directory.path().join("stdout.log");
         let stderr_path = directory.path().join("stderr.log");
-        onec_core::write_new_private_bytes(&stdout_path, stdout_bytes).expect("private stdout");
-        onec_core::write_new_private_bytes(&stderr_path, stderr_bytes).expect("private stderr");
+        hostlink_core::write_new_private_bytes(&stdout_path, stdout_bytes).expect("private stdout");
+        hostlink_core::write_new_private_bytes(&stderr_path, stderr_bytes).expect("private stderr");
         let signed = signed_output_logs(&receipt).expect("signed log commitments");
         verify_signed_log_files(signed, &stdout_path, &stderr_path)
             .expect("exact stdout and stderr match signed byte commitments");
 
         let wrong_stderr = directory.path().join("wrong-stderr.log");
-        onec_core::write_new_private_bytes(&wrong_stderr, b"altered stderr\n")
+        hostlink_core::write_new_private_bytes(&wrong_stderr, b"altered stderr\n")
             .expect("private wrong stderr");
         assert!(verify_signed_log_files(signed, &stdout_path, &wrong_stderr).is_err());
         let mut old_receipt = receipt;
@@ -995,10 +995,10 @@ mod tests {
             trusted_public_key_hex: hex::encode(signing.verifying_key().to_bytes()),
         };
         let directory = root.join(RECEIPT_DIRECTORY);
-        onec_core::ensure_private_directory(&directory).expect("private receipt directory");
+        hostlink_core::ensure_private_directory(&directory).expect("private receipt directory");
         let path = directory.join(format!("{}.json", expected.job_id));
         let bytes = serde_json::to_vec(&receipt).expect("encode signed receipt");
-        onec_core::write_new_private_bytes(&path, &bytes).expect("private signed receipt");
+        hostlink_core::write_new_private_bytes(&path, &bytes).expect("private signed receipt");
         path
     }
 
@@ -1026,14 +1026,14 @@ mod tests {
         record.result_set = Some(result_set(&expected.job_id, "results.xml", bytes));
         reserve_result_fixture(root, &expected);
         let key_path = root.join("trusted-key.hex");
-        onec_core::write_new_private_bytes(
+        hostlink_core::write_new_private_bytes(
             &key_path,
             hex::encode(signing.verifying_key().to_bytes()).as_bytes(),
         )
         .expect("private independent key");
         persist_signed_result_receipt(root, &signing, record.clone(), &expected);
         let artifact_path = root.join("results.xml");
-        onec_core::write_new_private_bytes(&artifact_path, bytes).expect("private result file");
+        hostlink_core::write_new_private_bytes(&artifact_path, bytes).expect("private result file");
         verify_local_result_from_root(
             root,
             &expected.machine_id,
@@ -1048,7 +1048,7 @@ mod tests {
         let wrong_same_size = root.join("wrong-same-size.xml");
         let mut changed = bytes.to_vec();
         changed[0] ^= 1;
-        onec_core::write_new_private_bytes(&wrong_same_size, &changed)
+        hostlink_core::write_new_private_bytes(&wrong_same_size, &changed)
             .expect("private tampered result");
         assert!(
             verify_result_file(
@@ -1072,7 +1072,7 @@ mod tests {
         );
 
         let wrong_key_path = root.join("wrong-key.hex");
-        onec_core::write_new_private_bytes(
+        hostlink_core::write_new_private_bytes(
             &wrong_key_path,
             hex::encode(SigningKey::from_bytes(&[18; 32]).verifying_key().to_bytes()).as_bytes(),
         )
@@ -1106,7 +1106,7 @@ mod tests {
             let wrong_root = tempfile::tempdir().expect("wrong reservation receipt root");
             reserve_result_fixture(wrong_root.path(), &expected);
             let wrong_key = wrong_root.path().join("trusted-key.hex");
-            onec_core::write_new_private_bytes(
+            hostlink_core::write_new_private_bytes(
                 &wrong_key,
                 hex::encode(signing.verifying_key().to_bytes()).as_bytes(),
             )
@@ -1141,7 +1141,7 @@ mod tests {
         let legacy = tempfile::tempdir().expect("legacy receipt root");
         reserve_result_fixture(legacy.path(), &expected);
         let legacy_key = legacy.path().join("trusted-key.hex");
-        onec_core::write_new_private_bytes(
+        hostlink_core::write_new_private_bytes(
             &legacy_key,
             hex::encode(signing.verifying_key().to_bytes()).as_bytes(),
         )
@@ -1165,7 +1165,7 @@ mod tests {
         let foreign = tempfile::tempdir().expect("foreign owner receipt root");
         reserve_result_fixture(foreign.path(), &expected);
         let foreign_key = foreign.path().join("trusted-key.hex");
-        onec_core::write_new_private_bytes(
+        hostlink_core::write_new_private_bytes(
             &foreign_key,
             hex::encode(signing.verifying_key().to_bytes()).as_bytes(),
         )
@@ -1264,21 +1264,21 @@ mod tests {
             trusted_public_key_hex: public_key_hex.clone(),
         };
         let receipt_directory = data_root.join(RECEIPT_DIRECTORY);
-        onec_core::ensure_private_directory(&receipt_directory)
+        hostlink_core::ensure_private_directory(&receipt_directory)
             .expect("private observation receipt directory");
-        onec_core::write_new_private_bytes(
+        hostlink_core::write_new_private_bytes(
             &receipt_directory.join(format!("{}.json", expected.job_id)),
             &serde_json::to_vec(&receipt).expect("encode signed receipt"),
         )
         .expect("private observation receipt");
 
         let key_path = data_root.join("pinned-key.hex");
-        onec_core::write_new_private_bytes(&key_path, public_key_hex.as_bytes())
+        hostlink_core::write_new_private_bytes(&key_path, public_key_hex.as_bytes())
             .expect("persist operator-pinned key fixture");
         let stdout_path = data_root.join("stdout.log");
         let stderr_path = data_root.join("stderr.log");
-        onec_core::write_new_private_bytes(&stdout_path, b"").expect("private stdout fixture");
-        onec_core::write_new_private_bytes(&stderr_path, b"").expect("private stderr fixture");
+        hostlink_core::write_new_private_bytes(&stdout_path, b"").expect("private stdout fixture");
+        hostlink_core::write_new_private_bytes(&stderr_path, b"").expect("private stderr fixture");
 
         assert!(
             verify_local_logs_from_root(
@@ -1298,7 +1298,7 @@ mod tests {
     fn local_log_reader_rejects_symlinks_oversize_truncation_and_non_private_files() {
         let directory = tempfile::tempdir().expect("local log directory");
         let file = directory.path().join("log");
-        onec_core::write_new_private_bytes(&file, b"complete").expect("private log");
+        hostlink_core::write_new_private_bytes(&file, b"complete").expect("private log");
         assert_eq!(
             read_stable_private_log(&file, "stdout")
                 .expect("complete log")
@@ -1307,7 +1307,8 @@ mod tests {
         );
 
         let truncated = directory.path().join("truncated");
-        onec_core::write_new_private_bytes(&truncated, b"short").expect("private truncated log");
+        hostlink_core::write_new_private_bytes(&truncated, b"short")
+            .expect("private truncated log");
         let signed = onec_agent_protocol::AgentNativeInvocationOutputLogs {
             stdout_sha256: format!("{:x}", Sha256::digest(b"complete")),
             stdout_bytes: 8,
@@ -1315,12 +1316,12 @@ mod tests {
             stderr_bytes: 0,
         };
         let empty_stderr = directory.path().join("empty-stderr");
-        onec_core::write_new_private_bytes(&empty_stderr, b"").expect("private empty stderr");
+        hostlink_core::write_new_private_bytes(&empty_stderr, b"").expect("private empty stderr");
         assert!(verify_signed_log_files(&signed, &truncated, &empty_stderr).is_err());
 
         let oversized = directory.path().join("oversized");
-        let oversized_file =
-            onec_core::create_new_private_file(&oversized).expect("create private oversized file");
+        let oversized_file = hostlink_core::create_new_private_file(&oversized)
+            .expect("create private oversized file");
         oversized_file
             .set_len(MAX_SIGNED_OUTPUT_LOG_BYTES + 1)
             .expect("grow oversized fixture");
@@ -1527,7 +1528,7 @@ mod tests {
             b"first verified receipt",
         )
         .expect("publish first receipt");
-        onec_core::validate_private_file(&receipt).expect("receipt is private");
+        hostlink_core::validate_private_file(&receipt).expect("receipt is private");
         assert_eq!(
             fs::read(&receipt).expect("read receipt"),
             b"first verified receipt"
@@ -1552,7 +1553,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("recovery directory");
         let pending = directory.path().join("job-170-180-1.pending");
         assert!(require_empty_pending(&pending).is_err());
-        let file = onec_core::create_new_private_file(&pending).expect("create private marker");
+        let file = hostlink_core::create_new_private_file(&pending).expect("create private marker");
         drop(file);
         require_empty_pending(&pending).expect("empty private marker enables read-only fetch");
         fs::write(&pending, b"unexpected content").expect("corrupt marker");

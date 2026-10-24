@@ -158,10 +158,11 @@ pub async fn sync_hub_ssh_hosts(
 
     write_atomic(&gateway_known_hosts, known_host_lines.as_bytes())?;
     write_atomic(&target_known_hosts, target_known_host_lines.as_bytes())?;
-    onec_core::restrict_private_file(&gateway_known_hosts).map_err(crate::private_path_error)?;
+    hostlink_core::restrict_private_file(&gateway_known_hosts)
+        .map_err(crate::private_path_error)?;
     write_atomic(&generated_config, host_blocks.as_bytes())?;
-    onec_core::restrict_private_file(&target_known_hosts).map_err(crate::private_path_error)?;
-    onec_core::restrict_private_file(&generated_config).map_err(crate::private_path_error)?;
+    hostlink_core::restrict_private_file(&target_known_hosts).map_err(crate::private_path_error)?;
+    hostlink_core::restrict_private_file(&generated_config).map_err(crate::private_path_error)?;
 
     let user_ssh_config = if install_include {
         let path = user_ssh_config_path()?;

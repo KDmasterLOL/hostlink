@@ -34,7 +34,7 @@ pub(super) fn reconcile_authorized_keys(path: &Path, state: &HubState) -> io::Re
             ),
         ));
     }
-    onec_core::write_private_file_atomically(path, &output)
+    hostlink_core::write_private_file_atomically(path, &output)
 }
 
 fn without_managed_entries(existing: &[u8]) -> Vec<u8> {
@@ -68,17 +68,17 @@ pub(super) fn ensure_authorized_keys_parent(path: &Path) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     if !path.exists() {
-        return onec_core::write_new_private_bytes(path, b"");
+        return hostlink_core::write_new_private_bytes(path, b"");
     }
     restrict_private_file(path)
 }
 
 fn read_authorized_keys(path: &Path) -> io::Result<Vec<u8>> {
-    onec_core::read_file_bounded(path, AUTHORIZED_KEYS_MAX_BYTES)
+    hostlink_core::read_file_bounded(path, AUTHORIZED_KEYS_MAX_BYTES)
 }
 
 fn restrict_private_file(path: &Path) -> io::Result<()> {
-    onec_core::restrict_private_file(path).map_err(io::Error::other)
+    hostlink_core::restrict_private_file(path).map_err(io::Error::other)
 }
 
 #[cfg(test)]

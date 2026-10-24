@@ -174,7 +174,7 @@ fn default_port_to() -> u16 {
 impl HubConfig {
     pub(super) fn load(path: &Path) -> io::Result<Self> {
         let wire: HubConfigWire =
-            onec_core::read_json_file_bounded(path, HUB_SERVER_CONFIG_MAX_BYTES)?;
+            hostlink_core::read_json_file_bounded(path, HUB_SERVER_CONFIG_MAX_BYTES)?;
         let mut config = Self::try_from(wire)?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         if config.authorized_keys.is_relative() {

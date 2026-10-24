@@ -45,5 +45,5 @@ pub use tool::{ResolvedTool, resolve_ssh_tool};
 pub(crate) use paths::config_path;
 
 pub(crate) fn sha256_file(path: &Path) -> AppResult<String> {
-    onec_core::sha256_file(path).map_err(|source| io_error(path, source))
+    hostlink_core::sha256_file(path).map_err(|source| io_error(path, source))
 }

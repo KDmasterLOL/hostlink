@@ -2731,7 +2731,7 @@ async fn regression_inv_027_target_ssh_verified_binary_upload_download_preserves
                 AgentRequestKind::PathSha256 { path } => {
                     let path = test_remote_path(&agent_root, &path).expect("remote hash path");
                     let bytes = fs::metadata(&path).expect("remote hash metadata").len();
-                    let sha256 = onec_core::sha256_file(&path).expect("remote hash");
+                    let sha256 = hostlink_core::sha256_file(&path).expect("remote hash");
                     AgentResponse::success(AgentResponseKind::PathSha256 { bytes, sha256 })
                 }
                 AgentRequestKind::PathRename {
@@ -2746,7 +2746,7 @@ async fn regression_inv_027_target_ssh_verified_binary_upload_download_preserves
                     );
                     let from = test_remote_path(&agent_root, &from).expect("publish staging path");
                     let to = test_remote_path(&agent_root, &to).expect("publish destination path");
-                    onec_core::replace_file_atomically(&from, &to).expect("atomic publish");
+                    hostlink_core::replace_file_atomically(&from, &to).expect("atomic publish");
                     if to.ends_with("publish-stall.bin") {
                         // Commit publication, then withhold its acknowledgement past the deadline.
                         thread::sleep(Duration::from_secs(3));

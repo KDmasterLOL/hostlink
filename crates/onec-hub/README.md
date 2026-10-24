@@ -1,8 +1,8 @@
 # onec-hub
 
 `onec-hub` is the authoritative enrollment/discovery service for `onec-agent` fleets.
-Controller-side managed-machine access is owned by `onec-access`; local 1C mechanics belong to
-their focused domain/backend crates and are composed by `onec-cli`.
+Controller-side managed-machine access is owned by `onec-access`; caller-specific application
+mechanics belong to the caller and are composed outside the Hub.
 
 ## Architecture
 

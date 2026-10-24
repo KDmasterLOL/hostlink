@@ -143,9 +143,10 @@ pub(super) async fn start(
             super::transport::local_regular_file(PathBuf::from(source)).await?,
         ));
     }
-    let candidate_identity = onec_core::FileDigest::from_path(&executable).map_err(|source| {
-        crate::invalid_config(format!("cannot hash local executable: {source}"))
-    })?;
+    let candidate_identity =
+        hostlink_core::FileDigest::from_path(&executable).map_err(|source| {
+            crate::invalid_config(format!("cannot hash local executable: {source}"))
+        })?;
     let candidate_digest = candidate_identity.sha256().to_owned();
     if let Some(policy) = &native_suite_policy {
         policy.sha256().map_err(|error| {
@@ -168,7 +169,7 @@ pub(super) async fn start(
     let mut mapped_identities = Vec::new();
     let mut mapped_files = Vec::new();
     for (name, path) in mapped {
-        let identity = onec_core::FileDigest::from_path(&path).map_err(|source| {
+        let identity = hostlink_core::FileDigest::from_path(&path).map_err(|source| {
             crate::invalid_config(format!("cannot hash mapped file: {source}"))
         })?;
         let digest = identity.sha256().to_owned();

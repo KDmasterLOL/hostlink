@@ -32,7 +32,7 @@ impl HubState {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let state: Self = onec_core::read_json_file_bounded(path, HUB_STATE_MAX_BYTES)?;
+        let state: Self = hostlink_core::read_json_file_bounded(path, HUB_STATE_MAX_BYTES)?;
         if !matches!(state.version, LEGACY_STATE_VERSION | STATE_VERSION) {
             return Err(invalid(format!(
                 "unsupported hub state version {}; expected {LEGACY_STATE_VERSION} or {STATE_VERSION}",
@@ -65,7 +65,7 @@ impl HubState {
                 ),
             )));
         }
-        match onec_core::write_private_file_atomically(path, &data) {
+        match hostlink_core::write_private_file_atomically(path, &data) {
             Ok(()) => Ok(()),
             Err(error) => classify_state_publication_error(path, &data, error),
         }
@@ -142,7 +142,7 @@ fn classify_state_publication_error(
     expected: &[u8],
     publication_error: io::Error,
 ) -> Result<(), StateCommitError> {
-    match onec_core::read_file_bounded(path, HUB_STATE_MAX_BYTES) {
+    match hostlink_core::read_file_bounded(path, HUB_STATE_MAX_BYTES) {
         Ok(observed) if observed == expected => {
             Err(StateCommitError::CommitUncertain(io::Error::new(
                 publication_error.kind(),
@@ -178,7 +178,7 @@ impl App {
             .lock()
             .map_err(|_| io::Error::other("state writer lock poisoned"))?;
         let lock_path = hub_state_lock_path(&self.config.state_file)?;
-        let lock = onec_core::acquire_exclusive_file_lock(lock_path, timeout, poll_interval)?;
+        let lock = hostlink_core::acquire_exclusive_file_lock(lock_path, timeout, poll_interval)?;
         let state = HubState::load(&self.config.state_file)?;
         Ok(HubStateWriter {
             app: self,

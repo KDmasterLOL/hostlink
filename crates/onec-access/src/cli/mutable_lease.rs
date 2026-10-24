@@ -146,7 +146,7 @@ pub(crate) fn persist_durable_native_invocation(
             "cannot encode durable native invocation reservation: {source}"
         ))
     })?;
-    onec_core::write_new_private_bytes(
+    hostlink_core::write_new_private_bytes(
         &native_invocation_reservation_path(data_root, machine_id, run_id),
         &bytes,
     )
@@ -170,7 +170,7 @@ pub(crate) fn durable_native_invocation_reservation(
             "native invocation commitment is not a bounded regular file".to_owned(),
         ));
     }
-    onec_core::validate_private_file(&path).map_err(|source| {
+    hostlink_core::validate_private_file(&path).map_err(|source| {
         anyhow::Error::new(source).context("native invocation commitment is not private")
     })?;
     let bytes = fs::read(&path).map_err(|source| {
@@ -448,10 +448,12 @@ pub(crate) fn mark_durable_run_local_results_downloaded(
     require_bound_reservation(data_root, machine_id, run_id)?;
     let marker = results_downloaded_path(data_root, machine_id, run_id);
     if !marker.exists() {
-        onec_core::write_new_private_bytes(&marker, b"results-downloaded\n").map_err(|source| {
-            anyhow::Error::new(source)
-                .context("cannot persist durable run-local download completion")
-        })?;
+        hostlink_core::write_new_private_bytes(&marker, b"results-downloaded\n").map_err(
+            |source| {
+                anyhow::Error::new(source)
+                    .context("cannot persist durable run-local download completion")
+            },
+        )?;
     }
     Ok(())
 }
@@ -491,9 +493,12 @@ pub(crate) fn mark_durable_run_local_results_complete(
     }
     let marker = results_complete_path(data_root, machine_id, run_id);
     if !marker.exists() {
-        onec_core::write_new_private_bytes(&marker, b"results-complete\n").map_err(|source| {
-            anyhow::Error::new(source).context("cannot persist durable run-local result completion")
-        })?;
+        hostlink_core::write_new_private_bytes(&marker, b"results-complete\n").map_err(
+            |source| {
+                anyhow::Error::new(source)
+                    .context("cannot persist durable run-local result completion")
+            },
+        )?;
     }
     Ok(())
 }
@@ -708,7 +713,7 @@ pub(crate) fn list_durable_run_local_reservations(
 }
 
 fn write_reservation(path: &Path, machine_id: &str, run_id: &str, job_id: &str) -> AppResult<()> {
-    onec_core::write_new_private_bytes(
+    hostlink_core::write_new_private_bytes(
         path,
         format!("{machine_id}\n{run_id}\n{job_id}\n").as_bytes(),
     )
@@ -792,7 +797,7 @@ fn ensure_reservation_machine_dir(
         match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
                 if create {
-                    onec_core::ensure_private_directory(path).map_err(|source| {
+                    hostlink_core::ensure_private_directory(path).map_err(|source| {
                         anyhow::Error::new(source)
                             .context("cannot secure durable run-local reservation directory")
                     })?;
@@ -807,7 +812,7 @@ fn ensure_reservation_machine_dir(
                 return Ok(None);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                onec_core::ensure_private_directory(path).map_err(|source| {
+                hostlink_core::ensure_private_directory(path).map_err(|source| {
                     anyhow::Error::new(source)
                         .context("cannot create durable run-local reservation directory")
                 })?;
@@ -915,7 +920,7 @@ fn acquire_mutable_target_lease_in_with_wait(
         anyhow::Error::new(source).context(format!("I/O error at {}", directory.display()))
     })?;
     let path = lease_path(&directory, machine_id);
-    match onec_core::acquire_exclusive_file_lock(&path, wait, MUTABLE_LEASE_POLL) {
+    match hostlink_core::acquire_exclusive_file_lock(&path, wait, MUTABLE_LEASE_POLL) {
         Ok(file) => Ok(Some(file)),
         Err(source) if source.kind() == std::io::ErrorKind::TimedOut => {
             Err(onec_access::invalid_config(format!(
@@ -1251,7 +1256,7 @@ mod tests {
         )
         .expect("persist canonical invocation identity");
         let path = native_invocation_reservation_path(root.path(), "machine-a", run_id);
-        onec_core::validate_private_file(&path).expect("private commitment");
+        hostlink_core::validate_private_file(&path).expect("private commitment");
         let persisted = durable_native_invocation_reservation(root.path(), "machine-a", run_id)
             .expect("read exact commitment");
         assert_eq!(persisted.candidate_sha256(), candidate_sha256);

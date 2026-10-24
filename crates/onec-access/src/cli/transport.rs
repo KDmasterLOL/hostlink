@@ -443,7 +443,7 @@ pub(super) async fn run_local(
             crate::invalid_config(format!("cannot resolve run-local executable: {error}"))
         })?;
         Some(
-            onec_core::FileDigest::from_path(runner)
+            hostlink_core::FileDigest::from_path(runner)
                 .map_err(|error| {
                     crate::invalid_config(format!("cannot hash run-local executable: {error}"))
                 })?
@@ -484,7 +484,7 @@ pub(super) async fn run_local(
     {
         let _stage = RunLocalStage::new(timings.as_mut(), RunLocalTimingStage::LocalHashes);
         for (local, remote_env) in staged_files {
-            let identity = onec_core::FileDigest::from_path(&local).map_err(|source| {
+            let identity = hostlink_core::FileDigest::from_path(&local).map_err(|source| {
                 crate::invalid_config(format!(
                     "cannot hash local file {}: {source}",
                     local.display()
@@ -702,7 +702,7 @@ pub(super) async fn run_local(
                         )
                     })?;
                 let executable_after =
-                    onec_core::FileDigest::from_path(&executable).map_err(|_| {
+                    hostlink_core::FileDigest::from_path(&executable).map_err(|_| {
                         crate::invalid_config("cannot recheck run-local test binary".to_owned())
                     })?;
                 if executable_after.sha256() != executable_identity.sha256() {
@@ -714,7 +714,7 @@ pub(super) async fn run_local(
                     crate::invalid_config("cannot recheck run-local executable".to_owned())
                 })?;
                 let runner_after =
-                    onec_core::FileDigest::from_path(runner_after).map_err(|_| {
+                    hostlink_core::FileDigest::from_path(runner_after).map_err(|_| {
                         crate::invalid_config("cannot recheck run-local executable".to_owned())
                     })?;
                 if runner_after.sha256() != runner {
@@ -751,10 +751,14 @@ pub(super) async fn run_local(
                     toolkit_version: env!("CARGO_PKG_VERSION").to_owned(),
                     run_id: cleanup_notice.run_id.clone(),
                     observed_controller_worktree_head_sha: source,
-                    runner_sha256: onec_core::Sha256Digest::from_str(&runner).map_err(|error| {
-                        crate::invalid_config(format!("invalid run-local runner digest: {error}"))
-                    })?,
-                    test_binary_sha256: onec_core::Sha256Digest::from_str(
+                    runner_sha256: hostlink_core::Sha256Digest::from_str(&runner).map_err(
+                        |error| {
+                            crate::invalid_config(format!(
+                                "invalid run-local runner digest: {error}"
+                            ))
+                        },
+                    )?,
+                    test_binary_sha256: hostlink_core::Sha256Digest::from_str(
                         executable_identity.sha256(),
                     )
                     .map_err(|error| {
@@ -769,7 +773,7 @@ pub(super) async fn run_local(
                     effect: required_effect.as_str().to_owned(),
                     selected_platform_version: receipt_selected_platform_version,
                     test_filter: filter.to_owned(),
-                    parameters_sha256: onec_core::Sha256Digest::from_str(&parameters_sha256)
+                    parameters_sha256: hostlink_core::Sha256Digest::from_str(&parameters_sha256)
                         .map_err(|error| {
                             crate::invalid_config(format!(
                                 "invalid run-local parameters digest: {error}"
@@ -996,7 +1000,7 @@ pub(super) async fn publish_or_reuse(
     client: &RemoteAgentClient,
     local: &std::path::Path,
     remote: &str,
-    identity: &onec_core::FileDigest,
+    identity: &hostlink_core::FileDigest,
 ) -> AppResult<()> {
     publish_or_reuse_timed(client, local, remote, identity, None).await
 }
@@ -1005,7 +1009,7 @@ pub(super) async fn publish_or_reuse(
 pub(super) async fn require_cached_candidate(
     client: &RemoteAgentClient,
     remote: &str,
-    identity: &onec_core::FileDigest,
+    identity: &hostlink_core::FileDigest,
     phase: &'static str,
 ) -> AppResult<()> {
     let observed = client.path_sha256(remote.to_owned()).await;
@@ -1014,7 +1018,7 @@ pub(super) async fn require_cached_candidate(
 
 fn verify_cached_candidate_probe(
     phase: &'static str,
-    expected: &onec_core::FileDigest,
+    expected: &hostlink_core::FileDigest,
     observed: AppResult<(u64, String)>,
 ) -> AppResult<()> {
     let (actual_bytes, actual_digest) = observed.map_err(|_| {
@@ -1038,7 +1042,7 @@ async fn publish_or_reuse_timed(
     client: &RemoteAgentClient,
     local: &std::path::Path,
     remote: &str,
-    identity: &onec_core::FileDigest,
+    identity: &hostlink_core::FileDigest,
     timings: Option<&mut RunLocalTimings>,
 ) -> AppResult<()> {
     let mut timings = timings;
@@ -1461,13 +1465,13 @@ mod run_local_cache_tests {
         let root = tempfile::tempdir().expect("tempdir");
         let source = root.path().join("runner.exe");
         std::fs::write(&source, b"original executable bytes").expect("write source");
-        let identity = onec_core::FileDigest::from_path(&source).expect("original identity");
+        let identity = hostlink_core::FileDigest::from_path(&source).expect("original identity");
         let remote = super::content_cache_name(&source, identity.sha256());
 
         // A source changing while the controller resolves the target must not
         // silently rebind a content-addressed filename to the newer payload.
         std::fs::write(&source, b"changed executable bytes").expect("change source");
-        let changed = onec_core::FileDigest::from_path(&source).expect("new identity");
+        let changed = hostlink_core::FileDigest::from_path(&source).expect("new identity");
         assert_ne!(identity.sha256(), changed.sha256());
         assert!(remote.contains(identity.sha256()));
         assert!(!remote.contains(changed.sha256()));
@@ -1550,7 +1554,8 @@ mod run_local_cache_tests {
         let directory = tempfile::tempdir().expect("candidate fixture");
         let candidate = directory.path().join("candidate.exe");
         std::fs::write(&candidate, b"source exact candidate").expect("write candidate");
-        let expected = onec_core::FileDigest::from_path(&candidate).expect("candidate identity");
+        let expected =
+            hostlink_core::FileDigest::from_path(&candidate).expect("candidate identity");
         let exact = (expected.bytes(), expected.sha256().to_owned());
 
         assert!(

@@ -279,7 +279,7 @@ fn hub_config_can_read_operator_token_from_private_file() {
     let token_path = dir.path().join("operator.token");
     let token = "0123456789abcdef0123456789abcdef"; // gitleaks:allow -- fixed test-only credential fixture
     fs::write(&token_path, format!("{token}\n")).expect("token fixture");
-    onec_core::restrict_private_file(&token_path).expect("private token fixture");
+    hostlink_core::restrict_private_file(&token_path).expect("private token fixture");
     let mut config = HubControllerConfig::new(
         "https://hub.example.test",
         "gateway.example.test",

@@ -11,10 +11,10 @@ pub(super) fn read_stdin_payload(source: Option<PathBuf>) -> AppResult<Option<St
     let bytes = if source.as_os_str() == "-" {
         let stdin = io::stdin();
         let mut locked = stdin.lock();
-        onec_core::read_bounded_bytes(&mut locked, None, MAX_STDIN_PAYLOAD_BYTES)
+        hostlink_core::read_bounded_bytes(&mut locked, None, MAX_STDIN_PAYLOAD_BYTES)
             .map_err(|error| input_error("<stdin>", error))?
     } else {
-        onec_core::read_file_bounded(&source, MAX_STDIN_PAYLOAD_BYTES)
+        hostlink_core::read_file_bounded(&source, MAX_STDIN_PAYLOAD_BYTES)
             .map_err(|error| input_error(&source.display().to_string(), error))?
     };
     StdinPayload::try_new(bytes)

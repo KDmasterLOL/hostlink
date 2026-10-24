@@ -5,7 +5,7 @@
 selection, generated SSH projection, embedded russh/russh-sftp transport, structured exec/jobs,
 verified file transfer, probes, forwarding, RDP and enrollment invitation rendering.
 
-It does **not** own hub persistence/enrollment state or 1C/project/update policy. Server-side
+It does **not** own hub persistence/enrollment state or caller-specific project/update policy. Server-side
 authority remains in `onec-hub`; target-local operations are composed by `onec-cli` over
 `onec-infobase`, `onec-project`, and the other focused domain owners.
 

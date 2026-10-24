@@ -1,6 +1,6 @@
 //! Receipts for terminal managed `run-local` process executions.
 
-use onec_core::Sha256Digest;
+use hostlink_core::Sha256Digest;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fs, io::Read, path::Path, str::FromStr};
@@ -134,17 +134,18 @@ pub(crate) fn write_create_new(
     directory: &Path,
     evidence: &RunLocalExecutionEvidence,
 ) -> std::io::Result<std::path::PathBuf> {
-    onec_core::ensure_private_directory(directory)?;
+    hostlink_core::ensure_private_directory(directory)?;
     let path = directory.join(format!("{}.json", evidence.run_id));
     let bytes = serde_json::to_vec(evidence).map_err(std::io::Error::other)?;
     let digest = format!("{:x}", Sha256::digest(&bytes));
     let checksum_path = path.with_extension("json.sha256");
-    onec_core::write_new_private_bytes(&path, &bytes)?;
+    hostlink_core::write_new_private_bytes(&path, &bytes)?;
     let checksum = format!(
         "{digest}  {}\n",
         path.file_name().unwrap_or_default().to_string_lossy()
     );
-    if let Err(error) = onec_core::write_new_private_bytes(&checksum_path, checksum.as_bytes()) {
+    if let Err(error) = hostlink_core::write_new_private_bytes(&checksum_path, checksum.as_bytes())
+    {
         return match fs::remove_file(&path) {
             Ok(()) => Err(error),
             Err(cleanup) => Err(std::io::Error::new(
@@ -191,7 +192,7 @@ pub(crate) fn write_create_new_with_output(
         ));
     }
 
-    onec_core::ensure_private_directory(directory)?;
+    hostlink_core::ensure_private_directory(directory)?;
     let stdout_path = directory.join(format!("{}.stdout", evidence.run_id));
     let stderr_path = directory.join(format!("{}.stderr", evidence.run_id));
     write_output_create_new(&stdout_path, stdout)?;
@@ -231,7 +232,7 @@ fn write_output_create_new_with(
     bytes: &[u8],
     write: impl FnOnce(&mut fs::File, &[u8]) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    let mut file = onec_core::create_new_private_file(path)?;
+    let mut file = hostlink_core::create_new_private_file(path)?;
     if let Err(error) = write(&mut file, bytes) {
         drop(file);
         return Err(remove_owned_file_after_error(path, error));

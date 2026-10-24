@@ -8,7 +8,7 @@ pub(super) fn install_managed_include(user_config: &Path, generated: &Path) -> A
         fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
     }
     let existing_bytes = if user_config.exists() {
-        onec_core::read_file_bounded(user_config, USER_SSH_CONFIG_MAX_BYTES)
+        hostlink_core::read_file_bounded(user_config, USER_SSH_CONFIG_MAX_BYTES)
             .map_err(|source| io_error(user_config, source))?
     } else {
         Vec::new()
@@ -30,7 +30,8 @@ pub(super) fn install_managed_include(user_config: &Path, generated: &Path) -> A
         if cleaned != existing {
             write_atomic(user_config, cleaned.as_bytes())?;
         }
-        return onec_core::restrict_private_file(user_config).map_err(crate::private_path_error);
+        return hostlink_core::restrict_private_file(user_config)
+            .map_err(crate::private_path_error);
     }
 
     let include = format!(
@@ -43,7 +44,7 @@ pub(super) fn install_managed_include(user_config: &Path, generated: &Path) -> A
     }
     next.push_str(&include);
     write_atomic(user_config, next.as_bytes())?;
-    onec_core::restrict_private_file(user_config).map_err(crate::private_path_error)
+    hostlink_core::restrict_private_file(user_config).map_err(crate::private_path_error)
 }
 
 fn remove_legacy_onec_ops_include(value: &str) -> String {

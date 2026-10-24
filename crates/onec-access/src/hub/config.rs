@@ -203,7 +203,7 @@ impl HubControllerConfig {
     /// Loads bounded strict JSON from an explicit path and resolves relative paths.
     pub fn load_from(path: impl AsRef<Path>) -> AppResult<Self> {
         let path = path.as_ref();
-        let bytes = onec_core::read_file_bounded(path, HUB_CONTROLLER_CONFIG_MAX_BYTES)
+        let bytes = hostlink_core::read_file_bounded(path, HUB_CONTROLLER_CONFIG_MAX_BYTES)
             .map_err(|source| io_error(path, source))?;
         let mut config: Self = serde_json::from_slice(&bytes)
             .map_err(|source| crate::json_error(path.to_path_buf(), source))?;
@@ -237,7 +237,7 @@ impl HubControllerConfig {
         }
         let data = serde_json::to_vec_pretty(self)
             .map_err(|source| crate::json_error(path.to_path_buf(), source))?;
-        onec_core::write_private_file_atomically(path, &data)
+        hostlink_core::write_private_file_atomically(path, &data)
             .map_err(|source| io_error(path, source))
     }
 
@@ -282,8 +282,8 @@ impl HubControllerConfig {
 
     pub(super) fn token(&self) -> AppResult<SecretString> {
         let token = if let Some(path) = self.token_file.as_deref() {
-            onec_core::validate_private_file(path).map_err(crate::private_path_error)?;
-            let bytes = onec_core::read_file_bounded(path, HUB_CONTROLLER_TOKEN_MAX_BYTES)
+            hostlink_core::validate_private_file(path).map_err(crate::private_path_error)?;
+            let bytes = hostlink_core::read_file_bounded(path, HUB_CONTROLLER_TOKEN_MAX_BYTES)
                 .map_err(|source| io_error(path, source))?;
             std::str::from_utf8(&bytes)
                 .map_err(|error| {

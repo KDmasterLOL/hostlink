@@ -3,7 +3,7 @@
 //! Generic propagation and context use `anyhow`. Only process failures remain typed because
 //! retry/transport policy branches on their semantics.
 
-use onec_core::PrivatePathError;
+use hostlink_core::PrivatePathError;
 use std::{io, path::PathBuf};
 
 /// Application error type for controller-side hub/access operations.

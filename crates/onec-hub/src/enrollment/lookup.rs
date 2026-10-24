@@ -22,7 +22,7 @@ pub(crate) fn ssh_authorized_key_lookup(
             "missing SSH lookup token",
         ));
     };
-    if !onec_core::constant_time_str_eq(token, expected_token.expose_secret()) {
+    if !hostlink_core::constant_time_str_eq(token, expected_token.expose_secret()) {
         return Ok(json_error(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
