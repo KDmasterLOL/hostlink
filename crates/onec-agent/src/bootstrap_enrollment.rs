@@ -804,6 +804,52 @@ mod tests {
         }
     }
 
+    // Exercise the actual SSH/SFTP transport with key material built by the fresh
+    // enrollment flow, not a separate hand-written embedded SSH fixture.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fresh_enrollment_state_authenticates_embedded_ssh_and_round_trips_sftp() {
+        let root = tempfile::tempdir().expect("owned temporary install root");
+        let agent_state = root.path().join("agent");
+        hostlink_core::create_private_directory(&agent_state).expect("private agent state");
+        let (outbound_private, _) = generate_ed25519_keypair().expect("outbound identity");
+        let (host_private, host_public) = generate_ed25519_keypair().expect("SSH host identity");
+        let (operator_private, operator_public) =
+            generate_ed25519_keypair().expect("authorized controller identity");
+        let gateway_key = key();
+        let response = serde_json::from_value::<EnrollmentResponse>(response_value(
+            "fixture-machine",
+            &gateway_key,
+            std::slice::from_ref(&operator_public),
+        ))
+        .expect("valid authoritative Hub enrollment response");
+        let validated =
+            validate_hub_response(response, "fixture-machine").expect("validated Hub identity");
+        write_enrolled_state(&agent_state, validated, &outbound_private, &host_private)
+            .expect("write new Agent enrollment state");
+
+        let controller_identity = root.path().join("operator-id");
+        hostlink_core::write_new_private_bytes(&controller_identity, operator_private.as_bytes())
+            .expect("private controller key");
+        let advertised_host_key = root.path().join("host-public.pub");
+        std::fs::write(&advertised_host_key, format!("{host_public}\n"))
+            .expect("advertised host public key");
+        let scratch = root.path().join("scratch");
+        std::fs::create_dir(&scratch).expect("owned SFTP scratch directory");
+        let config = AgentConfig::load(agent_state.join(CONFIG_FILE))
+            .expect("load actual generated Agent config");
+        crate::embedded_ssh::preflight_embedded_ssh(
+            config
+                .embedded_ssh_server()
+                .expect("new enrollment enables embedded SSH"),
+            &advertised_host_key,
+            &controller_identity,
+            &scratch,
+        )
+        .await
+        .expect("fresh enrollment keys authenticate and SSH/SFTP/forwarding round-trip");
+    }
+
     #[test]
     fn published_config_and_agent_updater_share_the_root_jobs_directory() {
         let directory = tempfile::tempdir().expect("temporary parent");
