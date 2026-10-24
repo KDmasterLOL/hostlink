@@ -50,7 +50,7 @@ if ($enrollmentMode) {
 }
 
 $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
-if ([string]::IsNullOrEmpty($localAppData)) { throw 'The current user's LocalAppData directory is unavailable.' }
+if ([string]::IsNullOrEmpty($localAppData)) { throw 'The current user''s LocalAppData directory is unavailable.' }
 $root = [IO.Path]::GetFullPath([IO.Path]::Combine($localAppData, 'HostLink\Agent'))
 if ([IO.Directory]::Exists($root) -or [IO.File]::Exists($root)) {
     throw 'HostLink Agent install requires a fresh root. Existing roots are never adopted.'

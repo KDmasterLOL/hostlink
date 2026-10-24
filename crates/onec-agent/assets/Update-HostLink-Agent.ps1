@@ -16,7 +16,7 @@ if ((-not [Environment]::Is64BitOperatingSystem) -and $Target.StartsWith('x86_64
 if (-not [IO.Path]::IsPathRooted($ArchiveFile)) { throw 'ArchiveFile must be an absolute path inside the HostLink Agent root.' }
 
 $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
-if ([string]::IsNullOrEmpty($localAppData)) { throw 'The current user's LocalAppData directory is unavailable.' }
+if ([string]::IsNullOrEmpty($localAppData)) { throw 'The current user''s LocalAppData directory is unavailable.' }
 $root = [IO.Path]::GetFullPath([IO.Path]::Combine($localAppData, 'HostLink\Agent'))
 $archive = [IO.Path]::GetFullPath($ArchiveFile)
 $prefix = $root.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar

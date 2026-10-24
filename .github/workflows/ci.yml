@@ -58,6 +58,30 @@ jobs:
           python-version: '3.13'
       - name: Install exact Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal --component clippy
+      - name: Parse all bundled scripts with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = @(
+            'crates/onec-agent/assets/Install-HostLink-Agent.ps1',
+            'crates/onec-agent/assets/Run-HostLink-Agent.ps1',
+            'crates/onec-agent/assets/Update-HostLink-Agent.ps1'
+          )
+          foreach ($path in $assets) {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path -LiteralPath $path).Path,
+              [ref]$tokens,
+              [ref]$parseErrors
+            ) | Out-Null
+            if ($parseErrors.Count -ne 0) {
+              foreach ($errorRecord in $parseErrors) {
+                Write-Output ("{0}:{1}:{2}: {3}" -f $path, $errorRecord.Extent.StartLineNumber, $errorRecord.Extent.StartColumnNumber, $errorRecord.Message)
+              }
+              throw 'Bundled PowerShell script does not parse under Windows PowerShell 5.1'
+            }
+          }
       - name: Compile Windows sources and tests
         run: cargo +1.98.1 check --workspace --all-targets --locked
       - name: Strict Windows Clippy

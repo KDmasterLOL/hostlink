@@ -2,7 +2,7 @@ param([Parameter(Mandatory=$true)][string]$ConfigFile)
 
 $ErrorActionPreference = 'Stop'
 $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
-if ([string]::IsNullOrEmpty($localAppData)) { throw 'The current user's LocalAppData directory is unavailable.' }
+if ([string]::IsNullOrEmpty($localAppData)) { throw 'The current user''s LocalAppData directory is unavailable.' }
 $root = [IO.Path]::GetFullPath([IO.Path]::Combine($localAppData, 'HostLink\Agent'))
 $installRoot = Join-Path $root 'hostlink-agent'
 $metadataPath = Join-Path $installRoot 'install.json'
