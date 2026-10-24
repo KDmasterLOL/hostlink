@@ -5,7 +5,9 @@ param(
     [Parameter(Mandatory=$true)][string]$Target,
     [string]$ConfigFile,
     [string]$HubUrl,
-    [string]$EnrollmentTokenFile
+    [string]$EnrollmentTokenFile,
+    [string]$AgentExecutableFile,
+    [string]$AgentExecutableSha256
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,6 +38,21 @@ if ($PackageVersion -notmatch '^\d+\.\d+\.\d+([+-][0-9A-Za-z.-]+)?$') {
 }
 if ($ArchiveSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw 'ArchiveSha256 must be a 64-character SHA-256 digest.' }
 if (-not [IO.Path]::IsPathRooted($ArchiveFile)) { throw 'ArchiveFile must be an absolute path.' }
+$hasAgentExecutableFile = -not [string]::IsNullOrEmpty($AgentExecutableFile)
+$hasAgentExecutableSha256 = -not [string]::IsNullOrEmpty($AgentExecutableSha256)
+if ($hasAgentExecutableFile -ne $hasAgentExecutableSha256) {
+    throw 'AgentExecutableFile and AgentExecutableSha256 must be supplied together.'
+}
+$hasAgentExecutable = $hasAgentExecutableFile -and $hasAgentExecutableSha256
+if ($hasAgentExecutable -and $AgentExecutableSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+    throw 'AgentExecutableSha256 must be a 64-character SHA-256 digest.'
+}
+if (($Target -like '*-win7-*') -and -not $hasAgentExecutable) {
+    throw 'Windows 7 targets require AgentExecutableFile and AgentExecutableSha256; CLR4 ZIP extraction is unavailable on PowerShell 2 / CLR 2.'
+}
+if ($hasAgentExecutable -and -not [IO.Path]::IsPathRooted($AgentExecutableFile)) {
+    throw 'AgentExecutableFile must be an absolute path.'
+}
 $enrollmentMode = (-not [string]::IsNullOrEmpty($HubUrl)) -or (-not [string]::IsNullOrEmpty($EnrollmentTokenFile))
 if ($enrollmentMode) {
     if ([string]::IsNullOrEmpty($HubUrl) -or [string]::IsNullOrEmpty($EnrollmentTokenFile) -or -not [string]::IsNullOrEmpty($ConfigFile)) {
@@ -52,11 +69,29 @@ if ($enrollmentMode) {
 $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
 if ([string]::IsNullOrEmpty($localAppData)) { throw 'The current user''s LocalAppData directory is unavailable.' }
 $root = [IO.Path]::GetFullPath([IO.Path]::Combine($localAppData, 'HostLink\Agent'))
+$parent = [IO.Path]::GetDirectoryName($root)
+if ([IO.Directory]::Exists($parent)) {
+    if (([IO.File]::GetAttributes($parent) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'HostLink parent directory must not be a reparse point.'
+    }
+    $parentOwner = (New-Object IO.DirectoryInfo($parent)).GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier])
+    if (-not $parentOwner.Equals($currentIdentity.User)) { throw 'HostLink parent directory must be owned by the current user.' }
+} elseif ([IO.File]::Exists($parent)) {
+    throw 'HostLink parent path exists as a file.'
+} else {
+    if (([IO.File]::GetAttributes($localAppData) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'LocalApplicationData directory must not be a reparse point.'
+    }
+    $localAppDataOwner = (New-Object IO.DirectoryInfo($localAppData)).GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier])
+    if (-not $localAppDataOwner.Equals($currentIdentity.User)) { throw 'LocalApplicationData directory must be owned by the current user.' }
+}
 if ([IO.Directory]::Exists($root) -or [IO.File]::Exists($root)) {
     throw 'HostLink Agent install requires a fresh root. Existing roots are never adopted.'
 }
 
 $archive = [IO.Path]::GetFullPath($ArchiveFile)
+$agentExecutable = $null
+if ($hasAgentExecutable) { $agentExecutable = [IO.Path]::GetFullPath($AgentExecutableFile) }
 $config = $null
 if (-not $enrollmentMode) { $config = [IO.Path]::GetFullPath($ConfigFile) }
 if (-not [IO.File]::Exists($archive)) { throw 'ArchiveFile does not name an existing regular file.' }
@@ -74,6 +109,13 @@ if ($enrollmentMode) {
     if ((New-Object IO.FileInfo($tokenPath)).Length -gt 4096) { throw 'EnrollmentTokenFile exceeds the 4 KiB limit.' }
 }
 if ((New-Object IO.FileInfo($archive)).Length -gt 536870912) { throw 'ArchiveFile exceeds the 512 MiB limit.' }
+if ($hasAgentExecutable) {
+    if (-not [IO.File]::Exists($agentExecutable)) { throw 'AgentExecutableFile does not name an existing regular file.' }
+    if (([IO.File]::GetAttributes($agentExecutable) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'AgentExecutableFile must not be a reparse point.'
+    }
+    if ((New-Object IO.FileInfo($agentExecutable)).Length -gt 268435456) { throw 'AgentExecutableFile exceeds the 256 MiB limit.' }
+}
 if (-not $enrollmentMode -and (New-Object IO.FileInfo($config)).Length -gt 262144) { throw 'ConfigFile exceeds the 256 KiB limit.' }
 
 # The updater always checks <root>/jobs for active work. Manual configurations must use
@@ -104,47 +146,76 @@ if (-not $enrollmentMode) {
 function Get-Sha256Stream([IO.Stream]$Stream) {
     $hash = [Security.Cryptography.SHA256]::Create()
     try { return ([BitConverter]::ToString($hash.ComputeHash($Stream))).Replace('-', '').ToLowerInvariant() }
-    finally { $hash.Dispose() }
+    finally { $hash.Clear() }
 }
 
-# Windows 7 PowerShell 2 has no Expand-Archive. Read only the exact package inventory and
-# write each member to a fixed destination; archive paths are never used as filesystem paths.
-try {
-    $compressionAssembly = [Reflection.Assembly]::LoadWithPartialName('System.IO.Compression')
-    if ($null -eq $compressionAssembly -or $null -eq $compressionAssembly.GetType('System.IO.Compression.ZipArchive', $false)) {
-        throw 'System.IO.Compression.ZipArchive is unavailable.'
+function Assert-CurrentUserOwnedFileAndParent([string]$Path, [Security.Principal.SecurityIdentifier]$UserSid) {
+    $fileInfo = New-Object IO.FileInfo($Path)
+    $fileOwner = $fileInfo.GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier])
+    if (-not $fileOwner.Equals($UserSid)) { throw 'AgentExecutableFile must be owned by the current user.' }
+    $parentPath = [IO.Path]::GetDirectoryName($Path)
+    if ([string]::IsNullOrEmpty($parentPath) -or -not [IO.Directory]::Exists($parentPath)) {
+        throw 'AgentExecutableFile parent directory must exist.'
     }
-} catch {
-    throw 'Agent ZIP extraction requires System.IO.Compression.ZipArchive from .NET Framework 4.5 or later. Windows 7 PowerShell 2 on CLR 2 is not verified and may not provide this type; no fallback extractor is bundled.'
+    if (([IO.File]::GetAttributes($parentPath) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'AgentExecutableFile parent directory must not be a reparse point.'
+    }
+    $parentInfo = New-Object IO.DirectoryInfo($parentPath)
+    $parentOwner = $parentInfo.GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier])
+    if (-not $parentOwner.Equals($UserSid)) { throw 'AgentExecutableFile parent directory must be owned by the current user.' }
 }
 
-$bundleName = 'hostlink-agent-' + $Target
-$expectedNames = @(
-    ($bundleName + '/hostlink-agent.exe'),
-    ($bundleName + '/Install-HostLink-Agent.ps1'),
-    ($bundleName + '/Run-HostLink-Agent.ps1'),
-    ($bundleName + '/Update-HostLink-Agent.ps1')
-)
+$verifiedArchiveStream = $null
+$candidateStream = $null
 $stage = Join-Path ([IO.Path]::GetTempPath()) ('hostlink-agent-install-' + [Guid]::NewGuid().ToString('N'))
-[void][IO.Directory]::CreateDirectory($stage)
 try {
+    $verifiedArchiveStream = [IO.File]::Open($archive, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    if ($verifiedArchiveStream.Length -gt 536870912) { throw 'ArchiveFile exceeds the 512 MiB limit.' }
+    $actualSha256 = Get-Sha256Stream $verifiedArchiveStream
+    if ($actualSha256 -ne $ArchiveSha256.ToLowerInvariant()) { throw 'Archive SHA-256 does not match ArchiveSha256.' }
+    if ($hasAgentExecutable) {
+        Assert-CurrentUserOwnedFileAndParent $agentExecutable $currentIdentity.User
+        $candidateStream = [IO.File]::Open($agentExecutable, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        if ($candidateStream.Length -gt 268435456) { throw 'AgentExecutableFile exceeds the 256 MiB limit.' }
+        $candidateSha256 = Get-Sha256Stream $candidateStream
+        if ($candidateSha256 -ne $AgentExecutableSha256.ToLowerInvariant()) { throw 'Agent executable SHA-256 does not match AgentExecutableSha256.' }
+    }
+
+    [void][IO.Directory]::CreateDirectory($stage)
 if (([IO.File]::GetAttributes($stage) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw 'Temporary Agent staging directory must not be a reparse point.'
 }
-$archiveStream = $null
-$zip = $null
-try {
-    $archiveStream = [IO.File]::Open($archive, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-    if ($archiveStream.Length -gt 536870912) { throw 'ArchiveFile exceeds the 512 MiB limit.' }
-    $actualSha256 = Get-Sha256Stream $archiveStream
-    if ($actualSha256 -ne $ArchiveSha256.ToLowerInvariant()) { throw 'Archive SHA-256 does not match ArchiveSha256.' }
-    $archiveStream.Position = 0
+$candidate = $agentExecutable
+if (-not $hasAgentExecutable) {
+    # Load CLR4 ZipArchive only on the original modern Windows path.
     try {
-        $zip = New-Object IO.Compression.ZipArchive($archiveStream, [IO.Compression.ZipArchiveMode]::Read, $false)
+        $compressionAssembly = [Reflection.Assembly]::LoadWithPartialName('System.IO.Compression')
+        if ($null -eq $compressionAssembly -or $null -eq $compressionAssembly.GetType('System.IO.Compression.ZipArchive', $false)) {
+            throw 'System.IO.Compression.ZipArchive is unavailable.'
+        }
     } catch {
         throw 'Agent ZIP extraction requires System.IO.Compression.ZipArchive from .NET Framework 4.5 or later. Windows 7 PowerShell 2 on CLR 2 is not verified and may not provide this type; no fallback extractor is bundled.'
     }
-    if ($zip.Entries.Count -ne $expectedNames.Count) { throw 'Agent package must contain exactly four files.' }
+
+    $bundleName = 'hostlink-agent-' + $Target
+    $expectedNames = @(
+        ($bundleName + '/hostlink-agent.exe'),
+        ($bundleName + '/Install-HostLink-Agent.ps1'),
+        ($bundleName + '/Run-HostLink-Agent.ps1'),
+        ($bundleName + '/Update-HostLink-Agent.ps1')
+    )
+    $archiveStream = $null
+    $zip = $null
+    try {
+        $archiveStream = [IO.File]::Open($archive, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        if ($archiveStream.Length -gt 536870912) { throw 'ArchiveFile exceeds the 512 MiB limit.' }
+        $archiveStream.Position = 0
+        try {
+            $zip = New-Object IO.Compression.ZipArchive($archiveStream, [IO.Compression.ZipArchiveMode]::Read, $false)
+        } catch {
+            throw 'Agent ZIP extraction requires System.IO.Compression.ZipArchive from .NET Framework 4.5 or later. Windows 7 PowerShell 2 on CLR 2 is not verified and may not provide this type; no fallback extractor is bundled.'
+        }
+        if ($zip.Entries.Count -ne $expectedNames.Count) { throw 'Agent package must contain exactly four files.' }
     $seen = @{}
     $expandedTotal = 0L
     foreach ($entry in $zip.Entries) {
@@ -184,13 +255,19 @@ try {
             if ($copied -ne $seen[$name].Length) { throw 'Package entry length did not match its ZIP metadata.' }
         } finally { $output.Dispose(); $entryStream.Dispose() }
     }
-} finally {
-    if ($null -ne $zip) { $zip.Dispose() }
-    if ($null -ne $archiveStream) { $archiveStream.Dispose() }
+    } finally {
+        if ($null -ne $zip) { $zip.Dispose() }
+        if ($null -ne $archiveStream) { $archiveStream.Dispose() }
+    }
+    $candidate = Join-Path $stage 'bin\hostlink-agent.exe'
 }
 
-$candidate = Join-Path $stage 'bin\hostlink-agent.exe'
-$parent = [IO.Path]::GetDirectoryName($root)
+try {
+    $versionOutput = & $candidate --version
+    if ($LASTEXITCODE -ne 0) { throw 'nonzero exit status' }
+} catch {
+    throw ('Verified Agent executable could not load or run --version on this Windows host; bootstrap stopped before creating the HostLink root. ' + $_.Exception.Message)
+}
 if ($enrollmentMode) {
     if (-not [IO.Directory]::Exists($parent)) { [void][IO.Directory]::CreateDirectory($parent) }
     if (([IO.File]::GetAttributes($parent) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'HostLink parent directory must not be a reparse point.' }
@@ -233,7 +310,7 @@ try {
     }
     $stagedArchive = Join-Path $root '.hostlink-agent-bootstrap.zip'
     [IO.File]::Copy($archive, $stagedArchive, $false)
-    & $candidate __self-update --root $root --agent-only --archive-file $stagedArchive --archive-sha256 $actualSha256 --package-version $PackageVersion --target $Target
+    & $candidate __self-update --agent-only --root $root --archive-file $stagedArchive --archive-sha256 $actualSha256 --package-version $PackageVersion --target $Target
     if ($LASTEXITCODE -ne 0) { throw "Agent-only package install failed with exit code $LASTEXITCODE." }
     [IO.File]::Delete($stagedArchive)
     if ($enrollmentMode) {
@@ -252,6 +329,8 @@ try {
 Write-Host ('HostLink Agent installed in the fresh user root: ' + $root)
 Write-Host ('Run explicitly with: powershell.exe -NoProfile -File "' + (Join-Path $root 'hostlink-agent\bin\Run-HostLink-Agent.ps1') + '" -ConfigFile "' + $config + '"')
 } finally {
+    if ($null -ne $candidateStream) { $candidateStream.Dispose() }
+    if ($null -ne $verifiedArchiveStream) { $verifiedArchiveStream.Dispose() }
     if ($enrollmentMode -and $null -ne $stateDir -and [IO.Directory]::Exists($stateDir)) { [IO.Directory]::Delete($stateDir, $true) }
     if ([IO.Directory]::Exists($stage)) { [IO.Directory]::Delete($stage, $true) }
 }

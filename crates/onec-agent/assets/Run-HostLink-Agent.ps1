@@ -41,7 +41,7 @@ foreach ($name in $expectedFiles) {
     $sha = [Security.Cryptography.SHA256]::Create()
     $stream = [IO.File]::OpenRead($path)
     try { $actual = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
-    finally { $stream.Dispose(); $sha.Dispose() }
+    finally { $stream.Dispose(); $sha.Clear() }
     if ($actual -ne $expected) { throw ('Installed HostLink Agent file digest mismatch: ' + $name) }
 }
 

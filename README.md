@@ -49,6 +49,16 @@ uses PowerShell 2-compatible syntax, but ZIP extraction requires the .NET Framew
 `ZipArchive` type. PowerShell 2 on stock Windows 7/CLR 2 is unverified and may not load that type;
 the installer fails closed when `ZipArchive` is unavailable. Native Win7 acceptance remains
 blocked until tested on an owned Win7 environment.
+Controller invites accept the optional paired flags `--direct-agent-executable-url` and
+`--direct-agent-executable-sha256` for a trusted `hostlink-agent.exe` sidecar. Both are
+required when the selected package target is `x86_64-win7-windows-msvc` or
+`i686-win7-windows-msvc`; the current `x86_64-pc-windows-msvc` package keeps the ZIP-only
+path unless the pair is supplied. The controller pins the sidecar digest from the operator,
+preflights its same-origin HTTPS URL before creating the one-use invite, and the generated
+PowerShell 2 bootstrap verifies the downloaded bytes before passing the sidecar to the
+existing installer. The sidecar URL must end in `/<package-target>/hostlink-agent.exe`,
+which binds the executable path to the selected ZIP target. A current-Windows executable is
+not a Win7-compatible substitute.
 The embedded SSH login is the fixed logical `hostlink` account; SSH commands run as the Agent
 process user and do not impersonate a Windows account. Durable jobs live in a current-user-only
 `jobs` directory shared by the Agent config and updater's active-job guard.

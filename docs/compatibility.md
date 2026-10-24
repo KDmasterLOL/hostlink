@@ -54,6 +54,15 @@ owned NT6.1 fixtures, and version-skew evidence remain mandatory. Generic
 Windows CI is not a substitute. See the
 [Rust platform documentation](https://doc.rust-lang.org/rustc/platform-support/win7-windows-msvc.html).
 
+The Agent-only PowerShell 2 installer can bypass CLR4 `ZipArchive` only when
+both `-AgentExecutableFile` and `-AgentExecutableSha256` are supplied. It
+checks the staged candidate and ZIP against caller-provided SHA-256 pins, then
+uses that candidate's existing `__self-update --agent-only` command to verify
+and install the ZIP. Win7 targets require this pair; there is no alternate
+extractor. Current Windows MSVC artifacts are not Win7 candidates. No dedicated
+Tier-3 Win7 executable or native bootstrap acceptance is established by this
+installer change.
+
 ## Outside this phase
 
 No changes to installed hosts, infra Ansible, server config, secrets, GitHub

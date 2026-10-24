@@ -24,6 +24,12 @@ pub(crate) struct Args {
     /// Exact supported Windows target triple bound to the package URL and local architecture.
     #[arg(long, value_name = "TARGET", required = true)]
     pub(crate) direct_package_target: String,
+    /// Exact same-origin HTTPS URL for the target-specific hostlink-agent.exe sidecar.
+    #[arg(long, value_name = "EXACT_HTTPS_URL")]
+    pub(crate) direct_agent_executable_url: Option<String>,
+    /// Trusted SHA-256 supplied by the source-exact Agent build publisher.
+    #[arg(long, value_name = "SHA256")]
+    pub(crate) direct_agent_executable_sha256: Option<String>,
 }
 
 pub(super) async fn run(args: Args) -> hostlink_access::AppResult<()> {

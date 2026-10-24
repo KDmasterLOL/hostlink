@@ -424,6 +424,78 @@ async fn embedded_server_exec_streams_binary_stdin_stdout_stderr_and_exit_status
     fixture.stop().await;
 }
 
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedded_server_windows_exec_streams_binary_stdio_and_exit_status() {
+    let fixture = start_fixture().await;
+    let mut session = connect(&fixture, fixture.host_key.clone()).await;
+    assert!(authenticate(&mut session, "managed-user", fixture.client_key.clone()).await);
+
+    let channel = session
+        .channel_open_session()
+        .await
+        .expect("session channel");
+    channel
+        .exec(
+            true,
+            r#"$stdinStream = [Console]::OpenStandardInput(); $stdoutStream = [Console]::OpenStandardOutput(); $buffer = New-Object byte[] 8192; while (($read = $stdinStream.Read($buffer, 0, $buffer.Length)) -gt 0) { $stdoutStream.Write($buffer, 0, $read) }; $stdoutStream.Flush(); $stderrStream = [Console]::OpenStandardError(); $errorBytes = [byte[]](0, 255, 69, 82, 82, 13, 10); $stderrStream.Write($errorBytes, 0, $errorBytes.Length); $stderrStream.Flush(); exit 7"#,
+        )
+        .await
+        .expect("exec request");
+    let (mut channel_input, channel_output) = channel.split();
+    let mut stdin = channel_output.make_writer();
+    let payload: Vec<u8> = (0..4096).map(|index| (index * 37) as u8).collect();
+    stdin.write_all(&payload).await.expect("exec stdin bytes");
+    stdin.flush().await.expect("exec stdin flush");
+    channel_output.eof().await.expect("exec stdin EOF");
+    drop(stdin);
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_status = None;
+    let mut saw_eof = false;
+    let mut saw_close = false;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(message) = channel_input.wait().await {
+            match message {
+                ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
+                ChannelMsg::ExtendedData { data, ext: 1 } => stderr.extend_from_slice(&data),
+                ChannelMsg::ExitStatus { exit_status: code } => exit_status = Some(code),
+                ChannelMsg::Eof => saw_eof = true,
+                ChannelMsg::Close => {
+                    assert!(saw_eof, "server must send EOF before closing the channel");
+                    saw_close = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("Windows exec output deadline");
+
+    assert_eq!(stdout, payload, "PowerShell must echo stdin byte-for-byte");
+    let expected_stderr = [0_u8, 255, b'E', b'R', b'R', b'\r', b'\n'];
+    assert_eq!(stderr, expected_stderr);
+    assert_eq!(
+        exit_status,
+        Some(7),
+        "exec must preserve the process exit code"
+    );
+    assert!(saw_eof, "server must send EOF before closing the channel");
+    assert!(saw_close, "server must close the completed exec channel");
+
+    session
+        .disconnect(
+            russh::Disconnect::ByApplication,
+            "Windows exec complete",
+            "en",
+        )
+        .await
+        .expect("SSH disconnect");
+    fixture.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embedded_server_rejects_invalid_exec_command_strings() {
     let fixture = start_fixture().await;
