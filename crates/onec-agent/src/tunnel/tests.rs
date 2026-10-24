@@ -963,7 +963,7 @@ fn tls_proxy_tree_confirmation_matches_owned_members_and_process_groups() {
             "1601 (unrelated) R 1 1601 1601 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345",
             &[],
             owned_group,
-            &[(1601, 12345)],
+            &[],
         )
         .expect("parse unrelated process")
     );
@@ -973,7 +973,7 @@ fn tls_proxy_tree_confirmation_matches_owned_members_and_process_groups() {
             "1601 (other session) R 1502 1582 701 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345",
             &[],
             owned_group,
-            &[(1601, 12345)],
+            &[],
         )
         .expect("reject same process group number in a different session")
     );
