@@ -11,6 +11,8 @@ pub(super) struct RemoteDirectInviteBootstrap<'a> {
     pub(super) package_sha256: &'a str,
     pub(super) package_version: &'a str,
     pub(super) package_target: &'a str,
+    pub(super) agent_executable_url: Option<&'a str>,
+    pub(super) agent_executable_sha256: Option<&'a str>,
 }
 
 /// Render a PowerShell 2 compatible, one-use HostLink Agent bootstrap.
@@ -30,7 +32,9 @@ $packageUrl='{}'
 $packageSha256='{}'
 $packageVersion='{}'
 $packageTarget='{}'
-if ($hubUrl -notmatch '^https://[^/]+(?:/.*)?$' -or $installerUrl -notmatch '^https://[^/]+/.*$' -or $packageUrl -notmatch '^https://[^/]+/.*$') {{ throw 'Hub and artifact URLs must use HTTPS.' }}
+$agentExecutableUrl='{}'
+$agentExecutableSha256='{}'
+if ($hubUrl -notmatch '^https://[^/]+(?:/.*)?$' -or $installerUrl -notmatch '^https://[^/]+/.*$' -or $packageUrl -notmatch '^https://[^/]+/.*$' -or ($agentExecutableUrl -ne '' -and $agentExecutableUrl -notmatch '^https://[^/]+/.*$')) {{ throw 'Hub and artifact URLs must use HTTPS.' }}
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 $principal=New-Object Security.Principal.WindowsPrincipal($identity)
 if ($identity.User.Value -eq 'S-1-5-18' -or $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{ throw 'Run this bootstrap as a normal, non-elevated user.' }}
@@ -42,6 +46,7 @@ $root=$null
 $tokenPath=$null
 $installerPath=$null
 $archivePath=$null
+$agentExecutablePath=$null
 try {{
     $bstr=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
     $token=[Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
@@ -101,7 +106,7 @@ try {{
     $installerScript=[Text.Encoding]::UTF8.GetString($installerBytes)
     $normalized=$installerScript.Replace(([char]13).ToString()+([char]10).ToString(),([char]10).ToString())
     $hasher=[Security.Cryptography.SHA256]::Create()
-    try {{ $actual=([BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized)))).Replace('-','').ToLowerInvariant() }} finally {{ $hasher.Dispose() }}
+    try {{ $actual=([BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized)))).Replace('-','').ToLowerInvariant() }} finally {{ $hasher.Clear() }}
     if ($actual -ne $installerSha256) {{ throw 'Install-HostLink-Agent.ps1 SHA-256 mismatch.' }}
     [IO.File]::WriteAllBytes($installerPath,$installerBytes)
     $archivePath=Join-Path $root 'hostlink-agent.zip'
@@ -128,11 +133,45 @@ try {{
     }} finally {{ $packageResponse.Close() }}
     $archiveStream=New-Object IO.FileStream($archivePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
     $archiveHasher=[Security.Cryptography.SHA256]::Create()
-    try {{ $archiveActual=([BitConverter]::ToString($archiveHasher.ComputeHash($archiveStream))).Replace('-','').ToLowerInvariant() }} finally {{ $archiveHasher.Dispose(); $archiveStream.Dispose() }}
+    try {{ $archiveActual=([BitConverter]::ToString($archiveHasher.ComputeHash($archiveStream))).Replace('-','').ToLowerInvariant() }} finally {{ $archiveHasher.Clear(); $archiveStream.Dispose() }}
     if ($archiveActual -ne $packageSha256) {{ throw 'HostLink Agent package SHA-256 mismatch.' }}
+    if ($agentExecutableUrl -ne '') {{
+        if ($agentExecutableSha256 -notmatch '^[0-9a-f]{{64}}$') {{ throw 'Agent executable SHA-256 is invalid.' }}
+        $agentExecutablePath=Join-Path $root 'hostlink-agent.exe'
+        $agentRequest=[Net.HttpWebRequest]::Create($agentExecutableUrl)
+        $agentRequest.AllowAutoRedirect=$false
+        $agentRequest.Timeout=15000
+        $agentRequest.ReadWriteTimeout=15000
+        $agentResponse=$agentRequest.GetResponse()
+        try {{
+            if ([int]$agentResponse.StatusCode -lt 200 -or [int]$agentResponse.StatusCode -ge 300) {{ throw 'Agent executable download returned an unsuccessful HTTP status.' }}
+            if ($agentResponse.ResponseUri.AbsoluteUri -ne $agentExecutableUrl) {{ throw 'Agent executable URL changed during download.' }}
+            if ($agentResponse.ContentLength -le 0 -or $agentResponse.ContentLength -gt 268435456) {{ throw 'Agent executable size is invalid.' }}
+            $agentInput=$agentResponse.GetResponseStream()
+            $agentOutput=New-Object IO.FileStream($agentExecutablePath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            $agentLength=[long]0
+            try {{
+                $buffer=New-Object byte[] 65536
+                while (($read=$agentInput.Read($buffer,0,$buffer.Length)) -gt 0) {{
+                    $agentLength+=$read
+                    if ($agentLength -gt 268435456 -or $agentLength -gt $agentResponse.ContentLength) {{ throw 'Agent executable exceeds its declared size.' }}
+                    $agentOutput.Write($buffer,0,$read)
+                }}
+            }} finally {{ $agentInput.Dispose(); $agentOutput.Dispose() }}
+            if ($agentLength -ne $agentResponse.ContentLength) {{ throw 'Agent executable size did not match its declared size.' }}
+        }} finally {{ $agentResponse.Close() }}
+        $agentStream=New-Object IO.FileStream($agentExecutablePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        $agentHasher=[Security.Cryptography.SHA256]::Create()
+        try {{ $agentActual=([BitConverter]::ToString($agentHasher.ComputeHash($agentStream))).Replace('-','').ToLowerInvariant() }} finally {{ $agentHasher.Clear(); $agentStream.Dispose() }}
+        if ($agentActual -ne $agentExecutableSha256) {{ throw 'HostLink Agent executable SHA-256 mismatch.' }}
+    }}
     try {{
         $LASTEXITCODE=$null
-        & $installerPath -ArchiveFile ([IO.Path]::GetFullPath($archivePath)) -ArchiveSha256 $packageSha256 -PackageVersion $packageVersion -Target $packageTarget -HubUrl $hubUrl -EnrollmentTokenFile ([IO.Path]::GetFullPath($tokenPath))
+        if ($null -ne $agentExecutablePath) {{
+            & $installerPath -ArchiveFile ([IO.Path]::GetFullPath($archivePath)) -ArchiveSha256 $packageSha256 -PackageVersion $packageVersion -Target $packageTarget -HubUrl $hubUrl -EnrollmentTokenFile ([IO.Path]::GetFullPath($tokenPath)) -AgentExecutableFile ([IO.Path]::GetFullPath($agentExecutablePath)) -AgentExecutableSha256 $agentExecutableSha256
+        }} else {{
+            & $installerPath -ArchiveFile ([IO.Path]::GetFullPath($archivePath)) -ArchiveSha256 $packageSha256 -PackageVersion $packageVersion -Target $packageTarget -HubUrl $hubUrl -EnrollmentTokenFile ([IO.Path]::GetFullPath($tokenPath))
+        }}
         $installerExitCode=$LASTEXITCODE
         if (($null -eq $installerExitCode) -or ($installerExitCode -ne 0)) {{ throw 'Installer exit status was missing or nonzero.' }}
     }} catch {{ throw 'HostLink Agent enrollment or installation failed. The invite may have been consumed; do not retry this token. Reconcile the target or create a new invite.' }}
@@ -142,7 +181,7 @@ try {{
             $fullRoot=[IO.Path]::GetFullPath($root).TrimEnd([char]92)
             $tempPrefix=$tempRoot+[IO.Path]::DirectorySeparatorChar
             if (-not $fullRoot.StartsWith($tempPrefix,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($fullRoot) -notmatch '^hostlink-invite-[0-9a-f]{{32}}$' -or ([IO.File]::GetAttributes($fullRoot) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{ throw 'Refusing to clean an unowned bootstrap directory.' }}
-            foreach ($ownedFile in @($tokenPath,$installerPath,$archivePath)) {{
+            foreach ($ownedFile in @($tokenPath,$installerPath,$archivePath,$agentExecutablePath)) {{
                 if ($null -ne $ownedFile -and [IO.File]::Exists($ownedFile)) {{
                     $fullFile=[IO.Path]::GetFullPath($ownedFile)
                     if (-not $fullFile.StartsWith($fullRoot+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or ([IO.File]::GetAttributes($fullFile) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{ throw 'Refusing to clean an unowned bootstrap file.' }}
@@ -165,6 +204,11 @@ try {{
         input.package_sha256,
         ps_single_quote(input.package_version),
         ps_single_quote(input.package_target),
+        input
+            .agent_executable_url
+            .map(ps_single_quote)
+            .unwrap_or_default(),
+        input.agent_executable_sha256.unwrap_or_default(),
     )
 }
 
