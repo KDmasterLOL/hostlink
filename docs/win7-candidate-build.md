@@ -15,13 +15,18 @@ The pinned nightly is an explicit experiment: the Rust target documentation
 reports the last known x64 host-tools success as 1.91.0, so a newer nightly may
 fail while building the target standard library. Such a failure is recorded as
 a failed workflow run; there is no ordinary `x86_64-pc-windows-msvc` fallback.
-The build does not force `+crt-static`; the target documentation does not
-specify it as a requirement. The resulting imported runtime must be reviewed
-from `pe-dependents.txt`.
+The build requests `+crt-static` because the real NT 6.1 fixture lacks the
+modern UCRT redistributable and the initial MinGW candidate failed to load
+with `0xC0000135`. This requirement is validated from the candidate's
+`dumpbin /dependents` output; dynamic UCRT/VCRuntime imports fail the job.
+Static-CRT linkage alone does not prove Win7 compatibility: the native loader
+check is still mandatory.
 
 On success, the workflow records the checkout commit and rustc version, evidence
-that `std`/`panic_abort` were compiled and target std rlibs were produced, PE
-machine, manifest extraction result, imported DLLs, and SHA-256 values. It
+that `std`/`panic_abort` were compiled by the pinned `-Z build-std` invocation,
+PE machine, manifest extraction result, imported DLLs, and SHA-256 values. A
+previous attempt incorrectly assumed Cargo always placed target std rlibs in
+`target/<triple>/release/deps` and failed after the executable was built. It
 packages the binary and exactly the three existing Agent PowerShell scripts
 with `scripts/package_hostlink.py agent x86_64-win7-windows-msvc`. It verifies
 the four ZIP members, package and raw-binary SHA-256 sidecars, and absence of a

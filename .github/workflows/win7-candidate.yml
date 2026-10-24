@@ -77,6 +77,9 @@ jobs:
 
       - name: Build Agent and standard library from source
         shell: pwsh
+        env:
+          # NT 6.1 does not necessarily have the modern UCRT redistributable.
+          RUSTFLAGS: '-C target-feature=+crt-static'
         run: |
           $ErrorActionPreference = 'Stop'
           $target = 'x86_64-win7-windows-msvc'
@@ -88,11 +91,12 @@ jobs:
           if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Expected Win7 target binary was not produced' }
           $stdlibLines = Select-String -Path '.dist/build-output.log' -Pattern 'Compiling (std|panic_abort) v|Compiling (std|panic_abort) '
           if (-not $stdlibLines) { throw 'Build output does not show std/panic_abort compilation from rust-src' }
-          $stdlibFiles = Get-ChildItem 'target/x86_64-win7-windows-msvc/release/deps' -File | Where-Object { $_.Name -match '^(lib)?(std|panic_abort)-.*\.rlib$' }
-          if (-not ($stdlibFiles | Where-Object { $_.Name -match '^(lib)?std-' })) { throw 'No target std rlib was found in the release dependency directory' }
+          # The pinned -Z build-std invocation plus compiler output is the proof.
+          # Cargo does not guarantee std rlibs under the binary's release/deps path.
+          # A previous CI run built the executable but failed on that assumed layout.
           "target=$target" | Add-Content -Encoding ascii '.dist/evidence/build.txt'
           "stdlib_compile_evidence=$($stdlibLines.Line -join ' | ')" | Add-Content -Encoding utf8 '.dist/evidence/build.txt'
-          "stdlib_rlibs=$((($stdlibFiles | ForEach-Object Name) -join ','))" | Add-Content -Encoding ascii '.dist/evidence/build.txt'
+          'crt_mode=static' | Add-Content -Encoding ascii '.dist/evidence/build.txt'
 
       - name: Inspect PE, manifest and imported runtime
         shell: pwsh
@@ -116,6 +120,11 @@ jobs:
           $dependents = & dumpbin.exe /dependents $binary 2>&1
           if ($LASTEXITCODE -ne 0) { throw 'dumpbin /dependents failed' }
           $dependents | Set-Content -Encoding utf8 '.dist/evidence/pe-dependents.txt'
+          $dynamicCrt = 'api-ms-win-crt-|ucrtbase\.dll|vcruntime140[^\s]*\.dll'
+          if (($dependents -join "`n") -match $dynamicCrt) {
+            throw 'Win7 candidate still imports a dynamic CRT not guaranteed on NT 6.1'
+          }
+          'dynamic_crt_imports=none' | Add-Content -Encoding ascii '.dist/evidence/build.txt'
           $hash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  hostlink-agent.exe" | Set-Content -Encoding ascii '.dist/out/hostlink-agent.exe.sha256'
           "candidate_sha256=$hash" | Add-Content -Encoding ascii '.dist/evidence/build.txt'
