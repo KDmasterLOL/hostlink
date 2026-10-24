@@ -1,11 +1,11 @@
 use hostlink_core::{ONEC_JOB_ID_ENV, ONEC_JOB_SYSTEM_ENV, ONEC_PARENT_RUN_ID_ENV};
-use onec_agent_protocol::{
+use hostlink_protocol::{
     AgentJobState, AgentRequest, AgentRequestKind, AgentResponse, AgentResponseKind,
     ONEC_AGENT_JOB_SYSTEM, ResultArtifactSpec, ResultOwner, SecretEnvironment, read_json_line,
     write_json_line,
 };
 #[cfg(unix)]
-use onec_agent_protocol::{MAX_STDIN_PAYLOAD_BYTES, StdinPayload};
+use hostlink_protocol::{MAX_STDIN_PAYLOAD_BYTES, StdinPayload};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
@@ -231,7 +231,7 @@ fn download_result(
     port: u16,
     owner: ResultOwner,
     name: &str,
-) -> (onec_agent_protocol::ResultArtifactInfo, Vec<u8>) {
+) -> (hostlink_protocol::ResultArtifactInfo, Vec<u8>) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect result");
     write_json_line(
         &mut stream,
@@ -705,11 +705,11 @@ fn durable_local_candidate_reconnects_retrieves_results_and_cleans_owned_workspa
         stdin: None,
         results: vec![ResultArtifactSpec::try_new("report.bin".to_owned(), 1024, None)
             .expect("valid result declaration")],
-        run_local: Some(onec_agent_protocol::RunLocalJobIdentity::try_new(
+        run_local: Some(hostlink_protocol::RunLocalJobIdentity::try_new(
             run_id.to_owned(),
             candidate_name.clone(),
             candidate_sha256.clone(),
-            vec![onec_agent_protocol::RunLocalMappedFile::try_new(
+            vec![hostlink_protocol::RunLocalMappedFile::try_new(
                 "ONEC_INPUT".to_owned(),
                 mapped_sha256,
             )
@@ -828,7 +828,7 @@ fn durable_local_candidate_reconnects_retrieves_results_and_cleans_owned_workspa
             stdin: None,
             results: Vec::new(),
             run_local: Some(
-                onec_agent_protocol::RunLocalJobIdentity::try_new(
+                hostlink_protocol::RunLocalJobIdentity::try_new(
                     cancel_run_id.to_owned(),
                     candidate_name,
                     candidate_sha256,

@@ -1,5 +1,5 @@
 use super::*;
-use onec_agent_protocol::SecretEnvironment;
+use hostlink_protocol::SecretEnvironment;
 
 pub(super) fn validate_environment_name(name: &str) -> AppResult<()> {
     if name.is_empty() || name.contains(['=', '\0']) {

@@ -37,7 +37,7 @@ pub(super) async fn run(args: Args) -> hostlink_access::AppResult<()> {
                 ));
             }
             match client.finalize_run_local_job(job.job_id.clone()).await? {
-                onec_agent_protocol::AgentResponseKind::PathRemoved { .. } => {}
+                hostlink_protocol::AgentResponseKind::PathRemoved { .. } => {}
                 _ => {
                     return Err(crate::invalid_config(
                         "agent returned an unexpected run-local finalization response".to_owned(),

@@ -8,7 +8,7 @@ use super::{
 use crate::remote::model::{RemoteAgentClient, RemoteCarrier};
 use crate::remote::protocol::{read_response_unbuffered, response_into_kind, write_request};
 use crate::{AppError, AppResult, io_error};
-use onec_agent_protocol::{AgentRequest, AgentRequestKind, AgentResponseKind};
+use hostlink_protocol::{AgentRequest, AgentRequestKind, AgentResponseKind};
 use std::fs;
 use std::io::Write as _;
 use std::path::Path;

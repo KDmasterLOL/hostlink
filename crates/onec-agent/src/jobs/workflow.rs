@@ -3,7 +3,7 @@
 #![deny(clippy::missing_docs_in_private_items)]
 
 use super::*;
-use onec_agent_protocol::{NativeExecutionEffect, NativeInvocationIdentity, RunLocalJobIdentity};
+use hostlink_protocol::{NativeExecutionEffect, NativeInvocationIdentity, RunLocalJobIdentity};
 use std::time::Duration;
 
 /// Binds the exact immutable job launch request to its authenticated native-invocation digest.
@@ -44,7 +44,7 @@ pub(super) fn native_invocation_commitment(
     NativeInvocationCommitment {
         version: 1,
         invocation_sha256,
-        requested_exact_testcase: onec_agent_protocol::requested_exact_testcase(&request.args)
+        requested_exact_testcase: hostlink_protocol::requested_exact_testcase(&request.args)
             .map(str::to_owned),
         native_effect,
         results: request.results.clone(),
@@ -54,12 +54,12 @@ pub(super) fn native_invocation_commitment(
 /// Admits a caller-presented suite policy only when it matches the independent Agent pin and
 /// every launch field covered by that policy.
 pub(crate) fn validate_native_suite_policy_admission(
-    policy: Option<&onec_agent_protocol::NativeSuitePolicy>,
+    policy: Option<&hostlink_protocol::NativeSuitePolicy>,
     pinned_policy_sha256: Option<&str>,
     program_sha256: &str,
     args: &[String],
     env: &BTreeMap<String, String>,
-    effect: onec_agent_protocol::NativeExecutionEffect,
+    effect: hostlink_protocol::NativeExecutionEffect,
 ) -> io::Result<Option<String>> {
     let Some(policy) = policy else {
         return Ok(None);
@@ -97,7 +97,7 @@ fn validate_persisted_native_suite_policy(request: &JobRequestFile) -> io::Resul
     ) {
         (None, None, _, _) => Ok(()),
         (Some(expected_digest), Some(expected_tests), Some(run_local), Some(effect)) => {
-            let policy = onec_agent_protocol::NativeSuitePolicy {
+            let policy = hostlink_protocol::NativeSuitePolicy {
                 version: 1,
                 runner_sha256: run_local.candidate_sha256().to_owned(),
                 args: request.args.clone(),
@@ -153,7 +153,7 @@ pub fn start_job(
         &secret_env,
         RequestedChildKind::DurableJob,
     )?;
-    onec_agent_protocol::validate_result_specs(&results)
+    hostlink_protocol::validate_result_specs(&results)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     if (native_effect.is_some() || native_suite_policy_sha256.is_some())
         && (run_local.is_none() || !secret_env.is_empty())
@@ -856,8 +856,7 @@ pub async fn run_worker(job_dir: &Path) -> io::Result<()> {
                 || commitment.invocation_sha256
                     != request.invocation_sha256.as_deref().unwrap_or_default()
                 || commitment.requested_exact_testcase
-                    != onec_agent_protocol::requested_exact_testcase(&request.args)
-                        .map(str::to_owned)
+                    != hostlink_protocol::requested_exact_testcase(&request.args).map(str::to_owned)
                 || commitment.native_effect != effect
                 || commitment.results != request.results
             {
@@ -1323,14 +1322,14 @@ pub(super) fn discard_result_workspace_with_primary_and(
 mod suite_policy_tests {
     use super::*;
 
-    fn policy() -> onec_agent_protocol::NativeSuitePolicy {
-        onec_agent_protocol::NativeSuitePolicy {
+    fn policy() -> hostlink_protocol::NativeSuitePolicy {
+        hostlink_protocol::NativeSuitePolicy {
             version: 1,
             runner_sha256: "a".repeat(64),
             args: vec!["run".into(), "--workspace".into()],
             env: BTreeMap::new(),
             expected_tests: vec!["crate::case_a".into(), "crate::case_b".into()],
-            effect: onec_agent_protocol::NativeExecutionEffect::ReadOnly,
+            effect: hostlink_protocol::NativeExecutionEffect::ReadOnly,
         }
     }
 
@@ -1415,7 +1414,7 @@ mod suite_policy_tests {
                 &"a".repeat(64),
                 &policy.args,
                 &policy.env,
-                onec_agent_protocol::NativeExecutionEffect::Disposable,
+                hostlink_protocol::NativeExecutionEffect::Disposable,
             )
             .is_err()
         );

@@ -3,7 +3,7 @@
 use crate::AppResult;
 use crate::remote::model::RemoteAgentClient;
 use bon::bon;
-use onec_agent_protocol::{
+use hostlink_protocol::{
     AgentRequestKind, AgentResponseKind, DEFAULT_EXEC_TIMEOUT_MS, NativeExecutionEffect,
     NativeSuitePolicy, ResultArtifactSpec, RunLocalJobIdentity, SecretEnvironment, StdinPayload,
     validate_result_specs,
@@ -428,7 +428,7 @@ fn job_start_request_kind(request: JobStartRequest) -> AgentRequestKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use onec_agent_protocol::AgentRequest;
+    use hostlink_protocol::AgentRequest;
 
     fn result_spec() -> ResultArtifactSpec {
         ResultArtifactSpec::try_new("report.bin".to_owned(), 1024, None)
@@ -441,7 +441,7 @@ mod tests {
         let first_id = exec_result_set_id(&specs).expect("result ID");
         let second_id = exec_result_set_id(&specs).expect("second result ID");
         assert_ne!(first_id, second_id);
-        onec_agent_protocol::validate_result_set_id(&first_id).expect("valid opaque ID");
+        hostlink_protocol::validate_result_set_id(&first_id).expect("valid opaque ID");
 
         let request = exec_request_kind(
             ExecRequest {
@@ -590,9 +590,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             result_set: Some(
-                onec_agent_protocol::ResultSetInfo::try_new(
-                    onec_agent_protocol::ResultOwner::exec("different-request")
-                        .expect("valid owner"),
+                hostlink_protocol::ResultSetInfo::try_new(
+                    hostlink_protocol::ResultOwner::exec("different-request").expect("valid owner"),
                     Vec::new(),
                 )
                 .expect("valid result set"),

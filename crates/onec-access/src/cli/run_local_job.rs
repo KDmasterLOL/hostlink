@@ -2,7 +2,7 @@
 
 use super::mutable_lease;
 use super::*;
-use onec_agent_protocol::{
+use hostlink_protocol::{
     AgentJobInfo, AgentJobState, AgentResponseKind, NativeInvocationIdentity, NativeSuitePolicy,
     RunLocalJobIdentity, RunLocalMappedFile,
 };
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 pub(super) struct StartOptions {
     pub(super) target: Option<String>,
     pub(super) effect: ManagedTargetEffect,
-    pub(super) native_effect: Option<onec_agent_protocol::NativeExecutionEffect>,
+    pub(super) native_effect: Option<hostlink_protocol::NativeExecutionEffect>,
     pub(super) native_suite_policy: Option<PathBuf>,
     pub(super) cwd: Option<String>,
     pub(super) ordinary_env: Vec<String>,
@@ -180,7 +180,7 @@ pub(super) async fn start(
     let run_id = uuid::Uuid::new_v4().simple().to_string();
     let (machine_id, _hub, client) = resolve(&target).await?;
     if let Some(native_effect) = native_effect {
-        if native_effect == onec_agent_protocol::NativeExecutionEffect::ReadOnly {
+        if native_effect == hostlink_protocol::NativeExecutionEffect::ReadOnly {
             return Err(crate::invalid_config(
                 "durable run-local jobs do not support read-only effect authorization".to_owned(),
             ));
@@ -550,7 +550,7 @@ pub(super) fn print_job(job: &AgentJobInfo, json: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use onec_agent_protocol::NativeExecutionEffect;
+    use hostlink_protocol::NativeExecutionEffect;
     use std::collections::BTreeMap;
 
     fn sample_policy() -> NativeSuitePolicy {
@@ -597,7 +597,7 @@ mod tests {
             .expect("durable reservation");
         assert!(validation < reserve);
         let native_effect_validation = source
-            .find("if native_effect == onec_agent_protocol::NativeExecutionEffect::ReadOnly")
+            .find("if native_effect == hostlink_protocol::NativeExecutionEffect::ReadOnly")
             .expect("durable native execution effect validation");
         let capability_gate = source
             .find("client.require_local_candidate_job_support().await?")

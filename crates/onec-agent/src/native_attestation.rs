@@ -1,7 +1,7 @@
 //! Dedicated host-native execution attestation key and terminal run-local signing.
 
 use ed25519_dalek::{Signature, Signer, SigningKey};
-use onec_agent_protocol::{
+use hostlink_protocol::{
     AgentJobState, AgentNativeInvocationOutputLogs, AgentNativeInvocationRecord,
     AgentTerminalExecutionRecord,
 };
@@ -39,7 +39,7 @@ struct StoredInvocationOutputCommitment {
     invocation_sha256: String,
     output_logs: AgentNativeInvocationOutputLogs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    result_set: Option<onec_agent_protocol::ResultSetInfo>,
+    result_set: Option<hostlink_protocol::ResultSetInfo>,
 }
 
 /// Signs an Agent-observed successful run-local invocation after scoped workspace removal.
@@ -159,8 +159,8 @@ pub(crate) fn observe_run_local_invocation(
 }
 
 #[cfg(windows)]
-fn observed_windows_facts() -> io::Result<Option<onec_agent_protocol::ObservedWindowsFacts>> {
-    use onec_agent_protocol::{ObservedWindowsFacts, WindowsArchitecture};
+fn observed_windows_facts() -> io::Result<Option<hostlink_protocol::ObservedWindowsFacts>> {
+    use hostlink_protocol::{ObservedWindowsFacts, WindowsArchitecture};
     use std::mem::size_of;
     use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
     use windows_sys::Win32::System::{
@@ -232,7 +232,7 @@ fn observed_windows_facts() -> io::Result<Option<onec_agent_protocol::ObservedWi
 }
 
 #[cfg(not(windows))]
-fn observed_windows_facts() -> io::Result<Option<onec_agent_protocol::ObservedWindowsFacts>> {
+fn observed_windows_facts() -> io::Result<Option<hostlink_protocol::ObservedWindowsFacts>> {
     Ok(None)
 }
 
@@ -337,7 +337,7 @@ pub(crate) fn fetch_run_local_invocation_observation(
 pub(crate) fn read_complete_invocation_output_logs(
     jobs_root: &Path,
     job_id: &str,
-    job: &onec_agent_protocol::AgentJobInfo,
+    job: &hostlink_protocol::AgentJobInfo,
 ) -> io::Result<AgentNativeInvocationOutputLogs> {
     if job.stdout_log_truncated || job.stderr_log_truncated {
         return Err(invalid("invocation output logs are truncated"));
@@ -371,7 +371,7 @@ pub(crate) fn read_complete_invocation_output_logs(
 #[cfg(test)]
 pub(crate) fn read_completed_invocation_output_logs(
     jobs_root: &Path,
-    job: &onec_agent_protocol::AgentJobInfo,
+    job: &hostlink_protocol::AgentJobInfo,
     expected_invocation_sha256: &str,
 ) -> io::Result<AgentNativeInvocationOutputLogs> {
     Ok(
@@ -382,7 +382,7 @@ pub(crate) fn read_completed_invocation_output_logs(
 
 fn read_completed_invocation_output_commitment(
     jobs_root: &Path,
-    job: &onec_agent_protocol::AgentJobInfo,
+    job: &hostlink_protocol::AgentJobInfo,
     expected_invocation_sha256: &str,
 ) -> io::Result<StoredInvocationOutputCommitment> {
     let identity = job
@@ -408,10 +408,10 @@ fn read_completed_invocation_output_commitment(
 
 pub(crate) fn write_completed_invocation_output_logs(
     jobs_root: &Path,
-    job: &onec_agent_protocol::AgentJobInfo,
+    job: &hostlink_protocol::AgentJobInfo,
     expected_invocation_sha256: &str,
     output_logs: AgentNativeInvocationOutputLogs,
-    result_set: Option<onec_agent_protocol::ResultSetInfo>,
+    result_set: Option<hostlink_protocol::ResultSetInfo>,
 ) -> io::Result<()> {
     let identity = job
         .run_local
@@ -442,8 +442,8 @@ pub(crate) fn write_completed_invocation_output_logs(
 }
 
 fn validate_result_set_commitment(
-    job: &onec_agent_protocol::AgentJobInfo,
-    declared: &[onec_agent_protocol::ResultArtifactSpec],
+    job: &hostlink_protocol::AgentJobInfo,
+    declared: &[hostlink_protocol::ResultArtifactSpec],
 ) -> io::Result<()> {
     match &job.result_set {
         None if declared.is_empty() => Ok(()),
@@ -608,7 +608,7 @@ fn validate_invocation_request(job_id: &str, challenge: &str, digest: &str) -> i
 
 fn validate_candidate_bytes(
     jobs_root: &Path,
-    identity: &onec_agent_protocol::RunLocalJobIdentity,
+    identity: &hostlink_protocol::RunLocalJobIdentity,
 ) -> io::Result<()> {
     let path = jobs_root
         .join("run-local-cache")
@@ -641,8 +641,8 @@ fn read_invocation_commitment(
 }
 
 fn validate_invocation_job(
-    first: &onec_agent_protocol::AgentJobInfo,
-    job: &onec_agent_protocol::AgentJobInfo,
+    first: &hostlink_protocol::AgentJobInfo,
+    job: &hostlink_protocol::AgentJobInfo,
     run_id: &str,
     _challenge: &str,
 ) -> io::Result<()> {
@@ -1231,7 +1231,7 @@ mod tests {
         );
         assert_eq!(
             record.declared_effect,
-            onec_agent_protocol::NativeExecutionEffect::ReadOnly
+            hostlink_protocol::NativeExecutionEffect::ReadOnly
         );
         assert_eq!(record.host_arch, std::env::consts::ARCH);
         assert_eq!(record.host_os, std::env::consts::OS);
@@ -1261,7 +1261,7 @@ mod tests {
                 .is_err()
         );
         let mut changed_effect = record.clone();
-        changed_effect.declared_effect = onec_agent_protocol::NativeExecutionEffect::Disposable;
+        changed_effect.declared_effect = hostlink_protocol::NativeExecutionEffect::Disposable;
         assert!(
             key.verifying_key()
                 .verify_strict(
@@ -1519,7 +1519,7 @@ mod tests {
 
     #[test]
     fn invocation_result_manifest_requires_exact_job_owner_and_declarations() {
-        use onec_agent_protocol::{
+        use hostlink_protocol::{
             AgentJobState, ResultArtifactInfo, ResultArtifactSpec, ResultOwner, ResultSetInfo,
         };
 
@@ -1541,7 +1541,7 @@ mod tests {
             vec![artifact],
         )
         .expect("result set");
-        let job = onec_agent_protocol::AgentJobInfo {
+        let job = hostlink_protocol::AgentJobInfo {
             job_id: "job-result-owner".to_owned(),
             state: AgentJobState::Succeeded,
             worker_pid: None,
@@ -1631,7 +1631,7 @@ mod tests {
         let candidate_name = format!("sha256-{candidate_sha256}.exe");
         let candidate_path = candidate_dir.join(&candidate_name);
         fs::write(&candidate_path, candidate_bytes).expect("candidate file");
-        let identity = onec_agent_protocol::RunLocalJobIdentity::try_new(
+        let identity = hostlink_protocol::RunLocalJobIdentity::try_new(
             run_id.clone(),
             candidate_name,
             candidate_sha256,
@@ -1642,9 +1642,9 @@ mod tests {
         hostlink_core::create_private_directory(&job_dir).expect("job directory");
         let args = vec!["--exact".to_owned(), "fixture::approved_case".to_owned()];
         let program = candidate_path.to_string_lossy().into_owned();
-        let effect = onec_agent_protocol::NativeExecutionEffect::ReadOnly;
+        let effect = hostlink_protocol::NativeExecutionEffect::ReadOnly;
         let env = std::collections::BTreeMap::new();
-        let invocation = onec_agent_protocol::NativeInvocationIdentity {
+        let invocation = hostlink_protocol::NativeInvocationIdentity {
             program: &program,
             args: &args,
             cwd: None,
@@ -1673,7 +1673,7 @@ mod tests {
             }),
         )
         .expect("persist immutable invocation request");
-        let job = onec_agent_protocol::AgentJobInfo {
+        let job = hostlink_protocol::AgentJobInfo {
             job_id: job_id.clone(),
             state: AgentJobState::Succeeded,
             worker_pid: None,
@@ -1746,7 +1746,7 @@ mod tests {
         let job_dir = jobs.join(&job_id);
         fs::create_dir(&job_dir).expect("job directory");
         hostlink_core::ensure_private_directory(&job_dir).expect("private job directory");
-        let job = onec_agent_protocol::AgentJobInfo {
+        let job = hostlink_protocol::AgentJobInfo {
             job_id: job_id.clone(),
             state,
             worker_pid: None,
@@ -1761,7 +1761,7 @@ mod tests {
             stderr_log_truncated: false,
             result_set: None,
             run_local: Some(
-                onec_agent_protocol::RunLocalJobIdentity::try_new(
+                hostlink_protocol::RunLocalJobIdentity::try_new(
                     run_id.clone(),
                     format!("sha256-{}.exe", "d".repeat(64)),
                     "d".repeat(64),

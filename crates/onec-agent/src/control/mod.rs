@@ -237,13 +237,13 @@ fn read_initial_request(
     // application response that the dispatch path historically returned.
     let mut reader = BufReader::new(stream.try_clone()?);
     let line =
-        hostlink_core::read_line_bounded(&mut reader, onec_agent_protocol::MAX_CONTROL_LINE_BYTES)?
+        hostlink_core::read_line_bounded(&mut reader, hostlink_protocol::MAX_CONTROL_LINE_BYTES)?
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "input closed before a JSON line",
-                )
-            })?;
+            io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "input closed before a JSON line",
+            )
+        })?;
     let request = decode_initial_request(&line, runtime);
     stream.set_read_timeout(None)?;
     request
@@ -253,7 +253,7 @@ fn decode_initial_request(
     line: &[u8],
     runtime: &AgentRuntime,
 ) -> io::Result<Result<AgentRequest, AgentResponse>> {
-    match onec_agent_protocol::decode_agent_request(line)
+    match hostlink_protocol::decode_agent_request(line)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
     {
         Ok(request) => Ok(Ok(request)),
@@ -272,30 +272,30 @@ fn decode_initial_request(
             }
             let detail = error.message();
             let response = match error.kind() {
-                onec_agent_protocol::AgentRequestValidationKind::ExecResults => {
+                hostlink_protocol::AgentRequestValidationKind::ExecResults => {
                     AgentResponse::failure_with_code(
                         AgentErrorCode::ExecResultInvalid,
                         format!("exec result declaration is invalid: {detail}"),
                     )
                 }
-                onec_agent_protocol::AgentRequestValidationKind::JobStartResults => {
+                hostlink_protocol::AgentRequestValidationKind::JobStartResults => {
                     AgentResponse::failure(format!("failed to start job: {detail}"))
                 }
-                onec_agent_protocol::AgentRequestValidationKind::JobStartRunLocalIdentity => {
+                hostlink_protocol::AgentRequestValidationKind::JobStartRunLocalIdentity => {
                     AgentResponse::failure(format!("failed to start job: {detail}"))
                 }
-                onec_agent_protocol::AgentRequestValidationKind::NativeInvocationObservation => {
+                hostlink_protocol::AgentRequestValidationKind::NativeInvocationObservation => {
                     AgentResponse::failure(format!(
                         "native invocation observation unavailable: {detail}"
                     ))
                 }
-                onec_agent_protocol::AgentRequestValidationKind::ResultDownloadOwner => {
+                hostlink_protocol::AgentRequestValidationKind::ResultDownloadOwner => {
                     AgentResponse::failure_with_code(
                         AgentErrorCode::ResultDownloadFailed,
                         "managed result is unavailable or invalid",
                     )
                 }
-                onec_agent_protocol::AgentRequestValidationKind::ResultCleanupOwner => {
+                hostlink_protocol::AgentRequestValidationKind::ResultCleanupOwner => {
                     AgentResponse::failure_with_code(
                         AgentErrorCode::ResultCleanupFailed,
                         "managed result set could not be safely removed",
@@ -324,7 +324,7 @@ mod connection_tests {
             .expect("valid JSON has an application result")
             .expect_err("invalid Exec result declaration must be rejected");
         assert_eq!(response.error_code, Some(AgentErrorCode::ExecResultInvalid));
-        let Err(validation) = onec_agent_protocol::decode_agent_request(malformed_result)
+        let Err(validation) = hostlink_protocol::decode_agent_request(malformed_result)
             .expect("valid JSON has typed semantic failure")
         else {
             panic!("invalid result declaration unexpectedly decoded");

@@ -2,7 +2,7 @@
 
 use crate::AppResult;
 use crate::error::{protocol_io, protocol_json};
-use onec_agent_protocol::{
+use hostlink_protocol::{
     AgentRequest, AgentResponse, AgentResponseKind, MAX_CONTROL_LINE_BYTES, PROTOCOL_VERSION,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -103,7 +103,7 @@ pub(super) fn response_is_path_not_found(response: &AgentResponse) -> bool {
     response.version == PROTOCOL_VERSION
         && !response.ok
         && response.response.is_none()
-        && response.error_code == Some(onec_agent_protocol::AgentErrorCode::PathNotFound)
+        && response.error_code == Some(hostlink_protocol::AgentErrorCode::PathNotFound)
 }
 
 pub(super) fn response_is_opaque_failure(response: &AgentResponse) -> bool {
@@ -116,7 +116,7 @@ pub(super) fn response_is_opaque_failure(response: &AgentResponse) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{response_is_opaque_failure, response_is_path_not_found};
-    use onec_agent_protocol::{AgentErrorCode, AgentResponse, AgentResponseKind, PROTOCOL_VERSION};
+    use hostlink_protocol::{AgentErrorCode, AgentResponse, AgentResponseKind, PROTOCOL_VERSION};
 
     #[test]
     fn only_explicit_path_not_found_is_a_cache_miss() {

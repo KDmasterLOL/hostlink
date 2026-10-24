@@ -397,7 +397,7 @@ pub(super) async fn run_local(
     let executable = local_regular_file(executable).await?;
     let receipt_filter = if evidence_dir.is_some() {
         Some(
-            onec_agent_protocol::requested_exact_testcase(args)
+            hostlink_protocol::requested_exact_testcase(args)
                 .ok_or_else(|| {
                     crate::invalid_config(
                         "run-local execution evidence requires one unambiguous bounded --exact libtest filter and forbids --list and --skip"

@@ -11,7 +11,7 @@ fn durable_job_reports_primary_and_scoped_cleanup_failures_and_retains_workspace
             &job_dir,
             "job-cleanup-failure",
             &[
-                onec_agent_protocol::ResultArtifactSpec::try_new("report.bin".to_owned(), 64, None)
+                hostlink_protocol::ResultArtifactSpec::try_new("report.bin".to_owned(), 64, None)
                     .expect("valid result declaration"),
             ],
         )
@@ -61,16 +61,13 @@ fn local_candidate_requires_exact_cache_digest_and_job_owned_mapped_paths() {
         .join("mapped")
         .join(format!("ONEC_INPUT-sha256-{mapped_digest}"));
     fs::write(&mapped_path, b"mapped-input").expect("mapped bytes");
-    let identity = onec_agent_protocol::RunLocalJobIdentity::try_new(
+    let identity = hostlink_protocol::RunLocalJobIdentity::try_new(
         run_id.to_owned(),
         candidate_name.clone(),
         candidate_digest.clone(),
         vec![
-            onec_agent_protocol::RunLocalMappedFile::try_new(
-                "ONEC_INPUT".to_owned(),
-                mapped_digest,
-            )
-            .expect("valid mapped identity"),
+            hostlink_protocol::RunLocalMappedFile::try_new("ONEC_INPUT".to_owned(), mapped_digest)
+                .expect("valid mapped identity"),
         ],
     )
     .expect("valid local identity");
@@ -87,7 +84,7 @@ fn local_candidate_requires_exact_cache_digest_and_job_owned_mapped_paths() {
     )
     .expect("exact owned candidate and mapped input");
     assert!(
-        onec_agent_protocol::RunLocalJobIdentity::try_new(
+        hostlink_protocol::RunLocalJobIdentity::try_new(
             run_id.to_owned(),
             format!("sha256-{candidate_digest};untrusted"),
             candidate_digest.clone(),
@@ -137,7 +134,7 @@ fn local_candidate_requires_exact_cache_digest_and_job_owned_mapped_paths() {
 async fn native_invocation_worker_rejects_forged_argv_before_child_spawn() {
     let root = tempfile::tempdir().expect("jobs root");
     let run_id = "0123456789abcdef0123456789abcdef";
-    let identity = onec_agent_protocol::RunLocalJobIdentity::try_new(
+    let identity = hostlink_protocol::RunLocalJobIdentity::try_new(
         run_id.to_owned(),
         format!("sha256-{}.exe", "a".repeat(64)),
         "a".repeat(64),
@@ -151,7 +148,7 @@ async fn native_invocation_worker_rejects_forged_argv_before_child_spawn() {
     let env = BTreeMap::new();
     let stdin = None;
     let results = Vec::new();
-    let effect = onec_agent_protocol::NativeExecutionEffect::ReadOnly;
+    let effect = hostlink_protocol::NativeExecutionEffect::ReadOnly;
     let expected_launch = JobRequestFile {
         version: JOB_SCHEMA_VERSION,
         program: program.clone(),
@@ -253,7 +250,7 @@ async fn native_invocation_signs_worker_published_result_manifest_after_cleanup(
     fs::write(&candidate_path, script).expect("candidate script");
     fs::set_permissions(&candidate_path, fs::Permissions::from_mode(0o700))
         .expect("executable candidate");
-    let identity = onec_agent_protocol::RunLocalJobIdentity::try_new(
+    let identity = hostlink_protocol::RunLocalJobIdentity::try_new(
         run_id.to_owned(),
         candidate_name,
         candidate_sha256,
@@ -264,7 +261,7 @@ async fn native_invocation_signs_worker_published_result_manifest_after_cleanup(
     let job_dir = root.path().join(job_id);
     ensure_private_directory(&job_dir).expect("job directory");
     let results = vec![
-        onec_agent_protocol::ResultArtifactSpec::try_new(
+        hostlink_protocol::ResultArtifactSpec::try_new(
             "report.bin".to_owned(),
             1024,
             Some("application/octet-stream".to_owned()),
@@ -281,7 +278,7 @@ async fn native_invocation_signs_worker_published_result_manifest_after_cleanup(
         results,
         run_local: Some(identity.clone()),
         invocation_sha256: None,
-        native_effect: Some(onec_agent_protocol::NativeExecutionEffect::ReadOnly),
+        native_effect: Some(hostlink_protocol::NativeExecutionEffect::ReadOnly),
         native_suite_policy_sha256: None,
         native_suite_expected_tests: None,
     };
@@ -293,9 +290,9 @@ async fn native_invocation_signs_worker_published_result_manifest_after_cleanup(
         &NativeInvocationCommitment {
             version: 1,
             invocation_sha256: invocation_sha256.clone(),
-            requested_exact_testcase: onec_agent_protocol::requested_exact_testcase(&request.args)
+            requested_exact_testcase: hostlink_protocol::requested_exact_testcase(&request.args)
                 .map(str::to_owned),
-            native_effect: onec_agent_protocol::NativeExecutionEffect::ReadOnly,
+            native_effect: hostlink_protocol::NativeExecutionEffect::ReadOnly,
             results: request.results.clone(),
         },
     )
@@ -479,7 +476,7 @@ fn durable_local_status_reconnects_by_run_identity() {
         stderr_log_truncated: false,
         result_set: None,
         run_local: Some(
-            onec_agent_protocol::RunLocalJobIdentity::try_new(
+            hostlink_protocol::RunLocalJobIdentity::try_new(
                 run_id.to_owned(),
                 format!("sha256-{}.exe", "a".repeat(64)),
                 "a".repeat(64),
@@ -525,7 +522,7 @@ fn run_id_lookup_skips_unrelated_control_locks_and_reconciles_match() {
             stderr_log_truncated: false,
             result_set: None,
             run_local: Some(
-                onec_agent_protocol::RunLocalJobIdentity::try_new(
+                hostlink_protocol::RunLocalJobIdentity::try_new(
                     unrelated_run_id.to_owned(),
                     format!("sha256-{}.exe", "a".repeat(64)),
                     "a".repeat(64),
@@ -560,7 +557,7 @@ fn run_id_lookup_skips_unrelated_control_locks_and_reconciles_match() {
             stderr_log_truncated: false,
             result_set: None,
             run_local: Some(
-                onec_agent_protocol::RunLocalJobIdentity::try_new(
+                hostlink_protocol::RunLocalJobIdentity::try_new(
                     matching_run_id.to_owned(),
                     format!("sha256-{}.exe", "b".repeat(64)),
                     "b".repeat(64),
@@ -616,7 +613,7 @@ fn run_id_lookup_reads_many_terminal_jobs_without_control_locks() {
                 stderr_log_truncated: false,
                 result_set: None,
                 run_local: Some(
-                    onec_agent_protocol::RunLocalJobIdentity::try_new(
+                    hostlink_protocol::RunLocalJobIdentity::try_new(
                         format!("{index:032x}"),
                         format!("sha256-{}.exe", "c".repeat(64)),
                         "c".repeat(64),
@@ -694,7 +691,7 @@ fn queued_job(
     root: &Path,
     script: &str,
     stdin: Option<StdinPayload>,
-    results: Vec<onec_agent_protocol::ResultArtifactSpec>,
+    results: Vec<hostlink_protocol::ResultArtifactSpec>,
 ) -> PathBuf {
     let job_dir = root.join("job-test");
     ensure_private_directory(&job_dir).expect("private job directory");
@@ -800,7 +797,7 @@ async fn native_invocation_worker_commits_digests_of_its_finalized_output_logs()
     fs::write(&candidate_path, candidate_bytes).expect("candidate script");
     fs::set_permissions(&candidate_path, fs::Permissions::from_mode(0o700))
         .expect("executable candidate");
-    let identity = onec_agent_protocol::RunLocalJobIdentity::try_new(
+    let identity = hostlink_protocol::RunLocalJobIdentity::try_new(
         run_id,
         candidate_name,
         candidate_sha256,
@@ -820,7 +817,7 @@ async fn native_invocation_worker_commits_digests_of_its_finalized_output_logs()
         results: Vec::new(),
         run_local: Some(identity.clone()),
         invocation_sha256: None,
-        native_effect: Some(onec_agent_protocol::NativeExecutionEffect::ReadOnly),
+        native_effect: Some(hostlink_protocol::NativeExecutionEffect::ReadOnly),
         native_suite_policy_sha256: None,
         native_suite_expected_tests: None,
     };
@@ -832,9 +829,9 @@ async fn native_invocation_worker_commits_digests_of_its_finalized_output_logs()
         &NativeInvocationCommitment {
             version: 1,
             invocation_sha256: invocation_sha256.clone(),
-            requested_exact_testcase: onec_agent_protocol::requested_exact_testcase(&request.args)
+            requested_exact_testcase: hostlink_protocol::requested_exact_testcase(&request.args)
                 .map(str::to_owned),
-            native_effect: onec_agent_protocol::NativeExecutionEffect::ReadOnly,
+            native_effect: hostlink_protocol::NativeExecutionEffect::ReadOnly,
             results: request.results.clone(),
         },
     )
@@ -1044,7 +1041,7 @@ async fn durable_log_failure_overrides_requested_cancellation_after_confirmed_te
 #[tokio::test]
 async fn durable_worker_reports_stdin_pipe_failure_as_failed_state() {
     let root = tempfile::tempdir().expect("tempdir");
-    let payload = vec![b'x'; onec_agent_protocol::MAX_STDIN_PAYLOAD_BYTES];
+    let payload = vec![b'x'; hostlink_protocol::MAX_STDIN_PAYLOAD_BYTES];
     let job_dir = queued_job(
         root.path(),
         "exec 0<&-; sleep 1; exit 0",
@@ -1071,7 +1068,7 @@ async fn durable_worker_reports_stdin_pipe_failure_as_failed_state() {
 #[tokio::test]
 async fn durable_worker_preserves_stdin_failure_when_child_exits_nonzero() {
     let root = tempfile::tempdir().expect("tempdir");
-    let payload = vec![b'x'; onec_agent_protocol::MAX_STDIN_PAYLOAD_BYTES];
+    let payload = vec![b'x'; hostlink_protocol::MAX_STDIN_PAYLOAD_BYTES];
     let job_dir = queued_job(
         root.path(),
         "exec 0<&-; sleep 0.2; exit 7",
@@ -1122,7 +1119,7 @@ fn interrupted_status_preserves_workspace_even_with_forgeable_child_marker() {
     let workspace = crate::results::ResultWorkspace::prepare_job(
         &job_dir,
         job_id,
-        &[onec_agent_protocol::ResultArtifactSpec::try_new(
+        &[hostlink_protocol::ResultArtifactSpec::try_new(
             "report.bin".to_owned(),
             64,
             Some("application/octet-stream".to_owned()),
@@ -1167,7 +1164,7 @@ fn queued_job_without_live_worker_or_spawn_owner_recovers_as_failed() {
         stderr_log_truncated: false,
         result_set: None,
         run_local: Some(
-            onec_agent_protocol::RunLocalJobIdentity::try_new(
+            hostlink_protocol::RunLocalJobIdentity::try_new(
                 "0123456789abcdef0123456789abcdef".to_owned(),
                 format!("sha256-{}.exe", "a".repeat(64)),
                 "a".repeat(64),
@@ -1415,7 +1412,7 @@ fn queued_run_local_invocation(
     job_id: &str,
     script: &[u8],
     mapped_inputs: &[(&str, &[u8])],
-    results: Vec<onec_agent_protocol::ResultArtifactSpec>,
+    results: Vec<hostlink_protocol::ResultArtifactSpec>,
 ) -> (String, PathBuf, Vec<PathBuf>) {
     use std::os::unix::fs::PermissionsExt;
 
@@ -1432,7 +1429,7 @@ fn queued_run_local_invocation(
     fs::write(&candidate_path, script).expect("candidate script");
     fs::set_permissions(&candidate_path, fs::Permissions::from_mode(0o700))
         .expect("executable candidate");
-    let identity = onec_agent_protocol::RunLocalJobIdentity::try_new(
+    let identity = hostlink_protocol::RunLocalJobIdentity::try_new(
         run_id.to_owned(),
         candidate_name,
         candidate_sha256.clone(),
@@ -1440,7 +1437,7 @@ fn queued_run_local_invocation(
             .iter()
             .map(|(environment_name, bytes)| {
                 let sha256 = format!("{:x}", sha2::Sha256::digest(bytes));
-                onec_agent_protocol::RunLocalMappedFile::try_new(
+                hostlink_protocol::RunLocalMappedFile::try_new(
                     (*environment_name).to_owned(),
                     sha256,
                 )
@@ -1477,7 +1474,7 @@ fn queued_run_local_invocation(
         results,
         run_local: Some(identity.clone()),
         invocation_sha256: None,
-        native_effect: Some(onec_agent_protocol::NativeExecutionEffect::ReadOnly),
+        native_effect: Some(hostlink_protocol::NativeExecutionEffect::ReadOnly),
         native_suite_policy_sha256: None,
         native_suite_expected_tests: None,
     };
@@ -1491,9 +1488,9 @@ fn queued_run_local_invocation(
         &NativeInvocationCommitment {
             version: 1,
             invocation_sha256: invocation_sha256.clone(),
-            requested_exact_testcase: onec_agent_protocol::requested_exact_testcase(&request.args)
+            requested_exact_testcase: hostlink_protocol::requested_exact_testcase(&request.args)
                 .map(str::to_owned),
-            native_effect: onec_agent_protocol::NativeExecutionEffect::ReadOnly,
+            native_effect: hostlink_protocol::NativeExecutionEffect::ReadOnly,
             results: request.results.clone(),
         },
     )
@@ -1538,7 +1535,7 @@ async fn native_suite_inventory_tamper_fails_owned_job_before_any_runner_launch(
             .expect("read admitted request");
     request.args = vec!["--approved-suite-args".to_owned()];
     let expected_tests = vec!["suite::case".to_owned()];
-    let policy = onec_agent_protocol::NativeSuitePolicy {
+    let policy = hostlink_protocol::NativeSuitePolicy {
         version: 1,
         runner_sha256: request
             .run_local
@@ -1549,7 +1546,7 @@ async fn native_suite_inventory_tamper_fails_owned_job_before_any_runner_launch(
         args: request.args.clone(),
         env: request.env.clone(),
         expected_tests: expected_tests.clone(),
-        effect: onec_agent_protocol::NativeExecutionEffect::ReadOnly,
+        effect: hostlink_protocol::NativeExecutionEffect::ReadOnly,
     };
     request.native_suite_policy_sha256 = Some(policy.sha256().expect("canonical policy digest"));
     request.native_suite_expected_tests = Some(expected_tests);
@@ -1565,7 +1562,7 @@ async fn native_suite_inventory_tamper_fails_owned_job_before_any_runner_launch(
         serde_json::to_vec(&workflow::native_invocation_commitment(
             &request,
             invocation_sha256.clone(),
-            onec_agent_protocol::NativeExecutionEffect::ReadOnly,
+            hostlink_protocol::NativeExecutionEffect::ReadOnly,
         ))
         .expect("serialize immutable invocation commitment"),
     )
@@ -1616,7 +1613,7 @@ async fn native_suite_inventory_tamper_fails_owned_job_before_any_runner_launch(
 async fn native_invocation_rejects_candidate_changed_by_successful_process() {
     let root = tempfile::tempdir().expect("jobs root");
     let results = vec![
-        onec_agent_protocol::ResultArtifactSpec::try_new(
+        hostlink_protocol::ResultArtifactSpec::try_new(
             "report.xml".to_owned(),
             1024,
             Some("application/xml".to_owned()),
@@ -1667,7 +1664,7 @@ async fn native_invocation_rejects_candidate_changed_by_successful_process() {
 async fn native_invocation_rejects_mapped_file_changed_by_successful_process() {
     let root = tempfile::tempdir().expect("jobs root");
     let results = vec![
-        onec_agent_protocol::ResultArtifactSpec::try_new(
+        hostlink_protocol::ResultArtifactSpec::try_new(
             "report.xml".to_owned(),
             1024,
             Some("application/xml".to_owned()),
@@ -1732,7 +1729,7 @@ async fn native_invocation_rejects_mapped_file_changed_by_successful_process() {
 #[tokio::test]
 async fn durable_worker_supervises_and_finalizes_result_workspace_before_terminal_state() {
     let root = tempfile::tempdir().expect("tempdir");
-    let spec = onec_agent_protocol::ResultArtifactSpec::try_new(
+    let spec = hostlink_protocol::ResultArtifactSpec::try_new(
         "report.bin".to_owned(),
         64,
         Some("application/octet-stream".to_owned()),
@@ -1771,7 +1768,7 @@ async fn durable_worker_supervises_and_finalizes_result_workspace_before_termina
 #[tokio::test]
 async fn durable_worker_rejects_undeclared_result_while_child_is_running() {
     let root = tempfile::tempdir().expect("tempdir");
-    let spec = onec_agent_protocol::ResultArtifactSpec::try_new("report.bin".to_owned(), 64, None)
+    let spec = hostlink_protocol::ResultArtifactSpec::try_new("report.bin".to_owned(), 64, None)
         .expect("valid result spec");
     let job_dir = queued_job(
         root.path(),
@@ -1933,7 +1930,7 @@ fn interrupted_status_preserves_unpublished_results_when_state_publication_fails
     let workspace = crate::results::ResultWorkspace::prepare_job(
         &job_dir,
         job_id,
-        &[onec_agent_protocol::ResultArtifactSpec::try_new(
+        &[hostlink_protocol::ResultArtifactSpec::try_new(
             "report.bin".to_owned(),
             64,
             Some("application/octet-stream".to_owned()),

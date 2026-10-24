@@ -14,7 +14,7 @@ use hostlink_core::{
     create_private_directory, ensure_private_directory, move_file_atomically, remove_path_scoped,
     restrict_private_directory, write_new_json_file,
 };
-use onec_agent_protocol::{
+use hostlink_protocol::{
     ResultArtifactInfo, ResultArtifactSpec, ResultOwner, ResultSetInfo, validate_result_name,
     validate_result_set_id, validate_result_specs,
 };

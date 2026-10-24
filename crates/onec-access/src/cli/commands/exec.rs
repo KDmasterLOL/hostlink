@@ -20,7 +20,7 @@ pub(crate) struct Args {
     /// Local directory for declared result artifacts; required with --result.
     #[arg(long, value_name = "DIR")]
     pub(crate) result_dir: Option<PathBuf>,
-    #[arg(long, default_value_t = onec_agent_protocol::DEFAULT_EXEC_TIMEOUT_MS)]
+    #[arg(long, default_value_t = hostlink_protocol::DEFAULT_EXEC_TIMEOUT_MS)]
     pub(crate) timeout_ms: u64,
     #[arg(required = true, trailing_var_arg = true)]
     pub(crate) command: Vec<String>,

@@ -4,7 +4,7 @@ use super::{create_local_temp_file, download::publish_staged_file, download::tra
 use crate::remote::model::RemoteAgentClient;
 use crate::remote::protocol::{read_response_unbuffered, response_into_kind, write_request};
 use crate::{AppResult, io_error};
-use onec_agent_protocol::{
+use hostlink_protocol::{
     AgentRequest, AgentRequestKind, AgentResponseKind, ResultArtifactInfo, ResultOwner,
 };
 use std::fs;

@@ -49,10 +49,10 @@ struct ImmediateExecRequest {
     args: Vec<String>,
     cwd: Option<String>,
     environment: std::collections::BTreeMap<String, String>,
-    secret_env: onec_agent_protocol::SecretEnvironment,
-    stdin: Option<onec_agent_protocol::StdinPayload>,
+    secret_env: hostlink_protocol::SecretEnvironment,
+    stdin: Option<hostlink_protocol::StdinPayload>,
     result_set_id: Option<String>,
-    results: Vec<onec_agent_protocol::ResultArtifactSpec>,
+    results: Vec<hostlink_protocol::ResultArtifactSpec>,
     timeout_ms: u64,
     raw_output: bool,
 }
@@ -523,12 +523,12 @@ async fn run_immediate_exec(
         timeout_ms,
         raw_output,
     } = request;
-    if timeout_ms == 0 || timeout_ms > onec_agent_protocol::MAX_EXEC_TIMEOUT_MS {
+    if timeout_ms == 0 || timeout_ms > hostlink_protocol::MAX_EXEC_TIMEOUT_MS {
         return AgentResponse::failure_with_code(
             AgentErrorCode::ExecInvalidTimeout,
             format!(
                 "exec timeout must be between 1 and {} ms, got {timeout_ms}",
-                onec_agent_protocol::MAX_EXEC_TIMEOUT_MS
+                hostlink_protocol::MAX_EXEC_TIMEOUT_MS
             ),
         );
     }
@@ -973,7 +973,7 @@ fn finalize_run_local_job(jobs_root: &Path, job_id: &str) -> io::Result<bool> {
             "run-local job is not terminal",
         ));
     }
-    if job.state == onec_agent_protocol::AgentJobState::Interrupted {
+    if job.state == hostlink_protocol::AgentJobState::Interrupted {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "interrupted job process-tree teardown is unconfirmed; preserve its workspace",
@@ -989,7 +989,7 @@ fn finalize_run_local_job(jobs_root: &Path, job_id: &str) -> io::Result<bool> {
     let job = jobs::status(jobs_root, job_id)?;
     if job.run_local.as_ref().map(|current| current.run_id()) != Some(identity.run_id())
         || !job.state.is_terminal()
-        || job.state == onec_agent_protocol::AgentJobState::Interrupted
+        || job.state == hostlink_protocol::AgentJobState::Interrupted
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1120,7 +1120,7 @@ fn with_immediate_exec_deadline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use onec_agent_protocol::ResultArtifactSpec;
+    use hostlink_protocol::ResultArtifactSpec;
 
     #[test]
     fn capabilities_do_not_promote_process_observation_to_suite_evidence() {
@@ -1313,9 +1313,9 @@ mod tests {
         let job_dir = jobs.join(job_id);
         fs::create_dir(&job_dir).expect("job directory");
         hostlink_core::ensure_private_directory(&job_dir).expect("private job directory");
-        let job = onec_agent_protocol::AgentJobInfo {
+        let job = hostlink_protocol::AgentJobInfo {
             job_id: job_id.to_owned(),
-            state: onec_agent_protocol::AgentJobState::Queued,
+            state: hostlink_protocol::AgentJobState::Queued,
             worker_pid: None,
             spawn_owner_pid: Some(std::process::id()),
             process_pid: None,
@@ -1328,7 +1328,7 @@ mod tests {
             stderr_log_truncated: false,
             result_set: None,
             run_local: Some(
-                onec_agent_protocol::RunLocalJobIdentity::try_new(
+                hostlink_protocol::RunLocalJobIdentity::try_new(
                     run_id.to_owned(),
                     format!("sha256-{}.exe", "a".repeat(64)),
                     "a".repeat(64),
@@ -1376,9 +1376,9 @@ mod tests {
         std::fs::create_dir(&job_dir).expect("job directory");
         hostlink_core::ensure_private_directory(&job_dir).expect("private job directory");
 
-        let mut job = onec_agent_protocol::AgentJobInfo {
+        let mut job = hostlink_protocol::AgentJobInfo {
             job_id: job_id.to_owned(),
-            state: onec_agent_protocol::AgentJobState::Running,
+            state: hostlink_protocol::AgentJobState::Running,
             worker_pid: None,
             spawn_owner_pid: None,
             process_pid: None,
@@ -1391,7 +1391,7 @@ mod tests {
             stderr_log_truncated: false,
             result_set: None,
             run_local: Some(
-                onec_agent_protocol::RunLocalJobIdentity::try_new(
+                hostlink_protocol::RunLocalJobIdentity::try_new(
                     run_id.to_owned(),
                     format!("sha256-{}.exe", "a".repeat(64)),
                     "a".repeat(64),
@@ -1400,7 +1400,7 @@ mod tests {
                 .expect("valid run-local identity"),
             ),
         };
-        let save = |job: &onec_agent_protocol::AgentJobInfo| {
+        let save = |job: &hostlink_protocol::AgentJobInfo| {
             std::fs::write(
                 job_dir.join("state-000000.json"),
                 serde_json::to_vec(&serde_json::json!({"version": 1, "job": job}))
@@ -1412,16 +1412,16 @@ mod tests {
         assert!(finalize_run_local_job(&jobs, job_id).is_err());
         assert!(workspace.is_dir());
 
-        job.state = onec_agent_protocol::AgentJobState::Interrupted;
+        job.state = hostlink_protocol::AgentJobState::Interrupted;
         job.finished_unix_ms = Some(2);
         save(&job);
         assert!(finalize_run_local_job(&jobs, job_id).is_err());
         assert!(workspace.is_dir());
 
-        job.state = onec_agent_protocol::AgentJobState::Succeeded;
+        job.state = hostlink_protocol::AgentJobState::Succeeded;
         job.result_set = Some(
-            onec_agent_protocol::ResultSetInfo::try_new(
-                onec_agent_protocol::ResultOwner::job(job_id).expect("valid job owner"),
+            hostlink_protocol::ResultSetInfo::try_new(
+                hostlink_protocol::ResultOwner::job(job_id).expect("valid job owner"),
                 Vec::new(),
             )
             .expect("valid empty result set"),

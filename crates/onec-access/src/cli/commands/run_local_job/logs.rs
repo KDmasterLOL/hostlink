@@ -28,7 +28,7 @@ pub(super) async fn run(args: Args) -> hostlink_access::AppResult<()> {
     .await?;
     let expected_job_id = job.job_id.clone();
     let response = client.job_logs(expected_job_id.clone(), tail_bytes).await?;
-    let onec_agent_protocol::AgentResponseKind::JobLogs {
+    let hostlink_protocol::AgentResponseKind::JobLogs {
         job_id,
         stdout,
         stderr,

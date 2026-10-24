@@ -5,7 +5,7 @@ use crate::remote::model::{RemoteAgentClient, RemoteCarrier};
 use crate::remote::protocol::{read_response_unbuffered, response_into_kind, write_request};
 use crate::remote::ssh::ApprovedRoutesFailure;
 use crate::{AppError, AppResult};
-use onec_agent_protocol::{AgentRequest, AgentRequestKind, AgentResponseKind};
+use hostlink_protocol::{AgentRequest, AgentRequestKind, AgentResponseKind};
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
@@ -213,7 +213,7 @@ impl RemoteAgentClient {
         kind: AgentRequestKind,
         close_write_before_response: bool,
         mut timing: Option<&mut RequestTiming>,
-    ) -> AppResult<onec_agent_protocol::AgentResponse> {
+    ) -> AppResult<hostlink_protocol::AgentResponse> {
         let secret = self.server.secret()?;
         let request = AgentRequest::new(secret, kind);
         let route_started = timing.as_ref().map(|_| Instant::now());
@@ -354,7 +354,7 @@ mod pre_submission_retry_tests {
 
     #[tokio::test]
     async fn owned_scoped_cleanup_reconnects_only_after_pre_submission_failure() {
-        use onec_agent_protocol::AgentResponseKind;
+        use hostlink_protocol::AgentResponseKind;
         let mut attempts = 0;
         let result = retry_pre_submission_route_once(
             || {

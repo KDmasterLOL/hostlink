@@ -61,7 +61,7 @@ async fn regression_inv_794_job_observation_requires_its_exact_capability() {
 
 #[tokio::test]
 async fn native_invocation_operations_fail_closed_without_advertised_capability() {
-    use onec_agent_protocol::{NativeExecutionEffect, RunLocalJobIdentity};
+    use hostlink_protocol::{NativeExecutionEffect, RunLocalJobIdentity};
     use std::collections::BTreeMap;
 
     let client = RemoteAgentClient::new(fixture()).expect("remote client");
@@ -119,7 +119,7 @@ async fn native_invocation_operations_fail_closed_without_advertised_capability(
 
 #[tokio::test]
 async fn native_suite_policy_rejects_launch_field_mismatches_before_agent_request() {
-    use onec_agent_protocol::{NativeExecutionEffect, NativeSuitePolicy, RunLocalJobIdentity};
+    use hostlink_protocol::{NativeExecutionEffect, NativeSuitePolicy, RunLocalJobIdentity};
     use std::collections::BTreeMap;
 
     let client = RemoteAgentClient::new(fixture()).expect("remote client");
@@ -171,7 +171,7 @@ async fn native_suite_policy_rejects_launch_field_mismatches_before_agent_reques
 
 #[tokio::test]
 async fn native_suite_policy_rejects_old_agent_hello_before_start_request() {
-    use onec_agent_protocol::{NativeExecutionEffect, NativeSuitePolicy, RunLocalJobIdentity};
+    use hostlink_protocol::{NativeExecutionEffect, NativeSuitePolicy, RunLocalJobIdentity};
     use std::collections::BTreeMap;
 
     let client = RemoteAgentClient::new(fixture()).expect("remote client");
@@ -222,7 +222,7 @@ async fn native_suite_policy_rejects_old_agent_hello_before_start_request() {
 #[tokio::test]
 async fn native_invocation_uses_one_authenticated_agent_exchange_for_start_observe_and_fetch() {
     use ed25519_dalek::{Signer, SigningKey};
-    use onec_agent_protocol::{
+    use hostlink_protocol::{
         AgentJobInfo, AgentJobState, NativeExecutionEffect, NativeInvocationIdentity,
         NativeSuitePolicy, RunLocalJobIdentity,
     };
@@ -284,7 +284,7 @@ async fn native_invocation_uses_one_authenticated_agent_exchange_for_start_obser
         "{:x}",
         Sha256::digest(signing_key.verifying_key().to_bytes())
     );
-    let record = onec_agent_protocol::AgentNativeInvocationRecord {
+    let record = hostlink_protocol::AgentNativeInvocationRecord {
         schema_version: 1,
         challenge: challenge.clone(),
         job_id: job_id.clone(),
@@ -344,7 +344,7 @@ async fn native_invocation_uses_one_authenticated_agent_exchange_for_start_obser
             let (mut stream, _) = agent_listener.accept().expect("accept control request");
             let mut reader = BufReader::new(stream.try_clone().expect("clone agent stream"));
             let request: AgentRequest =
-                onec_agent_protocol::read_json_line(&mut reader).expect("read typed request");
+                hostlink_protocol::read_json_line(&mut reader).expect("read typed request");
             drop(reader);
             assert_eq!(request.token, expected_secret);
             let response = match (step, request.request) {
@@ -572,7 +572,7 @@ use super::transfer::copy_exact_with_progress;
 use super::*;
 #[cfg(unix)]
 use crate::AppResult;
-use onec_agent_protocol::{
+use hostlink_protocol::{
     AgentRequest, AgentRequestKind, AgentResponse, AgentResponseKind, write_json_line,
 };
 #[cfg(unix)]
@@ -1260,7 +1260,7 @@ async fn regression_inv_794_read_only_durable_job_observations_reconnect_once_be
     let expected_run_id = "0123456789abcdef0123456789abcdef".to_owned();
     let candidate_sha256 = format!("{:x}", Sha256::digest(b"fixture run-local candidate"));
     let candidate_name = format!("sha256-{candidate_sha256}.exe");
-    let expected_run_identity = onec_agent_protocol::RunLocalJobIdentity::try_new(
+    let expected_run_identity = hostlink_protocol::RunLocalJobIdentity::try_new(
         expected_run_id.clone(),
         candidate_name,
         candidate_sha256,
@@ -1332,7 +1332,7 @@ async fn regression_inv_794_read_only_durable_job_observations_reconnect_once_be
             let (stream, _) = agent_listener.accept().expect("agent accepts observation");
             let mut reader = BufReader::new(stream.try_clone().expect("clone agent stream"));
             let request: AgentRequest =
-                onec_agent_protocol::read_json_line(&mut reader).expect("observation request");
+                hostlink_protocol::read_json_line(&mut reader).expect("observation request");
             drop(reader);
             assert_eq!(request.token, expected_secret);
             observed_requests_by_agent.fetch_add(1, Ordering::AcqRel);
@@ -1348,9 +1348,9 @@ async fn regression_inv_794_read_only_durable_job_observations_reconnect_once_be
                 }),
                 (1, AgentRequestKind::RunLocalStatus { run_id }) if run_id == run_id_by_agent => {
                     AgentResponse::success(AgentResponseKind::JobStatus {
-                        job: onec_agent_protocol::AgentJobInfo {
+                        job: hostlink_protocol::AgentJobInfo {
                             job_id: job_id_by_agent.clone(),
-                            state: onec_agent_protocol::AgentJobState::Running,
+                            state: hostlink_protocol::AgentJobState::Running,
                             worker_pid: None,
                             spawn_owner_pid: None,
                             process_pid: Some(794),
@@ -1416,7 +1416,7 @@ async fn regression_inv_794_read_only_durable_job_observations_reconnect_once_be
     assert!(matches!(
         status,
         AgentResponseKind::JobStatus { ref job }
-            if job.job_id == expected_job_id && job.state == onec_agent_protocol::AgentJobState::Running
+            if job.job_id == expected_job_id && job.state == hostlink_protocol::AgentJobState::Running
     ));
 
     // The capability cache is warm here. Reject the first route pass for the observation itself;
@@ -1570,7 +1570,7 @@ async fn regression_inv_205_target_ssh_post_auth_disconnect_is_unknown_and_recov
             let (mut stream, _) = agent_listener.accept().expect("agent accept");
             let mut reader = BufReader::new(stream.try_clone().expect("clone agent stream"));
             let request: AgentRequest =
-                onec_agent_protocol::read_json_line(&mut reader).expect("agent request");
+                hostlink_protocol::read_json_line(&mut reader).expect("agent request");
             drop(reader);
             assert_eq!(request.token, expected_secret);
             observed_requests.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -1603,9 +1603,9 @@ async fn regression_inv_205_target_ssh_post_auth_disconnect_is_unknown_and_recov
                     write_json_line(
                         stream,
                         &AgentResponse::success(AgentResponseKind::JobStarted {
-                            job: onec_agent_protocol::AgentJobInfo {
+                            job: hostlink_protocol::AgentJobInfo {
                                 job_id: format!("00000000-0000-0000-0000-{step:012}"),
-                                state: onec_agent_protocol::AgentJobState::Succeeded,
+                                state: hostlink_protocol::AgentJobState::Succeeded,
                                 worker_pid: None,
                                 spawn_owner_pid: None,
                                 process_pid: Some(step as u32),
@@ -1697,7 +1697,7 @@ async fn regression_inv_205_target_ssh_post_auth_disconnect_is_unknown_and_recov
         assert!(matches!(
             response,
             AgentResponseKind::JobStarted { ref job }
-                if job.state == onec_agent_protocol::AgentJobState::Succeeded
+                if job.state == hostlink_protocol::AgentJobState::Succeeded
                     && job.exit_code == Some(0)
         ));
     }
@@ -1936,7 +1936,7 @@ async fn agent_tcp_stream_uses_structured_connect_and_preserves_duplex_bytes() {
         let (mut stream, _) = listener.accept().expect("accept");
         let mut reader = BufReader::new(stream.try_clone().expect("clone"));
         let request: AgentRequest =
-            onec_agent_protocol::read_json_line(&mut reader).expect("tcp request");
+            hostlink_protocol::read_json_line(&mut reader).expect("tcp request");
         drop(reader);
         assert_eq!(request.token, expected_secret);
         assert!(matches!(
@@ -2018,13 +2018,13 @@ async fn combined_process_input_requires_each_requested_capability_before_transp
             .contains("jobs.local-candidate-v1")
     );
 
-    let secret_env = onec_agent_protocol::SecretEnvironment::new(
+    let secret_env = hostlink_protocol::SecretEnvironment::new(
         [("ONEC_TEST_SECRET".to_owned(), "not-sent".to_owned())]
             .into_iter()
             .collect(),
     );
     let stdin =
-        onec_agent_protocol::StdinPayload::try_new(b"not-sent".to_vec()).expect("bounded stdin");
+        hostlink_protocol::StdinPayload::try_new(b"not-sent".to_vec()).expect("bounded stdin");
 
     let exec_error = client
         .exec("cmd.exe")
@@ -2053,7 +2053,7 @@ async fn combined_process_input_requires_each_requested_capability_before_transp
     );
 
     let results = vec![
-        onec_agent_protocol::ResultArtifactSpec::try_new("report.bin".to_owned(), 1024, None)
+        hostlink_protocol::ResultArtifactSpec::try_new("report.bin".to_owned(), 1024, None)
             .expect("valid result declaration"),
     ];
     let exec_error = client
@@ -2085,7 +2085,7 @@ async fn combined_process_input_requires_each_requested_capability_before_transp
         .exec("cmd.exe")
         .args(vec!["/c".to_owned(), "echo ok".to_owned()])
         .results(vec![
-            onec_agent_protocol::ResultArtifactSpec::try_new("report.bin".to_owned(), 1024, None)
+            hostlink_protocol::ResultArtifactSpec::try_new("report.bin".to_owned(), 1024, None)
                 .expect("valid result declaration"),
         ])
         .call()
@@ -2096,7 +2096,7 @@ async fn combined_process_input_requires_each_requested_capability_before_transp
         .start_job("cmd.exe")
         .args(vec!["/c".to_owned(), "echo ok".to_owned()])
         .results(vec![
-            onec_agent_protocol::ResultArtifactSpec::try_new("report.bin".to_owned(), 1024, None)
+            hostlink_protocol::ResultArtifactSpec::try_new("report.bin".to_owned(), 1024, None)
                 .expect("valid result declaration"),
         ])
         .call()
@@ -2190,7 +2190,7 @@ async fn gateway_control_round_trips_hello_and_transfer() {
             let (mut stream, _) = listener.accept().expect("accept");
             let mut reader = BufReader::new(stream.try_clone().expect("clone"));
             let request: AgentRequest =
-                onec_agent_protocol::read_json_line(&mut reader).expect("agent request");
+                hostlink_protocol::read_json_line(&mut reader).expect("agent request");
             drop(reader);
             assert_eq!(request.token, expected_secret);
             match (step, request.request) {
@@ -2462,7 +2462,7 @@ async fn gateway_control_round_trips_hello_and_transfer() {
         let secret_error = client
             .start_job("cmd.exe")
             .args(vec!["/c".to_owned(), "echo unreachable".to_owned()])
-            .secret_env(onec_agent_protocol::SecretEnvironment::new(secret_values))
+            .secret_env(hostlink_protocol::SecretEnvironment::new(secret_values))
             .call()
             .await
             .expect_err("missing secret-env capability must fail before JobStart");
@@ -2470,7 +2470,7 @@ async fn gateway_control_round_trips_hello_and_transfer() {
             secret_error.to_string().contains("jobs.secret-env-v1"),
             "unexpected secret capability error: {secret_error:#}"
         );
-        let stdin = onec_agent_protocol::StdinPayload::try_new(b"exact-stdin".to_vec())
+        let stdin = hostlink_protocol::StdinPayload::try_new(b"exact-stdin".to_vec())
             .expect("bounded stdin");
         let mut exec_secrets = std::collections::BTreeMap::new();
         exec_secrets.insert(
@@ -2484,7 +2484,7 @@ async fn gateway_control_round_trips_hello_and_transfer() {
                 "PUBLIC_VALUE".to_owned(),
                 "visible".to_owned(),
             )]))
-            .secret_env(onec_agent_protocol::SecretEnvironment::new(exec_secrets))
+            .secret_env(hostlink_protocol::SecretEnvironment::new(exec_secrets))
             .stdin(stdin.clone())
             .timeout_ms(5_000)
             .call()
@@ -2715,7 +2715,7 @@ async fn regression_inv_027_target_ssh_verified_binary_upload_download_preserves
             let (mut stream, _) = agent_listener.accept().expect("agent accept");
             let mut reader = BufReader::new(stream.try_clone().expect("clone agent stream"));
             let request: AgentRequest =
-                onec_agent_protocol::read_json_line(&mut reader).expect("agent request");
+                hostlink_protocol::read_json_line(&mut reader).expect("agent request");
             drop(reader);
             assert_eq!(request.token, expected_secret);
             let response = match request.request {
@@ -3260,7 +3260,7 @@ async fn target_ssh_falls_back_to_agent_transfer_when_sftp_subsystem_is_rejected
             let (mut stream, _) = agent_listener.accept().expect("agent accept");
             let mut reader = BufReader::new(stream.try_clone().expect("clone agent stream"));
             let request: AgentRequest =
-                onec_agent_protocol::read_json_line(&mut reader).expect("agent request");
+                hostlink_protocol::read_json_line(&mut reader).expect("agent request");
             drop(reader);
             assert_eq!(request.token, expected_secret);
             match request.request {
@@ -3401,7 +3401,7 @@ async fn non_agent_control_bytes_have_actionable_diagnostic() {
 
 #[tokio::test]
 async fn async_control_framing_preserves_exact_limit_crlf_and_eof_behavior() {
-    use onec_agent_protocol::MAX_CONTROL_LINE_BYTES;
+    use hostlink_protocol::MAX_CONTROL_LINE_BYTES;
     use tokio::io::AsyncWriteExt;
 
     let response = AgentResponse::success(AgentResponseKind::TcpReady);

@@ -5,7 +5,7 @@ use crate::remote::PathSha256Probe;
 use crate::remote::control::request::RequestTiming;
 use crate::remote::model::{RemoteAgentClient, RemoteRunLocalPaths};
 use crate::remote::ssh::SshPhaseFailure;
-use onec_agent_protocol::{AgentRequestKind, AgentResponseKind};
+use hostlink_protocol::{AgentRequestKind, AgentResponseKind};
 use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::protocol::StatusCode;
 use std::io;

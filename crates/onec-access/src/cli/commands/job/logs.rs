@@ -1,5 +1,5 @@
 use clap::Args as ClapArgs;
-use onec_agent_protocol::AgentResponseKind;
+use hostlink_protocol::AgentResponseKind;
 use serde_json::json;
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {

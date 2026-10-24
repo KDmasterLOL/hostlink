@@ -1,6 +1,6 @@
 # HostLink Agent
 
-The `onec-agent` Rust package provides HostLink's runtime-side library and standalone
+The `hostlink-agent` Rust package provides HostLink's runtime-side library and standalone
 `hostlink-agent` executable for managed Windows and Unix hosts. Existing installed executables,
 service identities and wire values retain their historical `onec-agent` names; the new standalone
 artifact has no competing legacy-named binary target.

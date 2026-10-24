@@ -3,7 +3,7 @@
 use crate::AppResult;
 use crate::remote::control::request::RequestTiming;
 use crate::remote::model::{RemoteAgentClient, RemoteServer};
-use onec_agent_protocol::{AgentRequestKind, AgentResponseKind};
+use hostlink_protocol::{AgentRequestKind, AgentResponseKind};
 
 impl RemoteAgentClient {
     /// Creates a remote-agent client after validating the projected server/trust contract.

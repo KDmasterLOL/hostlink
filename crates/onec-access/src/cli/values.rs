@@ -38,7 +38,7 @@ pub(crate) enum NativeExecutionEffect {
     Disposable,
 }
 
-impl From<NativeExecutionEffect> for onec_agent_protocol::NativeExecutionEffect {
+impl From<NativeExecutionEffect> for hostlink_protocol::NativeExecutionEffect {
     fn from(value: NativeExecutionEffect) -> Self {
         match value {
             NativeExecutionEffect::RunOwned => Self::RunOwned,

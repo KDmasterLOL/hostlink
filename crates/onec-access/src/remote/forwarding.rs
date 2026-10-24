@@ -6,7 +6,7 @@ use super::ssh::RemoteChannel;
 use crate::AppResult;
 #[cfg(test)]
 use anyhow::Context;
-use onec_agent_protocol::{AgentRequest, AgentRequestKind, AgentResponseKind};
+use hostlink_protocol::{AgentRequest, AgentRequestKind, AgentResponseKind};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;

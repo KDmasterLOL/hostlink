@@ -21,7 +21,7 @@ pub(crate) struct Args {
     #[arg(long = "map-file-env", value_name = "KEY")]
     pub(crate) map_file_env: Vec<String>,
     /// Outer remote execution emergency ceiling. Native test timeout/scheduling belongs to Nextest.
-    #[arg(long, default_value_t = onec_agent_protocol::MAX_EXEC_TIMEOUT_MS)]
+    #[arg(long, default_value_t = hostlink_protocol::MAX_EXEC_TIMEOUT_MS)]
     pub(crate) timeout_ms: u64,
     /// Local executable followed by exact child arguments.
     #[arg(required = true, trailing_var_arg = true)]

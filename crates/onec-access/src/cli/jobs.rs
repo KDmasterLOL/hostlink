@@ -109,7 +109,7 @@ pub(super) fn parse_env(values: &[String]) -> AppResult<BTreeMap<String, String>
 
 pub(super) fn parse_result_specs(
     values: &[String],
-) -> AppResult<Vec<onec_agent_protocol::ResultArtifactSpec>> {
+) -> AppResult<Vec<hostlink_protocol::ResultArtifactSpec>> {
     let mut results = Vec::with_capacity(values.len());
     for value in values {
         let (name, max_bytes) = value.split_once('=').ok_or_else(|| {
@@ -119,17 +119,17 @@ pub(super) fn parse_result_specs(
             crate::invalid_config(format!("invalid --result byte limit in {value:?}: {error}"))
         })?;
         results.push(
-            onec_agent_protocol::ResultArtifactSpec::try_new(name.to_owned(), max_bytes, None)
+            hostlink_protocol::ResultArtifactSpec::try_new(name.to_owned(), max_bytes, None)
                 .map_err(crate::invalid_config)?,
         );
     }
-    onec_agent_protocol::validate_result_specs(&results).map_err(crate::invalid_config)?;
+    hostlink_protocol::validate_result_specs(&results).map_err(crate::invalid_config)?;
     Ok(results)
 }
 
 pub(super) async fn download_result_set(
     client: &RemoteAgentClient,
-    result_set: &onec_agent_protocol::ResultSetInfo,
+    result_set: &hostlink_protocol::ResultSetInfo,
     local_dir: &std::path::Path,
     overwrite: bool,
     cleanup: bool,
@@ -152,7 +152,7 @@ pub(super) async fn download_result_set(
 
 #[cfg(test)]
 fn download_result_artifacts_then_cleanup<D, C>(
-    result_set: &onec_agent_protocol::ResultSetInfo,
+    result_set: &hostlink_protocol::ResultSetInfo,
     local_dir: &std::path::Path,
     overwrite: bool,
     cleanup: bool,
@@ -161,12 +161,12 @@ fn download_result_artifacts_then_cleanup<D, C>(
 ) -> AppResult<()>
 where
     D: FnMut(
-        &onec_agent_protocol::ResultOwner,
-        &onec_agent_protocol::ResultArtifactInfo,
+        &hostlink_protocol::ResultOwner,
+        &hostlink_protocol::ResultArtifactInfo,
         PathBuf,
         bool,
     ) -> AppResult<()>,
-    C: FnOnce(onec_agent_protocol::ResultOwner) -> AppResult<bool>,
+    C: FnOnce(hostlink_protocol::ResultOwner) -> AppResult<bool>,
 {
     for artifact in result_set.artifacts() {
         let path = local_dir.join(artifact.name());
@@ -252,12 +252,12 @@ mod tests {
 
     #[test]
     fn result_cleanup_runs_after_every_publication_and_is_skipped_on_failure() {
-        let result_set = onec_agent_protocol::ResultSetInfo::try_new(
-            onec_agent_protocol::ResultOwner::job("job-1").expect("valid owner"),
+        let result_set = hostlink_protocol::ResultSetInfo::try_new(
+            hostlink_protocol::ResultOwner::job("job-1").expect("valid owner"),
             ["first.bin", "second.bin"]
                 .into_iter()
                 .map(|name| {
-                    onec_agent_protocol::ResultArtifactInfo::try_new(
+                    hostlink_protocol::ResultArtifactInfo::try_new(
                         name.to_owned(),
                         1,
                         "a".repeat(64),

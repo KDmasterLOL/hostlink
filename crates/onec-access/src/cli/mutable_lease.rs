@@ -2,7 +2,7 @@
 
 use directories::ProjectDirs;
 use hostlink_access::{AppResult, ManagedTargetEffect};
-use onec_agent_protocol::NativeExecutionEffect;
+use hostlink_protocol::NativeExecutionEffect;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{

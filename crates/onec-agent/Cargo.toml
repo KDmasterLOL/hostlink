@@ -1,5 +1,5 @@
 [package]
-name = "onec-agent"
+name = "hostlink-agent"
 autobins = false
 version.workspace = true
 edition.workspace = true
@@ -18,7 +18,7 @@ base64.workspace = true
 cap-fs-ext.workspace = true
 cap-std.workspace = true
 clap.workspace = true
-onec-agent-protocol = { path = "../onec-agent-protocol" }
+hostlink-protocol = { path = "../onec-agent-protocol" }
 hostlink-core = { path = "../hostlink-core" }
 ed25519-dalek = { version = "=2.2.0", features = ["rand_core"] }
 rand_core = { version = "0.6.4", features = ["getrandom"] }

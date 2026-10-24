@@ -2,7 +2,7 @@
 
 use super::{mutable_lease, run_local_job, *};
 use ed25519_dalek::{Signature, VerifyingKey};
-use onec_agent_protocol::{
+use hostlink_protocol::{
     AgentJobInfo, AgentJobState, AgentNativeInvocationRecord, AgentRequestKind, AgentResponseKind,
     MAX_RESULT_ARTIFACT_BYTES, NativeExecutionEffect,
 };
@@ -245,7 +245,7 @@ fn verify_local_logs_from_root(
 }
 
 fn verify_signed_log_files(
-    signed_logs: &onec_agent_protocol::AgentNativeInvocationOutputLogs,
+    signed_logs: &hostlink_protocol::AgentNativeInvocationOutputLogs,
     stdout_path: &Path,
     stderr_path: &Path,
 ) -> AppResult<()> {
@@ -266,7 +266,7 @@ fn verify_signed_log_files(
 
 fn signed_output_logs(
     receipt: &InvocationObservationReceipt,
-) -> AppResult<&onec_agent_protocol::AgentNativeInvocationOutputLogs> {
+) -> AppResult<&hostlink_protocol::AgentNativeInvocationOutputLogs> {
     receipt.record.output_logs.as_ref().ok_or_else(|| {
         crate::invalid_config(
             "signed invocation receipt predates log binding or contains no signed output logs"
@@ -911,7 +911,7 @@ mod tests {
         let (signing, mut record, _, expected) = fixture();
         let stdout_bytes = b"test stdout\n";
         let stderr_bytes = b"test stderr\n";
-        record.output_logs = Some(onec_agent_protocol::AgentNativeInvocationOutputLogs {
+        record.output_logs = Some(hostlink_protocol::AgentNativeInvocationOutputLogs {
             stdout_sha256: format!("{:x}", Sha256::digest(stdout_bytes)),
             stdout_bytes: stdout_bytes.len() as u64,
             stderr_sha256: format!("{:x}", Sha256::digest(stderr_bytes)),
@@ -1002,16 +1002,16 @@ mod tests {
         path
     }
 
-    fn result_set(job_id: &str, name: &str, bytes: &[u8]) -> onec_agent_protocol::ResultSetInfo {
-        let artifact = onec_agent_protocol::ResultArtifactInfo::try_new(
+    fn result_set(job_id: &str, name: &str, bytes: &[u8]) -> hostlink_protocol::ResultSetInfo {
+        let artifact = hostlink_protocol::ResultArtifactInfo::try_new(
             name.to_owned(),
             bytes.len() as u64,
             format!("{:x}", Sha256::digest(bytes)),
             None,
         )
         .expect("valid result artifact");
-        onec_agent_protocol::ResultSetInfo::try_new(
-            onec_agent_protocol::ResultOwner::job(job_id).expect("valid job owner"),
+        hostlink_protocol::ResultSetInfo::try_new(
+            hostlink_protocol::ResultOwner::job(job_id).expect("valid job owner"),
             vec![artifact],
         )
         .expect("valid result set")
@@ -1245,7 +1245,7 @@ mod tests {
 
         record.candidate_sha256 = "33".repeat(32);
         let empty_hash = format!("{:x}", Sha256::digest(b""));
-        record.output_logs = Some(onec_agent_protocol::AgentNativeInvocationOutputLogs {
+        record.output_logs = Some(hostlink_protocol::AgentNativeInvocationOutputLogs {
             stdout_sha256: empty_hash.clone(),
             stdout_bytes: 0,
             stderr_sha256: empty_hash,
@@ -1309,7 +1309,7 @@ mod tests {
         let truncated = directory.path().join("truncated");
         hostlink_core::write_new_private_bytes(&truncated, b"short")
             .expect("private truncated log");
-        let signed = onec_agent_protocol::AgentNativeInvocationOutputLogs {
+        let signed = hostlink_protocol::AgentNativeInvocationOutputLogs {
             stdout_sha256: format!("{:x}", Sha256::digest(b"complete")),
             stdout_bytes: 8,
             stderr_sha256: format!("{:x}", Sha256::digest(b"")),
@@ -1346,13 +1346,13 @@ mod tests {
     fn rejects_malformed_or_oversized_signed_output_commitments() {
         let (signing, mut record, _, expected) = fixture();
         for output_logs in [
-            onec_agent_protocol::AgentNativeInvocationOutputLogs {
+            hostlink_protocol::AgentNativeInvocationOutputLogs {
                 stdout_sha256: "A".repeat(64),
                 stdout_bytes: 0,
                 stderr_sha256: "0".repeat(64),
                 stderr_bytes: 0,
             },
-            onec_agent_protocol::AgentNativeInvocationOutputLogs {
+            hostlink_protocol::AgentNativeInvocationOutputLogs {
                 stdout_sha256: "0".repeat(64),
                 stdout_bytes: MAX_SIGNED_OUTPUT_LOG_BYTES + 1,
                 stderr_sha256: "0".repeat(64),
@@ -1377,12 +1377,12 @@ mod tests {
     fn rejects_signed_windows_facts_that_conflict_with_host_identity() {
         let (signing, mut record, _, expected) = fixture();
         record.host_os = "windows".to_owned();
-        record.observed_windows = Some(onec_agent_protocol::ObservedWindowsFacts {
+        record.observed_windows = Some(hostlink_protocol::ObservedWindowsFacts {
             os_major: 6,
             os_minor: 1,
             os_build: 7601,
-            process_architecture: onec_agent_protocol::WindowsArchitecture::X86,
-            native_architecture: onec_agent_protocol::WindowsArchitecture::X86_64,
+            process_architecture: hostlink_protocol::WindowsArchitecture::X86,
+            native_architecture: hostlink_protocol::WindowsArchitecture::X86_64,
             process_is_wow64: true,
         });
         let signature = signing.sign(&record.signing_bytes().expect("canonical bytes"));
@@ -1428,7 +1428,7 @@ mod tests {
             stderr_log_truncated: false,
             result_set: None,
             run_local: Some(
-                onec_agent_protocol::RunLocalJobIdentity::try_new(
+                hostlink_protocol::RunLocalJobIdentity::try_new(
                     expected.run_id.clone(),
                     format!("sha256-{}.exe", expected.candidate_sha256),
                     expected.candidate_sha256.clone(),
@@ -1471,7 +1471,7 @@ mod tests {
         );
         let mut stale_binary = job;
         stale_binary.run_local = Some(
-            onec_agent_protocol::RunLocalJobIdentity::try_new(
+            hostlink_protocol::RunLocalJobIdentity::try_new(
                 expected.run_id.clone(),
                 format!("sha256-{}.exe", "33".repeat(32)),
                 "33".repeat(32),

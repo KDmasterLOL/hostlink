@@ -3,7 +3,7 @@ use super::direct::{DirectInstall, validate_direct_install};
 use super::render::{
     RemoteRuntimeMigrationBootstrap, powershell_encoded_command, remote_runtime_migration_bootstrap,
 };
-use onec_agent_protocol::AgentRequestKind;
+use hostlink_protocol::AgentRequestKind;
 const MIGRATION_TIMEOUT_MS: u64 = 60_000;
 const MIGRATION_CONTROLLER_TIMEOUT_MS: u64 = MIGRATION_TIMEOUT_MS + 15_000;
 const MIGRATION_RECEIPT_MARKER: &str = "ONEC_TOOLKIT_MIGRATION_RECEIPT:";
@@ -208,7 +208,7 @@ fn legacy_migration_exec_request(args: Vec<String>) -> AgentRequestKind {
         args,
         cwd: None,
         env: std::collections::BTreeMap::new(),
-        secret_env: onec_agent_protocol::SecretEnvironment::default(),
+        secret_env: hostlink_protocol::SecretEnvironment::default(),
         stdin: None,
         result_set_id: None,
         results: Vec::new(),
@@ -400,7 +400,7 @@ mod tests {
     };
     use crate::cli::Cli;
     use clap::{Parser, error::ErrorKind};
-    use onec_agent_protocol::AgentRequest;
+    use hostlink_protocol::AgentRequest;
     use serde::Deserialize;
     use std::collections::BTreeMap;
 
@@ -484,7 +484,7 @@ mod tests {
         let wire = serde_json::to_vec(&request).expect("serialize current migration request");
         let legacy: LegacyAgentRequest =
             serde_json::from_slice(&wire).expect("pre-bounded schema accepts current request");
-        assert_eq!(legacy.version, onec_agent_protocol::PROTOCOL_VERSION);
+        assert_eq!(legacy.version, hostlink_protocol::PROTOCOL_VERSION);
         assert_eq!(legacy.version, 1);
         assert_eq!(legacy.token, "placeholder");
         let LegacyAgentRequestKind::Exec {

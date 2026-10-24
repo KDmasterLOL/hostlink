@@ -4,7 +4,7 @@
 
 use super::process::ProcessIdentity;
 use super::*;
-use onec_agent_protocol::{NativeExecutionEffect, ResultArtifactSpec, RunLocalJobIdentity};
+use hostlink_protocol::{NativeExecutionEffect, ResultArtifactSpec, RunLocalJobIdentity};
 
 /// Non-secret durable-job launch inputs received from the authenticated control request.
 pub(crate) struct JobLaunchRequest {

@@ -1,7 +1,7 @@
 //! Bounded controller-local input for managed remote execution.
 
 use super::*;
-use onec_agent_protocol::{MAX_STDIN_PAYLOAD_BYTES, StdinPayload};
+use hostlink_protocol::{MAX_STDIN_PAYLOAD_BYTES, StdinPayload};
 use std::io;
 
 pub(super) fn read_stdin_payload(source: Option<PathBuf>) -> AppResult<Option<StdinPayload>> {

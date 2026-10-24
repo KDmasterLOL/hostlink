@@ -1,7 +1,7 @@
 //! Human-facing controller CLI for managed-machine access.
 
 use hostlink_access::*;
-use onec_agent_protocol::{AgentJobInfo, AgentJobState, AgentResponseKind};
+use hostlink_protocol::{AgentJobInfo, AgentJobState, AgentResponseKind};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
@@ -425,7 +425,7 @@ mod tests {
         assert_eq!(args.map_file_env, ["NEXTEST_BIN_EXE_onec"]);
         assert_eq!(
             args.timeout_ms,
-            onec_agent_protocol::MAX_EXEC_TIMEOUT_MS,
+            hostlink_protocol::MAX_EXEC_TIMEOUT_MS,
             "run-local must leave the earlier per-test timeout to Nextest and keep only the protocol safety ceiling"
         );
         assert_eq!(
@@ -448,10 +448,7 @@ mod tests {
         let AccessCommand::Exec(args) = parsed.command else {
             panic!("expected exec command");
         };
-        assert_eq!(
-            args.timeout_ms,
-            onec_agent_protocol::DEFAULT_EXEC_TIMEOUT_MS
-        );
+        assert_eq!(args.timeout_ms, hostlink_protocol::DEFAULT_EXEC_TIMEOUT_MS);
     }
 
     #[test]
@@ -468,7 +465,7 @@ mod tests {
         let AccessCommand::RunLocal(args) = parsed.command else {
             panic!("expected run-local command");
         };
-        assert_eq!(args.timeout_ms, onec_agent_protocol::MAX_EXEC_TIMEOUT_MS);
+        assert_eq!(args.timeout_ms, hostlink_protocol::MAX_EXEC_TIMEOUT_MS);
         assert!(args.timeout_ms > 9 * 60 * 1000);
     }
 

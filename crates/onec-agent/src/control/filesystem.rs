@@ -169,7 +169,7 @@ fn path_sha256_response(path: &Path) -> AgentResponse {
             sha256: digest.sha256().to_owned(),
         }),
         Err(error) if error.kind() == io::ErrorKind::NotFound => AgentResponse::failure_with_code(
-            onec_agent_protocol::AgentErrorCode::PathNotFound,
+            hostlink_protocol::AgentErrorCode::PathNotFound,
             "requested path does not exist",
         ),
         Err(error) => AgentResponse::failure(format!("failed to hash path: {error}")),
@@ -179,7 +179,7 @@ fn path_sha256_response(path: &Path) -> AgentResponse {
 #[cfg(test)]
 mod tests {
     use super::path_sha256_response;
-    use onec_agent_protocol::{AgentErrorCode, AgentResponseKind};
+    use hostlink_protocol::{AgentErrorCode, AgentResponseKind};
 
     #[test]
     fn path_hash_reports_only_proven_missing_as_typed_not_found() {

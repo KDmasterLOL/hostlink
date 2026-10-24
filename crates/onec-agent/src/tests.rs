@@ -1,5 +1,5 @@
 use super::*;
-use onec_agent_protocol::{
+use hostlink_protocol::{
     AgentErrorCode, AgentRequestKind, DEFAULT_EXEC_TIMEOUT_MS, SecretEnvironment, read_json_line,
 };
 use std::io::BufReader;
@@ -1782,7 +1782,7 @@ fn hello_and_exec_round_trip() {
 #[cfg(unix)]
 #[test]
 fn exec_result_artifact_round_trips_through_typed_download_and_cleanup() {
-    use onec_agent_protocol::{ResultArtifactSpec, ResultOwner};
+    use hostlink_protocol::{ResultArtifactSpec, ResultOwner};
 
     let port = test_server();
     let result_set_id = format!(
@@ -1891,7 +1891,7 @@ fn exec_delivers_exact_multiline_stdin_and_closes_the_pipe() {
             env: Default::default(),
             secret_env: Default::default(),
             stdin: Some(
-                onec_agent_protocol::StdinPayload::try_new(payload.clone()).expect("bounded stdin"),
+                hostlink_protocol::StdinPayload::try_new(payload.clone()).expect("bounded stdin"),
             ),
             result_set_id: None,
             results: Vec::new(),
@@ -1926,7 +1926,7 @@ fn regression_inv_217_windows_exec_delivers_exact_stdin_to_sort() {
             env: Default::default(),
             secret_env: Default::default(),
             stdin: Some(
-                onec_agent_protocol::StdinPayload::try_new(payload.clone()).expect("bounded stdin"),
+                hostlink_protocol::StdinPayload::try_new(payload.clone()).expect("bounded stdin"),
             ),
             result_set_id: None,
             results: Vec::new(),
@@ -2018,9 +2018,9 @@ fn regression_inv_217_powershell_encoded_command_requires_completion_marker() {
 #[test]
 fn exec_timeout_remains_authoritative_when_stdin_writer_is_blocked() {
     let port = test_server();
-    let payload = onec_agent_protocol::StdinPayload::try_new(vec![
+    let payload = hostlink_protocol::StdinPayload::try_new(vec![
         b'x';
-        onec_agent_protocol::MAX_STDIN_PAYLOAD_BYTES
+        hostlink_protocol::MAX_STDIN_PAYLOAD_BYTES
     ])
     .expect("max bounded stdin");
     let started = Instant::now();
@@ -2086,7 +2086,7 @@ fn exec_controller_disconnect_cancels_the_owned_process_tree() {
                 stdin: None,
                 result_set_id: None,
                 results: Vec::new(),
-                timeout_ms: onec_agent_protocol::MAX_EXEC_TIMEOUT_MS,
+                timeout_ms: hostlink_protocol::MAX_EXEC_TIMEOUT_MS,
                 raw_output: false,
             },
         ),

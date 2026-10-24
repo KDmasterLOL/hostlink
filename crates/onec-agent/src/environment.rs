@@ -5,7 +5,7 @@
 use hostlink_core::{
     ONEC_EXEC_DEADLINE_UNIX_MS_ENV, ONEC_JOB_ID_ENV, ONEC_JOB_SYSTEM_ENV, ONEC_RESULT_DIR_ENV,
 };
-use onec_agent_protocol::SecretEnvironment;
+use hostlink_protocol::SecretEnvironment;
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};

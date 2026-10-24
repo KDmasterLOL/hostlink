@@ -11,7 +11,7 @@ use hostlink_core::{
     acquire_exclusive_file_lock, create_private_directory, ensure_private_directory,
     read_json_file_bounded, unix_time_ms as unix_ms, write_new_json_file, write_new_private_bytes,
 };
-use onec_agent_protocol::{
+use hostlink_protocol::{
     AgentJobInfo, AgentJobState, ONEC_AGENT_JOB_SYSTEM, SecretEnvironment, StdinPayload,
 };
 use serde::{Deserialize, Serialize};

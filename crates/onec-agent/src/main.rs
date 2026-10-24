@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand};
-use onec_agent::embedded_ssh::preflight_embedded_ssh;
-use onec_agent::{
+use hostlink_agent::embedded_ssh::preflight_embedded_ssh;
+use hostlink_agent::{
     AgentConfig, AgentPackageUpdateRequest, DirectPackageUpdateRequest, RuntimeUpdateOutcome,
     RuntimeUpdatePreflightOutcome, install_service, post_enrollment_json, preflight_runtime_update,
     probe_tunnel, run_job_worker, run_service, run_sshd_host, run_with_tunnel, serve,
@@ -380,7 +380,7 @@ fn load_runtime_config(path: &std::path::Path) -> io::Result<AgentConfig> {
     Ok(config)
 }
 
-fn print_service_status(status: onec_agent::ServiceRuntimeStatus) -> io::Result<()> {
+fn print_service_status(status: hostlink_agent::ServiceRuntimeStatus) -> io::Result<()> {
     println!(
         "{}",
         serde_json::to_string(&serde_json::json!({

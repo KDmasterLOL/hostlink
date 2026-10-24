@@ -1,5 +1,5 @@
 use clap::Args as ClapArgs;
-use onec_agent_protocol::AgentResponseKind;
+use hostlink_protocol::AgentResponseKind;
 use std::path::PathBuf;
 
 #[derive(Debug, ClapArgs)]

@@ -30,7 +30,7 @@ mod tunnel;
 use hostlink_core::{
     OwnedProcess, RedactingWriter, background_command, constant_time_str_eq, system_hostname,
 };
-use onec_agent_protocol::{
+use hostlink_protocol::{
     AgentErrorCode, AgentRequest, AgentRequestKind, AgentResponse, AgentResponseKind,
     PROTOCOL_VERSION, write_json_line,
 };

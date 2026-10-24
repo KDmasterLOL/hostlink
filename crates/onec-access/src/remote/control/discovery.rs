@@ -4,7 +4,7 @@ use crate::AppResult;
 use crate::remote::control::request::RequestTiming;
 use crate::remote::model::{RemoteAgentClient, RemoteCarrier, RemoteProbeResult};
 use crate::remote::protocol::{read_response_unbuffered, write_request};
-use onec_agent_protocol::{AgentRequest, AgentRequestKind, AgentResponseKind};
+use hostlink_protocol::{AgentRequest, AgentRequestKind, AgentResponseKind};
 use std::time::Duration;
 
 impl RemoteAgentClient {

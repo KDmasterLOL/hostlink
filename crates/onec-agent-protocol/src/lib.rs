@@ -1,4 +1,4 @@
-//! Shared JSON control protocol between onec-agent and controller clients.
+//! Shared JSON control protocol between the HostLink Agent and controller clients.
 //!
 //! The crate keeps a flat public API for compatibility while separating secret handling, request
 //! and response schemas, persistent-job metadata, and bounded JSONL framing.

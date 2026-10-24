@@ -25,7 +25,7 @@ pub(super) async fn run(args: Args) -> hostlink_access::AppResult<()> {
     .await?;
     let expected_job_id = job.job_id.clone();
     let response = client.job_cancel(expected_job_id.clone()).await?;
-    let onec_agent_protocol::AgentResponseKind::JobCancelRequested { job } = response else {
+    let hostlink_protocol::AgentResponseKind::JobCancelRequested { job } = response else {
         return Err(crate::invalid_config(
             "agent returned an unexpected durable run-local cancellation response".to_owned(),
         ));

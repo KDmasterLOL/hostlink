@@ -1,5 +1,5 @@
 use clap::Args as ClapArgs;
-use onec_agent_protocol::AgentJobState;
+use hostlink_protocol::AgentJobState;
 use std::{path::PathBuf, time::Duration};
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {

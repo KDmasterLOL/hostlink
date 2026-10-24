@@ -2,7 +2,7 @@
 
 use super::{mutable_lease, run_local_job, *};
 use ed25519_dalek::{Signature, VerifyingKey};
-use onec_agent_protocol::{
+use hostlink_protocol::{
     AgentJobInfo, AgentJobState, AgentRequestKind, AgentResponseKind, AgentTerminalExecutionRecord,
 };
 use serde::{Deserialize, Serialize};
@@ -481,7 +481,7 @@ where
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
-    use onec_agent_protocol::{RunLocalJobIdentity, RunLocalMappedFile};
+    use hostlink_protocol::{RunLocalJobIdentity, RunLocalMappedFile};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn fixture() -> (SigningKey, AgentTerminalExecutionRecord, String) {

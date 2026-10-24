@@ -1412,7 +1412,7 @@ dependencies = [
  "hex",
  "hostlink-core",
  "hostlink-hub",
- "onec-agent-protocol",
+ "hostlink-protocol",
  "rand",
  "reqwest 0.12.28",
  "russh",
@@ -1428,6 +1428,39 @@ dependencies = [
  "thiserror",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "hostlink-agent"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "cap-fs-ext",
+ "cap-std",
+ "clap",
+ "ed25519-dalek 2.2.0",
+ "hostlink-core",
+ "hostlink-protocol",
+ "libc",
+ "processkit",
+ "rand",
+ "rand_core 0.6.4",
+ "russh",
+ "russh-sftp",
+ "secrecy",
+ "self_update",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "strum",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "ureq",
+ "windows-service",
+ "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]
@@ -1479,6 +1512,19 @@ dependencies = [
  "tower-http",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "hostlink-protocol"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "hostlink-core",
+ "mime",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "strum",
 ]
 
 [[package]]
@@ -2102,52 +2148,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "onec-agent"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "cap-fs-ext",
- "cap-std",
- "clap",
- "ed25519-dalek 2.2.0",
- "hostlink-core",
- "libc",
- "onec-agent-protocol",
- "processkit",
- "rand",
- "rand_core 0.6.4",
- "russh",
- "russh-sftp",
- "secrecy",
- "self_update",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "strum",
- "tempfile",
- "tokio",
- "tracing",
- "ureq",
- "windows-service",
- "windows-sys 0.61.2",
- "zip",
-]
-
-[[package]]
-name = "onec-agent-protocol"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "hostlink-core",
- "mime",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "strum",
-]
 
 [[package]]
 name = "openssl-probe"
