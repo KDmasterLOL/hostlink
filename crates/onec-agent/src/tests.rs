@@ -181,6 +181,21 @@ fn hostlink_agent_assets_expose_only_the_fresh_root_and_exact_update_flow() {
         "[string]$ConfigFile",
         "[string]$HubUrl",
         "[string]$EnrollmentTokenFile",
+        "$AgentExecutableFile",
+        "$AgentExecutableSha256",
+        "AgentExecutableFile and AgentExecutableSha256 must be supplied together",
+        "Windows 7 targets require AgentExecutableFile and AgentExecutableSha256",
+        "AgentExecutableSha256 must be a 64-character SHA-256 digest",
+        "AgentExecutableFile must be an absolute path",
+        "AgentExecutableFile does not name an existing regular file",
+        "AgentExecutableFile must not be a reparse point",
+        "AgentExecutableFile exceeds the 256 MiB limit",
+        "Agent executable SHA-256 does not match AgentExecutableSha256",
+        "Assert-CurrentUserOwnedFileAndParent $agentExecutable $currentIdentity.User",
+        "HostLink parent directory must be owned by the current user",
+        "LocalApplicationData directory must be owned by the current user",
+        "Verified Agent executable could not load or run --version on this Windows host",
+        "& $candidate __self-update --agent-only --root $root --archive-file $stagedArchive",
         "__prepare-enrollment",
         "--token-file",
         "--state-dir",
@@ -216,9 +231,57 @@ fn hostlink_agent_assets_expose_only_the_fresh_root_and_exact_update_flow() {
     assert!(!install.contains("Register-Service"));
     assert!(!install.contains("New-Service"));
     assert!(!install.contains("Shell.Application"));
+    assert!(!install.to_ascii_lowercase().contains("7z"));
     assert!(
         install.find("CreateDirectory($jobsRoot, $jobsSecurity)") < install.find("__self-update"),
         "private jobs root must exist before the candidate updater checks root/jobs"
+    );
+    assert_eq!(
+        install.matches("__self-update").count(),
+        1,
+        "the installer must use exactly one updater invocation"
+    );
+    assert_eq!(
+        install
+            .matches("New-Object IO.Compression.ZipArchive")
+            .count(),
+        1,
+        "only the existing four-member ZipArchive extraction path may remain"
+    );
+    assert!(
+        install.find("$actualSha256 = Get-Sha256Stream $verifiedArchiveStream")
+            < install.find("[IO.Directory]::CreateDirectory($root)"),
+        "the ZIP pin must be checked before creating the fresh HostLink root"
+    );
+    assert!(
+        install.find("$candidateSha256 = Get-Sha256Stream $candidateStream")
+            < install.find("[IO.Directory]::CreateDirectory($root)"),
+        "the sidecar executable pin must be checked before creating the fresh HostLink root"
+    );
+    assert!(
+        install.find("if (-not $hasAgentExecutable)")
+            < install.find("[Reflection.Assembly]::LoadWithPartialName('System.IO.Compression')"),
+        "CLR4 ZipArchive must be loaded only in the no-sidecar path"
+    );
+    assert!(
+        install.find("$candidateSha256 = Get-Sha256Stream $candidateStream")
+            < install.find("$versionOutput = & $candidate --version"),
+        "the candidate must be pinned before it is executed"
+    );
+    assert!(
+        install.find("HostLink parent directory must be owned by the current user")
+            < install.find("$versionOutput = & $candidate --version"),
+        "the install parent's owner must be checked before running the candidate"
+    );
+    assert!(
+        install.find("Unsupported Windows package target")
+            < install.find("[IO.Directory]::CreateDirectory($root)"),
+        "unsupported target triples must fail before creating the fresh root"
+    );
+    assert!(
+        install.find("Agent executable SHA-256 does not match AgentExecutableSha256")
+            < install.find("[IO.Directory]::CreateDirectory($root)"),
+        "an unknown sidecar SHA-256 must fail before creating the fresh root"
     );
     for required in [
         "ArchiveFile",
@@ -245,6 +308,18 @@ fn hostlink_agent_assets_expose_only_the_fresh_root_and_exact_update_flow() {
             "fresh installer contains {forbidden}"
         );
     }
+}
+
+#[test]
+fn hostlink_installer_clears_sha256_for_legacy_dotnet() {
+    let install = include_str!("../assets/Install-HostLink-Agent.ps1");
+
+    assert!(install.contains("$hash = [Security.Cryptography.SHA256]::Create()"));
+    assert!(install.contains("finally { $hash.Clear() }"));
+    assert!(
+        !install.contains("$hash.Dispose()"),
+        "HashAlgorithm.Dispose is unavailable on the verified Win7 PowerShell 2 runtime"
+    );
 }
 
 #[test]
