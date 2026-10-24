@@ -1,6 +1,9 @@
-# onec-agent
+# HostLink Agent
 
-`onec-agent` is the small runtime-side component of `onec-toolkit` for customer Windows servers.
+`onec-agent` is the extracted runtime-side component of HostLink for managed Windows and Unix
+hosts. Its package and executable names remain historical compatibility identifiers because the
+workspace lockfile and installed service/process contracts are owned outside this crate slice.
+They are not HostLink domain APIs.
 
 It is intentionally separate from the `onec` controller:
 
@@ -10,6 +13,28 @@ It is intentionally separate from the `onec` controller:
 - the control listener is loopback-only.
 - connectivity is outbound: the agent maintains an SSH reverse tunnel to a gateway.
 - individual TCP endpoints can be proxied on demand; RAS/RAC or whole port ranges are not exposed by default.
+
+## Compatibility and extraction status
+
+This extracted source still carries the legacy pinned `onec-toolkit-<target>.zip` installer and
+updater. That path is retained for migration compatibility and still expects the historical
+`onec.exe` bundle member. It is not an independent HostLink Agent bootstrap/update package, and
+must not be used as the HostLink package contract. A separate exact-digest Agent-only bootstrap
+and updater is pending. Do not infer existing-host migration or service takeover from generic CLI
+wording.
+
+The embedded SSH server currently supports SFTP and direct TCP forwarding. SSH `exec` and `shell`
+requests remain rejected. Safe generic command execution still needs an owned process-tree
+lifecycle with exact exit status, stdout/stderr handling, stdin policy, and timeout/cancellation
+coverage before SSH hooks can use it.
+
+The neutral `hostlink-core` crate is being supplied by the sibling extraction slice. The Agent
+still depends on `onec-core` until that API is available. The Agent requires neutral equivalents
+for bounded file/JSON/line reads; private file and directory validation/creation; atomic file
+publication and scoped removal; exclusive file locking; SHA-256 and digest parsing; retained and
+redacting log writers; owned process/background command setup; Windows command-line encoding;
+constant-time string comparison; hostname lookup; and Unix timestamps. Core API integration and
+its compatibility tests remain pending.
 
 ## Current MVP
 

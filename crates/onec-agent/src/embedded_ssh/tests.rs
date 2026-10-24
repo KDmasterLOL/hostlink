@@ -302,6 +302,47 @@ async fn embedded_server_rejects_wrong_identity_user_and_host_key() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedded_server_keeps_shell_and_exec_requests_rejected() {
+    let fixture = start_fixture().await;
+    let mut session = connect(&fixture, fixture.host_key.clone()).await;
+    assert!(
+        authenticate(&mut session, "managed-user", fixture.client_key.clone()).await,
+        "enrolled controller key must authenticate"
+    );
+
+    for command in [None, Some(b"echo must-not-run".as_slice())] {
+        let channel = session
+            .channel_open_session()
+            .await
+            .expect("session channel");
+        if let Some(command) = command {
+            channel.exec(true, command).await.expect("exec request");
+        } else {
+            channel.request_shell(true).await.expect("shell request");
+        }
+
+        let mut channel = channel;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), channel.wait())
+                .await
+                .expect("request rejection deadline")
+            {
+                Some(ChannelMsg::Failure) => break,
+                Some(ChannelMsg::Success) => panic!("shell/exec request must remain rejected"),
+                Some(_) => {}
+                None => panic!("channel closed without an explicit rejection"),
+            }
+        }
+    }
+
+    session
+        .disconnect(russh::Disconnect::ByApplication, "test complete", "en")
+        .await
+        .expect("SSH disconnect");
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embedded_server_bounds_active_sftp_sessions_and_open_files() {
     use russh_sftp::server::Handler as _;
 

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 #[command(
     name = "onec-agent",
     version,
-    about = "Outbound managed remote-control agent for onec-toolkit"
+    about = "Outbound managed remote-control agent for HostLink"
 )]
 struct Cli {
     #[command(subcommand)]
