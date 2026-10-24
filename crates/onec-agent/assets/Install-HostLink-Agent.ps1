@@ -165,22 +165,23 @@ function Assert-CurrentUserOwnedFileAndParent([string]$Path, [Security.Principal
     if (-not $parentOwner.Equals($UserSid)) { throw 'AgentExecutableFile parent directory must be owned by the current user.' }
 }
 
-$verifiedArchiveStream = [IO.File]::Open($archive, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-if ($verifiedArchiveStream.Length -gt 536870912) { throw 'ArchiveFile exceeds the 512 MiB limit.' }
-$actualSha256 = Get-Sha256Stream $verifiedArchiveStream
-if ($actualSha256 -ne $ArchiveSha256.ToLowerInvariant()) { throw 'Archive SHA-256 does not match ArchiveSha256.' }
+$verifiedArchiveStream = $null
 $candidateStream = $null
-if ($hasAgentExecutable) {
-    Assert-CurrentUserOwnedFileAndParent $agentExecutable $currentIdentity.User
-    $candidateStream = [IO.File]::Open($agentExecutable, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-    if ($candidateStream.Length -gt 268435456) { throw 'AgentExecutableFile exceeds the 256 MiB limit.' }
-    $candidateSha256 = Get-Sha256Stream $candidateStream
-    if ($candidateSha256 -ne $AgentExecutableSha256.ToLowerInvariant()) { throw 'Agent executable SHA-256 does not match AgentExecutableSha256.' }
-}
-
 $stage = Join-Path ([IO.Path]::GetTempPath()) ('hostlink-agent-install-' + [Guid]::NewGuid().ToString('N'))
-[void][IO.Directory]::CreateDirectory($stage)
 try {
+    $verifiedArchiveStream = [IO.File]::Open($archive, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    if ($verifiedArchiveStream.Length -gt 536870912) { throw 'ArchiveFile exceeds the 512 MiB limit.' }
+    $actualSha256 = Get-Sha256Stream $verifiedArchiveStream
+    if ($actualSha256 -ne $ArchiveSha256.ToLowerInvariant()) { throw 'Archive SHA-256 does not match ArchiveSha256.' }
+    if ($hasAgentExecutable) {
+        Assert-CurrentUserOwnedFileAndParent $agentExecutable $currentIdentity.User
+        $candidateStream = [IO.File]::Open($agentExecutable, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        if ($candidateStream.Length -gt 268435456) { throw 'AgentExecutableFile exceeds the 256 MiB limit.' }
+        $candidateSha256 = Get-Sha256Stream $candidateStream
+        if ($candidateSha256 -ne $AgentExecutableSha256.ToLowerInvariant()) { throw 'Agent executable SHA-256 does not match AgentExecutableSha256.' }
+    }
+
+    [void][IO.Directory]::CreateDirectory($stage)
 if (([IO.File]::GetAttributes($stage) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw 'Temporary Agent staging directory must not be a reparse point.'
 }

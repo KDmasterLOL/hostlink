@@ -323,6 +323,43 @@ fn hostlink_installer_clears_sha256_for_legacy_dotnet() {
 }
 
 #[test]
+fn hostlink_installer_closes_verified_streams_and_cleans_enrollment_on_early_failure() {
+    let install = include_str!("../assets/Install-HostLink-Agent.ps1");
+    let stage_setup = install.find("$stage = Join-Path ").unwrap();
+    let outer_try = stage_setup + install[stage_setup..].find("try {").unwrap();
+    let archive_open = install
+        .find("$verifiedArchiveStream = [IO.File]::Open($archive")
+        .unwrap();
+    let candidate_open = install
+        .find("$candidateStream = [IO.File]::Open($agentExecutable")
+        .unwrap();
+    let outer_finally = install.rfind("} finally {").unwrap();
+
+    assert!(outer_try < archive_open);
+    assert!(outer_try < candidate_open);
+    assert!(candidate_open < outer_finally);
+    let verified_work = &install[outer_try..outer_finally];
+    for failure in [
+        "ArchiveFile exceeds the 512 MiB limit",
+        "AgentExecutableFile exceeds the 256 MiB limit",
+        "Agent executable SHA-256 does not match AgentExecutableSha256",
+    ] {
+        assert!(
+            verified_work.contains(failure),
+            "{failure} must be guarded by the stream cleanup finally"
+        );
+    }
+
+    let cleanup = &install[outer_finally..];
+    assert!(cleanup.contains("$candidateStream.Dispose()"));
+    assert!(cleanup.contains("$verifiedArchiveStream.Dispose()"));
+    assert!(cleanup.contains("[IO.Directory]::Delete($stateDir, $true)"));
+    assert!(cleanup.contains("[IO.Directory]::Delete($stage, $true)"));
+    assert!(install.contains("'--token-file', $tokenPath"));
+    assert!(!install.contains("ReadAllText($tokenPath)"));
+}
+
+#[test]
 fn managed_installer_keeps_win7_runtime_but_gates_target_ssh_at_nt_6_2() {
     let script = include_str!("../assets/Install-OnecToolkit.ps1");
     assert!(!script.contains("OSVersion.Version.Major -lt 10"));
