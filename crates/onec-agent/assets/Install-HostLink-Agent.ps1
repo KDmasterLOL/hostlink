@@ -76,6 +76,31 @@ if ($enrollmentMode) {
 if ((New-Object IO.FileInfo($archive)).Length -gt 536870912) { throw 'ArchiveFile exceeds the 512 MiB limit.' }
 if (-not $enrollmentMode -and (New-Object IO.FileInfo($config)).Length -gt 262144) { throw 'ConfigFile exceeds the 256 KiB limit.' }
 
+# The updater always checks <root>/jobs for active work. Manual configurations must use
+# that same durable store; otherwise an update could interrupt running jobs unnoticed.
+if (-not $enrollmentMode) {
+    try {
+        Add-Type -AssemblyName System.Web.Extensions
+        $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $manualConfig = $serializer.DeserializeObject([IO.File]::ReadAllText($config))
+        if ($null -eq $manualConfig -or -not $manualConfig.ContainsKey('jobs_dir')) {
+            throw 'Missing jobs_dir.'
+        }
+        $configuredJobs = [string]$manualConfig['jobs_dir']
+        if ([string]::IsNullOrEmpty($configuredJobs) -or $configuredJobs.Trim().Length -eq 0) {
+            throw 'Empty jobs_dir.'
+        }
+        $jobsValue = if ([IO.Path]::IsPathRooted($configuredJobs)) { $configuredJobs } else { [IO.Path]::Combine([IO.Path]::GetDirectoryName($config), $configuredJobs) }
+        $jobsCanonical = [IO.Path]::GetFullPath($jobsValue)
+        $expectedJobs = [IO.Path]::GetFullPath((Join-Path $root 'jobs'))
+        if (-not $jobsCanonical.Equals($expectedJobs, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Foreign jobs_dir.'
+        }
+    } catch {
+        throw 'Manual ConfigFile must set jobs_dir to this fresh HostLink Agent root\jobs; the updater cannot safely verify active work in another directory.'
+    }
+}
+
 function Get-Sha256Stream([IO.Stream]$Stream) {
     $hash = [Security.Cryptography.SHA256]::Create()
     try { return ([BitConverter]::ToString($hash.ComputeHash($Stream))).Replace('-', '').ToLowerInvariant() }

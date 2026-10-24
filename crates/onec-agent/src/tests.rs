@@ -208,6 +208,9 @@ fn hostlink_agent_assets_expose_only_the_fresh_root_and_exact_update_flow() {
     assert!(run.contains("sha256"));
     assert!(run.contains("$agent = Join-Path $bin 'hostlink-agent.exe'"));
     assert!(install.contains("manual configuration mode"));
+    assert!(install.contains("$manualConfig.ContainsKey('jobs_dir')"));
+    assert!(install.contains("$jobsCanonical.Equals($expectedJobs"));
+    assert!(install.contains("the updater cannot safely verify active work in another directory"));
     assert!(install.contains("requires HubUrl and EnrollmentTokenFile together"));
     assert!(!install.contains("-EnrollToken"));
     assert!(!install.contains("Register-Service"));

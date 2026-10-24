@@ -40,7 +40,9 @@ Tier-3 toolchain and NT6.1 runtime testing; see
 [compatibility gates](docs/compatibility.md).
 
 The Agent-only Windows installer supports either a manually prepared `-ConfigFile` or a fresh
-user-scope Hub enrollment using `-HubUrl` and `-EnrollmentTokenFile` together. Enrollment creates
+user-scope Hub enrollment using `-HubUrl` and `-EnrollmentTokenFile` together. Manual configs
+must explicitly set `jobs_dir` to the new `%LOCALAPPDATA%\HostLink\Agent\jobs` directory;
+otherwise installation fails before publishing because the updater could miss active work. Enrollment creates
 new private SSH identities and pinned Hub-provided keys before publishing config into a fresh
 `%LOCALAPPDATA%\HostLink\Agent` root. It never installs a service or starts the Agent. The script
 uses PowerShell 2-compatible syntax, but ZIP extraction requires the .NET Framework 4.5
