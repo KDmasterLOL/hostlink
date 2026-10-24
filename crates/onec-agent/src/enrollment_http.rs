@@ -11,7 +11,7 @@ const ENROLLMENT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Post one enrollment request without exposing the bearer token in argv or stdout.
 ///
-/// The token must come from a toolkit-private file and the response path must not already exist.
+/// The token must come from a private file and the response path must not already exist.
 /// Authenticated enrollment is HTTPS-only and follows no redirects.
 ///
 /// # Errors
@@ -205,5 +205,27 @@ mod tests {
             post_enrollment_json("https://hub.example.test/v1/enroll", &token, &body, &output)
                 .expect_err("unsafe token permissions must fail before network access");
         assert!(error.to_string().contains("private file"), "{error}");
+    }
+
+    #[test]
+    fn enrollment_rejects_corrupt_private_token_before_network_access() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token = dir.path().join("token.txt");
+        let body = dir.path().join("body.json");
+        let output = dir.path().join("response.json");
+        std::fs::write(&token, "not-a-64-character-hex-token").expect("token");
+        hostlink_core::restrict_private_file(&token).expect("private token");
+        std::fs::write(&body, "{}").expect("body");
+
+        let error =
+            post_enrollment_json("https://hub.example.test/v1/enroll", &token, &body, &output)
+                .expect_err("corrupt token must fail before network access");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("exactly 64 hexadecimal characters")
+        );
+        assert!(!output.exists());
     }
 }

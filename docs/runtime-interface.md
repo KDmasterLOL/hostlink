@@ -65,7 +65,10 @@ Windows uses `powershell.exe -NoProfile -NonInteractive -Command` only after
 checking that the Agent process is non-elevated and not LocalSystem. The SSH
 authentication username is **not** an OS-level impersonation identity. Scripts
 in a privileged Windows service context are rejected rather than gaining
-LocalSystem rights. PowerShell 2 and Win7 native acceptance remain unproven.
+LocalSystem rights. The installer source is checked for PowerShell 2 syntax, but
+its `ZipArchive` extraction needs .NET Framework 4.5; stock Windows 7 PowerShell
+2/CLR 2 may not provide that type. Win7 native installer acceptance remains
+blocked until verified in an owned environment.
 
 The convenient `hostlink run HOST LOCAL_SCRIPT` CLI is not implemented yet;
 callers may compose SFTP upload and explicit SSH exec themselves. SSH hooks

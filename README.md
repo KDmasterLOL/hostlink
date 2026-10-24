@@ -38,3 +38,15 @@ binaries without publishing them. This does not establish native compatibility
 or fleet-rollout acceptance. Windows 7 x64/x86 require separate source-exact
 Tier-3 toolchain and NT6.1 runtime testing; see
 [compatibility gates](docs/compatibility.md).
+
+The Agent-only Windows installer supports either a manually prepared `-ConfigFile` or a fresh
+user-scope Hub enrollment using `-HubUrl` and `-EnrollmentTokenFile` together. Enrollment creates
+new private SSH identities and pinned Hub-provided keys before publishing config into a fresh
+`%LOCALAPPDATA%\HostLink\Agent` root. It never installs a service or starts the Agent. The script
+uses PowerShell 2-compatible syntax, but ZIP extraction requires the .NET Framework 4.5
+`ZipArchive` type. PowerShell 2 on stock Windows 7/CLR 2 is unverified and may not load that type;
+the installer fails closed when `ZipArchive` is unavailable. Native Win7 acceptance remains
+blocked until tested on an owned Win7 environment.
+The embedded SSH login is the fixed logical `hostlink` account; SSH commands run as the Agent
+process user and do not impersonate a Windows account. Durable jobs live in a current-user-only
+`jobs` directory shared by the Agent config and updater's active-job guard.

@@ -1,11 +1,11 @@
 use clap::{Args, Parser, Subcommand};
 use hostlink_agent::embedded_ssh::preflight_embedded_ssh;
 use hostlink_agent::{
-    AgentConfig, AgentPackageUpdateRequest, DirectPackageUpdateRequest, RuntimeUpdateOutcome,
-    RuntimeUpdatePreflightOutcome, install_service, post_enrollment_json, preflight_runtime_update,
-    probe_tunnel, run_job_worker, run_service, run_sshd_host, run_with_tunnel, serve,
-    service_status, start_service, stop_service, uninstall_service, update_agent_package,
-    update_direct_package,
+    AgentConfig, AgentPackageUpdateRequest, DirectPackageUpdateRequest, PrepareEnrollmentRequest,
+    RuntimeUpdateOutcome, RuntimeUpdatePreflightOutcome, install_service, post_enrollment_json,
+    preflight_runtime_update, prepare_enrollment, probe_tunnel, run_job_worker, run_service,
+    run_sshd_host, run_with_tunnel, serve, service_status, start_service, stop_service,
+    uninstall_service, update_agent_package, update_direct_package,
 };
 use std::io;
 use std::path::PathBuf;
@@ -56,6 +56,9 @@ enum Command {
     /// Internal fresh-install enrollment transport.
     #[command(name = "__enroll-http", hide = true)]
     EnrollHttp(EnrollHttpArgs),
+    /// Internal fresh user-scope enrollment and candidate configuration builder.
+    #[command(name = "__prepare-enrollment", hide = true)]
+    PrepareEnrollment(PrepareEnrollmentArgs),
     /// Internal embedded-SSH candidate acceptance probe.
     #[command(name = "__embedded-ssh-preflight", hide = true)]
     EmbeddedSshPreflight(EmbeddedSshPreflightArgs),
@@ -197,6 +200,18 @@ struct EnrollHttpArgs {
 }
 
 #[derive(Debug, Args)]
+struct PrepareEnrollmentArgs {
+    #[arg(long, value_name = "HTTPS_URL")]
+    hub_url: String,
+    #[arg(long, value_name = "PATH")]
+    token_file: PathBuf,
+    #[arg(long, value_name = "PATH")]
+    state_dir: PathBuf,
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+}
+
+#[derive(Debug, Args)]
 struct EmbeddedSshPreflightArgs {
     #[command(flatten)]
     target: ConfigArgs,
@@ -267,6 +282,12 @@ fn run(command: Command) -> io::Result<()> {
         Command::EnrollHttp(args) => {
             post_enrollment_json(&args.url, &args.token_file, &args.body_file, &args.output)
         }
+        Command::PrepareEnrollment(args) => prepare_enrollment(PrepareEnrollmentRequest {
+            hub_url: args.hub_url,
+            token_file: args.token_file,
+            state_dir: args.state_dir,
+            name: args.name,
+        }),
         Command::EmbeddedSshPreflight(_) => {
             unreachable!("embedded SSH preflight is handled at the CLI runtime boundary")
         }
@@ -413,6 +434,7 @@ mod tests {
         assert!(!help.contains("__sshd-host"));
         assert!(!help.contains("__self-update"));
         assert!(!help.contains("__enroll-http"));
+        assert!(!help.contains("__prepare-enrollment"));
         assert!(!help.contains("__embedded-ssh-preflight"));
         assert!(!help.contains("Internal Windows SCM entrypoint"));
     }
@@ -578,6 +600,32 @@ mod tests {
                 "response.json",
             ])
             .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "hostlink-agent",
+                "__prepare-enrollment",
+                "--hub-url",
+                "https://hub.example",
+                "--token-file",
+                "/private/invite.token",
+                "--state-dir",
+                "/tmp/agent-state"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "hostlink-agent",
+                "__prepare-enrollment",
+                "--hub-url",
+                "https://hub.example",
+                "--enroll-token",
+                "plaintext-secret",
+                "--state-dir",
+                "/tmp/agent-state"
+            ])
+            .is_err()
         );
         assert!(
             Cli::try_parse_from([

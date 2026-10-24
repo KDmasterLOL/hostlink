@@ -32,8 +32,10 @@ The Windows bootstrap installs only to a fresh `%LOCALAPPDATA%\HostLink\Agent` u
 prints an explicit `Run-HostLink-Agent.ps1` command. The updater script invokes the Agent-only Rust
 route with the exact selected package inputs. Neither script registers a service or autostart
 entry, adopts an existing toolkit root, or claims to migrate installed hosts. PowerShell syntax is
-kept compatible with Windows PowerShell 2; actual Windows and Windows 7 runtime acceptance has not
-been performed by this source-only change.
+checked against the Windows PowerShell 2 source subset, but the ZIP extractor requires the .NET
+Framework 4.5 `ZipArchive` type. Stock Windows 7 PowerShell 2/CLR 2 may not load it; the installer
+fails closed if the type is absent. Native Windows 7 acceptance remains blocked pending an owned
+runtime test.
 
 The embedded SSH server supports SFTP, direct TCP forwarding, and bounded
 non-interactive SSH `exec`. Unix runs a command string via `sh -c`; Windows

@@ -6,6 +6,8 @@
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+/// Fresh user-scope enrollment state construction for the verified installer candidate.
+mod bootstrap_enrollment;
 mod config;
 mod control;
 mod diagnostics;
@@ -51,6 +53,7 @@ use std::time::Duration;
 #[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use bootstrap_enrollment::{PrepareEnrollmentRequest, prepare_enrollment};
 #[cfg(test)]
 use config::validate_user_sshd_config;
 pub use config::{

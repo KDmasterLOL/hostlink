@@ -178,6 +178,26 @@ fn hostlink_agent_assets_expose_only_the_fresh_root_and_exact_update_flow() {
         "__self-update",
         "--agent-only",
         "CreateNew",
+        "[string]$ConfigFile",
+        "[string]$HubUrl",
+        "[string]$EnrollmentTokenFile",
+        "__prepare-enrollment",
+        "--token-file",
+        "--state-dir",
+        "[IO.Directory]::Move($stateDir, $publishedState)",
+        "Do not reuse this token; create a new invite",
+        "cannot run as a built-in service account",
+        "requires an interactive user session",
+        "x86_64-pc-windows-msvc",
+        "x86_64-win7-windows-msvc",
+        "i686-win7-windows-msvc",
+        "Unsupported Windows package target",
+        "System.IO.Compression.ZipArchive is unavailable",
+        "Windows 7 PowerShell 2 on CLR 2 is not verified",
+        "must run unelevated",
+        "Join-Path $root 'jobs'",
+        "Security.AccessControl.DirectorySecurity",
+        "CreateDirectory($jobsRoot, $jobsSecurity)",
     ] {
         assert!(
             install.contains(required),
@@ -187,6 +207,16 @@ fn hostlink_agent_assets_expose_only_the_fresh_root_and_exact_update_flow() {
     assert!(run.contains("hostlink-agent.exe"));
     assert!(run.contains("sha256"));
     assert!(run.contains("$agent = Join-Path $bin 'hostlink-agent.exe'"));
+    assert!(install.contains("manual configuration mode"));
+    assert!(install.contains("requires HubUrl and EnrollmentTokenFile together"));
+    assert!(!install.contains("-EnrollToken"));
+    assert!(!install.contains("Register-Service"));
+    assert!(!install.contains("New-Service"));
+    assert!(!install.contains("Shell.Application"));
+    assert!(
+        install.find("CreateDirectory($jobsRoot, $jobsSecurity)") < install.find("__self-update"),
+        "private jobs root must exist before the candidate updater checks root/jobs"
+    );
     for required in [
         "ArchiveFile",
         "ArchiveSha256",

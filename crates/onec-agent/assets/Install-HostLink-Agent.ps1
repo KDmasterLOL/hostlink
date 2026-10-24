@@ -3,10 +3,24 @@ param(
     [Parameter(Mandatory=$true)][string]$ArchiveSha256,
     [Parameter(Mandatory=$true)][string]$PackageVersion,
     [Parameter(Mandatory=$true)][string]$Target,
-    [Parameter(Mandatory=$true)][string]$ConfigFile
+    [string]$ConfigFile,
+    [string]$HubUrl,
+    [string]$EnrollmentTokenFile
 )
 
 $ErrorActionPreference = 'Stop'
+
+$currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+if ($null -eq $currentIdentity -or $null -eq $currentIdentity.User -or @('S-1-5-18', 'S-1-5-19', 'S-1-5-20') -contains $currentIdentity.User.Value) {
+    throw 'HostLink Agent bootstrap cannot run as a built-in service account.'
+}
+if (-not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
+    throw 'HostLink Agent bootstrap requires an interactive user session.'
+}
+$currentPrincipal = New-Object Security.Principal.WindowsPrincipal($currentIdentity)
+if ($currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'HostLink Agent bootstrap must run unelevated in the target user session.'
+}
 
 $supportedTargets = @(
     'x86_64-pc-windows-msvc',
@@ -22,7 +36,18 @@ if ($PackageVersion -notmatch '^\d+\.\d+\.\d+([+-][0-9A-Za-z.-]+)?$') {
 }
 if ($ArchiveSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw 'ArchiveSha256 must be a 64-character SHA-256 digest.' }
 if (-not [IO.Path]::IsPathRooted($ArchiveFile)) { throw 'ArchiveFile must be an absolute path.' }
-if (-not [IO.Path]::IsPathRooted($ConfigFile)) { throw 'ConfigFile must be an absolute path.' }
+$enrollmentMode = (-not [string]::IsNullOrEmpty($HubUrl)) -or (-not [string]::IsNullOrEmpty($EnrollmentTokenFile))
+if ($enrollmentMode) {
+    if ([string]::IsNullOrEmpty($HubUrl) -or [string]::IsNullOrEmpty($EnrollmentTokenFile) -or -not [string]::IsNullOrEmpty($ConfigFile)) {
+        throw 'Enrollment mode requires HubUrl and EnrollmentTokenFile together and cannot be combined with ConfigFile.'
+    }
+    if (-not [IO.Path]::IsPathRooted($EnrollmentTokenFile)) { throw 'EnrollmentTokenFile must be an absolute path.' }
+    if ($HubUrl -notmatch '^https://[^/?#]+(/.*)?$' -or $HubUrl.Contains('@') -or $HubUrl.Contains('?') -or $HubUrl.Contains('#')) {
+        throw 'HubUrl must be an HTTPS Hub origin or enrollment endpoint.'
+    }
+} else {
+    if ([string]::IsNullOrEmpty($ConfigFile) -or -not [IO.Path]::IsPathRooted($ConfigFile)) { throw 'ConfigFile must be an absolute path in manual configuration mode.' }
+}
 
 $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
 if ([string]::IsNullOrEmpty($localAppData)) { throw 'The current user's LocalAppData directory is unavailable.' }
@@ -32,17 +57,24 @@ if ([IO.Directory]::Exists($root) -or [IO.File]::Exists($root)) {
 }
 
 $archive = [IO.Path]::GetFullPath($ArchiveFile)
-$config = [IO.Path]::GetFullPath($ConfigFile)
+$config = $null
+if (-not $enrollmentMode) { $config = [IO.Path]::GetFullPath($ConfigFile) }
 if (-not [IO.File]::Exists($archive)) { throw 'ArchiveFile does not name an existing regular file.' }
-if (-not [IO.File]::Exists($config)) { throw 'ConfigFile does not name an existing regular file.' }
+if (-not $enrollmentMode -and -not [IO.File]::Exists($config)) { throw 'ConfigFile does not name an existing regular file.' }
 if (([IO.File]::GetAttributes($archive) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw 'ArchiveFile must not be a reparse point.'
 }
-if (([IO.File]::GetAttributes($config) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+if (-not $enrollmentMode -and ([IO.File]::GetAttributes($config) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw 'ConfigFile must not be a reparse point.'
 }
+if ($enrollmentMode) {
+    $tokenPath = [IO.Path]::GetFullPath($EnrollmentTokenFile)
+    if (-not [IO.File]::Exists($tokenPath)) { throw 'EnrollmentTokenFile does not name an existing private file.' }
+    if (([IO.File]::GetAttributes($tokenPath) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'EnrollmentTokenFile must not be a reparse point.' }
+    if ((New-Object IO.FileInfo($tokenPath)).Length -gt 4096) { throw 'EnrollmentTokenFile exceeds the 4 KiB limit.' }
+}
 if ((New-Object IO.FileInfo($archive)).Length -gt 536870912) { throw 'ArchiveFile exceeds the 512 MiB limit.' }
-if ((New-Object IO.FileInfo($config)).Length -gt 262144) { throw 'ConfigFile exceeds the 256 KiB limit.' }
+if (-not $enrollmentMode -and (New-Object IO.FileInfo($config)).Length -gt 262144) { throw 'ConfigFile exceeds the 256 KiB limit.' }
 
 function Get-Sha256Stream([IO.Stream]$Stream) {
     $hash = [Security.Cryptography.SHA256]::Create()
@@ -54,11 +86,11 @@ function Get-Sha256Stream([IO.Stream]$Stream) {
 # write each member to a fixed destination; archive paths are never used as filesystem paths.
 try {
     $compressionAssembly = [Reflection.Assembly]::LoadWithPartialName('System.IO.Compression')
-    if ($null -eq $compressionAssembly) {
-        throw 'Compression assemblies were not found.'
+    if ($null -eq $compressionAssembly -or $null -eq $compressionAssembly.GetType('System.IO.Compression.ZipArchive', $false)) {
+        throw 'System.IO.Compression.ZipArchive is unavailable.'
     }
 } catch {
-    throw 'Agent package extraction requires .NET Framework 4.5 or later on Windows 7.'
+    throw 'Agent ZIP extraction requires System.IO.Compression.ZipArchive from .NET Framework 4.5 or later. Windows 7 PowerShell 2 on CLR 2 is not verified and may not provide this type; no fallback extractor is bundled.'
 }
 
 $bundleName = 'hostlink-agent-' + $Target
@@ -82,7 +114,11 @@ try {
     $actualSha256 = Get-Sha256Stream $archiveStream
     if ($actualSha256 -ne $ArchiveSha256.ToLowerInvariant()) { throw 'Archive SHA-256 does not match ArchiveSha256.' }
     $archiveStream.Position = 0
-    $zip = New-Object IO.Compression.ZipArchive($archiveStream, [IO.Compression.ZipArchiveMode]::Read, $false)
+    try {
+        $zip = New-Object IO.Compression.ZipArchive($archiveStream, [IO.Compression.ZipArchiveMode]::Read, $false)
+    } catch {
+        throw 'Agent ZIP extraction requires System.IO.Compression.ZipArchive from .NET Framework 4.5 or later. Windows 7 PowerShell 2 on CLR 2 is not verified and may not provide this type; no fallback extractor is bundled.'
+    }
     if ($zip.Entries.Count -ne $expectedNames.Count) { throw 'Agent package must contain exactly four files.' }
     $seen = @{}
     $expandedTotal = 0L
@@ -129,10 +165,22 @@ try {
 }
 
 $candidate = Join-Path $stage 'bin\hostlink-agent.exe'
-& $candidate check --config $config
-if ($LASTEXITCODE -ne 0) { throw "Agent config health check failed with exit code $LASTEXITCODE." }
-
 $parent = [IO.Path]::GetDirectoryName($root)
+if ($enrollmentMode) {
+    if (-not [IO.Directory]::Exists($parent)) { [void][IO.Directory]::CreateDirectory($parent) }
+    if (([IO.File]::GetAttributes($parent) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'HostLink parent directory must not be a reparse point.' }
+    $stateDir = Join-Path $parent ('.hostlink-agent-enrollment-' + [Guid]::NewGuid().ToString('N'))
+    $prepareArguments = @('__prepare-enrollment', '--hub-url', $HubUrl, '--token-file', $tokenPath, '--state-dir', $stateDir)
+    & $candidate @prepareArguments
+    if ($LASTEXITCODE -ne 0) { throw 'Agent enrollment failed or its outcome is uncertain. Do not reuse this token; create a new invite before another attempt.' }
+    $config = Join-Path $stateDir 'agent.json'
+    & $candidate check --config $config
+    if ($LASTEXITCODE -ne 0) { throw 'Enrolled Agent config health check failed. Do not reuse this token; create a new invite before another attempt.' }
+} else {
+    & $candidate check --config $config
+    if ($LASTEXITCODE -ne 0) { throw "Agent config health check failed with exit code $LASTEXITCODE." }
+}
+
 if ([IO.Directory]::Exists($parent)) {
     if (([IO.File]::GetAttributes($parent) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw 'HostLink parent directory must not be a reparse point.'
@@ -148,11 +196,27 @@ try {
     if (([IO.File]::GetAttributes($root) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw 'New HostLink Agent root unexpectedly resolved to a reparse point.'
     }
+    $jobsRoot = Join-Path $root 'jobs'
+    $jobsSecurity = New-Object Security.AccessControl.DirectorySecurity
+    $jobsSecurity.SetAccessRuleProtection($true, $false)
+    $jobsInheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $jobsRule = New-Object Security.AccessControl.FileSystemAccessRule($currentIdentity.User, [Security.AccessControl.FileSystemRights]::FullControl, $jobsInheritance, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
+    [void]$jobsSecurity.AddAccessRule($jobsRule)
+    [void][IO.Directory]::CreateDirectory($jobsRoot, $jobsSecurity)
+    if (([IO.File]::GetAttributes($jobsRoot) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'HostLink Agent jobs directory must not be a reparse point.'
+    }
     $stagedArchive = Join-Path $root '.hostlink-agent-bootstrap.zip'
     [IO.File]::Copy($archive, $stagedArchive, $false)
     & $candidate __self-update --root $root --agent-only --archive-file $stagedArchive --archive-sha256 $actualSha256 --package-version $PackageVersion --target $Target
     if ($LASTEXITCODE -ne 0) { throw "Agent-only package install failed with exit code $LASTEXITCODE." }
     [IO.File]::Delete($stagedArchive)
+    if ($enrollmentMode) {
+        $publishedState = Join-Path $root 'agent'
+        if ([IO.Directory]::Exists($publishedState) -or [IO.File]::Exists($publishedState)) { throw 'Agent state publication target already exists.' }
+        [IO.Directory]::Move($stateDir, $publishedState)
+        $config = Join-Path $publishedState 'agent.json'
+    }
     $installedAgent = Join-Path $root ('hostlink-agent\bin\' + $(if ($Target -like '*windows*') { 'hostlink-agent.exe' } else { 'hostlink-agent' }))
     & $installedAgent check --config $config
     if ($LASTEXITCODE -ne 0) { throw "Installed Agent config health check failed with exit code $LASTEXITCODE." }
@@ -163,5 +227,6 @@ try {
 Write-Host ('HostLink Agent installed in the fresh user root: ' + $root)
 Write-Host ('Run explicitly with: powershell.exe -NoProfile -File "' + (Join-Path $root 'hostlink-agent\bin\Run-HostLink-Agent.ps1') + '" -ConfigFile "' + $config + '"')
 } finally {
+    if ($enrollmentMode -and $null -ne $stateDir -and [IO.Directory]::Exists($stateDir)) { [IO.Directory]::Delete($stateDir, $true) }
     if ([IO.Directory]::Exists($stage)) { [IO.Directory]::Delete($stage, $true) }
 }
