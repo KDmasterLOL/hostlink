@@ -74,7 +74,7 @@ fn managed_include_is_idempotent_and_preserves_existing_config() {
 fn regression_inv_163_sync_ssh_retires_exact_legacy_onec_ops_include() {
     let dir = tempdir().expect("tempdir");
     let user = dir.path().join(".ssh/config");
-    let generated = dir.path().join("onec-access/ssh_config");
+    let generated = dir.path().join("hostlink/ssh_config");
     fs::create_dir_all(user.parent().expect("parent")).expect("ssh dir");
     fs::write(
         &user,
@@ -104,7 +104,7 @@ fn regression_inv_163_sync_ssh_retires_exact_legacy_onec_ops_include() {
 fn regression_inv_163_legacy_cleanup_does_not_remove_other_includes() {
     let dir = tempdir().expect("tempdir");
     let user = dir.path().join(".ssh/config");
-    let generated = dir.path().join("onec-access/ssh_config");
+    let generated = dir.path().join("hostlink/ssh_config");
     fs::create_dir_all(user.parent().expect("parent")).expect("ssh dir");
     let preserved = concat!(
         "Include ~/.config/other/ssh_config\n",
@@ -347,8 +347,8 @@ fn regression_1c_805_rejects_oversized_windows_interactive_command_without_paylo
         .expect_err("oversized Windows command must fail preflight");
     let message = error.to_string();
     assert!(message.contains(&encoded.len().to_string()));
-    assert!(message.contains("onec-access upload"));
-    assert!(message.contains("onec-access exec --stdin-file"));
+    assert!(message.contains("hostlink upload"));
+    assert!(message.contains("hostlink exec --stdin-file"));
     assert!(message.contains("verified stdin-consuming program"));
     assert!(!message.contains(&raw));
     assert!(!message.contains("tool.exe"));

@@ -28,7 +28,7 @@ pub(in crate::cli) fn migration_exec_mode(capabilities: &[String]) -> AppResult<
     {
         return Ok(MigrationExecMode::PreBounded);
     }
-    Err(onec_access::invalid_config(
+    Err(hostlink_access::invalid_config(
         "migrate-runtime requires either current exec.bounded-v1 or the pre-unified exec.argv-v1 compatibility contract".to_owned(),
     ))
 }
@@ -39,7 +39,7 @@ pub(in crate::cli) async fn migrate_runtime(
     let config_path = hub_config_path()?;
     let hub = HubClient::configured()?.ok_or_else(|| {
         crate::not_found_error(format!(
-            "onec-access controller config {}; run `onec-access configure ...`",
+            "hostlink controller config {}; run `hostlink configure ...`",
             config_path.display()
         ))
     })?;
@@ -84,7 +84,7 @@ pub(in crate::cli) async fn migrate_runtime(
         }
         Ok(other) => {
             return Err(crate::invalid_config(format!(
-                "target {:?} did not return an agent hello before migration (received {other:?}); verify the enrolled agent with `onec-access info {}`",
+                "target {:?} did not return an agent hello before migration (received {other:?}); verify the enrolled agent with `hostlink info {}`",
                 agent.name, agent.name
             )));
         }
@@ -185,7 +185,7 @@ async fn migration_bootstrap_exec(
     .await
     .map_err(|_| {
         crate::invalid_config(format!(
-            "runtime migration bootstrap exceeded the controller deadline for {target:?}; target state is unknown. Do not retry automatically; inspect `onec-access info {target}` and `onec-access verify {target}` first"
+            "runtime migration bootstrap exceeded the controller deadline for {target:?}; target state is unknown. Do not retry automatically; inspect `hostlink info {target}` and `hostlink verify {target}` first"
         ))
     })?
 }
@@ -302,7 +302,7 @@ fn parse_direct_migration_receipt(
 
 fn direct_migration_success_message(pid: u32, direct: &DirectInstall, target: &str) -> String {
     format!(
-        "Detached launch accepted (installer PID {pid}) for package {} target {} (ZIP SHA-256 {}). Migration completion and reconnection are pending; after the installer finishes, verify with `onec-access info {target}` and `onec-access verify {target}`.",
+        "Detached launch accepted (installer PID {pid}) for package {} target {} (ZIP SHA-256 {}). Migration completion and reconnection are pending; after the installer finishes, verify with `hostlink info {target}` and `hostlink verify {target}`.",
         direct.package_version, direct.package_target, direct.package_sha256
     )
 }
@@ -370,7 +370,7 @@ fn sanitized_diagnostic(value: &str) -> String {
 
 fn target_online_error_message(target: &str, reason: &str) -> String {
     format!(
-        "target {target:?} is enrolled but not online through its configured hub/access route; restore its agent/session or legacy SSH route, then verify with `onec-access info {target}`: {reason}"
+        "target {target:?} is enrolled but not online through its configured hub/access route; restore its agent/session or legacy SSH route, then verify with `hostlink info {target}`: {reason}"
     )
 }
 
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn migration_requires_all_direct_artifact_pins_and_rejects_retired_release_flags() {
         let missing = Cli::try_parse_from([
-            "onec-access",
+            "hostlink",
             "migrate-runtime",
             "host",
             "--persistence",
@@ -439,7 +439,7 @@ mod tests {
         .expect_err("migration must require the complete direct artifact pin");
         assert_eq!(missing.kind(), ErrorKind::MissingRequiredArgument);
         let retired = Cli::try_parse_from([
-            "onec-access",
+            "hostlink",
             "migrate-runtime",
             "host",
             "--persistence",
@@ -576,7 +576,7 @@ mod tests {
     fn offline_target_error_includes_recovery_command_and_route_detail() {
         let error = target_online_error_message("server-a", "connection refused");
         assert!(error.contains("restore its agent/session or legacy SSH route"));
-        assert!(error.contains("onec-access info server-a"));
+        assert!(error.contains("hostlink info server-a"));
         assert!(error.contains("connection refused"));
     }
 }

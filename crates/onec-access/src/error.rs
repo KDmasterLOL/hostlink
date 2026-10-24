@@ -100,12 +100,12 @@ pub(crate) fn protocol_error(message: impl Into<String>) -> AppError {
 
 /// Creates the stable invalid-controller-configuration error used by the library and CLI.
 pub fn invalid_config(message: impl Into<String>) -> AppError {
-    anyhow::anyhow!("invalid onec-access configuration: {}", message.into())
+    anyhow::anyhow!("invalid hostlink configuration: {}", message.into())
 }
 
 /// Creates the stable hub/access object-not-found error used by the library and CLI.
 pub fn not_found_error(message: impl Into<String>) -> AppError {
-    anyhow::anyhow!("onec-access object not found: {}", message.into())
+    anyhow::anyhow!("hostlink object not found: {}", message.into())
 }
 
 pub(crate) fn http_error(message: impl Into<String>) -> AppError {

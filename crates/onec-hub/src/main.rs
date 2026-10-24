@@ -1,4 +1,4 @@
-//! onec-hub process bootstrap.
+//! HostLink Hub process bootstrap.
 //!
 //! The binary root wires configuration/state into the HTTP server. Audit, persisted
 //! state, enrollment, authorization, port allocation, and authorized-keys mutation
@@ -25,7 +25,7 @@ use security::{
     validate_control_credential_nonce,
 };
 
-pub(crate) use onec_hub::HubHttpsUrl;
+pub(crate) use hostlink_hub::HubHttpsUrl;
 
 const CONFIG_VERSION: u32 = 1;
 const LEGACY_STATE_VERSION: u32 = 1;
@@ -58,7 +58,7 @@ use state::*;
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("onec-hub: {error}");
+        eprintln!("hostlink-hub: {error}");
         std::process::exit(1);
     }
 }

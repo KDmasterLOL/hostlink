@@ -73,7 +73,7 @@ pub(super) struct ControlCredentialResponse {
 pub(super) struct HubInfoResponse {
     pub(super) public_url: HubHttpsUrl,
     #[serde(default)]
-    pub(super) gateways: Vec<onec_hub::GatewayEndpoint>,
+    pub(super) gateways: Vec<hostlink_hub::GatewayEndpoint>,
 }
 
 #[derive(Debug, Serialize)]

@@ -37,7 +37,7 @@ pub(crate) fn remove_agent_request(
     state.agents.remove(machine_id);
     if let Err(error) = writer.commit(true) {
         if error.committed() {
-            eprintln!("onec-hub revocation committed with degraded projection: {error}");
+            eprintln!("HostLink Hub revocation committed with degraded projection: {error}");
             return Ok(json_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "reconciliation_required",
@@ -45,7 +45,7 @@ pub(crate) fn remove_agent_request(
             ));
         }
         if error.uncertain() {
-            eprintln!("onec-hub revocation state commit is uncertain: {error}");
+            eprintln!("HostLink Hub revocation state commit is uncertain: {error}");
             return Ok(json_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "state_commit_uncertain",

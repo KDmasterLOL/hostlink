@@ -1,4 +1,4 @@
-//! onec-access controller CLI.
+//! hostlink controller CLI.
 
 use clap::Parser;
 use std::io;
@@ -6,7 +6,7 @@ use std::io;
 mod cli;
 
 use cli::Cli;
-pub(crate) use onec_access::{invalid_config, not_found_error, process_failed_error};
+pub(crate) use hostlink_access::{invalid_config, not_found_error, process_failed_error};
 
 #[tokio::main]
 async fn main() {
@@ -14,7 +14,7 @@ async fn main() {
         Ok(Some(code)) => std::process::exit(code),
         Ok(None) => {}
         Err(error) => {
-            eprintln!("onec-access: {error}");
+            eprintln!("hostlink: {error}");
             std::process::exit(1);
         }
     }

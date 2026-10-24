@@ -209,7 +209,7 @@ impl HubControllerConfig {
             .map_err(|source| crate::json_error(path.to_path_buf(), source))?;
         if config.version != HUB_CONFIG_VERSION {
             return Err(crate::invalid_config(format!(
-                "unsupported onec-access config version {} in {}; expected {}",
+                "unsupported hostlink config version {} in {}; expected {}",
                 config.version,
                 path.display(),
                 HUB_CONFIG_VERSION
@@ -245,7 +245,7 @@ impl HubControllerConfig {
     pub fn validate(&self) -> AppResult<()> {
         if self.version != HUB_CONFIG_VERSION {
             return Err(crate::invalid_config(format!(
-                "unsupported onec-hub controller config version {}",
+                "unsupported HostLink Hub controller config version {}",
                 self.version
             )));
         }
@@ -257,7 +257,7 @@ impl HubControllerConfig {
             })
         {
             return Err(crate::invalid_config(
-                "onec-access requires non-empty fallback gateway host/user and non-zero port"
+                "hostlink requires non-empty fallback gateway host/user and non-zero port"
                     .to_owned(),
             ));
         }
@@ -268,13 +268,13 @@ impl HubControllerConfig {
             .any(|gateway| !seen.insert((gateway.host.to_ascii_lowercase(), gateway.port)))
         {
             return Err(crate::invalid_config(
-                "onec-access fallback gateways must not contain duplicate host/port endpoints"
+                "hostlink fallback gateways must not contain duplicate host/port endpoints"
                     .to_owned(),
             ));
         }
         if self.token_env.trim().is_empty() && self.token_file.is_none() {
             return Err(crate::invalid_config(
-                "a onec-hub operator token source is required".to_owned(),
+                "a HostLink Hub operator token source is required".to_owned(),
             ));
         }
         Ok(())
@@ -288,7 +288,7 @@ impl HubControllerConfig {
             std::str::from_utf8(&bytes)
                 .map_err(|error| {
                     crate::invalid_config(format!(
-                        "onec-hub operator token file {} must be UTF-8: {error}",
+                        "HostLink Hub operator token file {} must be UTF-8: {error}",
                         path.display()
                     ))
                 })?
@@ -297,14 +297,14 @@ impl HubControllerConfig {
         } else {
             env::var(&self.token_env).map_err(|_| {
                 crate::invalid_config(format!(
-                    "environment variable {:?} containing the onec-hub operator token is not set",
+                    "environment variable {:?} containing the HostLink Hub operator token is not set",
                     self.token_env
                 ))
             })?
         };
         if token.trim().len() < 32 {
             return Err(crate::invalid_config(
-                "onec-hub operator token must contain at least 32 characters".to_owned(),
+                "HostLink Hub operator token must contain at least 32 characters".to_owned(),
             ));
         }
         Ok(token.into())

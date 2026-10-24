@@ -24,7 +24,7 @@ pub async fn resolve_remote_server(name: &str) -> AppResult<RemoteServer> {
     let config_path = hub_config_path()?;
     let hub = HubClient::configured()?.ok_or_else(|| {
         crate::not_found_error(format!(
-            "onec-access config {}; configure access before using remote operations",
+            "hostlink config {}; configure access before using remote operations",
             config_path.display()
         ))
     })?;

@@ -1,13 +1,12 @@
-# onec-access
+# HostLink controller
 
-`onec-access` is the controller-side managed-machine access product for `onec-hub` /
-`onec-agent` fleets. It owns controller-local hub configuration, authoritative inventory
+`hostlink` is the controller-side managed-machine access product for `HostLink Hub` /
+`HostLink Agent` fleets. It owns controller-local hub configuration, authoritative inventory
 selection, generated SSH projection, embedded russh/russh-sftp transport, structured exec/jobs,
 verified file transfer, probes, forwarding, RDP and enrollment invitation rendering.
 
 It does **not** own hub persistence/enrollment state or caller-specific project/update policy. Server-side
-authority remains in `onec-hub`; target-local operations are composed by `onec-cli` over
-`onec-infobase`, `onec-project`, and the other focused domain owners.
+authority remains in `HostLink Hub`; callers compose their own target operations over HostLink transport primitives.
 
 ## Display-only managed machine labels
 
@@ -15,13 +14,13 @@ An enrolled host may have an optional Unicode display label independent of its s
 Hub name. The operator can update or clear it without reenrollment or key rotation:
 
 ```text
-onec-access display-name server-a "Тестовый сервер"
-onec-access display-name server-a --clear
+hostlink display-name server-a "Тестовый сервер"
+hostlink display-name server-a --clear
 ```
 
 The stable Hub `name` remains the only human-readable SSH/exec/remove selector and
 authenticated Hello identity. `display_name` is never a selector; duplicate labels are
-allowed. `onec-access list` presents both name and label, while `list --json` and
+allowed. `hostlink list` presents both name and label, while `list --json` and
 `info` expose `display_name` separately without changing existing fields.
 
 The Hub persists `display_name` as an optional field in the current durable state,
@@ -68,16 +67,16 @@ state machine. The complete loopback SFTP upload/download regression runs at def
 
 Immediate execution and durable job start each expose one async `bon`-generated builder, beginning
 with `exec(program)` and `start_job(program)`. This is an intentional source API break for Rust
-callers of this crate: `onec-access` is an internal controller product, and its former
+callers of this crate: `hostlink` is an internal controller product, and its former
 `exec_with_*` / `job_start_with_*` wrapper families were removed. No synchronous compatibility
 facade remains. The builder migration changes neither the CLI contract nor agent wire semantics.
 
 ## Controller access setup
 
-Configure the hub once on the operator machine. For a durable workstation, keep the operator token in a private file beside the toolkit config rather than requiring every shell to export it:
+Configure the hub once on the operator machine. For a durable workstation, keep the operator token in a private file beside the HostLink config rather than requiring every shell to export it:
 
 ```bash
-onec-access configure \
+hostlink configure \
   --url https://ops.example.com \
   --gateway gateway.example.com \
   --gateway-user operator \
@@ -85,10 +84,10 @@ onec-access configure \
   --known-hosts ~/.ssh/known_hosts \
   --token-file secrets/operator.token
 
-onec-access check
+hostlink check
 ```
 
-Relative token-file paths resolve beside the OS-native `onec-access` ProjectDirs controller config (`~/.config/onec-access/controller.json` on ordinary Linux, `%APPDATA%\onec-access\config\controller.json` on Windows). `--token-env` remains available for ephemeral/operator-managed environments. The token value itself is never stored in `controller.json`, and there is no per-server local registry entry.
+Relative token-file paths resolve beside the OS-native `hostlink` ProjectDirs controller config (`~/.config/onec-access/controller.json` on ordinary Linux, `%APPDATA%\onec-access\config\controller.json` on Windows). `--token-env` remains available for ephemeral/operator-managed environments. The token value itself is never stored in `controller.json`, and there is no per-server local registry entry.
 
 The local configuration is written canonically with an ordered `gateways` array. Older
 single-gateway `gateway_host` / `gateway_user` / `gateway_port` files are read and migrated on the
@@ -101,8 +100,7 @@ authenticated enrolled host uses the same controller authorization model.
 `run-local --required-effect` still labels an invocation's effect for
 correct lease and owned-resource handling; it is not a separate host privilege.
 Legacy `target_max_effects` config is validated on read but omitted on write.
-Production infobase restrictions, scoped cleanup, active-job deferral and exact
-artifact verification remain independent of this controller setting.
+Caller-specific authorization and artifact policy remain outside the HostLink controller.
 
 Embedded controller operations use the approved gateway list in order during SSH and channel
 establishment. Each connection phase is bounded: gateway SSH connect/authentication, gateway
@@ -117,7 +115,7 @@ If cleanup cannot be confirmed inside that deadline, admission fails without try
 Once a channel is returned, controller protocol operations are sent once and are not
 replayed through another edge. Generated `sync-ssh` configuration creates a separate alias for each
 approved gateway. Manually invoked OpenSSH still uses the configured primary `ProxyJump`. The
-`onec-access ssh` command first probes the target reverse listener through approved gateways in
+`hostlink ssh` command first probes the target reverse listener through approved gateways in
 order, then starts one interactive OpenSSH session through the selected gateway. It does not retry
 the target session after launch. Fleet and automation access uses embedded multi-edge transport.
 
@@ -133,43 +131,56 @@ The migration receipt binds the selected package version/digest and positive det
 
 `migration-report` is read-only. It classifies a live agent from its complete current capabilities, retains unreachable/incomplete inventory as unknown, and reports whether the supported persistence/Windows migration preconditions hold. It never invokes migration. This compatibility implementation remains available for source development and regression tests; it does not define a fleet rollout policy.
 
-`onec-access list` and `migration-report` resolve Hub routes for up to eight enrolled agents concurrently, while authenticated agent `Hello` probes remain limited to two simultaneous connections. Both commands preserve sorted output. In `list`, `status=online` means an authenticated agent `Hello` responded at the reported `observed_at_unix_ms`; `status_scope=point_in_time` makes clear this does not guarantee that a later SSH channel or `exec` will succeed. A failed Hello is reported as `status=unknown`, because transport failure cannot establish that the agent itself is offline. `persistence_mode_source=hub_enrollment` identifies Hub-provided enrollment metadata separately from the live Hello observation. Failure rows retain the existing `error` key but its text is a bounded, sanitized diagnostic; `failure_phase` identifies the route stage. Both commands remain read-only with respect to managed targets and do not execute a probe command.
+`hostlink list` and `migration-report` resolve Hub routes for up to eight enrolled agents concurrently, while authenticated agent `Hello` probes remain limited to two simultaneous connections. Both commands preserve sorted output. In `list`, `status=online` means an authenticated agent `Hello` responded at the reported `observed_at_unix_ms`; `status_scope=point_in_time` makes clear this does not guarantee that a later SSH channel or `exec` will succeed. A failed Hello is reported as `status=unknown`, because transport failure cannot establish that the agent itself is offline. `persistence_mode_source=hub_enrollment` identifies Hub-provided enrollment metadata separately from the live Hello observation. Failure rows retain the existing `error` key but its text is a bounded, sanitized diagnostic; `failure_phase` identifies the route stage. Both commands remain read-only with respect to managed targets and do not execute a probe command.
 
 ```bash
-onec-access list
-onec-access info accounting-01
-onec-access verify accounting-01 --json
-onec-access sync-ssh
-onec-access ssh accounting-01 -- hostname
-onec-access exec accounting-01 -- cmd.exe /c whoami
-onec-access exec accounting-01 --secret-env ONEC_OPS_IB_PASSWORD=ONEC_ACCOUNTING_PASSWORD -- onec doctor
-onec-access exec accounting-01 --stdin-file request.bin -- tool.exe --consume-stdin
-onec-access exec accounting-01 --result report.json=1048576 --result-dir ./results -- tool.exe --write-result
-ONEC_ACCESS_TARGET=accounting-01 onec-access run-local --required-effect run-owned --map-file-env NEXTEST_BIN_EXE_onec -- ./native_run_owned.exe --list
-ONEC_ACCESS_TARGET=accounting-01 onec-access run-local --required-effect read-only --map-file-env NEXTEST_BIN_EXE_onec -- ./native_readonly.exe --list
-ONEC_ACCESS_TARGET=accounting-01 onec-access run-local --required-effect disposable --map-file-env NEXTEST_BIN_EXE_onec -- ./native_disposable.exe --list
-onec-access exec accounting-01 --secret-env TOOL_PASSWORD=ONEC_ACCOUNTING_PASSWORD --stdin-file request.json --result report.json=1048576 --result-dir ./results -- tool.exe --consume-stdin --write-result
-onec-access job start accounting-01 -- onec doctor
-onec-access job start accounting-01 --secret-env ONEC_OPS_IB_PASSWORD=ONEC_ACCOUNTING_PASSWORD -- onec doctor
-onec-access job start accounting-01 --stdin-file request.bin -- tool.exe --consume-stdin
-onec-access job start accounting-01 --result report.json=1048576 -- tool.exe --write-result
-onec-access job start accounting-01 --secret-env TOOL_PASSWORD=ONEC_ACCOUNTING_PASSWORD --stdin-file request.json --result report.json=1048576 -- tool.exe --consume-stdin --write-result
-onec-access job result accounting-01 <job-id> ./results --cleanup
-onec-access upload accounting-01 ./payload.bin 'C:\\Temp\\payload.bin'
-onec-access download accounting-01 'C:\\Temp\\result.dt' ./result.dt
-onec-access probe accounting-01 127.0.0.1 1545
-onec-access rdp accounting-01
+hostlink list
+hostlink info accounting-01
+hostlink verify accounting-01 --json
+hostlink sync-ssh
+hostlink ssh accounting-01 -- hostname
+hostlink exec accounting-01 -- cmd.exe /c whoami
+hostlink exec accounting-01 --secret-env ONEC_OPS_IB_PASSWORD=ONEC_ACCOUNTING_PASSWORD -- app.exe --health-check
+hostlink exec accounting-01 --stdin-file request.bin -- tool.exe --consume-stdin
+hostlink exec accounting-01 --result report.json=1048576 --result-dir ./results -- tool.exe --write-result
+ONEC_ACCESS_TARGET=accounting-01 hostlink run-local --required-effect run-owned --map-file-env NEXTEST_BIN_EXE_app -- ./native_run_owned.exe --list
+ONEC_ACCESS_TARGET=accounting-01 hostlink run-local --required-effect read-only --map-file-env NEXTEST_BIN_EXE_app -- ./native_readonly.exe --list
+ONEC_ACCESS_TARGET=accounting-01 hostlink run-local --required-effect disposable --map-file-env NEXTEST_BIN_EXE_app -- ./native_disposable.exe --list
+hostlink exec accounting-01 --secret-env TOOL_PASSWORD=ONEC_ACCOUNTING_PASSWORD --stdin-file request.json --result report.json=1048576 --result-dir ./results -- tool.exe --consume-stdin --write-result
+hostlink job start accounting-01 -- app.exe --health-check
+hostlink job start accounting-01 --secret-env ONEC_OPS_IB_PASSWORD=ONEC_ACCOUNTING_PASSWORD -- app.exe --health-check
+hostlink job start accounting-01 --stdin-file request.bin -- tool.exe --consume-stdin
+hostlink job start accounting-01 --result report.json=1048576 -- tool.exe --write-result
+hostlink job start accounting-01 --secret-env TOOL_PASSWORD=ONEC_ACCOUNTING_PASSWORD --stdin-file request.json --result report.json=1048576 -- tool.exe --consume-stdin --write-result
+hostlink job result accounting-01 <job-id> ./results --cleanup
+hostlink upload accounting-01 ./payload.bin 'C:\\Temp\\payload.bin'
+hostlink download accounting-01 'C:\\Temp\\result.dt' ./result.dt
+hostlink probe accounting-01 127.0.0.1 1545
+hostlink rdp accounting-01
 ```
 
-`onec-access exec` and `onec-access job start` accept repeatable `--secret-env KEY=SOURCE_ENV`. The CLI never accepts plaintext secret values: the controller validates all mappings, reads the named local process environment variables, and sends resolved values only through authenticated `SecretEnvironment`. Ordinary `--env` and secret mappings for the same target variable are rejected before host lookup; missing, non-Unicode, or empty source variables fail locally. Agents must advertise `exec.secret-env-v1` / `jobs.secret-env-v1`; immediate output and durable logs redact exact secret bytes, and durable job state/request metadata never persist the reusable value.
+## Caller-supplied scripts
 
-`onec-access exec` and `onec-access job start` also accept optional `--stdin-file PATH`; use `--stdin-file -` to read one payload from controller stdin. Input is exact binary data, limited to 256 KiB before any remote request. Agents advertise `exec.stdin-v1` / `jobs.stdin-v1`; controllers fail closed before execution when the matching capability is absent. Stdin is non-secret operation data, not a credential channel.
+HostLink does not install a script runtime or manage packages. A caller can upload an
+ordinary script and invoke it through the target's SSH shell, composing pre- and
+post-steps in its own workflow:
 
-For interactive `onec-access ssh` commands targeting Windows, the controller checks the complete final encoded command before gateway probing and rejects commands longer than 8000 encoded bytes. This is a conservative supported-route limit that reserves space within the default 8191-character `cmd.exe` command-line envelope; the configured OpenSSH server shell can differ, and this limit does not assert or inspect a remote shell registry setting. Use `onec-access upload` for a file or script. Use `onec-access exec --stdin-file` only when the selected program is verified to consume stdin. The diagnostic reports encoded length only and never includes command arguments. POSIX interactive commands are not subject to this Windows limit.
+```powershell
+hostlink upload server-a .\prepare.ps1 'C:\Temp\prepare.ps1'
+hostlink ssh server-a -- powershell.exe -NoProfile -NonInteractive -File C:\Temp\prepare.ps1
+```
+
+The script runs as the SSH account. HostLink does not elevate it or run it automatically.
+
+`hostlink exec` and `hostlink job start` accept repeatable `--secret-env KEY=SOURCE_ENV`. The CLI never accepts plaintext secret values: the controller validates all mappings, reads the named local process environment variables, and sends resolved values only through authenticated `SecretEnvironment`. Ordinary `--env` and secret mappings for the same target variable are rejected before host lookup; missing, non-Unicode, or empty source variables fail locally. Agents must advertise `exec.secret-env-v1` / `jobs.secret-env-v1`; immediate output and durable logs redact exact secret bytes, and durable job state/request metadata never persist the reusable value.
+
+`hostlink exec` and `hostlink job start` also accept optional `--stdin-file PATH`; use `--stdin-file -` to read one payload from controller stdin. Input is exact binary data, limited to 256 KiB before any remote request. Agents advertise `exec.stdin-v1` / `jobs.stdin-v1`; controllers fail closed before execution when the matching capability is absent. Stdin is non-secret operation data, not a credential channel.
+
+For interactive `hostlink ssh` commands targeting Windows, the controller checks the complete final encoded command before gateway probing and rejects commands longer than 8000 encoded bytes. This is a conservative supported-route limit that reserves space within the default 8191-character `cmd.exe` command-line envelope; the configured OpenSSH server shell can differ, and this limit does not assert or inspect a remote shell registry setting. Use `hostlink upload` for a file or script. Use `hostlink exec --stdin-file` only when the selected program is verified to consume stdin. The diagnostic reports encoded length only and never includes command arguments. POSIX interactive commands are not subject to this Windows limit.
 
 Do not send PowerShell 2 scripts through stdin with `-Command -` or `-File -`; native NT 6.1 runs returned exit 0 without the required completion marker. Stdin remains suitable for exact binary payloads to consumers verified to read it, such as `sort.exe`. For short, non-secret PowerShell scripts up to 4096 UTF-16LE source bytes, use `-EncodedCommand` with a completion marker after the caller-specific postcondition. Base64 is encoding, not secrecy, and the command is visible in process arguments. Longer or secret scripts must use an explicitly uploaded, owned `.ps1` path with `-File <path>` and an independent postcondition check. See the [legacy Windows PowerShell execution contract](../../docs/legacy-windows-compatibility.md#powershell-script-execution-and-stdin).
 
-`onec-access exec` and `onec-access job start` accept repeatable `--result NAME=MAX_BYTES` declarations. Immediate Exec requires `--result-dir DIR` for controller-local publication; durable results are retrieved after terminal completion with `onec-access job result NAME JOB_ID DIR [--cleanup]`. Result retrieval binds to the original Exec/JobStatus metadata and verifies exact name, byte count, SHA-256 and media type before publication.
+`hostlink exec` and `hostlink job start` accept repeatable `--result NAME=MAX_BYTES` declarations. Immediate Exec requires `--result-dir DIR` for controller-local publication; durable results are retrieved after terminal completion with `hostlink job result NAME JOB_ID DIR [--cleanup]`. Result retrieval binds to the original Exec/JobStatus metadata and verifies exact name, byte count, SHA-256 and media type before publication.
 
 `exec` and `job start` are trusted arbitrary process execution under the authenticated Agent
 account. They send a program and argv without controller-side shell interpolation, but they do not
@@ -177,12 +188,12 @@ sandbox the process: callers can invoke interpreters, scripts, or encoded comman
 arbitrary commands belongs to the authenticated caller; no general shell parser or command
 denylist constrains filesystem effects. Interactive OpenSSH is a separate boundary that encodes
 the remote command as one shell string for the selected target OS; this does not guarantee the
-semantics of arbitrary caller-authored shell scripts. Toolkit-owned recursive cleanup must use the
+semantics of arbitrary caller-authored shell scripts. Caller-owned recursive cleanup must use the
 typed `filesystem.scoped-remove-v1` / `PathRemoveScoped` operation, which requires the target to
 be a strict child of an explicitly declared root and validates path components on the Agent. If
 ownership cannot be proven, preserve the staging path for inspection.
 
-`onec-access run-local` is the generic Cargo/Nextest target-runner boundary. It resolves the
+`hostlink run-local` is the generic Cargo/Nextest target-runner boundary. It resolves the
 managed target from `--target` or `ONEC_ACCESS_TARGET`, validates every controller-local file
 before target resolution, then resolves its canonical machine identity through the authenticated
 hub and checks `--required-effect` against that machine's controller-local ceiling before creating
@@ -240,10 +251,10 @@ used to infer absence: it cannot provide the Agent-side structural path and repa
 for this proof. Diagnostics do not print upstream error text, credentials, or remote paths.
 
 Runner stdout contains only the remote child's bounded, secret-redacted stdout bytes; child stderr
-is forwarded to stderr and the `onec-access` process returns the remote exit code. Setup/transport
+is forwarded to stderr and the `hostlink` process returns the remote exit code. Setup/transport
 diagnostics are written to stderr. Immediate execution remains bounded by the agent's existing
 256 KiB-per-stream safety ceiling; exceeding it fails the run rather than returning truncated test
-listing output. Ordinary `onec-access exec` keeps its 60-second default, while `run-local` uses
+listing output. Ordinary `hostlink exec` keeps its 60-second default, while `run-local` uses
 the Agent protocol's 10-minute maximum only as an outer emergency ceiling. Repository Nextest
 configuration owns the earlier native per-test timeout. Exec control channels remain write-open
 until the response so controller/runner termination is observable by the Agent; connection
@@ -252,7 +263,7 @@ EOF/reset cancels and reaps the owned process tree instead of leaving a detached
 redaction invariants instead of defining another remote runner protocol.
 
 For source-exact commands that may outlive their controller connection, use
-`onec-access run-local-job start|status|logs|cancel|results|attest|cleanup`. `start` requires the
+`hostlink run-local-job start|status|logs|cancel|results|attest|cleanup`. `start` requires the
 `jobs.local-candidate-v1` Agent capability before remote preparation or upload and prints a
 controller-generated run ID for reconnecting. Mapped files are verified and retained in that
 job's prepared workspace; the executable may use the immutable content cache. Mutable run
@@ -290,7 +301,7 @@ does not prove that listed tests ran or passed and does not grant native suite
 or release acceptance.
 
 ```sh
-onec-access run-local-job start --target <managed-target> \
+hostlink run-local-job start --target <managed-target> \
   --required-effect run-owned --native-effect run-owned \
   --native-suite-policy approved-suite-policy.json \
   -- ./native-runner.exe run --exact suite::case_a suite::case_b
@@ -312,7 +323,7 @@ Example explicit opt-in (the durable target authorization and the Agent-declared
 checked independently):
 
 ```text
-onec-access run-local-job start --target <managed-target> \
+hostlink run-local-job start --target <managed-target> \
   --required-effect run-owned --native-effect run-owned -- ./candidate.exe --exact suite::test
 ```
 
@@ -320,11 +331,11 @@ For the standard `JobStart` flow without `--native-effect`, after terminal succe
 (which also cleans the remote result set), then collect its one-time terminal attestation:
 
 ```text
-onec-access run-local-job results <managed-target> <run-id> <local-results-dir>
-onec-access run-local-job attest <managed-target> <run-id> --challenge <fresh-challenge> \
+hostlink run-local-job results <managed-target> <run-id> <local-results-dir>
+hostlink run-local-job attest <managed-target> <run-id> --challenge <fresh-challenge> \
   --trusted-public-key <independently-pinned-ed25519-key.hex>
 # Only after an interrupted attest request, with the exact same challenge and pinned key:
-onec-access run-local-job recover-attest <managed-target> <run-id> --challenge <fresh-challenge> \
+hostlink run-local-job recover-attest <managed-target> <run-id> --challenge <fresh-challenge> \
   --trusted-public-key <independently-pinned-ed25519-key.hex>
 ```
 
@@ -338,18 +349,18 @@ lost, never retry `attest`; run `recover-attest`
 with the original challenge and pinned key. Recovery only fetches an already-created signed
 record for the exact job. Missing/corrupt remote data, a changed challenge, or a network error
 preserves the pending marker and durable reservation. A verified receipt is atomically published
-create-new with private permissions under the controller's OS-native `onec-access` data directory
+create-new with private permissions under the controller's OS-native `hostlink` data directory
 before reservation release; an existing non-empty receipt is never overwritten. It is a process
 observation only; it does not represent release-native test results or a managed acceptance receipt.
 
 Native invocation mode uses a separate signed record and commands:
 
 ```text
-onec-access run-local-job results <managed-target> <run-id> <local-results-dir>
-onec-access run-local-job observe-invocation <managed-target> <run-id> \
+hostlink run-local-job results <managed-target> <run-id> <local-results-dir>
+hostlink run-local-job observe-invocation <managed-target> <run-id> \
   --challenge <fresh-challenge> --trusted-public-key <independently-pinned-key.hex>
 # Only after an interrupted observe request, using its exact challenge and pinned key:
-onec-access run-local-job recover-invocation <managed-target> <run-id> \
+hostlink run-local-job recover-invocation <managed-target> <run-id> \
   --challenge <fresh-challenge> --trusted-public-key <independently-pinned-key.hex>
 ```
 
@@ -375,7 +386,7 @@ machine through the Hub or contact a managed host. The key is never taken from t
 receipt from an older record without signed output-log hashes is rejected.
 
 ```text
-onec-access run-local-job verify-invocation-logs <run-id> \
+hostlink run-local-job verify-invocation-logs <run-id> \
   --machine-id <independently-pinned-machine-id> \
   --challenge <original-challenge> \
   --trusted-public-key <independently-pinned-key.hex> \
@@ -397,7 +408,7 @@ download files, interpret JUnit, or treat the artifact as a test result. Older s
 without a result set are rejected for this command.
 
 ```text
-onec-access run-local-job verify-invocation-result <run-id> \
+hostlink run-local-job verify-invocation-result <run-id> \
   --machine-id <independently-pinned-machine-id> \
   --challenge <original-challenge> \
   --trusted-public-key <independently-pinned-key.hex> \
@@ -412,4 +423,4 @@ protocol's 512 MiB per-artifact ceiling. Successful output says `observation_onl
 `authenticated_result_bytes:true`; it authenticates the bytes only and does not produce a release
 acceptance receipt or release PASS.
 
-The new machine appears because `onec-access list` asks the hub; no `remote add` is necessary. New enrollment records also retain the selected managed persistence mode (`user-session` or `windows-service`) as non-secret inventory metadata, so controller diagnostics can explain an offline logon-scoped host without contacting the missing agent. Older records remain readable and simply have no persistence value until compatible re-enrollment. To decommission a machine, use `onec-access remove accounting-01`; hub-backed removal deletes the fleet record and removes that machine's restricted gateway SSH key.
+The new machine appears because `hostlink list` asks the hub; no `remote add` is necessary. New enrollment records also retain the selected managed persistence mode (`user-session` or `windows-service`) as non-secret inventory metadata, so controller diagnostics can explain an offline logon-scoped host without contacting the missing agent. Older records remain readable and simply have no persistence value until compatible re-enrollment. To decommission a machine, use `hostlink remove accounting-01`; hub-backed removal deletes the fleet record and removes that machine's restricted gateway SSH key.

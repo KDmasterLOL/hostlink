@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn unique_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
-        "onec-access-transfer-{name}-{}-{}",
+        "hostlink-transfer-{name}-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

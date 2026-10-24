@@ -54,7 +54,7 @@ fn format_run_local_exec_timing(total: Duration, request: &RequestTiming) -> Str
         .saturating_add(request.request_response);
     let other = total.saturating_sub(accounted);
     format!(
-        "onec-access run-local exec timing (us): total={} route_channel={} request_response={} other={} successful_route_channels={} completed_exec_responses={}",
+        "hostlink run-local exec timing (us): total={} route_channel={} request_response={} other={} successful_route_channels={} completed_exec_responses={}",
         total.as_micros(),
         request.route_channel.as_micros(),
         request.request_response.as_micros(),
@@ -438,7 +438,7 @@ mod run_local_exec_timing_tests {
         };
         assert_eq!(
             format_run_local_exec_timing(Duration::from_micros(100), &timing),
-            "onec-access run-local exec timing (us): total=100 route_channel=20 request_response=70 other=10 successful_route_channels=1 completed_exec_responses=1"
+            "hostlink run-local exec timing (us): total=100 route_channel=20 request_response=70 other=10 successful_route_channels=1 completed_exec_responses=1"
         );
         assert_eq!(
             format_run_local_exec_timing(Duration::from_micros(5), &timing)

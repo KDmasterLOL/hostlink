@@ -66,7 +66,7 @@ impl StageBudget {
         if timings_enabled {
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "onec-access run-local staging budget: artifacts={} bytes={} deadline_ms={}",
+                "hostlink run-local staging budget: artifacts={} bytes={} deadline_ms={}",
                 self.artifact_count,
                 self.total_bytes,
                 self.allocated.as_millis(),
@@ -156,7 +156,7 @@ impl Drop for RunLocalTimings {
         // a panic if stderr has been closed by the invoking test runner.
         let _ = writeln!(
             std::io::stderr().lock(),
-            "onec-access run-local timing (us): total={} local_hashes={} hub_resolve={} lease={} agent_path_prepare={} cache_admission={} upload={} cache_race_validation={} published_verification={} exec={} cleanup={} cache_hits={} cache_reused_bytes={} completed_uploads={} uploaded_bytes={}",
+            "hostlink run-local timing (us): total={} local_hashes={} hub_resolve={} lease={} agent_path_prepare={} cache_admission={} upload={} cache_race_validation={} published_verification={} exec={} cleanup={} cache_hits={} cache_reused_bytes={} completed_uploads={} uploaded_bytes={}",
             self.started.elapsed().as_micros(),
             self.elapsed[RunLocalTimingStage::LocalHashes as usize].as_micros(),
             self.elapsed[RunLocalTimingStage::HubResolve as usize].as_micros(),
@@ -184,7 +184,7 @@ fn report_run_local_outcome(
     if timings.is_some() {
         let _ = writeln!(
             std::io::stderr().lock(),
-            "onec-access run-local outcome: {stage}={outcome}"
+            "hostlink run-local outcome: {stage}={outcome}"
         );
     }
 }
@@ -201,7 +201,7 @@ impl<'a> RunLocalStage<'a> {
         if started.is_some() {
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "onec-access run-local phase: {} begin",
+                "hostlink run-local phase: {} begin",
                 stage.label()
             );
         }
@@ -220,7 +220,7 @@ impl Drop for RunLocalStage<'_> {
             timings.elapsed[self.stage as usize] += elapsed;
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "onec-access run-local phase: {} end elapsed_us={}",
+                "hostlink run-local phase: {} end elapsed_us={}",
                 self.stage.label(),
                 elapsed.as_micros()
             );
@@ -257,7 +257,7 @@ impl Drop for RunLocalCleanupNotice {
         if !self.confirmed {
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "onec-access run-local cleanup: state=unconfirmed run_id={}",
+                "hostlink run-local cleanup: state=unconfirmed run_id={}",
                 self.run_id
             );
         }
@@ -500,7 +500,7 @@ pub(super) async fn run_local(
         let config_path = hub_config_path()?;
         let hub = HubClient::configured()?.ok_or_else(|| {
             crate::not_found_error(format!(
-                "onec-access config {}; configure access before using remote operations",
+                "hostlink config {}; configure access before using remote operations",
                 config_path.display()
             ))
         })?;
@@ -1599,12 +1599,12 @@ mod run_local_cache_tests {
             "Agent PathSha256 response was opaque; TargetSftp absence proof failed: SFTP permission denied"
         );
         let rendered = format!(
-            "onec-access: {}",
+            "hostlink: {}",
             super::run_local_cache_admission_error(source)
         );
         assert_eq!(
             rendered,
-            "onec-access: cannot verify run-local cache entry; upload skipped: Agent PathSha256 response was opaque; TargetSftp absence proof failed: SFTP permission denied"
+            "hostlink: cannot verify run-local cache entry; upload skipped: Agent PathSha256 response was opaque; TargetSftp absence proof failed: SFTP permission denied"
         );
         for private in ["token=", "/home/", "192.0.2.", "secret"] {
             assert!(

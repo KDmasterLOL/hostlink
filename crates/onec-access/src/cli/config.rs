@@ -31,7 +31,7 @@ pub(super) fn configure(args: HubConfigureArgs) -> AppResult<()> {
     };
     config.save()?;
     println!(
-        "onec-access controller configured: {}",
+        "hostlink controller configured: {}",
         hub_config_path()?.display()
     );
     Ok(())
@@ -41,13 +41,13 @@ pub(super) async fn check() -> AppResult<()> {
     let config_path = hub_config_path()?;
     let client = HubClient::configured()?.ok_or_else(|| {
         crate::not_found_error(format!(
-            "onec-access controller config {}",
+            "hostlink controller config {}",
             config_path.display()
         ))
     })?;
     let agents = client.list_agents().await?;
     println!(
-        "onec-hub is reachable through onec-access; enrolled hosts: {}",
+        "HostLink Hub is reachable through hostlink; enrolled hosts: {}",
         agents.len()
     );
     Ok(())

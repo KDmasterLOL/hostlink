@@ -1,4 +1,4 @@
-//! Controller-side client for the onec-hub enrollment and discovery service.
+//! Controller-side client for the HostLink Hub enrollment and discovery service.
 //!
 //! Configuration/secret persistence, redacted wire models, and async authenticated HTTP
 //! operations have separate owners while the historical flat public API remains unchanged.

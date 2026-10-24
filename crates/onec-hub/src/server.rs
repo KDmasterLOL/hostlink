@@ -33,7 +33,7 @@ pub(super) async fn serve(app: App) -> io::Result<()> {
     prepare_server_state(&app)?;
     let address = app.config.listen.clone();
     eprintln!(
-        "onec-hub listening on {} (public {})",
+        "HostLink Hub listening on {} (public {})",
         address, app.config.public_url
     );
     serve_async(Arc::new(app), address).await
@@ -119,7 +119,7 @@ async fn map_service_error(error: Box<dyn Error + Send + Sync>) -> Response {
             "hub request timed out",
         );
     }
-    eprintln!("onec-hub HTTP middleware failed: {error}");
+    eprintln!("HostLink Hub HTTP middleware failed: {error}");
     json_error(
         StatusCode::INTERNAL_SERVER_ERROR,
         "internal_error",
@@ -223,7 +223,7 @@ async fn create_invite(
 
 pub(super) fn invite_commit_error(error: StateCommitError) -> Response {
     if error.uncertain() {
-        eprintln!("onec-hub invitation state commit is uncertain: {error}");
+        eprintln!("HostLink Hub invitation state commit is uncertain: {error}");
         return json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "state_commit_uncertain",

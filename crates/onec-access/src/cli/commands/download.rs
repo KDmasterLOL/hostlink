@@ -10,6 +10,6 @@ pub(crate) struct Args {
     pub(crate) overwrite: bool,
 }
 
-pub(super) async fn run(args: Args) -> onec_access::AppResult<()> {
+pub(super) async fn run(args: Args) -> hostlink_access::AppResult<()> {
     super::super::transport::download(args.name, args.remote, args.local, args.overwrite).await
 }

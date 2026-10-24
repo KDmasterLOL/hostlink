@@ -16,7 +16,7 @@ pub(in crate::cli) async fn invite(args: crate::cli::commands::invite::Args) -> 
     let config_path = hub_config_path()?;
     let client = HubClient::configured()?.ok_or_else(|| {
         crate::not_found_error(format!(
-            "onec-access controller config {}; run `onec-access configure ...`",
+            "hostlink controller config {}; run `hostlink configure ...`",
             config_path.display()
         ))
     })?;
@@ -29,7 +29,7 @@ pub(in crate::cli) async fn invite(args: crate::cli::commands::invite::Args) -> 
         .await?;
     if invite.public_url != public_url {
         return Err(crate::invalid_config(format!(
-            "onec-hub public URL changed while creating invite: preflight={public_url:?}, invite={:?}",
+            "HostLink Hub public URL changed while creating invite: preflight={public_url:?}, invite={:?}",
             invite.public_url
         )));
     }
@@ -85,11 +85,11 @@ mod tests {
 
     #[test]
     fn invite_requires_all_direct_artifact_pins_and_rejects_retired_release_flags() {
-        let missing = Cli::try_parse_from(["onec-access", "invite"])
+        let missing = Cli::try_parse_from(["hostlink", "invite"])
             .expect_err("invite must require direct artifact pins");
         assert_eq!(missing.kind(), ErrorKind::MissingRequiredArgument);
         let retired = Cli::try_parse_from([
-            "onec-access",
+            "hostlink",
             "invite",
             "--release-id",
             "old",

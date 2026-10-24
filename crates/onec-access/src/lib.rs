@@ -1,4 +1,4 @@
-//! Controller-side managed-machine access for onec-hub/onec-agent fleets.
+//! HostLink managed-machine controller library.
 //!
 //! This crate owns the hub HTTP client, controller-local configuration, managed SSH projection,
 //! authenticated agent RPC, persistent jobs, file transfer and TCP forwarding. It deliberately
@@ -30,11 +30,11 @@ pub use host::{
     managed_target_known_hosts_path, resolve_managed_ssh_agent, run_managed_ssh,
     sync_hub_ssh_hosts, user_ssh_config_path,
 };
+pub use hostlink_hub::HubHttpsUrl;
 pub use hub::{
     ControllerGateway, HubAgent, HubClient, HubControllerConfig, HubInvite, ManagedTargetEffect,
     hub_config_path, hub_runtime_server, resolve_remote_server,
 };
-pub use onec_hub::HubHttpsUrl;
 pub use remote::{
     GatewayRoute, GatewayTrust, RemoteAgentClient, RemoteCarrier, RemoteProbeResult,
     RemoteRunLocalPaths, RemoteServer, RemoteTcpStream, SshPhaseFailure,

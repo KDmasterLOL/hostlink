@@ -159,7 +159,7 @@ pub(crate) fn enroll_request(
 
 pub(crate) fn write_enrollment_commit_error(error: StateCommitError) -> ApiResponse {
     if error.committed() {
-        eprintln!("onec-hub enrollment committed with degraded projection: {error}");
+        eprintln!("HostLink Hub enrollment committed with degraded projection: {error}");
         return json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "reconciliation_required",
@@ -167,7 +167,7 @@ pub(crate) fn write_enrollment_commit_error(error: StateCommitError) -> ApiRespo
         );
     }
     if error.uncertain() {
-        eprintln!("onec-hub enrollment state commit is uncertain: {error}");
+        eprintln!("HostLink Hub enrollment state commit is uncertain: {error}");
         return json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "state_commit_uncertain",

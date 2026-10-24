@@ -4,7 +4,7 @@ fn configured_client() -> AppResult<HubClient> {
     let config_path = hub_config_path()?;
     HubClient::configured()?.ok_or_else(|| {
         crate::not_found_error(format!(
-            "onec-access controller config {}; configure access first",
+            "hostlink controller config {}; configure access first",
             config_path.display()
         ))
     })

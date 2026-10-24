@@ -9,7 +9,7 @@ pub(crate) struct Args {
     pub(crate) json: bool,
 }
 
-pub(super) async fn run(args: Args) -> onec_access::AppResult<()> {
+pub(super) async fn run(args: Args) -> hostlink_access::AppResult<()> {
     let Args { target, json } = args;
     let machine_id = controller::resolve_machine_id(&target).await?;
     let reservations = mutable_lease::list_durable_run_local_reservations(

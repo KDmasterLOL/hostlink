@@ -4,9 +4,9 @@ use super::*;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "onec-hub",
+    name = "hostlink-hub",
     version,
-    about = "Enrollment and discovery hub for onec-agent fleets"
+    about = "HostLink enrollment and discovery hub"
 )]
 pub(super) struct Cli {
     #[command(subcommand)]
@@ -34,12 +34,12 @@ mod tests {
 
     #[test]
     fn server_cli_exposes_only_check_and_serve() {
-        Cli::try_parse_from(["onec-hub", "check", "--config", "hub.json"])
+        Cli::try_parse_from(["hostlink-hub", "check", "--config", "hub.json"])
             .expect("check command must parse");
-        Cli::try_parse_from(["onec-hub", "serve", "--config", "hub.json"])
+        Cli::try_parse_from(["hostlink-hub", "serve", "--config", "hub.json"])
             .expect("serve command must parse");
 
-        let error = Cli::try_parse_from(["onec-hub", "access", "list"])
+        let error = Cli::try_parse_from(["hostlink-hub", "access", "list"])
             .expect_err("controller access must not remain in the hub server CLI");
         assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
     }

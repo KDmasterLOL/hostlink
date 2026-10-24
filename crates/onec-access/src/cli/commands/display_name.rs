@@ -12,6 +12,6 @@ pub(crate) struct Args {
     pub(crate) clear: bool,
 }
 
-pub(super) async fn run(args: Args) -> onec_access::AppResult<()> {
+pub(super) async fn run(args: Args) -> hostlink_access::AppResult<()> {
     super::super::display_name::set(args.target, args.label, args.clear).await
 }

@@ -271,7 +271,7 @@ impl RemoteAgentClient {
                     let elapsed_ms = started_at.elapsed().as_millis();
                     let _ = writeln!(
                         std::io::stderr().lock(),
-                        "onec-access upload outcome: phase=total_deadline stage={stage} elapsed_ms={elapsed_ms} acknowledged_bytes={acknowledged}/{total} publication={publication} remote_state=unknown"
+                        "hostlink upload outcome: phase=total_deadline stage={stage} elapsed_ms={elapsed_ms} acknowledged_bytes={acknowledged}/{total} publication={publication} remote_state=unknown"
                     );
                     Err(crate::invalid_config(format!(
                         "target SSH upload deadline exceeded (phase=total_deadline stage={stage} elapsed_ms={elapsed_ms} acknowledged_bytes={acknowledged}/{total} publication={publication} remote_state=unknown)"

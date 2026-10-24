@@ -1,7 +1,7 @@
 //! Exact direct installer and runtime artifact selection for controller bootstraps.
 
 use super::render::normalized_script_sha256;
-use onec_access::{AppResult, HubHttpsUrl};
+use hostlink_access::{AppResult, HubHttpsUrl};
 use reqwest::{Client, redirect::Policy};
 use std::time::Duration;
 
@@ -33,12 +33,12 @@ pub(super) async fn validate_direct_install(
     let package_hash = parse_sha256(package_sha256, "package SHA-256")?;
     let embedded_hash = normalized_script_sha256(WINDOWS_TOOLKIT_BOOTSTRAP);
     if !installer_hash.eq_ignore_ascii_case(&embedded_hash) {
-        return Err(onec_access::invalid_config(format!(
-            "direct installer SHA-256 must match this onec-access binary's pinned Install-OnecToolkit.ps1 ({embedded_hash})"
+        return Err(hostlink_access::invalid_config(format!(
+            "direct installer SHA-256 must match this hostlink binary's pinned Install-OnecToolkit.ps1 ({embedded_hash})"
         )));
     }
     if installer_url.as_url().origin() != package_url.as_url().origin() {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "direct installer script and package URLs must share the same HTTPS origin",
         ));
     }
@@ -48,13 +48,13 @@ pub(super) async fn validate_direct_install(
         .and_then(Iterator::last)
         != Some("Install-OnecToolkit.ps1")
     {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "direct installer URL must select Install-OnecToolkit.ps1",
         ));
     }
     let expected_package = format!("onec-toolkit-{package_target}.zip");
     if !supported_target(package_target) {
-        return Err(onec_access::invalid_config(format!(
+        return Err(hostlink_access::invalid_config(format!(
             "unsupported direct package target {package_target:?}"
         )));
     }
@@ -64,12 +64,12 @@ pub(super) async fn validate_direct_install(
         .and_then(Iterator::last)
         != Some(expected_package.as_str())
     {
-        return Err(onec_access::invalid_config(format!(
+        return Err(hostlink_access::invalid_config(format!(
             "direct package URL must select {expected_package} for the explicit target"
         )));
     }
     if !valid_package_version(package_version) {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "direct package version must be a plain semantic version such as 1.2.3 or 1.2.3-rc.1",
         ));
     }
@@ -153,7 +153,7 @@ pub(super) async fn validate_direct_install(
 
 fn parse_sha256(value: &str, label: &str) -> AppResult<String> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(onec_access::invalid_config(format!(
+        return Err(hostlink_access::invalid_config(format!(
             "{label} must contain exactly 64 hexadecimal characters"
         )));
     }

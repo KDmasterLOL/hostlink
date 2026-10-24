@@ -12,7 +12,7 @@ pub(crate) struct Args {
     pub(crate) cleanup: bool,
 }
 
-pub(super) async fn run(args: Args) -> onec_access::AppResult<()> {
+pub(super) async fn run(args: Args) -> hostlink_access::AppResult<()> {
     let Args {
         name,
         job_id,

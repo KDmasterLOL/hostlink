@@ -78,7 +78,7 @@ where
     }
     Err(io::Error::new(
         io::ErrorKind::AddrNotAvailable,
-        "onec-hub remote-port pool is exhausted",
+        "HostLink Hub remote-port pool is exhausted",
     ))
 }
 

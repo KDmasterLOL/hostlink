@@ -1,6 +1,6 @@
 //! Human-facing controller CLI for managed-machine access.
 
-use onec_access::*;
+use hostlink_access::*;
 use onec_agent_protocol::{AgentJobInfo, AgentJobState, AgentResponseKind};
 use serde_json::json;
 use std::{
@@ -31,9 +31,9 @@ use clap::Parser;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "onec-access",
+    name = "hostlink",
     version,
-    about = "Controller-side managed-machine access for onec-hub/onec-agent fleets"
+    about = "HostLink managed-machine controller"
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
@@ -53,13 +53,13 @@ mod tests {
     #[test]
     fn surface_is_machine_only() {
         for argv in [
-            vec!["onec-access", "list", "--json"],
-            vec!["onec-access", "display-name", "host-a", "Тестовый сервер"],
-            vec!["onec-access", "display-name", "host-a", "--clear"],
-            vec!["onec-access", "verify", "host-a", "--json"],
-            vec!["onec-access", "exec", "host-a", "--", "hostname"],
+            vec!["hostlink", "list", "--json"],
+            vec!["hostlink", "display-name", "host-a", "Тестовый сервер"],
+            vec!["hostlink", "display-name", "host-a", "--clear"],
+            vec!["hostlink", "verify", "host-a", "--json"],
+            vec!["hostlink", "exec", "host-a", "--", "hostname"],
             vec![
-                "onec-access",
+                "hostlink",
                 "run-local",
                 "--target",
                 "host-a",
@@ -72,7 +72,7 @@ mod tests {
                 "--list",
             ],
             vec![
-                "onec-access",
+                "hostlink",
                 "exec",
                 "host-a",
                 "--secret-env",
@@ -83,7 +83,7 @@ mod tests {
                 "hostname",
             ],
             vec![
-                "onec-access",
+                "hostlink",
                 "job",
                 "start",
                 "host-a",
@@ -94,9 +94,9 @@ mod tests {
                 "--",
                 "hostname",
             ],
-            vec!["onec-access", "job", "status", "host-a", "job-1"],
+            vec!["hostlink", "job", "status", "host-a", "job-1"],
             vec![
-                "onec-access",
+                "hostlink",
                 "remove-scoped",
                 "host-a",
                 r"C:\Temp\onec-toolkit",
@@ -105,14 +105,14 @@ mod tests {
                 "--missing-ok",
                 "--json",
             ],
-            vec!["onec-access", "sync-ssh", "--json"],
-            vec!["onec-access", "ssh", "host-a"],
+            vec!["hostlink", "sync-ssh", "--json"],
+            vec!["hostlink", "ssh", "host-a"],
         ] {
             Cli::try_parse_from(argv).expect("machine-access command must parse");
         }
 
         for forbidden in ["1c", "project", "update", "storage", "distribution"] {
-            let error = Cli::try_parse_from(["onec-access", forbidden])
+            let error = Cli::try_parse_from(["hostlink", forbidden])
                 .expect_err("domain command must not exist in access product");
             assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
         }
@@ -120,22 +120,16 @@ mod tests {
 
     #[test]
     fn display_name_requires_explicit_set_or_clear() {
-        let no_label = Cli::try_parse_from(["onec-access", "display-name", "server-a"])
+        let no_label = Cli::try_parse_from(["hostlink", "display-name", "server-a"])
             .expect_err("label must be supplied or cleared");
         assert_eq!(no_label.kind(), ErrorKind::MissingRequiredArgument);
-        Cli::try_parse_from(["onec-access", "display-name", "server-a", "--clear"])
+        Cli::try_parse_from(["hostlink", "display-name", "server-a", "--clear"])
             .expect("explicit clear");
-        Cli::try_parse_from(["onec-access", "display-name", "server-a", "Тестовый сервер"])
+        Cli::try_parse_from(["hostlink", "display-name", "server-a", "Тестовый сервер"])
             .expect("UTF-8 display label");
         assert!(
-            Cli::try_parse_from([
-                "onec-access",
-                "display-name",
-                "server-a",
-                "--clear",
-                "label"
-            ])
-            .is_err()
+            Cli::try_parse_from(["hostlink", "display-name", "server-a", "--clear", "label"])
+                .is_err()
         );
     }
 
@@ -144,7 +138,7 @@ mod tests {
         let mut command = Cli::command();
         command.clone().debug_assert();
         let root_help = command.render_long_help().to_string();
-        assert!(root_help.contains("Usage: onec-access"));
+        assert!(root_help.contains("Usage: hostlink"));
         for top_level in ["job", "run-local-job", "run-local-evidence"] {
             assert!(
                 root_help.contains(top_level),
@@ -196,7 +190,7 @@ mod tests {
     #[test]
     fn run_local_job_lifecycle_commands_parse_with_run_identity() {
         let cli = Cli::try_parse_from([
-            "onec-access",
+            "hostlink",
             "run-local-job",
             "start",
             "--target",
@@ -220,7 +214,7 @@ mod tests {
         assert_eq!(args.command, ["./candidate.exe", "--suite", "bounded"]);
 
         let cli = Cli::try_parse_from([
-            "onec-access",
+            "hostlink",
             "run-local-job",
             "start",
             "--target",
@@ -240,7 +234,7 @@ mod tests {
         ));
         assert!(
             Cli::try_parse_from([
-                "onec-access",
+                "hostlink",
                 "run-local-job",
                 "status",
                 "host-a",
@@ -261,7 +255,7 @@ mod tests {
         assert!(help.contains("already exist in the Agent cache; never upload it"));
 
         let cli = Cli::try_parse_from([
-            "onec-access",
+            "hostlink",
             "run-local-job",
             "start",
             "--target",
@@ -296,7 +290,7 @@ mod tests {
 
         assert!(
             Cli::try_parse_from([
-                "onec-access",
+                "hostlink",
                 "run-local-job",
                 "start",
                 "--target",
@@ -314,21 +308,21 @@ mod tests {
 
         for argv in [
             vec![
-                "onec-access",
+                "hostlink",
                 "run-local-job",
                 "status",
                 "host-a",
                 "0123456789abcdef0123456789abcdef",
             ],
             vec![
-                "onec-access",
+                "hostlink",
                 "run-local-job",
                 "cleanup",
                 "host-a",
                 "0123456789abcdef0123456789abcdef",
             ],
             vec![
-                "onec-access",
+                "hostlink",
                 "run-local-job",
                 "observe-invocation",
                 "host-a",
@@ -339,7 +333,7 @@ mod tests {
                 "trusted-key.hex",
             ],
             vec![
-                "onec-access",
+                "hostlink",
                 "run-local-job",
                 "recover-invocation",
                 "host-a",
@@ -350,7 +344,7 @@ mod tests {
                 "trusted-key.hex",
             ],
             vec![
-                "onec-access",
+                "hostlink",
                 "run-local-job",
                 "verify-invocation-logs",
                 "0123456789abcdef0123456789abcdef",
@@ -366,7 +360,7 @@ mod tests {
                 "stderr.log",
             ],
             vec![
-                "onec-access",
+                "hostlink",
                 "run-local-job",
                 "attest",
                 "host-a",
@@ -377,7 +371,7 @@ mod tests {
                 "agent-public-key.hex",
             ],
             vec![
-                "onec-access",
+                "hostlink",
                 "run-local-job",
                 "recover-attest",
                 "host-a",
@@ -388,7 +382,7 @@ mod tests {
                 "agent-public-key.hex",
             ],
             vec![
-                "onec-access",
+                "hostlink",
                 "run-local-job",
                 "list-reservations",
                 "host-a",
@@ -402,7 +396,7 @@ mod tests {
     #[test]
     fn run_local_preserves_cargo_runner_argv_and_generic_file_mapping() {
         let parsed = Cli::try_parse_from([
-            "onec-access",
+            "hostlink",
             "run-local",
             "--target",
             "windows-test",
@@ -450,7 +444,7 @@ mod tests {
     #[test]
     fn ordinary_exec_keeps_the_shorter_operator_timeout_default() {
         let parsed =
-            Cli::try_parse_from(["onec-access", "exec", "host-a", "--", "hostname"]).expect("exec");
+            Cli::try_parse_from(["hostlink", "exec", "host-a", "--", "hostname"]).expect("exec");
         let AccessCommand::Exec(args) = parsed.command else {
             panic!("expected exec command");
         };
@@ -463,7 +457,7 @@ mod tests {
     #[test]
     fn run_local_defaults_to_the_protocol_emergency_ceiling() {
         let parsed = Cli::try_parse_from([
-            "onec-access",
+            "hostlink",
             "run-local",
             "--required-effect",
             "disposable",
@@ -480,13 +474,13 @@ mod tests {
 
     #[test]
     fn run_local_requires_explicit_effect_classification() {
-        let error = Cli::try_parse_from(["onec-access", "run-local", "--", "./candidate.exe"])
+        let error = Cli::try_parse_from(["hostlink", "run-local", "--", "./candidate.exe"])
             .expect_err("run-local must not infer an effect");
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
 
         for effect in ["read-only", "run-owned", "disposable"] {
             Cli::try_parse_from([
-                "onec-access",
+                "hostlink",
                 "run-local",
                 "--required-effect",
                 effect,
@@ -500,7 +494,7 @@ mod tests {
     #[test]
     fn run_local_rejects_discovery_bypass_option_and_accepts_arbitrary_executable() {
         let parsed = Cli::try_parse_from([
-            "onec-access",
+            "hostlink",
             "run-local",
             "--required-effect",
             "disposable",
@@ -520,7 +514,7 @@ mod tests {
         );
 
         let error = Cli::try_parse_from([
-            "onec-access",
+            "hostlink",
             "run-local",
             "--required-effect",
             "disposable",
@@ -538,7 +532,7 @@ mod tests {
     #[test]
     fn exec_composes_secret_stdin_and_result_options() {
         let parsed = Cli::try_parse_from([
-            "onec-access",
+            "hostlink",
             "exec",
             "host-a",
             "--secret-env",
@@ -577,7 +571,7 @@ mod tests {
     #[test]
     fn job_start_composes_secret_stdin_and_result_options() {
         let parsed = Cli::try_parse_from([
-            "onec-access",
+            "hostlink",
             "job",
             "start",
             "host-a",
@@ -611,7 +605,7 @@ mod tests {
         assert_eq!(args.command, ["onec", "diagnose"]);
         assert!(
             Cli::try_parse_from([
-                "onec-access",
+                "hostlink",
                 "job",
                 "start",
                 "host-a",
@@ -630,7 +624,7 @@ mod tests {
     fn secret_environment_accepts_local_env_references_only() {
         for forbidden_flag in ["--secret", "--secret-env-alias"] {
             let error = Cli::try_parse_from([
-                "onec-access",
+                "hostlink",
                 "exec",
                 "host-a",
                 forbidden_flag,
@@ -643,7 +637,7 @@ mod tests {
         }
 
         Cli::try_parse_from([
-            "onec-access",
+            "hostlink",
             "exec",
             "host-a",
             "--secret-env",
@@ -656,18 +650,18 @@ mod tests {
 
     #[test]
     fn removed_target_effect_command_is_rejected() {
-        let error = Cli::try_parse_from(["onec-access", "target-effect", "show", "host-a"])
+        let error = Cli::try_parse_from(["hostlink", "target-effect", "show", "host-a"])
             .expect_err("retired per-target effect commands are unsupported");
         assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[test]
     fn invite_requires_complete_direct_pins_and_rejects_retired_release_flags() {
-        let missing = Cli::try_parse_from(["onec-access", "invite"])
+        let missing = Cli::try_parse_from(["hostlink", "invite"])
             .expect_err("invite requires all direct artifact pins");
         assert_eq!(missing.kind(), ErrorKind::MissingRequiredArgument);
         let retired = Cli::try_parse_from([
-            "onec-access",
+            "hostlink",
             "invite",
             "--release-id",
             "old",
@@ -681,7 +675,7 @@ mod tests {
     #[test]
     fn invite_embedded_ssh_candidate_remains_an_explicit_opt_in() {
         Cli::try_parse_from([
-            "onec-access",
+            "hostlink",
             "invite",
             "--embedded-ssh-candidate",
             "--direct-installer-url",
@@ -718,9 +712,9 @@ mod tests {
 
     #[test]
     fn migration_report_supports_human_and_json_modes() {
-        Cli::try_parse_from(["onec-access", "migration-report"])
+        Cli::try_parse_from(["hostlink", "migration-report"])
             .expect("human-readable migration report must parse");
-        Cli::try_parse_from(["onec-access", "migration-report", "--json"])
+        Cli::try_parse_from(["hostlink", "migration-report", "--json"])
             .expect("JSON migration report must parse");
     }
 }

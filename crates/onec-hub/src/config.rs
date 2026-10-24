@@ -10,7 +10,7 @@ pub(super) struct HubConfig {
     #[serde(default = "default_listen")]
     pub(super) listen: String,
     pub(super) public_url: HubHttpsUrl,
-    pub(super) gateways: Vec<onec_hub::GatewayEndpoint>,
+    pub(super) gateways: Vec<hostlink_hub::GatewayEndpoint>,
     /// Restricted SSH account used by controllers to open direct-tcpip channels
     /// to agent reverse listeners. Legacy configs may omit it and keep using
     /// controller-local single-gateway fallback.
@@ -50,7 +50,7 @@ struct HubConfigWire {
     listen: String,
     public_url: HubHttpsUrl,
     #[serde(default)]
-    gateways: Vec<onec_hub::GatewayEndpoint>,
+    gateways: Vec<hostlink_hub::GatewayEndpoint>,
     #[serde(default)]
     controller_ssh_user: Option<String>,
     #[serde(default)]
@@ -117,7 +117,7 @@ impl TryFrom<HubConfigWire> for HubConfig {
             let host_public_key = wire
                 .gateway_host_public_key
                 .ok_or_else(|| invalid("missing gateway_host_public_key"))?;
-            vec![onec_hub::GatewayEndpoint {
+            vec![hostlink_hub::GatewayEndpoint {
                 host,
                 user,
                 port: wire.gateway_ssh_port.unwrap_or_else(default_ssh_port),
@@ -202,7 +202,7 @@ impl HubConfig {
         if !listen.ip().is_loopback() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                format!("onec-hub must listen on loopback behind HTTPS, got {listen}"),
+                format!("HostLink Hub must listen on loopback behind HTTPS, got {listen}"),
             ));
         }
         if listen.port() == 0 {
@@ -270,7 +270,7 @@ impl HubConfig {
         Ok(())
     }
 
-    pub(super) fn controller_gateways(&self) -> Option<Vec<onec_hub::GatewayEndpoint>> {
+    pub(super) fn controller_gateways(&self) -> Option<Vec<hostlink_hub::GatewayEndpoint>> {
         let user = self.controller_ssh_user.as_deref()?.trim();
         if user.is_empty() {
             return None;

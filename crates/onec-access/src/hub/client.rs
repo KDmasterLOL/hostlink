@@ -9,7 +9,7 @@ use crate::{GatewayRoute, GatewayTrust};
 use tokio::sync::OnceCell;
 
 #[derive(Debug, Clone)]
-/// Async authenticated client for the controller-side onec-hub API.
+/// Async authenticated client for the controller-side HostLink Hub API.
 pub struct HubClient {
     pub(super) config: HubControllerConfig,
     pub(super) token: SecretString,
@@ -30,7 +30,7 @@ impl HubClient {
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|error| {
-                crate::http_error(format!("failed to create onec-hub client: {error}"))
+                crate::http_error(format!("failed to create HostLink Hub client: {error}"))
             })?;
         Ok(Self {
             config,
@@ -74,12 +74,14 @@ impl HubClient {
                     .bearer_auth(self.token.expose_secret())
                     .send()
                     .await
-                    .map_err(|error| crate::http_error(format!("onec-hub info failed: {error}")))?;
+                    .map_err(|error| {
+                        crate::http_error(format!("HostLink Hub info failed: {error}"))
+                    })?;
                 let response = require_success(response, "hub info").await?;
                 let info = read_bounded_response_json::<HubInfoResponse>(
                     response,
                     HUB_CONTROL_JSON_MAX_BYTES,
-                    "onec-hub info response",
+                    "HostLink Hub info response",
                 )
                 .await?;
                 Ok(info)
@@ -155,12 +157,14 @@ impl HubClient {
             .bearer_auth(self.token.expose_secret())
             .send()
             .await
-            .map_err(|error| crate::http_error(format!("onec-hub list agents failed: {error}")))?;
+            .map_err(|error| {
+                crate::http_error(format!("HostLink Hub list agents failed: {error}"))
+            })?;
         let response = require_success(response, "list agents").await?;
         read_bounded_response_json::<AgentsResponse>(
             response,
             HUB_CONTROL_JSON_MAX_BYTES,
-            "onec-hub agents response",
+            "HostLink Hub agents response",
         )
         .await
         .map(|value| value.agents)
@@ -184,13 +188,13 @@ impl HubClient {
             .send()
             .await
             .map_err(|error| {
-                crate::http_error(format!("onec-hub create invite failed: {error}"))
+                crate::http_error(format!("HostLink Hub create invite failed: {error}"))
             })?;
         let response = require_success(response, "create invite").await?;
         read_bounded_response_json::<HubInvite>(
             response,
             HUB_CONTROL_JSON_MAX_BYTES,
-            "onec-hub invite response",
+            "HostLink Hub invite response",
         )
         .await
     }
@@ -222,7 +226,7 @@ impl HubClient {
             [] => {}
             _ => {
                 return Err(crate::invalid_config(format!(
-                    "onec-hub selector {requested:?} is ambiguous"
+                    "HostLink Hub selector {requested:?} is ambiguous"
                 )));
             }
         }
@@ -237,7 +241,7 @@ impl HubClient {
             [] => Ok(None),
             [agent] => Ok(Some(agent.clone())),
             _ => Err(crate::invalid_config(format!(
-                "onec-hub selector prefix {requested:?} is ambiguous"
+                "HostLink Hub selector prefix {requested:?} is ambiguous"
             ))),
         }
     }
@@ -260,13 +264,13 @@ impl HubClient {
             .send()
             .await
             .map_err(|error| {
-                crate::http_error(format!("onec-hub display name update failed: {error}"))
+                crate::http_error(format!("HostLink Hub display name update failed: {error}"))
             })?;
         let response = require_success(response, "set display name").await?;
         let receipt = read_bounded_response_json::<super::model::DisplayNameResponse>(
             response,
             HUB_CONTROL_JSON_MAX_BYTES,
-            "onec-hub display name update",
+            "HostLink Hub display name update",
         )
         .await?;
         if receipt.machine_id != agent.machine_id || receipt.name != agent.name {
@@ -295,7 +299,9 @@ impl HubClient {
             .bearer_auth(self.token.expose_secret())
             .send()
             .await
-            .map_err(|error| crate::http_error(format!("onec-hub remove agent failed: {error}")))?;
+            .map_err(|error| {
+                crate::http_error(format!("HostLink Hub remove agent failed: {error}"))
+            })?;
         require_success(response, "remove agent").await?;
         Ok(())
     }
@@ -317,14 +323,14 @@ impl HubClient {
             .await
             .map_err(|error| {
                 crate::http_error(format!(
-                    "onec-hub control credential retrieval failed: {error}"
+                    "HostLink Hub control credential retrieval failed: {error}"
                 ))
             })?;
         let response = require_success(response, "get agent control credential").await?;
         let credential = read_bounded_response_json::<ControlCredentialResponse>(
             response,
             HUB_CONTROL_JSON_MAX_BYTES,
-            "onec-hub control credential response",
+            "HostLink Hub control credential response",
         )
         .await?;
         validate_control_credential_response(agent, credential)
@@ -450,13 +456,13 @@ fn validate_control_credential_response(
 ) -> AppResult<SecretString> {
     if credential.machine_id != agent.machine_id {
         return Err(crate::invalid_config(format!(
-            "onec-hub control credential identity mismatch: expected {:?}, got {:?}",
+            "HostLink Hub control credential identity mismatch: expected {:?}, got {:?}",
             agent.machine_id, credential.machine_id
         )));
     }
     if credential.control_credential_nonce != agent.control_credential_nonce {
         return Err(crate::invalid_config(format!(
-            "onec-hub control credential generation changed for {:?}; refresh managed inventory and retry",
+            "HostLink Hub control credential generation changed for {:?}; refresh managed inventory and retry",
             agent.machine_id
         )));
     }
@@ -473,7 +479,7 @@ async fn require_success(
     let status = response.status();
     let body = bounded_error_text(response, HUB_ERROR_BODY_MAX_BYTES).await;
     Err(crate::http_error(format!(
-        "onec-hub {operation} returned HTTP {}{}",
+        "HostLink Hub {operation} returned HTTP {}{}",
         status.as_u16(),
         if body.trim().is_empty() {
             String::new()

@@ -25,6 +25,6 @@ pub(crate) struct Args {
     pub(crate) direct_package_target: String,
 }
 
-pub(super) async fn run(args: Args) -> onec_access::AppResult<()> {
+pub(super) async fn run(args: Args) -> hostlink_access::AppResult<()> {
     super::super::bootstrap::migrate_runtime(args).await
 }

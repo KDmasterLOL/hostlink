@@ -47,7 +47,7 @@ pub(super) struct EnrollResponse {
     pub(super) remote_port: u16,
     #[serde(serialize_with = "serialize_secret")]
     pub(super) control_secret: SecretString,
-    pub(super) gateways: Vec<onec_hub::GatewayEndpoint>,
+    pub(super) gateways: Vec<hostlink_hub::GatewayEndpoint>,
     /// Legacy first-gateway host retained for older installers during migration.
     pub(super) gateway_host: String,
     /// Legacy first-gateway SSH port retained for older installers during migration.

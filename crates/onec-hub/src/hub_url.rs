@@ -1,4 +1,4 @@
-//! Typed HTTPS URL policy for onec-hub endpoints and release roots.
+//! Typed HTTPS URL policy for HostLink Hub endpoints and release roots.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{error::Error, fmt, str::FromStr};
@@ -28,7 +28,9 @@ impl fmt::Display for HubUrlError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
             HubUrlErrorKind::Policy(message) => formatter.write_str(message),
-            HubUrlErrorKind::Parse(source) => write!(formatter, "invalid onec-hub URL: {source}"),
+            HubUrlErrorKind::Parse(source) => {
+                write!(formatter, "invalid HostLink Hub URL: {source}")
+            }
         }
     }
 }
@@ -42,7 +44,7 @@ impl Error for HubUrlError {
     }
 }
 
-/// Validated, credential-free HTTPS base/public/release URL shared by onec-hub and onec-access.
+/// Validated, credential-free HTTPS base/public/release URL shared by HostLink Hub and hostlink.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct HubHttpsUrl(Url);
 
@@ -58,24 +60,26 @@ impl HubHttpsUrl {
     pub fn parse(value: &str) -> Result<Self, HubUrlError> {
         let mut url = Url::parse(value).map_err(HubUrlError::parse)?;
         if url.scheme() != "https" {
-            return Err(HubUrlError::policy("onec-hub URL must use https"));
+            return Err(HubUrlError::policy("HostLink Hub URL must use https"));
         }
         if url.cannot_be_a_base() || url.host().is_none() {
             return Err(HubUrlError::policy(
-                "onec-hub URL must be an absolute hierarchical URL with a host",
+                "HostLink Hub URL must be an absolute hierarchical URL with a host",
             ));
         }
         if !url.username().is_empty() || url.password().is_some() {
             return Err(HubUrlError::policy(
-                "onec-hub URL must not contain username or password",
+                "HostLink Hub URL must not contain username or password",
             ));
         }
         if url.query().is_some() {
-            return Err(HubUrlError::policy("onec-hub URL must not contain a query"));
+            return Err(HubUrlError::policy(
+                "HostLink Hub URL must not contain a query",
+            ));
         }
         if url.fragment().is_some() {
             return Err(HubUrlError::policy(
-                "onec-hub URL must not contain a fragment",
+                "HostLink Hub URL must not contain a fragment",
             ));
         }
 
@@ -105,9 +109,9 @@ impl HubHttpsUrl {
     ) -> Result<Self, HubUrlError> {
         let mut url = self.0.clone();
         {
-            let mut path = url
-                .path_segments_mut()
-                .map_err(|_| HubUrlError::policy("onec-hub URL cannot be used as a base URL"))?;
+            let mut path = url.path_segments_mut().map_err(|_| {
+                HubUrlError::policy("HostLink Hub URL cannot be used as a base URL")
+            })?;
             path.pop_if_empty();
             for segment in segments {
                 path.push(segment);
@@ -215,7 +219,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            format!("invalid onec-hub URL: {expected_source}")
+            format!("invalid HostLink Hub URL: {expected_source}")
         );
         assert!(!error.to_string().contains("super-secret"));
         assert!(!format!("{error:?}").contains("super-secret"));
@@ -230,7 +234,7 @@ mod tests {
     fn policy_error_keeps_existing_message_without_parser_source() {
         let error =
             HubHttpsUrl::parse("http://hub.example.test").expect_err("plain HTTP must fail");
-        assert_eq!(error.to_string(), "onec-hub URL must use https");
+        assert_eq!(error.to_string(), "HostLink Hub URL must use https");
         assert!(Error::source(&error).is_none());
     }
 

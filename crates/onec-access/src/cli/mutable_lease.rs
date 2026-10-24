@@ -1,7 +1,7 @@
 //! Controller-local cross-process admission for mutable managed-target runs.
 
 use directories::ProjectDirs;
-use onec_access::{AppResult, ManagedTargetEffect};
+use hostlink_access::{AppResult, ManagedTargetEffect};
 use onec_agent_protocol::NativeExecutionEffect;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -57,8 +57,8 @@ pub(crate) fn acquire_run_local_lease(
         return Ok(None);
     }
     let project_dirs = ProjectDirs::from("", "", "onec-access").ok_or_else(|| {
-        onec_access::invalid_config(
-            "cannot determine OS-native application directories for onec-access".to_owned(),
+        hostlink_access::invalid_config(
+            "cannot determine OS-native application directories for hostlink".to_owned(),
         )
     })?;
     let data_root = project_dirs.data_local_dir();
@@ -83,7 +83,7 @@ fn acquire_run_local_lease_in(
     let lease = acquire_mutable_target_lease_in_with_wait(data_root, machine_id, effect, wait)?;
     if has_durable_reservation(data_root, machine_id)? {
         drop(lease);
-        return Err(onec_access::invalid_config(format!(
+        return Err(hostlink_access::invalid_config(format!(
             "TARGET BUSY: managed target {machine_id:?} has a durable run-local job; resume or clean that job before another mutable run"
         )));
     }
@@ -99,7 +99,7 @@ pub(crate) fn reserve_durable_run_local(
     let _guard =
         acquire_mutable_target_lease_in(data_root, machine_id, ManagedTargetEffect::RunOwned)?;
     if has_durable_reservation(data_root, machine_id)? {
-        return Err(onec_access::invalid_config(format!(
+        return Err(hostlink_access::invalid_config(format!(
             "TARGET BUSY: managed target {machine_id:?} already has a durable run-local job"
         )));
     }
@@ -121,14 +121,14 @@ pub(crate) fn persist_durable_native_invocation(
     validate_sha256(candidate_sha256, "candidate")?;
     validate_sha256(invocation_sha256, "invocation")?;
     if native_effect == NativeExecutionEffect::ReadOnly {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "durable run-local native invocation reservations require run-owned or disposable effect"
                 .to_owned(),
         ));
     }
     let (_, pending, released) = reservation_identity(data_root, machine_id, run_id)?;
     if pending.is_none() || released.is_some() {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "native invocation commitment requires this run's active pending reservation"
                 .to_owned(),
         ));
@@ -142,7 +142,7 @@ pub(crate) fn persist_durable_native_invocation(
         native_effect,
     };
     let bytes = serde_json::to_vec(&reservation).map_err(|source| {
-        onec_access::invalid_config(format!(
+        hostlink_access::invalid_config(format!(
             "cannot encode durable native invocation reservation: {source}"
         ))
     })?;
@@ -166,7 +166,7 @@ pub(crate) fn durable_native_invocation_reservation(
         anyhow::Error::new(source).context("native invocation commitment is unavailable")
     })?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_NATIVE_INVOCATION_RESERVATION_BYTES {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "native invocation commitment is not a bounded regular file".to_owned(),
         ));
     }
@@ -178,7 +178,7 @@ pub(crate) fn durable_native_invocation_reservation(
     })?;
     let reservation: DurableNativeInvocationReservation =
         serde_json::from_slice(&bytes).map_err(|source| {
-            onec_access::invalid_config(format!(
+            hostlink_access::invalid_config(format!(
                 "native invocation commitment is malformed: {source}"
             ))
         })?;
@@ -187,7 +187,7 @@ pub(crate) fn durable_native_invocation_reservation(
         || reservation.run_id != run_id
         || reservation.native_effect == NativeExecutionEffect::ReadOnly
     {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "native invocation commitment does not match the requested machine/run/effect"
                 .to_owned(),
         ));
@@ -213,7 +213,7 @@ pub(crate) fn bind_durable_run_local_job(
         if pending.is_none() && bound.as_deref() == Some(job_id) {
             return Ok(());
         }
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "completed durable run-local reservation belongs to another Agent job".to_owned(),
         ));
     }
@@ -228,12 +228,12 @@ pub(crate) fn bind_durable_run_local_job(
             return Ok(());
         }
         Some(_) => {
-            return Err(onec_access::invalid_config(
+            return Err(hostlink_access::invalid_config(
                 "durable run-local reservation is already bound to another Agent job".to_owned(),
             ));
         }
         None if pending.is_none() => {
-            return Err(onec_access::invalid_config(
+            return Err(hostlink_access::invalid_config(
                 "durable run-local pending reservation is missing".to_owned(),
             ));
         }
@@ -267,13 +267,13 @@ pub(crate) fn durable_run_local_job_id(
 ) -> AppResult<String> {
     let (job_id, pending, released) = reservation_identity(data_root, machine_id, run_id)?;
     if pending.is_some() || released.is_some() {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "native attestation requires an active, job-bound durable run-local reservation"
                 .to_owned(),
         ));
     }
     job_id.ok_or_else(|| {
-        onec_access::invalid_config(
+        hostlink_access::invalid_config(
             "native attestation requires an active, job-bound durable run-local reservation"
                 .to_owned(),
         )
@@ -287,12 +287,12 @@ pub(crate) fn durable_run_local_recorded_job_id(
 ) -> AppResult<String> {
     let (job_id, pending, _) = reservation_identity(data_root, machine_id, run_id)?;
     if pending.is_some() {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "durable run-local reservation is not bound to an Agent job".to_owned(),
         ));
     }
     job_id.ok_or_else(|| {
-        onec_access::invalid_config(
+        hostlink_access::invalid_config(
             "durable run-local reservation has no recorded Agent job identity".to_owned(),
         )
     })
@@ -317,7 +317,7 @@ pub(crate) fn acquire_durable_run_local_operation_lease(
 ) -> AppResult<File> {
     acquire_mutable_target_lease_in(data_root, machine_id, ManagedTargetEffect::RunOwned)?
         .ok_or_else(|| {
-            onec_access::invalid_config(
+            hostlink_access::invalid_config(
                 "durable run-local operation lease was not acquired".to_owned(),
             )
         })
@@ -331,7 +331,7 @@ pub(crate) fn release_durable_run_local(
 ) -> AppResult<()> {
     let (recorded_job, pending, released) = reservation_identity(data_root, machine_id, run_id)?;
     if released.is_some() && pending.is_some() {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "released durable run-local receipt conflicts with a pending reservation".to_owned(),
         ));
     }
@@ -346,13 +346,13 @@ pub(crate) fn release_durable_run_local(
             return Ok(());
         }
         _ => {
-            return Err(onec_access::invalid_config(
+            return Err(hostlink_access::invalid_config(
                 "durable run-local reservation belongs to another Agent job".to_owned(),
             ));
         }
     }
     if !durable_run_local_results_complete(data_root, machine_id, run_id)? {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "durable run-local reservation cannot be released before result retrieval and cleanup"
                 .to_owned(),
         ));
@@ -389,7 +389,7 @@ fn release_durable_run_local_files(
         acquire_mutable_target_lease_in(data_root, machine_id, ManagedTargetEffect::RunOwned)?;
     let (job_id, pending, released) = reservation_identity(data_root, machine_id, run_id)?;
     if job_id.as_deref() != expected_job_id && (job_id.is_some() || expected_job_id.is_some()) {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "durable run-local reservation ownership does not match the requested cleanup"
                 .to_owned(),
         ));
@@ -399,7 +399,7 @@ fn release_durable_run_local_files(
         "cannot remove durable run-local download marker",
     )?;
     if inject_failure_after_download_marker {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "injected durable reservation release failure".to_owned(),
         ));
     }
@@ -407,7 +407,7 @@ fn release_durable_run_local_files(
     // released identity receipt. A retry can then verify both run and job after any crash.
     if let Some(released) = released {
         if job_id.as_deref() != Some(released.as_str()) {
-            return Err(onec_access::invalid_config(
+            return Err(hostlink_access::invalid_config(
                 "released durable run-local receipt does not match its Agent job identity"
                     .to_owned(),
             ));
@@ -430,7 +430,7 @@ fn release_durable_run_local_files(
         })?;
     }
     if inject_failure_after_release_receipt {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "injected durable reservation failure after released identity receipt".to_owned(),
         ));
     }
@@ -487,7 +487,7 @@ pub(crate) fn mark_durable_run_local_results_complete(
         anyhow::Error::new(source).context("durable run-local result downloads are not recorded")
     })? != b"results-downloaded\n"
     {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "durable run-local result downloads are not complete".to_owned(),
         ));
     }
@@ -531,7 +531,7 @@ fn require_bound_reservation(
 ) -> AppResult<String> {
     let (job_id, _, _) = reservation_identity(data_root, machine_id, run_id)?;
     job_id.ok_or_else(|| {
-        onec_access::invalid_config(
+        hostlink_access::invalid_config(
             "durable run-local reservation is not bound to an Agent job".to_owned(),
         )
     })
@@ -569,7 +569,7 @@ fn reservation_identity(
             continue;
         }
         if !entry.file_type().map_err(anyhow::Error::new)?.is_file() {
-            return Err(onec_access::invalid_config(
+            return Err(hostlink_access::invalid_config(
                 "durable run-local reservation entry is not a regular file".to_owned(),
             ));
         }
@@ -580,7 +580,7 @@ fn reservation_identity(
         }
         if fields[2].is_empty() {
             if entry.path() != pending_reservation_path(data_root, machine_id, run_id) {
-                return Err(onec_access::invalid_config(
+                return Err(hostlink_access::invalid_config(
                     "pending durable reservation path does not match its identity".to_owned(),
                 ));
             }
@@ -594,7 +594,7 @@ fn reservation_identity(
                 job_reservation_path(data_root, machine_id, fields[2])
             };
             if entry.path() != expected_path {
-                return Err(onec_access::invalid_config(
+                return Err(hostlink_access::invalid_config(
                     "durable reservation path does not match its Agent job identity".to_owned(),
                 ));
             }
@@ -603,7 +603,7 @@ fn reservation_identity(
                     .as_deref()
                     .is_some_and(|current| current != fields[2])
                 {
-                    return Err(onec_access::invalid_config(
+                    return Err(hostlink_access::invalid_config(
                         "run identity has conflicting released Agent job receipts".to_owned(),
                     ));
                 }
@@ -611,7 +611,7 @@ fn reservation_identity(
                 continue;
             }
             if job.as_deref().is_some_and(|current| current != fields[2]) {
-                return Err(onec_access::invalid_config(
+                return Err(hostlink_access::invalid_config(
                     "run identity has conflicting durable Agent job reservations".to_owned(),
                 ));
             }
@@ -619,7 +619,7 @@ fn reservation_identity(
         }
     }
     if released.is_some() && (job.is_some() || pending.is_some()) {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "active and released durable reservations conflict for one run identity".to_owned(),
         ));
     }
@@ -655,7 +655,7 @@ pub(crate) fn list_durable_run_local_reservations(
             continue;
         }
         if !entry.file_type().map_err(anyhow::Error::new)?.is_file() {
-            return Err(onec_access::invalid_config(
+            return Err(hostlink_access::invalid_config(
                 "durable run-local reservation entry is not a regular file".to_owned(),
             ));
         }
@@ -668,14 +668,14 @@ pub(crate) fn list_durable_run_local_reservations(
             continue;
         }
         if fields.len() != 3 || fields[0] != machine_id {
-            return Err(onec_access::invalid_config(
+            return Err(hostlink_access::invalid_config(
                 "malformed durable run-local reservation in machine identity store".to_owned(),
             ));
         }
         validate_run_id(fields[1])?;
         let job_id = if fields[2].is_empty() {
             if entry.path() != pending_reservation_path(data_root, machine_id, fields[1]) {
-                return Err(onec_access::invalid_config(
+                return Err(hostlink_access::invalid_config(
                     "pending durable reservation path does not match its identity".to_owned(),
                 ));
             }
@@ -683,7 +683,7 @@ pub(crate) fn list_durable_run_local_reservations(
         } else {
             validate_job_id(fields[2])?;
             if entry.path() != job_reservation_path(data_root, machine_id, fields[2]) {
-                return Err(onec_access::invalid_config(
+                return Err(hostlink_access::invalid_config(
                     "durable reservation path does not match its Agent job identity".to_owned(),
                 ));
             }
@@ -696,7 +696,7 @@ pub(crate) fn list_durable_run_local_reservations(
             std::collections::btree_map::Entry::Occupied(mut entry) => {
                 match (entry.get().as_deref(), job_id.as_deref()) {
                     (Some(left), Some(right)) if left != right => {
-                        return Err(onec_access::invalid_config(
+                        return Err(hostlink_access::invalid_config(
                             "run identity has conflicting durable Agent job reservations"
                                 .to_owned(),
                         ));
@@ -757,7 +757,7 @@ fn has_durable_reservation(data_root: &Path, machine_id: &str) -> AppResult<bool
                 let is_active_record = name.to_string_lossy().ends_with(".reservation")
                     || name.to_string_lossy().ends_with(".pending");
                 if is_active_record && !file_type.is_file() {
-                    return Err(onec_access::invalid_config(
+                    return Err(hostlink_access::invalid_config(
                         "durable run-local reservation entry is not a regular file".to_owned(),
                     ));
                 }
@@ -804,7 +804,7 @@ fn ensure_reservation_machine_dir(
                 }
             }
             Ok(_) => {
-                return Err(onec_access::invalid_config(
+                return Err(hostlink_access::invalid_config(
                     "durable run-local reservation directory is not an owned directory".to_owned(),
                 ));
             }
@@ -856,7 +856,7 @@ fn validate_sha256(value: &str, subject: &str) -> AppResult<()> {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        return Err(onec_access::invalid_config(format!(
+        return Err(hostlink_access::invalid_config(format!(
             "{subject} SHA-256 must be 64 lowercase hexadecimal characters"
         )));
     }
@@ -865,7 +865,7 @@ fn validate_sha256(value: &str, subject: &str) -> AppResult<()> {
 
 fn validate_run_id(run_id: &str) -> AppResult<()> {
     if run_id.len() != 32 || !run_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "run-local identity must be a 32-character hexadecimal UUID".to_owned(),
         ));
     }
@@ -879,7 +879,7 @@ fn validate_job_id(job_id: &str) -> AppResult<()> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     {
-        return Err(onec_access::invalid_config(
+        return Err(hostlink_access::invalid_config(
             "invalid Agent job identity in durable run-local reservation".to_owned(),
         ));
     }
@@ -923,7 +923,7 @@ fn acquire_mutable_target_lease_in_with_wait(
     match hostlink_core::acquire_exclusive_file_lock(&path, wait, MUTABLE_LEASE_POLL) {
         Ok(file) => Ok(Some(file)),
         Err(source) if source.kind() == std::io::ErrorKind::TimedOut => {
-            Err(onec_access::invalid_config(format!(
+            Err(hostlink_access::invalid_config(format!(
                 "TARGET BUSY: managed target {machine_id:?} already has a mutable run-local execution; wait for it to finish and retry"
             )))
         }

@@ -1,5 +1,5 @@
 [Unit]
-Description=onec-toolkit enrollment and discovery hub
+Description=HostLink enrollment and discovery hub
 After=network-online.target ssh.service
 Wants=network-online.target
 
@@ -8,7 +8,7 @@ Type=simple
 User=onec-agent
 Group=onec-agent
 EnvironmentFile=/etc/onec-hub/secret.env
-ExecStart=/usr/local/bin/onec-hub serve --config /etc/onec-hub/hub.json
+ExecStart=/usr/local/bin/hostlink-hub serve --config /etc/onec-hub/hub.json
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true

@@ -28,7 +28,7 @@ pub(crate) struct Args {
     pub(crate) command: Vec<String>,
 }
 
-pub(super) async fn run(args: Args) -> onec_access::AppResult<i32> {
+pub(super) async fn run(args: Args) -> hostlink_access::AppResult<i32> {
     super::super::transport::run_local(
         args.target,
         super::super::transport::RunLocalOptions {

@@ -261,9 +261,9 @@ fn inventory_status_fields(
         Err(error) => {
             let phase_failure = error
                 .chain()
-                .find_map(|cause| cause.downcast_ref::<onec_access::SshPhaseFailure>());
+                .find_map(|cause| cause.downcast_ref::<hostlink_access::SshPhaseFailure>());
             let phase = phase_failure
-                .map(onec_access::SshPhaseFailure::phase)
+                .map(hostlink_access::SshPhaseFailure::phase)
                 .unwrap_or_else(|| transport_failure_phase(&error.to_string()));
             let diagnostic = format!(
                 "{phase}: Hello transport failed; agent state is unknown. Check this route phase and retry."
@@ -340,7 +340,7 @@ async fn discover_servers() -> AppResult<Vec<DiscoveredServer>> {
     let config_path = hub_config_path()?;
     let hub = HubClient::configured()?.ok_or_else(|| {
         crate::not_found_error(format!(
-            "onec-access controller config {}; configure access before using managed hosts",
+            "hostlink controller config {}; configure access before using managed hosts",
             config_path.display()
         ))
     })?;
@@ -386,7 +386,7 @@ async fn discover_migration_targets() -> AppResult<Vec<MigrationTarget>> {
     let config_path = hub_config_path()?;
     let hub = HubClient::configured()?.ok_or_else(|| {
         crate::not_found_error(format!(
-            "onec-access controller config {}; configure access before using managed hosts",
+            "hostlink controller config {}; configure access before using managed hosts",
             config_path.display()
         ))
     })?;
@@ -640,7 +640,7 @@ pub(super) async fn remove(name: String) -> AppResult<()> {
     let config_path = hub_config_path()?;
     let hub = HubClient::configured()?.ok_or_else(|| {
         crate::not_found_error(format!(
-            "onec-access controller config {}",
+            "hostlink controller config {}",
             config_path.display()
         ))
     })?;
@@ -655,7 +655,7 @@ pub(super) async fn remove(name: String) -> AppResult<()> {
 
 pub(super) async fn info(name: String) -> AppResult<()> {
     let hub = HubClient::configured()?.ok_or_else(|| {
-        crate::not_found_error("onec-access controller is not configured".to_owned())
+        crate::not_found_error("hostlink controller is not configured".to_owned())
     })?;
     let agent = hub
         .resolve_agent(&name)

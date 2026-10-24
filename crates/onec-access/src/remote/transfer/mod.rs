@@ -100,7 +100,7 @@ pub(in crate::remote) fn sftp_stage_timeout_error(
     );
     let _ = writeln!(
         std::io::stderr().lock(),
-        "onec-access upload outcome: {diagnostic}"
+        "hostlink upload outcome: {diagnostic}"
     );
     crate::invalid_config(format!(
         "target SSH upload stage deadline exceeded ({diagnostic})"
@@ -189,7 +189,7 @@ impl Drop for RemoteStagingGuard {
             .map_or_else(|| "state=unconfirmed".to_owned(), |format| format());
         let _ = writeln!(
             std::io::stderr().lock(),
-            "onec-access remote staging cleanup: {diagnostic}"
+            "hostlink remote staging cleanup: {diagnostic}"
         );
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(cleanup());

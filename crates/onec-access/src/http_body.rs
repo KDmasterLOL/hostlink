@@ -1,4 +1,4 @@
-//! Bounded async HTTP body helpers for onec-hub small control/manifest documents.
+//! Bounded async HTTP body helpers for HostLink Hub small control/manifest documents.
 
 use crate::{AppResult, http_error};
 use reqwest::Response;
@@ -51,7 +51,7 @@ pub(crate) async fn read_bounded_response_json<T: DeserializeOwned>(
 }
 
 pub(crate) async fn bounded_error_text(response: Response, max_bytes: usize) -> String {
-    match read_bounded_response_bytes(response, max_bytes, "onec-hub error response").await {
+    match read_bounded_response_bytes(response, max_bytes, "HostLink Hub error response").await {
         Ok(bytes) => String::from_utf8_lossy(&bytes).trim().to_owned(),
         Err(_) => {
             "<response body omitted: exceeds diagnostic limit or could not be read>".to_owned()

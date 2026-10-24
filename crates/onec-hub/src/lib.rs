@@ -1,7 +1,7 @@
-//! Shared value contracts for the onec-hub server and controller clients.
+//! Shared value contracts for the HostLink Hub server and controller clients.
 //!
 //! Server persistence, enrollment, authorization and HTTP handlers stay private to the
-//! `onec-hub` binary. This library exposes only the small contracts that both the server and
+//! `hostlink-hub` binary. This library exposes only the small contracts that both the server and
 //! controller-side access product must interpret identically.
 
 #![deny(missing_docs)]

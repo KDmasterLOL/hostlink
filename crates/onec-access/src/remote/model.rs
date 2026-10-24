@@ -83,7 +83,7 @@ pub struct RemoteServer {
     pub remote_port: u16,
     /// Carrier used to reach agent control.
     pub carrier: RemoteCarrier,
-    /// Enrollment persistence metadata from onec-hub. Older/static records may not provide it.
+    /// Enrollment persistence metadata from HostLink Hub. Older/static records may not provide it.
     pub persistence_mode: Option<String>,
     /// Optional controller SSH private-key path.
     pub identity: Option<PathBuf>,
@@ -95,7 +95,7 @@ pub struct RemoteServer {
     pub target_known_hosts: Option<PathBuf>,
     /// Stable target host-key alias used for known_hosts verification.
     pub target_host_key_alias: Option<String>,
-    /// Ephemeral control secret supplied by onec-hub. Never serialize or persist this runtime value.
+    /// Ephemeral control secret supplied by HostLink Hub. Never serialize or persist this runtime value.
     pub(crate) secret: SecretString,
 }
 

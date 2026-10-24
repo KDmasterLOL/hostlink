@@ -4,7 +4,7 @@ use super::*;
 
 pub(crate) async fn set(target: String, label: Option<String>, clear: bool) -> AppResult<()> {
     let hub = HubClient::configured()?.ok_or_else(|| {
-        crate::not_found_error("onec-access controller is not configured".to_owned())
+        crate::not_found_error("hostlink controller is not configured".to_owned())
     })?;
     let agent = hub
         .resolve_agent(&target)

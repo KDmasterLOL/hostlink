@@ -226,7 +226,7 @@ fn controller_config_rejects_stringly_https_lookalikes_at_deserialization() {
         });
         let error = serde_json::from_value::<HubControllerConfig>(value)
             .expect_err("invalid URL must fail at config ingress");
-        assert!(error.to_string().contains("onec-hub URL"), "{error}");
+        assert!(error.to_string().contains("HostLink Hub URL"), "{error}");
     }
 }
 
@@ -321,7 +321,7 @@ async fn hub_agent_maps_to_runtime_only_control_servers() {
         .expect("gateway key line");
     info.set(HubInfoResponse {
         public_url: HubHttpsUrl::parse("https://hub.example.test").expect("URL"),
-        gateways: vec![onec_hub::GatewayEndpoint::new(
+        gateways: vec![hostlink_hub::GatewayEndpoint::new(
             "gateway.example.test",
             "operator",
             key,

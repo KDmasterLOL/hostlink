@@ -57,10 +57,10 @@ fn overload_audit_is_secret_free_and_monotonic_count_is_serialized() {
 #[test]
 fn root_help_uses_standard_clap_layout() {
     let help = Cli::command()
-        .try_get_matches_from(["onec-hub", "--help"])
+        .try_get_matches_from(["hostlink-hub", "--help"])
         .expect_err("help exits through DisplayHelp")
         .to_string();
-    assert!(help.contains("Usage: onec-hub <COMMAND>"));
+    assert!(help.contains("Usage: hostlink-hub <COMMAND>"));
     assert!(help.contains("Commands:"));
     assert!(help.contains("Options:"));
     assert!(help.contains("Print help"));
@@ -72,7 +72,7 @@ fn config(dir: &Path) -> HubConfig {
         version: 1,
         listen: "127.0.0.1:27400".into(),
         public_url: HubHttpsUrl::parse("https://hub.example.test").expect("public URL"),
-        gateways: vec![onec_hub::GatewayEndpoint {
+        gateways: vec![hostlink_hub::GatewayEndpoint {
             host: "gateway.example.test".into(),
             user: "onec-agent".into(),
             port: 22,

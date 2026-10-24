@@ -23,7 +23,7 @@ pub(crate) struct Args {
     pub(crate) token_file: Option<PathBuf>,
 }
 
-pub(super) fn run(args: Args) -> onec_access::AppResult<()> {
+pub(super) fn run(args: Args) -> hostlink_access::AppResult<()> {
     super::super::config::configure(super::super::config::HubConfigureArgs {
         url: args.url,
         gateway: args.gateway,

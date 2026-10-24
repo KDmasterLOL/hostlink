@@ -471,7 +471,7 @@ async fn resolve_machine_id_with_hub(target: &str) -> AppResult<(String, HubClie
     let config_path = hub_config_path()?;
     let hub = HubClient::configured()?.ok_or_else(|| {
         crate::not_found_error(format!(
-            "onec-access config {}; configure access before using remote operations",
+            "hostlink config {}; configure access before using remote operations",
             config_path.display()
         ))
     })?;
@@ -523,7 +523,7 @@ pub(super) fn controller_data_root() -> AppResult<PathBuf> {
         .map(|dirs| dirs.data_local_dir().to_path_buf())
         .ok_or_else(|| {
             crate::invalid_config(
-                "cannot determine OS-native application directories for onec-access".to_owned(),
+                "cannot determine OS-native application directories for hostlink".to_owned(),
             )
         })
 }

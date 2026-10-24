@@ -1,7 +1,7 @@
 //! One adapter per user-visible command leaf.
 
 use clap::Subcommand;
-use onec_access::AppResult;
+use hostlink_access::AppResult;
 
 mod check;
 mod configure;

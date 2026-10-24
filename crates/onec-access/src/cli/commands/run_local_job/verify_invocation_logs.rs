@@ -19,7 +19,7 @@ pub(crate) struct Args {
     pub(crate) stderr_log: PathBuf,
 }
 
-pub(super) async fn run(args: Args) -> onec_access::AppResult<()> {
+pub(super) async fn run(args: Args) -> hostlink_access::AppResult<()> {
     let Args {
         machine_id,
         run_id,

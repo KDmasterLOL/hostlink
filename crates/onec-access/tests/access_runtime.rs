@@ -2,8 +2,26 @@ use std::{fs, process::Command};
 use tempfile::tempdir;
 
 #[test]
+fn hostlink_binary_name_and_help_are_available_without_target_access() {
+    let output = Command::new(env!("CARGO_BIN_EXE_hostlink"))
+        .arg("--help")
+        .env_remove("ONEC_ACCESS_TARGET")
+        .output()
+        .expect("run HostLink controller help");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let help = String::from_utf8(output.stdout).expect("help UTF-8");
+    assert!(help.starts_with("Usage: hostlink "), "{help}");
+    assert!(
+        help.contains("HostLink managed-machine controller"),
+        "{help}"
+    );
+}
+
+#[test]
 fn run_local_rejects_missing_target_before_transport() {
-    let output = Command::new(env!("CARGO_BIN_EXE_onec-access"))
+    let output = Command::new(env!("CARGO_BIN_EXE_hostlink"))
         .args([
             "run-local",
             "--required-effect",
@@ -13,7 +31,7 @@ fn run_local_rejects_missing_target_before_transport() {
         ])
         .env_remove("ONEC_ACCESS_TARGET")
         .output()
-        .expect("run onec-access run-local");
+        .expect("run hostlink run-local");
 
     assert!(!output.status.success());
     assert!(
@@ -30,7 +48,7 @@ fn run_local_rejects_missing_target_before_transport() {
 #[test]
 fn run_local_rejects_non_file_candidate_before_target_resolution() {
     let dir = tempdir().expect("tempdir");
-    let output = Command::new(env!("CARGO_BIN_EXE_onec-access"))
+    let output = Command::new(env!("CARGO_BIN_EXE_hostlink"))
         .args([
             "run-local",
             "--target",
@@ -41,7 +59,7 @@ fn run_local_rejects_non_file_candidate_before_target_resolution() {
             dir.path().to_str().expect("UTF-8 temp path"),
         ])
         .output()
-        .expect("run onec-access run-local");
+        .expect("run hostlink run-local");
 
     assert!(!output.status.success());
     assert!(output.stdout.is_empty(), "runner stdout must stay clean");
@@ -67,7 +85,7 @@ fn regression_inv_120_access_cli_uses_one_application_tokio_runtime() {
     )
     .expect("write controller config");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_onec-access"))
+    let output = Command::new(env!("CARGO_BIN_EXE_hostlink"))
         .args(["list", "--json"])
         .env("ONEC_ACCESS_CONFIG", &config_path)
         .env(
@@ -75,7 +93,7 @@ fn regression_inv_120_access_cli_uses_one_application_tokio_runtime() {
             "inv120-test-operator-token-0123456789abcdef",
         )
         .output()
-        .expect("run onec-access list");
+        .expect("run hostlink list");
 
     assert!(
         !output.status.success(),
@@ -83,11 +101,11 @@ fn regression_inv_120_access_cli_uses_one_application_tokio_runtime() {
     );
     let stderr = String::from_utf8(output.stderr).expect("stderr UTF-8");
     assert!(
-        stderr.contains("onec-access:"),
+        stderr.contains("hostlink:"),
         "access failure must use normal top-level error handling: {stderr}"
     );
     assert!(
-        stderr.contains("onec-access config needs"),
+        stderr.contains("hostlink config needs"),
         "fixture must reach the post-client local SSH precondition: {stderr}"
     );
     assert!(
@@ -157,13 +175,13 @@ fn public_access_cli_leaf_help_tree_preserves_all_supported_commands() {
         ),
         (vec!["run-local-evidence"], vec!["verify"]),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_onec-access"))
+        let output = Command::new(env!("CARGO_BIN_EXE_hostlink"))
             .args(&prefix)
             .arg("--help")
             .env("NO_COLOR", "1")
             .env_remove("ONEC_ACCESS_TARGET")
             .output()
-            .expect("render onec-access Clap help");
+            .expect("render hostlink Clap help");
         assert!(
             output.status.success(),
             "help for {prefix:?} must succeed: {}",
@@ -180,7 +198,7 @@ fn public_access_cli_leaf_help_tree_preserves_all_supported_commands() {
         }
     }
 
-    let output = Command::new(env!("CARGO_BIN_EXE_onec-access"))
+    let output = Command::new(env!("CARGO_BIN_EXE_hostlink"))
         .args(["project", "--help"])
         .output()
         .expect("reject unrelated 1C domain command");

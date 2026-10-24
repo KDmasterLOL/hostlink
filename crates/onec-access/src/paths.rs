@@ -1,4 +1,4 @@
-//! Controller-local onec-access paths.
+//! Controller-local hostlink paths.
 
 use crate::AppResult;
 use directories::ProjectDirs;
@@ -21,7 +21,7 @@ fn config_path_from_sources(
     }
     let root = project_dirs.map(ProjectDirs::config_dir).ok_or_else(|| {
         crate::invalid_config(
-            "cannot determine OS-native application directories for onec-access".to_owned(),
+            "cannot determine OS-native application directories for hostlink".to_owned(),
         )
     })?;
     Ok(root.join("controller.json"))

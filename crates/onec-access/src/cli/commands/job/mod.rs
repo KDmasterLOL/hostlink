@@ -24,7 +24,7 @@ pub(crate) struct Args {
     pub(crate) command: Command,
 }
 
-pub(super) async fn run(args: Args) -> onec_access::AppResult<()> {
+pub(super) async fn run(args: Args) -> hostlink_access::AppResult<()> {
     match args.command {
         Command::Start(args) => start::run(args).await,
         Command::Status(args) => status::run(args).await,

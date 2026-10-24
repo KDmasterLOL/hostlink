@@ -50,7 +50,7 @@ impl RemoteAgentClient {
                     if let Some(Err(error)) = completed
                         && !error.is_cancelled()
                     {
-                        eprintln!("onec-access forward task failed: {error}");
+                        eprintln!("hostlink forward task failed: {error}");
                     }
                 }
                 accepted = listener.accept() => {
@@ -185,7 +185,7 @@ where
     relays.spawn(async move {
         let result = with_forward_permit(permit, future).await;
         if let Err(error) = result {
-            eprintln!("onec-access forward: {error}");
+            eprintln!("hostlink forward: {error}");
         }
     });
 }

@@ -46,7 +46,7 @@ pub(crate) fn invalid(message: impl Into<String>) -> io::Error {
 }
 
 pub(crate) fn internal_error(error: io::Error) -> ApiResponse {
-    eprintln!("onec-hub request failed: {error}");
+    eprintln!("HostLink Hub request failed: {error}");
     json_error(
         StatusCode::INTERNAL_SERVER_ERROR,
         "internal_error",

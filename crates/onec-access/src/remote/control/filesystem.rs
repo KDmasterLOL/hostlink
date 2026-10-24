@@ -280,7 +280,7 @@ impl Drop for RunLocalPrepareTimingEvent {
         let other = self.other(total);
         let _ = writeln!(
             std::io::stderr().lock(),
-            "onec-access run-local prepare timing (us): total={} route_channel={} prepare_request_response={} other={} successful_route_channels={} completed_prepare_requests={} complete={}",
+            "hostlink run-local prepare timing (us): total={} route_channel={} prepare_request_response={} other={} successful_route_channels={} completed_prepare_requests={} complete={}",
             total.as_micros(),
             self.route_channel().as_micros(),
             self.prepare.request_response.as_micros(),
@@ -570,7 +570,7 @@ mod path_sha256_probe_tests {
         )
         .await
         .expect_err("unknown SFTP error must fail closed");
-        let rendered = format!("onec-access: {unknown_sftp}");
+        let rendered = format!("hostlink: {unknown_sftp}");
         assert!(rendered.contains("Agent PathSha256 response was opaque"));
         assert!(rendered.contains("unclassified SFTP transport error"));
         assert!(rendered.contains("cache upload skipped"));

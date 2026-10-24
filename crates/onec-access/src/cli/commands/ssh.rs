@@ -9,6 +9,6 @@ pub(crate) struct Args {
     pub(crate) command: Vec<String>,
 }
 
-pub(super) async fn run(args: Args) -> onec_access::AppResult<()> {
+pub(super) async fn run(args: Args) -> hostlink_access::AppResult<()> {
     super::super::ssh::run(args.name, args.tty, args.command).await
 }

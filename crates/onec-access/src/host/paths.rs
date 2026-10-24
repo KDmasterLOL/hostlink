@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Returns the generated OpenSSH config path owned by onec-access.
+/// Returns the generated OpenSSH config path owned by hostlink.
 ///
 /// # Errors
 ///
@@ -11,7 +11,7 @@ pub fn managed_ssh_config_path() -> AppResult<PathBuf> {
     Ok(config_path()?.with_file_name("ssh_config"))
 }
 
-/// Returns the generated pinned target-host known_hosts path owned by onec-access.
+/// Returns the generated pinned target-host known_hosts path owned by hostlink.
 ///
 /// # Errors
 ///
@@ -20,7 +20,7 @@ pub fn managed_target_known_hosts_path() -> AppResult<PathBuf> {
     Ok(config_path()?.with_file_name("ssh_known_hosts"))
 }
 
-/// Returns the generated pinned gateway known_hosts path owned by onec-access.
+/// Returns the generated pinned gateway known_hosts path owned by hostlink.
 pub fn managed_gateway_known_hosts_path() -> AppResult<PathBuf> {
     Ok(config_path()?.with_file_name("ssh_gateway_known_hosts"))
 }

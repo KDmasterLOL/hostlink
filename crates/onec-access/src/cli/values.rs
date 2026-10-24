@@ -22,7 +22,7 @@ pub(crate) enum TargetEffect {
     Disposable,
 }
 
-impl From<TargetEffect> for onec_access::ManagedTargetEffect {
+impl From<TargetEffect> for hostlink_access::ManagedTargetEffect {
     fn from(value: TargetEffect) -> Self {
         match value {
             TargetEffect::ReadOnly => Self::ReadOnly,
@@ -47,7 +47,7 @@ impl From<NativeExecutionEffect> for onec_agent_protocol::NativeExecutionEffect 
     }
 }
 
-impl From<NativeExecutionEffect> for onec_access::ManagedTargetEffect {
+impl From<NativeExecutionEffect> for hostlink_access::ManagedTargetEffect {
     fn from(value: NativeExecutionEffect) -> Self {
         match value {
             NativeExecutionEffect::RunOwned => Self::RunOwned,

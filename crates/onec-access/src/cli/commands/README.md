@@ -1,4 +1,4 @@
-# onec-access commands
+# HostLink controller commands
 
 This catalog lists the executable's current command leaves. `job`, `run-local-job`, and `run-local-evidence` are command families.
 

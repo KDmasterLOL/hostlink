@@ -13,7 +13,7 @@ pub(crate) struct Args {
     pub(crate) command: Command,
 }
 
-pub(super) fn run(args: Args) -> onec_access::AppResult<()> {
+pub(super) fn run(args: Args) -> hostlink_access::AppResult<()> {
     match args.command {
         Command::Verify(args) => verify::run(args),
     }

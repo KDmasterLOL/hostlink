@@ -6,10 +6,10 @@ pub(crate) struct Args {
     pub(crate) receipt: PathBuf,
 }
 
-pub(super) fn run(args: Args) -> onec_access::AppResult<()> {
+pub(super) fn run(args: Args) -> hostlink_access::AppResult<()> {
     let evidence =
         super::super::super::execution_evidence::read_verified(&args.receipt).map_err(|error| {
-            onec_access::invalid_config(format!("invalid run-local execution receipt: {error}"))
+            hostlink_access::invalid_config(format!("invalid run-local execution receipt: {error}"))
         })?;
     println!(
         "run-local observation integrity checked: exit_code={:?} run_id={} host_id={} target={} effect={}",

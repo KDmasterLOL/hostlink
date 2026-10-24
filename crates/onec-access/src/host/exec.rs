@@ -31,7 +31,7 @@ pub async fn run_managed_ssh(
     let config = managed_ssh_config_path()?;
     if !config.is_file() {
         return Err(crate::not_found_error(format!(
-            "managed SSH config {}; run `onec-access sync-ssh` first",
+            "managed SSH config {}; run `hostlink sync-ssh` first",
             config.display()
         )));
     }
@@ -39,7 +39,7 @@ pub async fn run_managed_ssh(
     let program = ssh.path;
     let identity = client.config().identity.as_deref().ok_or_else(|| {
         crate::invalid_config(
-            "onec-access config needs `identity` before standard SSH can be used".to_owned(),
+            "hostlink config needs `identity` before standard SSH can be used".to_owned(),
         )
     })?;
     // Preflight the final encoded command before any gateway probe or SSH traffic.
@@ -108,7 +108,7 @@ pub(super) fn check_interactive_command_length(encoded: &str, remote_os: &str) -
     let encoded_bytes = encoded.len();
     if encoded_bytes > WINDOWS_INTERACTIVE_COMMAND_MAX_BYTES {
         return Err(crate::invalid_config(format!(
-            "encoded Windows interactive SSH command is {encoded_bytes} bytes; the conservative limit is {WINDOWS_INTERACTIVE_COMMAND_MAX_BYTES} bytes. Use `onec-access upload` for a file or script, or `onec-access exec --stdin-file` only with a verified stdin-consuming program."
+            "encoded Windows interactive SSH command is {encoded_bytes} bytes; the conservative limit is {WINDOWS_INTERACTIVE_COMMAND_MAX_BYTES} bytes. Use `hostlink upload` for a file or script, or `hostlink exec --stdin-file` only with a verified stdin-consuming program."
         )));
     }
     Ok(())
