@@ -5,14 +5,14 @@ The `onec-agent` Rust package provides HostLink's runtime-side library and stand
 service identities and wire values retain their historical `onec-agent` names; the new standalone
 artifact has no competing legacy-named binary target.
 
-It is intentionally separate from the `onec` controller:
+It is intentionally separate from the HostLink controller:
 
-- `hostlink-agent` owns connectivity and a minimal remote-control protocol.
-- `onec` owns the controller/orchestration CLI and composes the focused domain/backend crates.
-- the customer server does not need the toolkit repository or Rust toolchain.
+- `hostlink-agent` owns outbound connectivity and its remote-control protocol.
+- `hostlink` is the generic controller CLI; it does not configure applications on behalf of a caller.
+- managed machines do not need the Rust toolchain or any calling application's source code.
 - the control listener is loopback-only.
 - connectivity is outbound: the agent maintains an SSH reverse tunnel to a gateway.
-- individual TCP endpoints can be proxied on demand; RAS/RAC or whole port ranges are not exposed by default.
+- TCP endpoints are forwarded only on explicit request; arbitrary port ranges are not exposed by default.
 
 ## Compatibility and extraction status
 
@@ -40,9 +40,8 @@ requests remain rejected. Safe generic command execution still needs an owned pr
 lifecycle with exact exit status, stdout/stderr handling, stdin policy, and timeout/cancellation
 coverage before SSH hooks can use it.
 
-The neutral `hostlink-core` crate is being supplied by the sibling extraction slice. The Agent
-still depends on `onec-core` until that API is available. The Agent currently calls these shared
-symbols, all of which need neutral equivalents before removing that dependency:
+The Agent now depends on the standalone `hostlink-core` crate, not on Toolkit's `onec-core`.
+Shared generic runtime operations use the following neutral core symbols:
 `read_file_bounded`, `read_json_file_bounded`, `read_line_bounded`, `append_json_line`,
 `write_new_json_file`, `write_new_private_bytes`, `restrict_private_file`,
 `validate_private_file`, `create_private_directory`, `ensure_private_directory`,
@@ -53,8 +52,8 @@ symbols, all of which need neutral equivalents before removing that dependency:
 `windows_command_line`, `constant_time_str_eq`, `system_hostname`, `unix_time_ms`,
 `ONEC_RESULT_DIR_ENV`, `ONEC_EXEC_DEADLINE_UNIX_MS_ENV`, `ONEC_JOB_ID_ENV`, and
 `ONEC_JOB_SYSTEM_ENV`. Preserve their current bounds, atomicity, permissions, process ownership,
-and wire/on-disk values during that API migration. Core integration and its compatibility tests
-remain pending until the sibling API is available.
+and wire/on-disk values during the completed core integration. Native and compatibility
+acceptance of the independently built Agent remains pending.
 
 ## Current MVP
 
@@ -288,7 +287,10 @@ directly to `russh::client::connect_stream`. SSH host-key pinning and Ed25519 cl
 authentication remain authoritative. This helper preserves the historical raw-TLS transport
 semantics; it is not an HTTPS tunnel and does not turn the TLS wrapper into a second SSH client.
 
-## Tunnel reliability and diagnostics
+## Legacy Toolkit-managed runtime: compatibility reference
+
+The following historical behavior documents pre-extraction installations. It is **not** the
+new standalone HostLink Agent bootstrap or an instruction to enroll/upgrade existing hosts.
 
 The no-admin Windows installation uses a hidden per-user PowerShell supervisor started from `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. It restarts `onec-agent` after an agent exit, while `onec-agent` itself reconnects a failed SSH reverse tunnel every `reconnect_seconds`. `russh` keepalives detect a dead transport, and connection/forward-request failures are retried in-process rather than terminating the resident agent.
 
@@ -296,14 +298,14 @@ The supervisor must not self-update the toolkit while a durable `jobs-v1` worker
 
 Managed installed-runtime updates replace the complete immutable `bin/` bundle: `onec-agent.exe`, `onec.exe`, `Run-OnecAgent.ps1`, `Update-OnecToolkit.ps1`, and `onec-toolkit-update.cmd`. The unified `onec.exe` provides the controller command surface, including project orchestration and metadata operations, on the managed host. A previously installer-owned `onec-ops.exe` is backed up with the other managed files, removed as part of successful publication, and restored if publication rolls back. If the old file cannot be removed, publication fails and restores the prior managed files. Mutable enrollment/config/SSH/jobs/log/lock state stays outside that bundle. `self_update` owns exact archive digest verification, extraction, candidate verification, same-parent directory replacement and rollback-on-swap-failure. `Update-OnecToolkit.ps1` is only the Windows lifecycle handoff around that Rust operation. Existing user-session persistence still executes `scripts/Run-OnecAgent.ps1`; after a successful bundle replacement the lifecycle wrapper refreshes that compatibility projection from the new immutable bundle.
 
-The hidden `__self-update` mechanism accepts an exact archive through `--archive-url` or `--archive-file`, together with `--archive-sha256`, `--package-version`, `--target` and the installed `--root`. These flags are an implementation contract for infrastructure and regression tests. Operational installation follows the [source and infrastructure boundary](../../docs/remote-agent-testing.md#source-and-infrastructure-ownership).
+The hidden `__self-update` mechanism accepts an exact archive through `--archive-url` or `--archive-file`, together with `--archive-sha256`, `--package-version`, `--target` and the installed `--root`. These flags are an implementation contract for infrastructure and regression tests. New HostLink installation requires the [source and compatibility gates](../../docs/compatibility.md); the historical updater is retained solely for legacy compatibility.
 
 Exactly one archive source is required: HTTPS URL, or an absolute ZIP path staged under the toolkit root. Local archives must be regular files with no symlink/reparse path components. Exactly one archive source and all three package identity values are required. The target must match `install.json`; the archive digest, package version and target are recorded for digest-based idempotence. On repeat install, the verified archive digest and per-file runtime checks remain mandatory; the plain operator-selected semver (for example `0.3.2`) matches the same installed release even when the Windows bootstrap records an executable `+src...` build fingerprint in `installed_version`. Different major/minor/patch or prerelease values still fail closed. The archive filename and extraction directory are derived from the target, and the same five-file staged-candidate check, writer lock, active-job deferral, exact digest verification and rollback-capable `self_update` replacement apply. A local archive is digest-checked before entering `self_update`, which independently verifies the streamed bytes before extraction. Calling `__self-update` without an exact archive selection now fails with guidance; it never contacts a moving `latest` pointer.
 
 
 The direct installer and `Update-OnecToolkit.ps1` receive an exact ZIP with its trusted SHA-256, package version and target. Installed v2 agents and their older lifecycle scripts may still contain the previous latest/manifest updater until that installation is replaced. This source change does not migrate installed hosts. Require native acceptance of the old-install-to-direct-update transition before claiming that fleet migration is safe. The `Install-OnecToolkit.ps1` legacy v2 branch remains only to transition existing installations. Direct package installation records package digest identity; it does not authorize or report managed-release acceptance.
 
-SHA-256 values enter the Rust package updater as `onec_core::Sha256Digest`. Input accepts uppercase or lowercase hexadecimal and serializes the recorded digest in lowercase.
+SHA-256 values enter the Rust package updater as `hostlink_core::Sha256Digest`. Input accepts uppercase or lowercase hexadecimal and serializes the recorded digest in lowercase.
 
 Persistent diagnostics live next to the agent configuration:
 
@@ -320,7 +322,7 @@ Managed enrollment has two explicit persistence profiles. `user-session` is the 
 
 Configure controller-side machine access in `onec-access`. The agent protocol is intentionally machine-only: it owns enrollment, identity/status, structured execution, durable jobs, filesystem transfer, probes, and forwarding, but no 1C discovery/update/project policy.
 
-Persistence profile selection and enrollment are governed by the [infrastructure boundary](../../docs/remote-agent-testing.md#source-and-infrastructure-ownership). The following access examples assume an already prepared test target:
+Historical persistence profile selection and enrollment were governed by the Toolkit infrastructure owner, not HostLink's new Agent-only installer. The following access examples assume an already prepared test target:
 
 ```bash
 onec-access list
