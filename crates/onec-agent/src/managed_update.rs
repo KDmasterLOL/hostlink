@@ -1355,7 +1355,7 @@ mod tests {
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         let package = format!("hostlink-agent-{}", current_agent_target());
         #[cfg(target_os = "windows")]
-        let entries = vec![
+        let entries = [
             (
                 format!("{package}/hostlink-agent.exe"),
                 b"hostlink-agent-v1".as_slice(),
