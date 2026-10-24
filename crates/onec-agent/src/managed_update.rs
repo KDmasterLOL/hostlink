@@ -911,11 +911,11 @@ fn validate_exact_archive(
                 "package archive uses an unsupported compression method",
             ));
         }
-        if let Some(mode) = entry.unix_mode() {
-            let file_type = mode & 0o170000;
-            if file_type != 0 && file_type != 0o100000 {
-                return Err(invalid("package archive contains a non-regular file"));
-            }
+        // ZIP creator OS may be MS-DOS even when the external mode encodes a
+        // symlink. Inspect the raw mode, not unix_mode(), which omits that case.
+        let file_type = (entry.external_attributes() >> 16) & 0o170000;
+        if file_type != 0 && file_type != 0o100000 {
+            return Err(invalid("package archive contains a non-regular file"));
         }
         let declared_size = entry.size();
         if declared_size > DIRECT_ARCHIVE_MAX_ENTRY_BYTES
@@ -1547,6 +1547,9 @@ mod tests {
             .windows(4)
             .position(|window| window == b"PK\x01\x02")
             .expect("central file header");
+        // Mark the producer as MS-DOS while retaining Unix symlink attributes:
+        // unix_mode() then returns None, but the unsafe mode must be rejected.
+        bytes[central + 5] = 0;
         bytes[central + 38..central + 42].copy_from_slice(&(0o120777_u32 << 16).to_le_bytes());
         std::fs::write(&symlink, bytes).expect("mark ZIP member as symlink");
         let mut file = File::open(symlink).expect("symlink archive");
