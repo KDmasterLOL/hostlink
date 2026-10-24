@@ -38,6 +38,22 @@ remain the authority until a separately authorized, tested cutover.
 6. Only after the new release and infra orchestration are separately accepted
    may source ownership be removed from OneC Toolkit in a further task.
 
+## Automated CI coverage
+
+The standalone `.github/workflows/ci.yml` checks locked Linux workspace
+compilation, format, strict Clippy, unit/loopback tests, negative architecture
+guards, and deterministic package inventories/SHA-256 sidecars. Current Windows
+x64 runs compile/Clippy and packages controller and Agent from independently
+built binaries. These jobs do not install or update managed machines or publish
+a release.
+
+Windows 7 triples `x86_64-win7-windows-msvc` and `i686-win7-windows-msvc`
+are Rust Tier 3 without distributed standard-library artifacts. Dedicated
+source-exact cross-toolchain builds, loader checks, process/tunnel behavior on
+owned NT6.1 fixtures, and version-skew evidence remain mandatory. Generic
+Windows CI is not a substitute. See the
+[Rust platform documentation](https://doc.rust-lang.org/rustc/platform-support/win7-windows-msvc.html).
+
 ## Outside this phase
 
 No changes to installed hosts, infra Ansible, server config, secrets, GitHub

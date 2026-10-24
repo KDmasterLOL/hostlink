@@ -30,7 +30,8 @@ own source checkout and invokes the external runner:
     CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER="hostlink run-local ..."
     cargo nextest run --target x86_64-pc-windows-msvc -p onec-cli --test native_disposable
 
-This is the intended future interface, not yet an implemented renamed CLI.
+The renamed controller CLI exists in the independent workspace; the original
+Toolkit runner/infra cutover has not been authorized or natively accepted.
 
 The runner accepts the executable as the first trailing argument, then passes
 following arguments byte-for-byte to the remote process including Nextest
