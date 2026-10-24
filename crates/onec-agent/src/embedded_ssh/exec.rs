@@ -150,7 +150,7 @@ fn invalid_command(message: &'static str) -> io::Error {
 use crate::environment::AgentEnvironmentPolicy;
 
 #[cfg(windows)]
-fn safe_windows_user_context() -> io::Result<bool> {
+pub(super) fn safe_windows_user_context() -> io::Result<bool> {
     use std::mem::{size_of, zeroed};
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
     use windows_sys::Win32::Security::{

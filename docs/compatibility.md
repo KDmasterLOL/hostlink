@@ -63,6 +63,9 @@ extractor. Current Windows MSVC artifacts are not Win7 candidates. No dedicated
 Tier-3 Win7 executable or native bootstrap acceptance is established by this
 installer change.
 
+Embedded SSH exec on Windows requires a verified non-elevated, non-LocalSystem
+process token; elevated contexts receive an explicit SSH request denial.
+
 ## Outside this phase
 
 No changes to installed hosts, infra Ansible, server config, secrets, GitHub

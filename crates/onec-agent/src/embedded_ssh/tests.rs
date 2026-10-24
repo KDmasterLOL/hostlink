@@ -431,17 +431,70 @@ async fn embedded_server_windows_exec_streams_binary_stdio_and_exit_status() {
     let mut session = connect(&fixture, fixture.host_key.clone()).await;
     assert!(authenticate(&mut session, "managed-user", fixture.client_key.clone()).await);
 
+    let safe_user_context = exec::safe_windows_user_context()
+        .expect("Windows test process token elevation and user SID must be verifiable");
+    let launch_marker = fixture
+        ._dir
+        .path()
+        .join("windows-exec-child-launched.marker");
+    let escaped_marker_path = launch_marker.to_string_lossy().replace('\'', "''");
+    let command = format!(
+        r#"[IO.File]::WriteAllText('{escaped_marker_path}', 'started'); $stdinStream = [Console]::OpenStandardInput(); $stdoutStream = [Console]::OpenStandardOutput(); $buffer = New-Object byte[] 8192; while (($read = $stdinStream.Read($buffer, 0, $buffer.Length)) -gt 0) {{ $stdoutStream.Write($buffer, 0, $read) }}; $stdoutStream.Flush(); $stderrStream = [Console]::OpenStandardError(); $errorBytes = [byte[]](0, 255, 69, 82, 82, 13, 10); $stderrStream.Write($errorBytes, 0, $errorBytes.Length); $stderrStream.Flush(); exit 7"#
+    );
     let channel = session
         .channel_open_session()
         .await
         .expect("session channel");
-    channel
-        .exec(
-            true,
-            r#"$stdinStream = [Console]::OpenStandardInput(); $stdoutStream = [Console]::OpenStandardOutput(); $buffer = New-Object byte[] 8192; while (($read = $stdinStream.Read($buffer, 0, $buffer.Length)) -gt 0) { $stdoutStream.Write($buffer, 0, $read) }; $stdoutStream.Flush(); $stderrStream = [Console]::OpenStandardError(); $errorBytes = [byte[]](0, 255, 69, 82, 82, 13, 10); $stderrStream.Write($errorBytes, 0, $errorBytes.Length); $stderrStream.Flush(); exit 7"#,
-        )
-        .await
-        .expect("exec request");
+    channel.exec(true, command).await.expect("exec request");
+
+    let request_acknowledgement = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Success) => break true,
+                Some(ChannelMsg::Failure) => break false,
+                Some(_) => {}
+                None => panic!("Windows exec channel closed before request acknowledgement"),
+            }
+        }
+    })
+    .await
+    .expect("Windows exec request acknowledgement deadline");
+
+    if !safe_user_context {
+        assert!(
+            !request_acknowledgement,
+            "Windows exec must be denied for elevated or LocalSystem tokens"
+        );
+        assert!(
+            matches!(
+                tokio::time::timeout(Duration::from_secs(15), channel.wait())
+                    .await
+                    .expect("Windows exec denial close deadline"),
+                Some(ChannelMsg::Close)
+            ),
+            "denied Windows exec must close after its failure acknowledgement"
+        );
+        assert!(
+            !launch_marker.exists(),
+            "denied Windows exec must not launch its child process"
+        );
+
+        session
+            .disconnect(
+                russh::Disconnect::ByApplication,
+                "Windows elevated exec denied",
+                "en",
+            )
+            .await
+            .expect("SSH disconnect");
+        fixture.stop().await;
+        return;
+    }
+
+    assert!(
+        request_acknowledgement,
+        "Windows exec request must be accepted for a verified unelevated user token"
+    );
     let (mut channel_input, channel_output) = channel.split();
     let mut stdin = channel_output.make_writer();
     let payload: Vec<u8> = (0..4096).map(|index| (index * 37) as u8).collect();
@@ -461,7 +514,13 @@ async fn embedded_server_windows_exec_streams_binary_stdio_and_exit_status() {
                 ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
                 ChannelMsg::ExtendedData { data, ext: 1 } => stderr.extend_from_slice(&data),
                 ChannelMsg::ExitStatus { exit_status: code } => exit_status = Some(code),
-                ChannelMsg::Eof => saw_eof = true,
+                ChannelMsg::Eof => {
+                    assert!(
+                        exit_status.is_some(),
+                        "server must send exit status before EOF"
+                    );
+                    saw_eof = true;
+                }
                 ChannelMsg::Close => {
                     assert!(saw_eof, "server must send EOF before closing the channel");
                     saw_close = true;
@@ -484,6 +543,10 @@ async fn embedded_server_windows_exec_streams_binary_stdio_and_exit_status() {
     );
     assert!(saw_eof, "server must send EOF before closing the channel");
     assert!(saw_close, "server must close the completed exec channel");
+    assert!(
+        launch_marker.exists(),
+        "accepted Windows exec must launch its child process"
+    );
 
     session
         .disconnect(
