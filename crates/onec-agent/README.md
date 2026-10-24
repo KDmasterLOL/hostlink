@@ -29,12 +29,20 @@ lifecycle with exact exit status, stdout/stderr handling, stdin policy, and time
 coverage before SSH hooks can use it.
 
 The neutral `hostlink-core` crate is being supplied by the sibling extraction slice. The Agent
-still depends on `onec-core` until that API is available. The Agent requires neutral equivalents
-for bounded file/JSON/line reads; private file and directory validation/creation; atomic file
-publication and scoped removal; exclusive file locking; SHA-256 and digest parsing; retained and
-redacting log writers; owned process/background command setup; Windows command-line encoding;
-constant-time string comparison; hostname lookup; and Unix timestamps. Core API integration and
-its compatibility tests remain pending.
+still depends on `onec-core` until that API is available. The Agent currently calls these shared
+symbols, all of which need neutral equivalents before removing that dependency:
+`read_file_bounded`, `read_json_file_bounded`, `read_line_bounded`, `append_json_line`,
+`write_new_json_file`, `write_new_private_bytes`, `restrict_private_file`,
+`validate_private_file`, `create_private_directory`, `ensure_private_directory`,
+`restrict_private_directory`, `replace_file_atomically`, `move_file_atomically`,
+`write_file_atomically`, `remove_path_scoped`, `acquire_exclusive_file_lock`, `digest_file`,
+`sha256_file`, `Sha256Digest`, `RetainedLog`, `RetainedLogWriter`, `RedactingWriter`,
+`OwnedProcess`, `background_command`, `configure_background_process_with_flags`,
+`windows_command_line`, `constant_time_str_eq`, `system_hostname`, `unix_time_ms`,
+`ONEC_RESULT_DIR_ENV`, `ONEC_EXEC_DEADLINE_UNIX_MS_ENV`, `ONEC_JOB_ID_ENV`, and
+`ONEC_JOB_SYSTEM_ENV`. Preserve their current bounds, atomicity, permissions, process ownership,
+and wire/on-disk values during that API migration. Core integration and its compatibility tests
+remain pending until the sibling API is available.
 
 ## Current MVP
 
