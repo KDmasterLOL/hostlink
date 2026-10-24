@@ -4,6 +4,8 @@ use crate::config::{SshGatewayEndpoint, SshTlsProxyConfig};
 use crate::environment::AgentEnvironmentPolicy;
 use hostlink_core::background_command;
 use processkit::{ProcessStdin, RawOutputSink, RawSinkFuture, RunningProcess};
+#[cfg(target_os = "linux")]
+use std::collections::HashMap;
 use std::future::Future;
 use std::io::{self, Error as IoError};
 use std::pin::Pin;
@@ -15,6 +17,8 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
 use super::SHUTDOWN_GRACE;
 
 const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const PROXY_TREE_EXIT_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(5);
+const PROXY_TREE_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 pub(super) struct ProxyStream {
     stdin: ProxyStdin,
@@ -300,10 +304,324 @@ pub(super) async fn stop_proxy_process(proxy: &mut Option<RunningProcess>) -> io
     let Some(process) = proxy.take() else {
         return Ok(());
     };
+    let tree = process
+        .owned_tree_probe()
+        .ok_or_else(|| io::Error::other("TLS proxy has no owned ProcessKit process tree"))?;
+    #[cfg(target_os = "linux")]
+    let initial_members = linux_initial_tree_member_identities(&tree)?;
+    #[cfg(target_os = "linux")]
+    let process_group = linux_proxy_process_group_identity(&process)?;
     process.shutdown(SHUTDOWN_GRACE).await.map_err(|error| {
         io::Error::other(format!("TLS proxy process-tree shutdown failed: {error}"))
     })?;
-    Ok(())
+    #[cfg(target_os = "linux")]
+    {
+        wait_for_proxy_tree_exit(&tree, process_group, &initial_members).await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        wait_for_proxy_tree_exit(&tree).await
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_initial_tree_member_identities(
+    tree: &processkit::OwnedProcessTreeProbe,
+) -> io::Result<HashMap<u32, u64>> {
+    let mut identities = HashMap::new();
+    for pid in tree.members().map_err(|error| {
+        io::Error::other(format!(
+            "cannot inspect TLS proxy initial process tree: {error}"
+        ))
+    })? {
+        if let Some(stat) = read_linux_proc_stat(pid)? {
+            identities.insert(pid, stat.start_time);
+        }
+    }
+    Ok(identities)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct LinuxProxyProcessGroupIdentity {
+    pgid: u32,
+    session_id: u32,
+    leader_start_time: u64,
+    initial_members: HashMap<u32, u64>,
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxProcStat {
+    pid: u32,
+    state: char,
+    process_group: u32,
+    session_id: u32,
+    start_time: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_proxy_process_group_identity(
+    process: &RunningProcess,
+) -> io::Result<Option<LinuxProxyProcessGroupIdentity>> {
+    let pid = process
+        .pid()
+        .ok_or_else(|| io::Error::other("cannot identify an already-reaped TLS proxy process"))?;
+    let root = read_linux_proc_stat(pid)?.ok_or_else(|| {
+        io::Error::other(format!("TLS proxy PID {pid} disappeared before shutdown"))
+    })?;
+    if root.pid != pid {
+        return Err(io::Error::other(format!(
+            "TLS proxy PID identity changed before shutdown: expected {pid}, found {}",
+            root.pid
+        )));
+    }
+
+    let current = read_linux_proc_stat(std::process::id())?
+        .ok_or_else(|| io::Error::other("cannot identify the Agent process group"))?;
+    if root.process_group == current.process_group {
+        // Linux cgroup containment does not change process groups. Its owned probe
+        // enumerates the full cgroup, so do not inspect or adopt the Agent's group.
+        return Ok(None);
+    }
+    if root.process_group != pid {
+        return Err(io::Error::other(format!(
+            "TLS proxy PID {pid} is in unexpected process group {}; refusing to treat it as owned",
+            root.process_group
+        )));
+    }
+
+    let initial_members = linux_process_group_members(root.process_group, root.session_id)?;
+    if initial_members.get(&pid) != Some(&root.start_time) {
+        return Err(io::Error::other(format!(
+            "TLS proxy PID {pid} changed while capturing its process group"
+        )));
+    }
+
+    Ok(Some(LinuxProxyProcessGroupIdentity {
+        pgid: root.process_group,
+        session_id: root.session_id,
+        leader_start_time: root.start_time,
+        initial_members,
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_group_members(pgid: u32, session_id: u32) -> io::Result<HashMap<u32, u64>> {
+    let mut members = HashMap::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if let Some(stat) = read_linux_proc_stat(pid)?
+            && stat.process_group == pgid
+            && stat.session_id == session_id
+        {
+            members.insert(pid, stat.start_time);
+        }
+    }
+    Ok(members)
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_proc_stat(pid: u32) -> io::Result<Option<LinuxProcStat>> {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let stat = parse_linux_proc_stat(pid, &stat)?;
+    if stat.pid != pid {
+        return Err(invalid_linux_proc_stat(pid));
+    }
+    Ok(Some(stat))
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_proc_stat(pid: u32, stat: &str) -> io::Result<LinuxProcStat> {
+    let Some((identity, after_comm)) = stat.rsplit_once(')') else {
+        return Err(invalid_linux_proc_stat(pid));
+    };
+    let parsed_pid = identity
+        .split_whitespace()
+        .next()
+        .and_then(|field| field.parse::<u32>().ok())
+        .ok_or_else(|| invalid_linux_proc_stat(pid))?;
+    let fields = after_comm.split_whitespace().collect::<Vec<_>>();
+    let state = fields
+        .first()
+        .and_then(|field| field.chars().next())
+        .ok_or_else(|| invalid_linux_proc_stat(pid))?;
+    let process_group = fields
+        .get(2)
+        .and_then(|field| field.parse::<u32>().ok())
+        .ok_or_else(|| invalid_linux_proc_stat(pid))?;
+    let session_id = fields
+        .get(3)
+        .and_then(|field| field.parse::<u32>().ok())
+        .ok_or_else(|| invalid_linux_proc_stat(pid))?;
+    let start_time = fields
+        .get(19)
+        .and_then(|field| field.parse::<u64>().ok())
+        .ok_or_else(|| invalid_linux_proc_stat(pid))?;
+
+    Ok(LinuxProcStat {
+        pid: parsed_pid,
+        state,
+        process_group,
+        session_id,
+        start_time,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn invalid_linux_proc_stat(pid: u32) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("cannot parse /proc/{pid}/stat while confirming TLS proxy shutdown"),
+    )
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_proxy_tree_exit(
+    tree: &processkit::OwnedProcessTreeProbe,
+    process_group: Option<LinuxProxyProcessGroupIdentity>,
+    initial_members: &HashMap<u32, u64>,
+) -> io::Result<()> {
+    let deadline = tokio::time::Instant::now() + PROXY_TREE_EXIT_CONFIRMATION_TIMEOUT;
+    loop {
+        let members = tree.members().map_err(|error| {
+            io::Error::other(format!("cannot inspect TLS proxy process tree: {error}"))
+        })?;
+        if !linux_owned_proxy_tree_has_live_members(
+            &members,
+            process_group.as_ref(),
+            initial_members,
+        )? {
+            return Ok(());
+        }
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "TLS proxy process tree still has live members after shutdown",
+            ));
+        }
+        tokio::time::sleep(PROXY_TREE_EXIT_POLL_INTERVAL.min(remaining)).await;
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn wait_for_proxy_tree_exit(tree: &processkit::OwnedProcessTreeProbe) -> io::Result<()> {
+    let deadline = tokio::time::Instant::now() + PROXY_TREE_EXIT_CONFIRMATION_TIMEOUT;
+    loop {
+        let members = tree.members().map_err(|error| {
+            io::Error::other(format!("cannot inspect TLS proxy process tree: {error}"))
+        })?;
+
+        let has_live_members = !members.is_empty();
+
+        if !has_live_members {
+            return Ok(());
+        }
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "TLS proxy process tree still has live members after shutdown",
+            ));
+        }
+        tokio::time::sleep(PROXY_TREE_EXIT_POLL_INTERVAL.min(remaining)).await;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_owned_proxy_tree_has_live_members(
+    members: &[u32],
+    process_group: Option<&LinuxProxyProcessGroupIdentity>,
+    initial_members: &HashMap<u32, u64>,
+) -> io::Result<bool> {
+    if members.is_empty() && process_group.is_none() && initial_members.is_empty() {
+        return Ok(false);
+    }
+
+    let process_group_is_current = match process_group {
+        Some(identity) => linux_process_group_identity_is_current(identity)?,
+        None => false,
+    };
+
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let stat = match read_linux_proc_stat(pid) {
+            Ok(Some(stat)) => stat,
+            Ok(None) => continue,
+            Err(error) => return Err(error),
+        };
+        let process_is_owned = members.contains(&pid)
+            || initial_members.get(&pid) == Some(&stat.start_time)
+            || process_group_is_current
+                && process_group.is_some_and(|identity| {
+                    stat.process_group == identity.pgid
+                        && stat.session_id == identity.session_id
+                        && identity.initial_members.get(&pid) == Some(&stat.start_time)
+                });
+        if process_is_owned && !matches!(stat.state, 'Z' | 'X' | 'x') {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_group_identity_is_current(
+    identity: &LinuxProxyProcessGroupIdentity,
+) -> io::Result<bool> {
+    match read_linux_proc_stat(identity.pgid)? {
+        Some(leader) => Ok(leader.pid == identity.pgid
+            && leader.process_group == identity.pgid
+            && leader.session_id == identity.session_id
+            && leader.start_time == identity.leader_start_time),
+        // The group leader may have exited while descendants still keep its PGID
+        // alive. Linux cannot reuse that PGID until the old group itself is gone.
+        None => Ok(true),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+pub(super) fn linux_proc_stat_is_live_owned_proxy_member(
+    pid: u32,
+    stat: &str,
+    members: &[u32],
+    process_group: Option<(u32, u32)>,
+    initial_members: &[(u32, u64)],
+) -> io::Result<bool> {
+    let parsed = parse_linux_proc_stat(pid, stat)?;
+    let belongs_to_owned_tree = members.contains(&pid)
+        || initial_members
+            .iter()
+            .any(|(member_pid, start_time)| *member_pid == pid && *start_time == parsed.start_time)
+        || process_group.is_some_and(|(pgid, session_id)| {
+            parsed.process_group == pgid
+                && parsed.session_id == session_id
+                && initial_members.iter().any(|(member_pid, start_time)| {
+                    *member_pid == pid && *start_time == parsed.start_time
+                })
+        });
+    Ok(belongs_to_owned_tree && !matches!(parsed.state, 'Z' | 'X' | 'x'))
 }
 
 pub(super) fn tls_proxy_command(

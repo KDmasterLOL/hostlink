@@ -823,6 +823,99 @@ fn linux_proc_status_is_zombie(status: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+#[tokio::test]
+async fn tls_proxy_shutdown_waits_for_forced_tree_exit_without_ssh_fixture() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let proxy_script = directory.path().join("proxy-with-term-ignoring-child");
+    let descendant_pid_path = directory.path().join("descendant.pid");
+    fs::write(
+        &proxy_script,
+        format!(
+            "#!/bin/bash\nset -eu\n(trap '' TERM; printf '%s\\n' \"$BASHPID\" > '{}'; exec sleep 300 >/dev/null 2>&1) &\nchild=$!\nwait \"$child\"\n",
+            descendant_pid_path.display()
+        ),
+    )
+    .expect("write proxy script");
+    let mut permissions = fs::metadata(&proxy_script)
+        .expect("proxy metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&proxy_script, permissions).expect("make proxy executable");
+
+    let gateway = SshGatewayEndpoint {
+        host: "127.0.0.1".to_owned(),
+        user: "agent".to_owned(),
+        port: 22,
+        tls_proxy: Some(SshTlsProxyConfig {
+            program: proxy_script,
+            server_name: "edge.example.test".to_owned(),
+            alpn: None,
+        }),
+    };
+    let (mut stream, process) = super::proxy::spawn_tls_proxy(
+        &gateway,
+        gateway.tls_proxy.as_ref().expect("TLS proxy config"),
+        &AgentEnvironmentPolicy::default(),
+    )
+    .await
+    .expect("spawn isolated TLS proxy");
+    let stdout_reader = tokio::spawn(async move {
+        let mut output = Vec::new();
+        stream
+            .read_to_end(&mut output)
+            .await
+            .expect("read proxy stdout through EOF");
+        output
+    });
+    let descendant_pid = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(text) = fs::read_to_string(&descendant_pid_path)
+                && let Ok(pid) = text.trim().parse::<i32>()
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("descendant PID publication");
+
+    let mut owner = Some(process);
+    super::proxy::stop_proxy_process(&mut owner)
+        .await
+        .expect("shutdown must wait until the owned process group has no live members");
+    assert!(owner.is_none());
+    assert!(stdout_reader.await.expect("stdout reader task").is_empty());
+    assert!(
+        !linux_process_is_live(descendant_pid).expect("inspect descendant after shutdown"),
+        "TERM-ignoring proxy descendant must be gone or a confirmed zombie"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_is_live(pid: i32) -> io::Result<bool> {
+    let status = match fs::read_to_string(format!("/proc/{pid}/status")) {
+        Ok(status) => status,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let state = status
+        .lines()
+        .filter_map(|line| line.strip_prefix("State:"))
+        .find_map(|value| value.split_whitespace().next());
+    match state {
+        Some("Z" | "X" | "x") => Ok(false),
+        Some(_) => Ok(true),
+        None => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("cannot read process state for PID {pid}"),
+        )),
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 fn tls_proxy_shutdown_considers_only_a_confirmed_zombie_to_be_exited() {
     assert!(linux_proc_status_is_zombie(
@@ -838,6 +931,82 @@ fn tls_proxy_shutdown_considers_only_a_confirmed_zombie_to_be_exited() {
     ] {
         assert!(!linux_proc_status_is_zombie(status));
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn tls_proxy_tree_confirmation_matches_owned_members_and_process_groups() {
+    let owned_group = Some((1582, 700));
+    assert!(
+        super::proxy::linux_proc_stat_is_live_owned_proxy_member(
+            1601,
+            "1601 (sleep child) R 1502 1582 700 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345",
+            &[],
+            owned_group,
+            &[(1601, 12345)],
+        )
+        .expect("find live descendant with no current ProcessKit members")
+    );
+    assert!(
+        !super::proxy::linux_proc_stat_is_live_owned_proxy_member(
+            1601,
+            "1601 (sleep child) Z 1502 1582 700 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345",
+            &[],
+            owned_group,
+            &[(1601, 12345)],
+        )
+        .expect("parse zombie descendant")
+    );
+    assert!(
+        !super::proxy::linux_proc_stat_is_live_owned_proxy_member(
+            1601,
+            "1601 (unrelated) R 1 1601 1601 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345",
+            &[],
+            owned_group,
+            &[(1601, 12345)],
+        )
+        .expect("parse unrelated process")
+    );
+    assert!(
+        !super::proxy::linux_proc_stat_is_live_owned_proxy_member(
+            1601,
+            "1601 (other session) R 1502 1582 701 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345",
+            &[],
+            owned_group,
+            &[(1601, 12345)],
+        )
+        .expect("reject same process group number in a different session")
+    );
+    assert!(
+        !super::proxy::linux_proc_stat_is_live_owned_proxy_member(
+            1601,
+            "1601 (reused pid) R 1502 1582 700 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 54321",
+            &[],
+            owned_group,
+            &[(1601, 12345)],
+        )
+        .expect("reject a PID reused after the initial group snapshot")
+    );
+    assert!(
+        super::proxy::linux_proc_stat_is_live_owned_proxy_member(
+            1582,
+            "1582 (proxy) S 1 700 700 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345",
+            &[1582],
+            None,
+            &[],
+        )
+        .expect("match an exact cgroup member")
+    );
+    assert!(
+        super::proxy::linux_proc_stat_is_live_owned_proxy_member(
+            1601,
+            "1601 (sleep child) R 1502 1582 700 0 0",
+            &[],
+            owned_group,
+            &[(1601, 12345)],
+        )
+        .is_err()
+    );
 }
 
 #[cfg(unix)]
