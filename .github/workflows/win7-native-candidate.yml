@@ -1,0 +1,163 @@
+name: Win7 MSVC Tier-3 test candidate
+
+on:
+  push:
+    branches: [task/1c-972-win7-msvc-ci]
+
+permissions:
+  contents: read
+
+jobs:
+  win7-agent-candidate:
+    name: Build and package Win7 x64 Agent test candidate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Verify source and target identity
+        shell: pwsh
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+          EXPECTED_REF: refs/heads/task/1c-972-win7-msvc-ci
+          TARGET_TRIPLE: x86_64-win7-windows-msvc
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $actualRef = $env:GITHUB_REF
+          $actualCommit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve checked out source identity' }
+          if ($actualRef -ne $env:EXPECTED_REF) { throw "Unexpected source ref: $actualRef" }
+          if ($actualCommit -ne $env:EXPECTED_COMMIT) { throw "Source commit mismatch: $actualCommit" }
+          if ($env:TARGET_TRIPLE -ne 'x86_64-win7-windows-msvc') { throw "Unsupported target: $env:TARGET_TRIPLE" }
+          Write-Output "source_commit=$actualCommit"
+          Write-Output "source_ref=$actualRef"
+          Write-Output "target=$env:TARGET_TRIPLE"
+
+      - name: Install pinned Tier-3 MSVC toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install nightly-2026-08-22 --profile minimal --component rust-src
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust toolchain installation failed' }
+          $toolchain = rustup run nightly-2026-08-22 rustc -vV
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust compiler is unavailable' }
+          $toolchain | Write-Output
+          if (($toolchain -join "`n") -notmatch 'host: x86_64-pc-windows-msvc') {
+            throw 'The pinned compiler host is not x86_64-pc-windows-msvc'
+          }
+
+      - name: Run Agent tests on the current Windows CI host
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo +nightly-2026-08-22 test --locked -p hostlink-agent
+          if ($LASTEXITCODE -ne 0) { throw 'Agent source tests failed on the Windows CI host' }
+
+      - name: Build Win7 x64 Agent with standard library
+        shell: pwsh
+        env:
+          # Avoid depending on the UCRT redistributable missing from stock NT 6.1.
+          RUSTFLAGS: '-C target-feature=+crt-static'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo +nightly-2026-08-22 -Z build-std=std,panic_abort build --locked --release -p hostlink-agent --bin hostlink-agent --target x86_64-win7-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Win7 x64 Agent build failed' }
+
+      - name: Verify executable on the current Windows host
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = 'target/x86_64-win7-windows-msvc/release/hostlink-agent.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Expected Win7 target executable is missing: $exe" }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw 'Visual Studio vswhere.exe was not found' }
+          $vsRoot = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vsRoot) { throw 'Installed MSVC tools were not found' }
+          $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10'
+          if (-not (Test-Path -LiteralPath (Join-Path $sdkRoot 'Include') -PathType Container) -or -not (Test-Path -LiteralPath (Join-Path $sdkRoot 'Lib') -PathType Container)) {
+            throw 'Windows SDK include/lib directories were not found on the runner'
+          }
+          $dumpbin = Get-ChildItem -LiteralPath (Join-Path $vsRoot 'VC/Tools/MSVC') -Directory |
+            Sort-Object Name -Descending |
+            ForEach-Object { Join-Path $_.FullName 'bin/Hostx64/x64/dumpbin.exe' } |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+            Select-Object -First 1
+          if (-not $dumpbin) { throw 'MSVC x64 dumpbin.exe was not found' }
+          $headers = & $dumpbin /nologo /headers $exe 2>&1
+          if ($LASTEXITCODE -ne 0) { throw 'dumpbin could not read the target executable headers' }
+          $headers | Write-Output
+          if (($headers -join "`n") -notmatch '8664 machine \(x64\)') { throw 'Executable is not an x64 PE image' }
+          $imports = & $dumpbin /nologo /imports $exe 2>&1
+          if ($LASTEXITCODE -ne 0) { throw 'dumpbin could not read the target executable imports' }
+          $imports | Write-Output
+          $importText = ($imports -join "`n").ToLowerInvariant()
+          if ($importText -match 'api-ms-win-crt-|ucrtbase\.dll|vcruntime140[^\s]*\.dll') {
+            throw 'Win7 candidate imports a dynamic CRT unavailable on stock NT 6.1'
+          }
+          $version = & $exe --version 2>&1
+          if ($LASTEXITCODE -ne 0) { throw 'Win7-target executable did not run on the Windows CI host' }
+          $version | Write-Output
+
+      - name: Package and verify the candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = 'x86_64-win7-windows-msvc'
+          $stage = '.dist/staging'
+          $out = '.dist/out'
+          $targetOut = Join-Path $out $target
+          New-Item -ItemType Directory -Force $stage, $out, $targetOut | Out-Null
+          Copy-Item -LiteralPath 'target/x86_64-win7-windows-msvc/release/hostlink-agent.exe' -Destination (Join-Path $stage 'hostlink-agent.exe')
+          Copy-Item -LiteralPath 'crates/onec-agent/assets/Install-HostLink-Agent.ps1', 'crates/onec-agent/assets/Run-HostLink-Agent.ps1', 'crates/onec-agent/assets/Update-HostLink-Agent.ps1' -Destination $stage
+          $expectedStage = @('hostlink-agent.exe', 'Install-HostLink-Agent.ps1', 'Run-HostLink-Agent.ps1', 'Update-HostLink-Agent.ps1') | Sort-Object
+          $actualStage = @(Get-ChildItem -LiteralPath $stage -File | ForEach-Object Name | Sort-Object)
+          if (Compare-Object $expectedStage $actualStage) { throw 'Staging inventory does not contain exactly the Win7 Agent and its three scripts' }
+          python scripts/package_hostlink.py agent $target $stage $out
+          if ($LASTEXITCODE -ne 0) { throw 'HostLink Agent ZIP packaging failed' }
+          $candidate = Join-Path $targetOut 'hostlink-agent.exe'
+          Copy-Item -LiteralPath (Join-Path $stage 'hostlink-agent.exe') -Destination $candidate
+          $candidateHash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          [System.IO.File]::WriteAllText("$candidate.sha256", "$candidateHash  hostlink-agent.exe`n", [System.Text.Encoding]::ASCII)
+
+          $zip = Join-Path $out 'hostlink-agent-x86_64-win7-windows-msvc.zip'
+          $zipChecksum = "$zip.sha256"
+          if (-not (Test-Path -LiteralPath $zip -PathType Leaf) -or -not (Test-Path -LiteralPath $zipChecksum -PathType Leaf)) { throw 'Packager did not produce the ZIP and checksum sidecar' }
+          $sidecar = [System.IO.File]::ReadAllText($zipChecksum).Trim()
+          if ($sidecar -notmatch '^([0-9a-f]{64})  (.+)$' -or $Matches[2] -ne (Split-Path -Leaf $zip)) { throw 'ZIP checksum sidecar has an invalid format or filename' }
+          $expectedZipHash = $Matches[1]
+          $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($zipHash -ne $expectedZipHash) { throw 'ZIP checksum does not match the packaged artifact' }
+          python -c "from pathlib import Path; from zipfile import ZipFile; p=Path(r'$zip'); z=ZipFile(p); expected=['hostlink-agent-x86_64-win7-windows-msvc/hostlink-agent.exe','hostlink-agent-x86_64-win7-windows-msvc/Install-HostLink-Agent.ps1','hostlink-agent-x86_64-win7-windows-msvc/Run-HostLink-Agent.ps1','hostlink-agent-x86_64-win7-windows-msvc/Update-HostLink-Agent.ps1']; assert z.testzip() is None, 'ZIP CRC failure'; assert z.namelist()==expected, f'ZIP inventory mismatch: {z.namelist()}'; assert z.read(expected[0])==Path(r'$candidate').read_bytes(), 'ZIP executable mismatch'; z.close()"
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged ZIP CRC or exact inventory verification failed' }
+          $exeHash = (Get-FileHash -LiteralPath (Join-Path $stage 'hostlink-agent.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($candidateHash -ne $exeHash) { throw 'Output executable differs from the staged build executable' }
+          $candidateSidecar = [System.IO.File]::ReadAllText("$candidate.sha256").Trim()
+          if ($candidateSidecar -ne "$candidateHash  hostlink-agent.exe") { throw 'Candidate executable checksum sidecar mismatch' }
+          Remove-Item -LiteralPath $stage -Recurse -Force
+          $expectedOut = @(
+            'hostlink-agent-x86_64-win7-windows-msvc.zip',
+            'hostlink-agent-x86_64-win7-windows-msvc.zip.sha256',
+            'x86_64-win7-windows-msvc/hostlink-agent.exe',
+            'x86_64-win7-windows-msvc/hostlink-agent.exe.sha256'
+          ) | Sort-Object
+          $actualOut = @(Get-ChildItem -LiteralPath $out -File -Recurse | ForEach-Object { $_.FullName.Substring((Resolve-Path -LiteralPath $out).Path.Length + 1).Replace('\', '/') } | Sort-Object)
+          if (Compare-Object $expectedOut $actualOut) { throw 'Final artifact directory contains unexpected or missing files' }
+
+      - name: Upload verified Win7 x64 test candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: hostlink-agent-x86_64-win7-windows-msvc-${{ github.sha }}
+          path: |
+            .dist/out/hostlink-agent-x86_64-win7-windows-msvc.zip
+            .dist/out/hostlink-agent-x86_64-win7-windows-msvc.zip.sha256
+            .dist/out/x86_64-win7-windows-msvc/hostlink-agent.exe
+            .dist/out/x86_64-win7-windows-msvc/hostlink-agent.exe.sha256
+          retention-days: 3
+          if-no-files-found: error
+          include-hidden-files: true
+          compression-level: 0
