@@ -1400,6 +1400,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostlink-access"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bon",
+ "clap",
+ "directories",
+ "ed25519-dalek 2.2.0",
+ "hex",
+ "hostlink-core",
+ "hostlink-hub",
+ "onec-agent-protocol",
+ "rand",
+ "reqwest 0.12.28",
+ "russh",
+ "russh-sftp",
+ "secrecy",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "shlex",
+ "ssh-key",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "hostlink-core"
 version = "0.1.0"
 dependencies = [
@@ -1423,6 +1454,31 @@ dependencies = [
  "windows",
  "windows-permissions",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "hostlink-hub"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "getrandom 0.4.3",
+ "hex",
+ "hmac 0.12.1",
+ "hostlink-core",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "ssh-key",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tower-http",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2048,37 +2104,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "onec-access"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "bon",
- "clap",
- "directories",
- "ed25519-dalek 2.2.0",
- "hex",
- "hostlink-core",
- "onec-agent-protocol",
- "onec-hub",
- "rand",
- "reqwest 0.12.28",
- "russh",
- "russh-sftp",
- "secrecy",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "shlex",
- "ssh-key",
- "tempfile",
- "thiserror",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "onec-agent"
 version = "0.1.0"
 dependencies = [
@@ -2122,31 +2147,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "strum",
-]
-
-[[package]]
-name = "onec-hub"
-version = "0.1.0"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "chrono",
- "clap",
- "getrandom 0.4.3",
- "hex",
- "hmac 0.12.1",
- "hostlink-core",
- "secrecy",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "ssh-key",
- "tempfile",
- "tokio",
- "tower",
- "tower-http",
- "url",
- "uuid",
 ]
 
 [[package]]

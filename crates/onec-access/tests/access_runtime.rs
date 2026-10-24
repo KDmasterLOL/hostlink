@@ -12,7 +12,7 @@ fn hostlink_binary_name_and_help_are_available_without_target_access() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let help = String::from_utf8(output.stdout).expect("help UTF-8");
-    assert!(help.starts_with("Usage: hostlink "), "{help}");
+    assert!(help.contains("\nUsage: hostlink "), "{help}");
     assert!(
         help.contains("HostLink managed-machine controller"),
         "{help}"

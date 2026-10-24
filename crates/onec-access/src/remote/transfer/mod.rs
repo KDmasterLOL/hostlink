@@ -356,8 +356,12 @@ mod deadline_tests {
         assert!(rendered.contains("stage=sftp_write"), "{rendered}");
         assert!(rendered.contains("elapsed_ms="), "{rendered}");
         assert!(rendered.contains("acknowledged_bytes=64/128"), "{rendered}");
-        assert!(!rendered.contains("host"), "{rendered}");
-        assert!(!rendered.contains("path"), "{rendered}");
+        // Check the sanitized stage details, not the fixed HostLink product prefix.
+        let details = rendered
+            .strip_prefix("invalid hostlink configuration: ")
+            .expect("stable error context");
+        assert!(!details.contains("host"), "{rendered}");
+        assert!(!details.contains("path"), "{rendered}");
         assert!(
             dropped.load(Ordering::Acquire),
             "the stalled request is cancelled"
