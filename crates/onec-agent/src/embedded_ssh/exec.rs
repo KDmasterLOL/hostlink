@@ -195,7 +195,7 @@ fn safe_windows_user_context() -> io::Result<bool> {
         return Ok(false);
     }
 
-    let user_storage_bytes = 16 * 1024;
+    let user_storage_bytes: usize = 16 * 1024;
     let user_storage_words = user_storage_bytes.div_ceil(size_of::<usize>());
     let mut user_storage = vec![0_usize; user_storage_words];
     let user_buffer_bytes = user_storage.len() * size_of::<usize>();
