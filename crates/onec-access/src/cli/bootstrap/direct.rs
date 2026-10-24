@@ -6,8 +6,8 @@ use reqwest::{Client, redirect::Policy};
 use std::time::Duration;
 
 const DIRECT_INSTALLER_MAX_BYTES: usize = 512 * 1024;
-pub(super) const WINDOWS_TOOLKIT_BOOTSTRAP: &str =
-    include_str!("../../../../onec-agent/assets/Install-OnecToolkit.ps1");
+pub(super) const HOSTLINK_AGENT_BOOTSTRAP: &str =
+    include_str!("../../../../onec-agent/assets/Install-HostLink-Agent.ps1");
 
 #[derive(Debug, Clone)]
 pub(super) struct DirectInstall {
@@ -31,10 +31,10 @@ pub(super) async fn validate_direct_install(
     let package_url = HubHttpsUrl::parse(package_url)?;
     let installer_hash = parse_sha256(installer_sha256, "installer SHA-256")?;
     let package_hash = parse_sha256(package_sha256, "package SHA-256")?;
-    let embedded_hash = normalized_script_sha256(WINDOWS_TOOLKIT_BOOTSTRAP);
+    let embedded_hash = normalized_script_sha256(HOSTLINK_AGENT_BOOTSTRAP);
     if !installer_hash.eq_ignore_ascii_case(&embedded_hash) {
         return Err(hostlink_access::invalid_config(format!(
-            "direct installer SHA-256 must match this hostlink binary's pinned Install-OnecToolkit.ps1 ({embedded_hash})"
+            "direct installer SHA-256 must match this hostlink binary's pinned Install-HostLink-Agent.ps1 ({embedded_hash})"
         )));
     }
     if installer_url.as_url().origin() != package_url.as_url().origin() {
@@ -46,13 +46,13 @@ pub(super) async fn validate_direct_install(
         .as_url()
         .path_segments()
         .and_then(Iterator::last)
-        != Some("Install-OnecToolkit.ps1")
+        != Some("Install-HostLink-Agent.ps1")
     {
         return Err(hostlink_access::invalid_config(
-            "direct installer URL must select Install-OnecToolkit.ps1",
+            "direct installer URL must select Install-HostLink-Agent.ps1",
         ));
     }
-    let expected_package = format!("onec-toolkit-{package_target}.zip");
+    let expected_package = format!("hostlink-agent-{package_target}.zip");
     if !supported_target(package_target) {
         return Err(hostlink_access::invalid_config(format!(
             "unsupported direct package target {package_target:?}"
@@ -73,6 +73,7 @@ pub(super) async fn validate_direct_install(
             "direct package version must be a plain semantic version such as 1.2.3 or 1.2.3-rc.1",
         ));
     }
+    validate_agent_enrollment_installer(HOSTLINK_AGENT_BOOTSTRAP)?;
 
     let client = Client::builder()
         .timeout(Duration::from_secs(15))
@@ -111,10 +112,10 @@ pub(super) async fn validate_direct_install(
     }
     if response
         .content_length()
-        .is_some_and(|length| length > DIRECT_INSTALLER_MAX_BYTES as u64)
+        .is_none_or(|length| length == 0 || length > DIRECT_INSTALLER_MAX_BYTES as u64)
     {
         return Err(anyhow::anyhow!(
-            "direct installer script exceeds the {DIRECT_INSTALLER_MAX_BYTES}-byte limit"
+            "direct installer script has an invalid or excessive declared size"
         ));
     }
     let mut response = response;
@@ -151,6 +152,15 @@ pub(super) async fn validate_direct_install(
     })
 }
 
+fn validate_agent_enrollment_installer(script: &str) -> AppResult<()> {
+    if !script.contains("HubUrl") || !script.contains("EnrollmentTokenFile") {
+        return Err(hostlink_access::invalid_config(
+            "embedded Install-HostLink-Agent.ps1 does not support the pinned HostLink enrollment contract; no invite token was created",
+        ));
+    }
+    Ok(())
+}
+
 fn parse_sha256(value: &str, label: &str) -> AppResult<String> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(hostlink_access::invalid_config(format!(
@@ -176,6 +186,10 @@ fn validate_direct_package_length(headers: &reqwest::header::HeaderMap) -> AppRe
                 "direct package preflight reported an empty or oversized package"
             ));
         }
+    } else {
+        return Err(anyhow::anyhow!(
+            "direct package preflight did not report Content-Length"
+        ));
     }
     Ok(())
 }
@@ -199,7 +213,7 @@ mod tests {
     fn direct_package_head_uses_header_length_not_empty_head_body() {
         use reqwest::header::{CONTENT_LENGTH, HeaderMap, HeaderValue};
         let mut headers = HeaderMap::new();
-        validate_direct_package_length(&headers).unwrap();
+        assert!(validate_direct_package_length(&headers).is_err());
         headers.insert(CONTENT_LENGTH, HeaderValue::from_static("18081703"));
         validate_direct_package_length(&headers).unwrap();
         for value in ["0", "536870913", "not-a-number", "-1"] {
@@ -210,9 +224,9 @@ mod tests {
 
     fn valid_inputs() -> (&'static str, String, &'static str, String) {
         (
-            "https://downloads.example.test/Install-OnecToolkit.ps1",
-            normalized_script_sha256(WINDOWS_TOOLKIT_BOOTSTRAP),
-            "https://downloads.example.test/onec-toolkit-x86_64-win7-windows-msvc.zip",
+            "https://downloads.example.test/Install-HostLink-Agent.ps1",
+            normalized_script_sha256(HOSTLINK_AGENT_BOOTSTRAP),
+            "https://downloads.example.test/hostlink-agent-x86_64-win7-windows-msvc.zip",
             "a".repeat(64),
         )
     }
@@ -230,7 +244,11 @@ mod tests {
         )
         .await
         .expect_err("wrong script pin must fail before network access");
-        assert!(error.to_string().contains("pinned Install-OnecToolkit.ps1"));
+        assert!(
+            error
+                .to_string()
+                .contains("pinned Install-HostLink-Agent.ps1")
+        );
     }
 
     #[tokio::test]
@@ -238,16 +256,16 @@ mod tests {
         let (_, script_hash, _, package_hash) = valid_inputs();
         for (script_url, package_url) in [
             (
-                "http://downloads.example.test/Install-OnecToolkit.ps1",
-                "https://downloads.example.test/onec-toolkit-x86_64-win7-windows-msvc.zip",
+                "http://downloads.example.test/Install-HostLink-Agent.ps1",
+                "https://downloads.example.test/hostlink-agent-x86_64-win7-windows-msvc.zip",
             ),
             (
-                "https://user:pass@downloads.example.test/Install-OnecToolkit.ps1",
-                "https://downloads.example.test/onec-toolkit-x86_64-win7-windows-msvc.zip",
+                "https://user:pass@downloads.example.test/Install-HostLink-Agent.ps1",
+                "https://downloads.example.test/hostlink-agent-x86_64-win7-windows-msvc.zip",
             ),
             (
-                "https://downloads.example.test/Install-OnecToolkit.ps1",
-                "https://foreign.example.test/onec-toolkit-x86_64-win7-windows-msvc.zip",
+                "https://downloads.example.test/Install-HostLink-Agent.ps1",
+                "https://foreign.example.test/hostlink-agent-x86_64-win7-windows-msvc.zip",
             ),
         ] {
             assert!(
@@ -278,5 +296,12 @@ mod tests {
         assert!(!valid_package_version("1.2.3.4"));
         assert!(!valid_package_version("1.2.3;Invoke-Expression"));
         assert!(!supported_target("x86_64-unknown-linux-gnu"));
+    }
+
+    #[test]
+    fn direct_installer_requires_the_agent_owned_enrollment_parameters() {
+        assert!(validate_agent_enrollment_installer("param($ConfigFile)").is_err());
+        validate_agent_enrollment_installer("param([string]$HubUrl,[string]$EnrollmentTokenFile)")
+            .expect("agent installer must expose both agreed enrollment parameters");
     }
 }

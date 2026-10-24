@@ -11,137 +11,160 @@ pub(super) struct RemoteDirectInviteBootstrap<'a> {
     pub(super) package_sha256: &'a str,
     pub(super) package_version: &'a str,
     pub(super) package_target: &'a str,
-    pub(super) persistence: &'a str,
-    pub(super) embedded_ssh_candidate: bool,
 }
 
-pub(super) struct RemoteRuntimeMigrationBootstrap<'a> {
-    pub(super) installer_url: &'a str,
-    pub(super) installer_sha256: &'a str,
-    pub(super) persistence: &'a str,
-    pub(super) direct_package_url: &'a str,
-    pub(super) direct_package_sha256: &'a str,
-    pub(super) direct_package_version: &'a str,
-    pub(super) direct_package_target: &'a str,
-}
-
-pub(super) fn remote_runtime_migration_bootstrap(
-    input: &RemoteRuntimeMigrationBootstrap<'_>,
-) -> String {
+/// Render a PowerShell 2 compatible, one-use HostLink Agent bootstrap.
+///
+/// The enrollment token is read interactively and persisted only into a private,
+/// user-owned file. It is never included in this generated source or an argument
+/// passed to the Agent installer.
+pub(super) fn remote_direct_invite_bootstrap(input: &RemoteDirectInviteBootstrap<'_>) -> String {
     format!(
         r#"
 $ErrorActionPreference='Stop'
-try {{ [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor 3072 }} catch {{}}
-$u='{}'
-$expected='{}'
-$persistence='{}'
+try {{ [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor 3072 }} catch {{ throw 'TLS 1.2 is unavailable.' }}
+$hubUrl='{}'
+$installerUrl='{}'
+$installerSha256='{}'
 $packageUrl='{}'
 $packageSha256='{}'
 $packageVersion='{}'
 $packageTarget='{}'
-$downloadTimer=[Diagnostics.Stopwatch]::StartNew()
-$request=[Net.HttpWebRequest]::Create($u)
-$request.AllowAutoRedirect=$false
-$request.Timeout=10000
-$request.ReadWriteTimeout=5000
-$response=$request.GetResponse()
-if ($response.ResponseUri.AbsoluteUri -ne $u) {{ throw 'Installer URL changed during download' }}
-$stream=$null
-$memory=$null
+if ($hubUrl -notmatch '^https://[^/]+(?:/.*)?$' -or $installerUrl -notmatch '^https://[^/]+/.*$' -or $packageUrl -notmatch '^https://[^/]+/.*$') {{ throw 'Hub and artifact URLs must use HTTPS.' }}
+$identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+$principal=New-Object Security.Principal.WindowsPrincipal($identity)
+if ($identity.User.Value -eq 'S-1-5-18' -or $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{ throw 'Run this bootstrap as a normal, non-elevated user.' }}
+$secureToken=Read-Host 'One-use HostLink enrollment token' -AsSecureString
+if ($null -eq $secureToken -or $secureToken.Length -eq 0) {{ throw 'Enrollment token is required.' }}
+$bstr=[IntPtr]::Zero
+$token=$null
+$root=$null
+$tokenPath=$null
+$installerPath=$null
+$archivePath=$null
 try {{
-    if (($response.ContentLength -gt 8388608) -or ($response.ContentLength -lt 0)) {{ throw 'Installer response has an invalid or excessive size' }}
-    $stream=$response.GetResponseStream()
-    $memory=New-Object IO.MemoryStream
-    $buffer=New-Object byte[] 8192
-    while (($read=$stream.Read($buffer,0,$buffer.Length)) -gt 0) {{
-        if ($downloadTimer.ElapsedMilliseconds -ge 35000) {{ throw 'Installer download exceeded its total time limit' }}
-        if (($memory.Length+$read) -gt 8388608) {{ throw 'Installer response exceeds the migration size limit' }}
-        $memory.Write($buffer,0,$read)
+    $bstr=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
+    $token=[Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    if ([String]::IsNullOrEmpty($token)) {{ throw 'Enrollment token is required.' }}
+    $tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([char]92)
+    $root=Join-Path $tempRoot ('hostlink-invite-'+[Guid]::NewGuid().ToString('N'))
+    $userSid=$identity.User.Value
+    if (Test-Path -LiteralPath $root) {{ throw 'Refusing a pre-existing temporary bootstrap path.' }}
+    [IO.Directory]::CreateDirectory($root) | Out-Null
+    if (([IO.File]::GetAttributes($root) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{ throw 'Refusing a reparse-point bootstrap directory.' }}
+    $aclOutput=& "$env:SystemRoot\System32\icacls.exe" $root '/inheritance:r' '/grant:r' ('*'+$userSid+':(OI)(CI)F') '*S-1-5-18:(OI)(CI)F' 2>&1
+    if ($LASTEXITCODE -ne 0) {{ throw 'Could not restrict temporary bootstrap directory permissions.' }}
+    $directoryAcl=[IO.Directory]::GetAccessControl($root)
+    if ($directoryAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $userSid) {{ throw 'Temporary bootstrap directory owner verification failed.' }}
+    $directorySids=@()
+    foreach ($entry in $directoryAcl.Access) {{
+        $entrySid=$entry.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($entry.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or -not (@($userSid,'S-1-5-18') -contains $entrySid) -or ($entry.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne [Security.AccessControl.FileSystemRights]::FullControl) {{ throw 'Temporary bootstrap directory ACL verification failed.' }}
+        if (-not ($directorySids -contains $entrySid)) {{ $directorySids+= $entrySid }}
     }}
-    if ($downloadTimer.ElapsedMilliseconds -ge 35000) {{ throw 'Installer download exceeded its total time limit' }}
-    $bytes=$memory.ToArray()
-}} finally {{
-    if ($null -ne $stream) {{ $stream.Dispose() }}
-    if ($null -ne $memory) {{ $memory.Dispose() }}
-    $response.Close()
-}}
-$script=[Text.Encoding]::UTF8.GetString($bytes)
-$normalized=$script.Replace(([char]13).ToString()+([char]10).ToString(),([char]10).ToString())
-$sha=[Security.Cryptography.SHA256]::Create()
-$actual=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized)))).Replace('-','').ToLowerInvariant()
-if ($actual -ne $expected) {{ throw 'Install-OnecToolkit.ps1 SHA-256 mismatch' }}
-$migrationRoot=Join-Path ([IO.Path]::GetTempPath()) 'onec-toolkit-migration'
-if (Test-Path -LiteralPath $migrationRoot) {{
-    $migrationRootInfo=New-Object IO.DirectoryInfo($migrationRoot)
-    if (($migrationRootInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{ throw 'Refusing a reparse-point migration temp root' }}
-}} else {{ New-Item -ItemType Directory -Path $migrationRoot -ErrorAction Stop | Out-Null }}
-$root=Join-Path $migrationRoot ([Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
-$installer=Join-Path $root 'Install-OnecToolkit.ps1'
-[IO.File]::WriteAllText($installer,$script,(New-Object Text.UTF8Encoding($false)))
-function ConvertTo-PsLiteral([string]$value) {{
-    return ([char]39).ToString()+$value.Replace(([char]39).ToString(),(([char]39).ToString()+([char]39).ToString()))+([char]39).ToString()
-}}
-$child=Join-Path $root 'Install-Detached.ps1'
-$childScript='$ErrorActionPreference=''Stop'';$installerPath='+(ConvertTo-PsLiteral $installer)+';$childPath='+(ConvertTo-PsLiteral $child)+';$persistence='+(ConvertTo-PsLiteral $persistence)+';$packageUrl='+(ConvertTo-PsLiteral $packageUrl)+';$packageSha256='+(ConvertTo-PsLiteral $packageSha256)+';$packageVersion='+(ConvertTo-PsLiteral $packageVersion)+';$packageTarget='+(ConvertTo-PsLiteral $packageTarget)+';$ownedParent='+(ConvertTo-PsLiteral $migrationRoot)+';$ownedRoot='+(ConvertTo-PsLiteral $root)+';try {{ & $installerPath {installer_arguments} }} catch {{ $record=$_;$errorType=''Other'';switch -Exact ($record.Exception.GetType().Name) {{ ''WebException'' {{$errorType=''WebException''}};''UnauthorizedAccessException'' {{$errorType=''UnauthorizedAccessException''}};''IOException'' {{$errorType=''IOException''}};''CryptographicException'' {{$errorType=''CryptographicException''}};''InvalidOperationException'' {{$errorType=''InvalidOperationException''}};''ArgumentException'' {{$errorType=''ArgumentException''}} }};$errorLine=0;if ($null -ne $record.InvocationInfo) {{$errorLine=[Math]::Max(0,[int]$record.InvocationInfo.ScriptLineNumber)}};try {{$localRoot=[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData);if ([String]::IsNullOrWhiteSpace($localRoot)) {{throw ''Local application data path is unavailable''}};$localRoot=[IO.Path]::GetFullPath($localRoot).TrimEnd([char]92);$diagnosticDirectory=Join-Path (Join-Path $localRoot ''onec-toolkit'') ''agent'';$diagnosticPath=Join-Path $diagnosticDirectory ''migration-last-failure.json'';$fullDiagnosticDirectory=[IO.Path]::GetFullPath($diagnosticDirectory);$prefix=$localRoot+[IO.Path]::DirectorySeparatorChar;if (-not $fullDiagnosticDirectory.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) {{throw ''Refusing an unowned diagnostic path''}};$cursor=$fullDiagnosticDirectory;while ($cursor.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) {{$info=New-Object IO.DirectoryInfo($cursor);if (-not (Test-Path -LiteralPath $cursor)) {{[IO.Directory]::CreateDirectory($cursor) | Out-Null}};$info=New-Object IO.DirectoryInfo($cursor);if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{throw ''Refusing a reparse-point diagnostic path''}};$cursor=[IO.Path]::GetDirectoryName($cursor)}};$localInfo=New-Object IO.DirectoryInfo($localRoot);if (($localInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{throw ''Refusing a reparse-point local data path''}};$json=''{{"phase":"installer_execution","error_type":"''+$errorType+''","line":''+[string]$errorLine+''}}'';$bytes=[Text.Encoding]::UTF8.GetBytes($json);$file=New-Object IO.FileStream($diagnosticPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);try {{$file.Write($bytes,0,$bytes.Length)}} finally {{$file.Dispose()}} }} catch {{ }} }} finally {{ $fullParent=[IO.Path]::GetFullPath($ownedParent).TrimEnd([char]92);$fullRoot=[IO.Path]::GetFullPath($ownedRoot).TrimEnd([char]92);$prefix=$fullParent+[IO.Path]::DirectorySeparatorChar;if (-not $fullRoot.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($fullParent) -ne ''onec-toolkit-migration'' -or [IO.Path]::GetFileName($fullRoot) -notmatch ''^[0-9a-f]{{32}}$'') {{ throw ''Refusing to clean an unowned migration path'' }};$parentInfo=New-Object IO.DirectoryInfo($fullParent);$rootInfo=New-Object IO.DirectoryInfo($fullRoot);if ((($parentInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or (($rootInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {{ throw ''Refusing to clean a reparse-point migration path'' }};foreach($filePath in @($installerPath,$childPath)) {{ $fileInfo=New-Object IO.FileInfo($filePath);if (-not $fileInfo.FullName.StartsWith($fullRoot+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (($fileInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {{ throw ''Refusing to clean an unowned migration file'' }};[IO.File]::Delete($fileInfo.FullName) }};[IO.Directory]::Delete($fullRoot,$false) }}'
-[IO.File]::WriteAllText($child,$childScript,(New-Object Text.UTF8Encoding($false)))
-$powershell=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$commandLine='"'+$powershell+'" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$child+'"'
-$detached=$false
-try {{
-    $result=([WmiClass]'Win32_Process').Create($commandLine)
-    if (($null -eq $result) -or ([int]$result.ReturnValue -ne 0) -or ([int]$result.ProcessId -le 0)) {{
-        $code=if ($null -eq $result) {{ -1 }} else {{ [int]$result.ReturnValue }}
-        throw ('WMI detached installer launch failed; return_value='+[string]$code)
+    if ($directorySids.Count -ne 2) {{ throw 'Temporary bootstrap directory ACL is incomplete.' }}
+    $tokenPath=Join-Path $root 'enrollment-token.txt'
+    $tokenBytes=(New-Object Text.UTF8Encoding($false)).GetBytes($token)
+    $tokenStream=New-Object IO.FileStream($tokenPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try {{ $tokenStream.Write($tokenBytes,0,$tokenBytes.Length) }} finally {{ $tokenStream.Dispose() }}
+    $aclOutput=& "$env:SystemRoot\System32\icacls.exe" $tokenPath '/inheritance:r' '/grant:r' ('*'+$userSid+':F') '*S-1-5-18:F' 2>&1
+    if ($LASTEXITCODE -ne 0) {{ throw 'Could not restrict enrollment token file permissions.' }}
+    $tokenAcl=[IO.File]::GetAccessControl($tokenPath)
+    if ($tokenAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $userSid) {{ throw 'Enrollment token file owner verification failed.' }}
+    $tokenSids=@()
+    foreach ($entry in $tokenAcl.Access) {{
+        $entrySid=$entry.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($entry.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or -not (@($userSid,'S-1-5-18') -contains $entrySid) -or ($entry.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne [Security.AccessControl.FileSystemRights]::FullControl) {{ throw 'Enrollment token file ACL verification failed.' }}
+        if (-not ($tokenSids -contains $entrySid)) {{ $tokenSids+= $entrySid }}
     }}
-    $detached=$true
+    if ($tokenSids.Count -ne 2) {{ throw 'Enrollment token file ACL is incomplete.' }}
+    $installerPath=Join-Path $root 'Install-HostLink-Agent.ps1'
+    $installerRequest=[Net.HttpWebRequest]::Create($installerUrl)
+    $installerRequest.AllowAutoRedirect=$false
+    $installerRequest.Timeout=15000
+    $installerRequest.ReadWriteTimeout=15000
+    $installerResponse=$installerRequest.GetResponse()
+    try {{
+        if ($installerResponse.ResponseUri.AbsoluteUri -ne $installerUrl) {{ throw 'Installer URL changed during download.' }}
+        if ($installerResponse.ContentLength -lt 0 -or $installerResponse.ContentLength -gt 524288) {{ throw 'Installer script size is invalid.' }}
+        $installerStream=$installerResponse.GetResponseStream()
+        $installerMemory=New-Object IO.MemoryStream
+        try {{
+            $buffer=New-Object byte[] 8192
+            while (($read=$installerStream.Read($buffer,0,$buffer.Length)) -gt 0) {{
+                if (($installerMemory.Length+$read) -gt 524288) {{ throw 'Installer script exceeds its size limit.' }}
+                $installerMemory.Write($buffer,0,$read)
+            }}
+            $installerBytes=$installerMemory.ToArray()
+        }} finally {{ $installerStream.Dispose(); $installerMemory.Dispose() }}
+    }} finally {{ $installerResponse.Close() }}
+    $installerScript=[Text.Encoding]::UTF8.GetString($installerBytes)
+    $normalized=$installerScript.Replace(([char]13).ToString()+([char]10).ToString(),([char]10).ToString())
+    $hasher=[Security.Cryptography.SHA256]::Create()
+    try {{ $actual=([BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized)))).Replace('-','').ToLowerInvariant() }} finally {{ $hasher.Dispose() }}
+    if ($actual -ne $installerSha256) {{ throw 'Install-HostLink-Agent.ps1 SHA-256 mismatch.' }}
+    [IO.File]::WriteAllBytes($installerPath,$installerBytes)
+    $archivePath=Join-Path $root 'hostlink-agent.zip'
+    $packageRequest=[Net.HttpWebRequest]::Create($packageUrl)
+    $packageRequest.AllowAutoRedirect=$false
+    $packageRequest.Timeout=15000
+    $packageRequest.ReadWriteTimeout=15000
+    $packageResponse=$packageRequest.GetResponse()
+    try {{
+        if ($packageResponse.ResponseUri.AbsoluteUri -ne $packageUrl) {{ throw 'Package URL changed during download.' }}
+        if ($packageResponse.ContentLength -le 0 -or $packageResponse.ContentLength -gt 536870912) {{ throw 'Agent package size is invalid.' }}
+        $packageInput=$packageResponse.GetResponseStream()
+        $packageOutput=New-Object IO.FileStream($archivePath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        $packageLength=[long]0
+        try {{
+            $buffer=New-Object byte[] 65536
+            while (($read=$packageInput.Read($buffer,0,$buffer.Length)) -gt 0) {{
+                $packageLength+=$read
+                if ($packageLength -gt 536870912 -or $packageLength -gt $packageResponse.ContentLength) {{ throw 'Agent package exceeds its declared size.' }}
+                $packageOutput.Write($buffer,0,$read)
+            }}
+        }} finally {{ $packageInput.Dispose(); $packageOutput.Dispose() }}
+        if ($packageLength -ne $packageResponse.ContentLength) {{ throw 'Agent package size did not match its declared size.' }}
+    }} finally {{ $packageResponse.Close() }}
+    $archiveStream=New-Object IO.FileStream($archivePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    $archiveHasher=[Security.Cryptography.SHA256]::Create()
+    try {{ $archiveActual=([BitConverter]::ToString($archiveHasher.ComputeHash($archiveStream))).Replace('-','').ToLowerInvariant() }} finally {{ $archiveHasher.Dispose(); $archiveStream.Dispose() }}
+    if ($archiveActual -ne $packageSha256) {{ throw 'HostLink Agent package SHA-256 mismatch.' }}
+    try {{
+        $LASTEXITCODE=$null
+        & $installerPath -ArchiveFile ([IO.Path]::GetFullPath($archivePath)) -ArchiveSha256 $packageSha256 -PackageVersion $packageVersion -Target $packageTarget -HubUrl $hubUrl -EnrollmentTokenFile ([IO.Path]::GetFullPath($tokenPath))
+        $installerExitCode=$LASTEXITCODE
+        if (($null -eq $installerExitCode) -or ($installerExitCode -ne 0)) {{ throw 'Installer exit status was missing or nonzero.' }}
+    }} catch {{ throw 'HostLink Agent enrollment or installation failed. The invite may have been consumed; do not retry this token. Reconcile the target or create a new invite.' }}
 }} finally {{
-    if (-not $detached) {{
-        $fullParent=[IO.Path]::GetFullPath($migrationRoot).TrimEnd([char]92)
-        $fullRoot=[IO.Path]::GetFullPath($root).TrimEnd([char]92)
-        $prefix=$fullParent+[IO.Path]::DirectorySeparatorChar
-        if (-not $fullRoot.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($fullParent) -ne 'onec-toolkit-migration' -or [IO.Path]::GetFileName($fullRoot) -notmatch '^[0-9a-f]{{32}}$') {{ throw 'Refusing to clean an unowned migration path' }}
-        $parentInfo=New-Object IO.DirectoryInfo($fullParent)
-        $rootInfo=New-Object IO.DirectoryInfo($fullRoot)
-        if ((($parentInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or (($rootInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {{ throw 'Refusing to clean a reparse-point migration path' }}
-        foreach ($filePath in @($installer,$child)) {{
-            $fileInfo=New-Object IO.FileInfo($filePath)
-            if (-not $fileInfo.FullName.StartsWith($fullRoot+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (($fileInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {{ throw 'Refusing to clean an unowned migration file' }}
-            [IO.File]::Delete($fileInfo.FullName)
+    try {{
+        if ($null -ne $root -and [IO.Directory]::Exists($root)) {{
+            $fullRoot=[IO.Path]::GetFullPath($root).TrimEnd([char]92)
+            $tempPrefix=$tempRoot+[IO.Path]::DirectorySeparatorChar
+            if (-not $fullRoot.StartsWith($tempPrefix,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($fullRoot) -notmatch '^hostlink-invite-[0-9a-f]{{32}}$' -or ([IO.File]::GetAttributes($fullRoot) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{ throw 'Refusing to clean an unowned bootstrap directory.' }}
+            foreach ($ownedFile in @($tokenPath,$installerPath,$archivePath)) {{
+                if ($null -ne $ownedFile -and [IO.File]::Exists($ownedFile)) {{
+                    $fullFile=[IO.Path]::GetFullPath($ownedFile)
+                    if (-not $fullFile.StartsWith($fullRoot+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or ([IO.File]::GetAttributes($fullFile) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{ throw 'Refusing to clean an unowned bootstrap file.' }}
+                    [IO.File]::Delete($fullFile)
+                }}
+            }}
+            [IO.Directory]::Delete($fullRoot,$false)
         }}
-        [IO.Directory]::Delete($fullRoot,$false)
+    }} finally {{
+        $token=$null
+        if ([IntPtr]::Zero -ne $bstr) {{ [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }}
+        if ($null -ne $secureToken) {{ $secureToken.Dispose() }}
     }}
 }}
-{migration_receipt}
 "#,
+        ps_single_quote(input.hub_url),
         ps_single_quote(input.installer_url),
-        ps_single_quote(input.installer_sha256),
-        ps_single_quote(input.persistence),
-        ps_single_quote(input.direct_package_url),
-        ps_single_quote(input.direct_package_sha256),
-        ps_single_quote(input.direct_package_version),
-        ps_single_quote(input.direct_package_target),
-        installer_arguments = "-DirectPackageUrl $packageUrl -DirectPackageSha256 $packageSha256 -DirectPackageVersion $packageVersion -DirectPackageTarget $packageTarget -Persistence $persistence",
-        migration_receipt = "Write-Output ('ONEC_TOOLKIT_MIGRATION_RECEIPT: detached_pid='+[string]$result.ProcessId+' package_version='+$packageVersion+' package_sha256='+$packageSha256)",
-    )
-}
-
-pub(super) fn remote_direct_invite_bootstrap(input: &RemoteDirectInviteBootstrap<'_>) -> String {
-    let embedded_ssh_candidate = if input.embedded_ssh_candidate {
-        " -EmbeddedSshCandidate"
-    } else {
-        ""
-    };
-    format!(
-        "$ErrorActionPreference='Stop';$q=Read-Host 'Enrollment token' -AsSecureString;$z=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($q);try{{$t=[Runtime.InteropServices.Marshal]::PtrToStringBSTR($z)}}finally{{[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($z)}};if([string]::IsNullOrEmpty($t)){{throw 'Enrollment token is required'}};try{{[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor 3072}}catch{{}};$u='{installer_url}';$expected='{installer_sha256}';$request=[Net.HttpWebRequest]::Create($u);$request.AllowAutoRedirect=$false;$request.Timeout=10000;$request.ReadWriteTimeout=15000;$response=$null;$stream=$null;$memory=$null;try{{$response=$request.GetResponse();if($response.ResponseUri.AbsoluteUri -ne $u){{throw 'Installer URL changed during download'}};if(($response.ContentLength -lt 0) -or ($response.ContentLength -gt 524288)){{throw 'Installer script size is invalid'}};$stream=$response.GetResponseStream();$memory=New-Object IO.MemoryStream;$buffer=New-Object byte[] 8192;while (($read=$stream.Read($buffer,0,$buffer.Length)) -gt 0){{if(($memory.Length+$read) -gt 524288){{throw 'Installer script exceeds the size limit'}};$memory.Write($buffer,0,$read)}};$bytes=$memory.ToArray()}}finally{{if($null -ne $stream){{$stream.Dispose()}};if($null -ne $memory){{$memory.Dispose()}};if($null -ne $response){{$response.Close()}}}};$s=[Text.Encoding]::UTF8.GetString($bytes);$n=$s.Replace(([char]13).ToString()+([char]10).ToString(),([char]10).ToString());$h=[Security.Cryptography.SHA256]::Create();$x=([BitConverter]::ToString($h.ComputeHash([Text.Encoding]::UTF8.GetBytes($n)))).Replace('-','').ToLowerInvariant();if($x -ne $expected){{throw 'Install-OnecToolkit.ps1 SHA-256 mismatch'}};try{{& ([ScriptBlock]::Create($s)) -HubUrl '{hub_url}' -EnrollToken $t -DirectPackageUrl '{package_url}' -DirectPackageSha256 '{package_sha256}' -DirectPackageVersion '{package_version}' -DirectPackageTarget '{package_target}' -Persistence '{persistence}'{embedded_ssh_candidate}}}finally{{$t=$null;$q=$null}}",
-        installer_url = ps_single_quote(input.installer_url),
-        installer_sha256 = input.installer_sha256,
-        hub_url = ps_single_quote(input.hub_url),
-        package_url = ps_single_quote(input.package_url),
-        package_sha256 = input.package_sha256,
-        package_version = ps_single_quote(input.package_version),
-        package_target = ps_single_quote(input.package_target),
-        persistence = ps_single_quote(input.persistence),
+        input.installer_sha256,
+        ps_single_quote(input.package_url),
+        input.package_sha256,
+        ps_single_quote(input.package_version),
+        ps_single_quote(input.package_target),
     )
 }
 

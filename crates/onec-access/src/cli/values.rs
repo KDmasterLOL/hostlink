@@ -1,21 +1,6 @@
 use clap::ValueEnum;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum Persistence {
-    UserSession,
-    WindowsService,
-}
-
-impl Persistence {
-    pub(crate) fn installer_value(self) -> &'static str {
-        match self {
-            Self::UserSession => "user-session",
-            Self::WindowsService => "windows-service",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum TargetEffect {
     ReadOnly,
     RunOwned,

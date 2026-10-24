@@ -4,7 +4,7 @@ This catalog lists the executable's current command leaves. `job`, `run-local-jo
 
 ## Top-level leaves
 
-`check`, `configure`, `display-name`, `download`, `exec`, `forward`, `info`, `invite`, `list`, `migrate-runtime`, `migration-report`, `probe`, `rdp`, `remove`, `remove-scoped`, `run-local`, `show`, `ssh`, `sync-ssh`, `upload`, and `verify`.
+`check`, `configure`, `display-name`, `download`, `exec`, `forward`, `info`, `invite`, `list`, `probe`, `rdp`, `remove`, `remove-scoped`, `run-local`, `show`, `ssh`, `sync-ssh`, `upload`, and `verify`.
 
 ## Nested leaves
 

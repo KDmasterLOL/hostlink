@@ -670,48 +670,35 @@ mod tests {
     }
 
     #[test]
-    fn invite_embedded_ssh_candidate_remains_an_explicit_opt_in() {
-        Cli::try_parse_from([
-            "hostlink",
-            "invite",
-            "--embedded-ssh-candidate",
-            "--direct-installer-url",
-            "https://downloads.example.test/Install-OnecToolkit.ps1",
-            "--direct-installer-sha256",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "--direct-package-url",
-            "https://downloads.example.test/onec-toolkit-x86_64-win7-windows-msvc.zip",
-            "--direct-package-sha256",
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "--direct-package-version",
-            "1.2.3",
-            "--direct-package-target",
-            "x86_64-win7-windows-msvc",
-        ])
-        .expect("embedded SSH candidate flag and complete direct pin must parse");
-    }
-
-    #[test]
-    fn migrate_runtime_help_requires_direct_artifact_pins() {
+    fn invite_help_is_hostlink_agent_only_and_uses_the_six_required_pins() {
         let mut command = Cli::command();
-        let help = command.render_long_help().to_string();
-        assert!(help.contains("migrate-runtime"));
-        let migration = command
-            .find_subcommand_mut("migrate-runtime")
-            .expect("migration command help");
-        let help = migration.render_long_help().to_string();
+        let invite = command.find_subcommand_mut("invite").expect("invite help");
+        let help = invite.render_long_help().to_string();
         assert!(help.contains("--direct-installer-url"));
+        assert!(help.contains("--direct-installer-sha256"));
+        assert!(help.contains("--direct-package-url"));
         assert!(help.contains("--direct-package-sha256"));
         assert!(help.contains("--direct-package-version"));
         assert!(help.contains("--direct-package-target"));
-        assert!(help.contains("--persistence"));
-    }
-
-    #[test]
-    fn migration_report_supports_human_and_json_modes() {
-        Cli::try_parse_from(["hostlink", "migration-report"])
-            .expect("human-readable migration report must parse");
-        Cli::try_parse_from(["hostlink", "migration-report", "--json"])
-            .expect("JSON migration report must parse");
+        for retired in [
+            "--embedded-ssh-candidate",
+            "--persistence",
+            "windows-service",
+            "Install-OnecToolkit.ps1",
+            "onec-toolkit-",
+        ] {
+            assert!(!help.contains(retired), "invite help contains {retired}");
+        }
+        let root_help = Cli::command().render_long_help().to_string();
+        assert!(!root_help.contains("migrate-runtime"));
+        assert!(!root_help.contains("migration-report"));
+        for retired in ["migrate-runtime", "migration-report"] {
+            assert_eq!(
+                Cli::try_parse_from(["hostlink", retired])
+                    .expect_err("retired migration commands must be absent")
+                    .kind(),
+                ErrorKind::InvalidSubcommand
+            );
+        }
     }
 }

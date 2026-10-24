@@ -13,8 +13,6 @@ mod info;
 pub(crate) mod invite;
 pub(crate) mod job;
 mod list;
-pub(crate) mod migrate_runtime;
-mod migration_report;
 mod probe;
 mod rdp;
 mod remove;
@@ -38,12 +36,8 @@ pub(crate) enum AccessCommand {
     Show(show::Args),
     /// Mint a one-use enrollment token and render the Windows bootstrap command.
     Invite(invite::Args),
-    /// Migrate an already-enrolled Windows target to an explicitly pinned runtime package.
-    MigrateRuntime(migrate_runtime::Args),
     /// List enrolled hosts and current agent reachability.
     List(list::Args),
-    /// Report enrolled targets that still need runtime migration without changing them.
-    MigrationReport(migration_report::Args),
     /// Revoke an enrolled host from the hub.
     Remove(remove::Args),
     /// Update a display-only label without changing the stable host identity.
@@ -86,9 +80,7 @@ pub(super) async fn run(command: AccessCommand) -> AppResult<Option<i32>> {
         AccessCommand::Check(args) => check::run(args).await.map(|()| None),
         AccessCommand::Show(args) => show::run(args).map(|()| None),
         AccessCommand::Invite(args) => invite::run(args).await.map(|()| None),
-        AccessCommand::MigrateRuntime(args) => migrate_runtime::run(args).await.map(|()| None),
         AccessCommand::List(args) => list::run(args).await.map(|()| None),
-        AccessCommand::MigrationReport(args) => migration_report::run(args).await.map(|()| None),
         AccessCommand::Remove(args) => remove::run(args).await.map(|()| None),
         AccessCommand::DisplayName(args) => display_name::run(args).await.map(|()| None),
         AccessCommand::Info(args) => info::run(args).await.map(|()| None),
