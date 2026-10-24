@@ -6,6 +6,6 @@ mod filesystem;
 mod lifecycle;
 mod request;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(in crate::remote) use filesystem::RunLocalPrepareTimingEvent;
 pub(crate) use filesystem::{sftp_carrier_unavailable_error, sftp_not_offered_error};

@@ -370,7 +370,7 @@ pub(crate) fn read_complete_invocation_output_logs(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn read_completed_invocation_output_logs(
     jobs_root: &Path,
     job: &hostlink_protocol::AgentJobInfo,

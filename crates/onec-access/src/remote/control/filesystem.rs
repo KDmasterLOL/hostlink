@@ -243,7 +243,7 @@ impl RunLocalPrepareTimingEvent {
         self.capability.successful_route_channels + self.prepare.successful_route_channels
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(in crate::remote) fn completed_responses(&self) -> (u64, u64) {
         (
             self.capability.completed_requests,
@@ -251,12 +251,12 @@ impl RunLocalPrepareTimingEvent {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(in crate::remote) fn is_complete(&self) -> bool {
         self.complete
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(in crate::remote) fn successful_route_channels(&self) -> u64 {
         self.route_channels()
     }
