@@ -11,10 +11,10 @@ homepage.workspace = true
 [dependencies]
 base64.workspace = true
 mime.workspace = true
-onec-core = { path = "../onec-core" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 strum.workspace = true
+hostlink-core = { path = "../hostlink-core" }
 
 [dev-dependencies]

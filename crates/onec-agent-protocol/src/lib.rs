@@ -30,9 +30,14 @@ pub const DEFAULT_EXEC_TIMEOUT_MS: u64 = 60_000;
 /// wire-compatible with maintained deployed agents; long native scenarios must be decomposed or
 /// use a lifecycle designed for long-running jobs rather than widening immediate Exec in place.
 pub const MAX_EXEC_TIMEOUT_MS: u64 = 10 * 60 * 1000;
-pub use onec_core::{
-    ONEC_JOB_ID_ENV, ONEC_JOB_SYSTEM_ENV, ONEC_PARENT_RUN_ID_ENV, ONEC_RESULT_DIR_ENV,
-};
+/// Legacy correlation environment key retained for deployed protocol consumers.
+pub const ONEC_PARENT_RUN_ID_ENV: &str = "ONEC_PARENT_RUN_ID";
+/// Legacy durable-job system environment key retained for deployed protocol consumers.
+pub const ONEC_JOB_SYSTEM_ENV: &str = "ONEC_JOB_SYSTEM";
+/// Legacy durable-job identity environment key retained for deployed protocol consumers.
+pub const ONEC_JOB_ID_ENV: &str = "ONEC_JOB_ID";
+/// Legacy result directory environment key retained for deployed protocol consumers.
+pub const ONEC_RESULT_DIR_ENV: &str = "ONEC_RESULT_DIR";
 
 /// Agent-owned durable-job namespace placed in the job-system correlation environment.
 pub const ONEC_AGENT_JOB_SYSTEM: &str = "onec_agent_job";

@@ -77,7 +77,7 @@ impl AgentRequestValidationError {
 
     /// Compares the presented token without leaking its contents.
     pub fn matches_token(&self, expected_token: &str) -> bool {
-        onec_core::constant_time_str_eq(&self.token, expected_token)
+        hostlink_core::constant_time_str_eq(&self.token, expected_token)
     }
 }
 

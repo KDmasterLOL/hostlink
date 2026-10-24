@@ -4,6 +4,7 @@ members = [
     "crates/onec-hub",
     "crates/onec-agent",
     "crates/onec-agent-protocol",
+    "crates/hostlink-core",
 ]
 resolver = "3"
 

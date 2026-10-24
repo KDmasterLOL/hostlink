@@ -1240,9 +1240,10 @@ fn raw_exec_response_at_agent_stream_limits_fits_control_frame_without_text_dupl
 
 #[test]
 fn correlation_names_remain_backward_compatible_reexports() {
-    assert_eq!(ONEC_PARENT_RUN_ID_ENV, onec_core::ONEC_PARENT_RUN_ID_ENV);
-    assert_eq!(ONEC_JOB_SYSTEM_ENV, onec_core::ONEC_JOB_SYSTEM_ENV);
-    assert_eq!(ONEC_JOB_ID_ENV, onec_core::ONEC_JOB_ID_ENV);
+    assert_eq!(ONEC_PARENT_RUN_ID_ENV, "ONEC_PARENT_RUN_ID");
+    assert_eq!(ONEC_JOB_SYSTEM_ENV, "ONEC_JOB_SYSTEM");
+    assert_eq!(ONEC_JOB_ID_ENV, "ONEC_JOB_ID");
+    assert_eq!(ONEC_RESULT_DIR_ENV, "ONEC_RESULT_DIR");
     assert_eq!(ONEC_AGENT_JOB_SYSTEM, "onec_agent_job");
 }
 
