@@ -3,6 +3,7 @@
 //! This module is intentionally not wired into the default agent carrier yet. It provides the
 //! product boundary used by Phase A validation and the later explicit runtime migration.
 
+mod exec;
 mod preflight;
 mod sftp;
 
@@ -28,7 +29,9 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const DIRECT_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_DIRECT_TCP_CHANNELS: usize = 32;
 const MAX_ACTIVE_SFTP_SESSIONS: usize = 8;
+const MAX_ACTIVE_EXEC_SESSIONS: usize = 4;
 const MAX_PENDING_SESSION_CHANNELS: usize = 16;
+const MAX_EXEC_COMMAND_BYTES: usize = 16 * 1024;
 
 /// Persistent identity and authorization inputs for one embedded target SSH server.
 #[derive(Clone, Debug)]
@@ -82,6 +85,8 @@ struct EmbeddedServer {
     authorized_keys: Arc<Vec<PublicKey>>,
     forward_slots: Arc<Semaphore>,
     sftp_slots: Arc<Semaphore>,
+    exec_slots: Arc<Semaphore>,
+    exec_shutdown: processkit::CancellationToken,
 }
 
 struct EmbeddedSession {
@@ -89,6 +94,9 @@ struct EmbeddedSession {
     authorized_keys: Arc<Vec<PublicKey>>,
     forward_slots: Arc<Semaphore>,
     sftp_slots: Arc<Semaphore>,
+    exec_slots: Arc<Semaphore>,
+    exec_shutdown: processkit::CancellationToken,
+    active_exec: Arc<std::sync::Mutex<HashMap<ChannelId, processkit::CancellationToken>>>,
     session_channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
 }
 
@@ -140,22 +148,31 @@ where
         authorized_keys: prepared.authorized_keys,
         forward_slots: Arc::new(Semaphore::new(MAX_DIRECT_TCP_CHANNELS)),
         sftp_slots: Arc::new(Semaphore::new(MAX_ACTIVE_SFTP_SESSIONS)),
+        exec_slots: Arc::new(Semaphore::new(MAX_ACTIVE_EXEC_SESSIONS)),
+        exec_shutdown: processkit::CancellationToken::new(),
     };
+    let exec_shutdown = server.exec_shutdown.clone();
 
     let running = server.run_on_socket(server_config, &listener);
     let handle = running.handle();
     tokio::pin!(running);
     tokio::pin!(shutdown);
 
-    tokio::select! {
+    let result = tokio::select! {
         result = &mut running => result,
         () = &mut shutdown => {
             handle.shutdown("onec-agent embedded SSH shutdown".to_owned());
-            tokio::time::timeout(SHUTDOWN_GRACE, &mut running)
-                .await
-                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "embedded SSH shutdown timed out"))?
+            match tokio::time::timeout(SHUTDOWN_GRACE, &mut running).await {
+                Ok(result) => result,
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "embedded SSH shutdown timed out",
+                )),
+            }
         }
-    }
+    };
+    exec_shutdown.cancel();
+    result
 }
 
 impl russh::server::Server for EmbeddedServer {
@@ -167,6 +184,9 @@ impl russh::server::Server for EmbeddedServer {
             authorized_keys: self.authorized_keys.clone(),
             forward_slots: self.forward_slots.clone(),
             sftp_slots: self.sftp_slots.clone(),
+            exec_slots: self.exec_slots.clone(),
+            exec_shutdown: self.exec_shutdown.clone(),
+            active_exec: Arc::new(std::sync::Mutex::new(HashMap::new())),
             session_channels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -187,6 +207,29 @@ impl EmbeddedSession {
 
     async fn discard_session_channel(&self, channel_id: ChannelId) {
         self.session_channels.lock().await.remove(&channel_id);
+    }
+
+    fn cancel_exec(&self, channel_id: ChannelId) {
+        let cancellation = self
+            .active_exec
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&channel_id);
+        if let Some(cancellation) = cancellation {
+            cancellation.cancel();
+        }
+    }
+}
+
+impl Drop for EmbeddedSession {
+    fn drop(&mut self) {
+        let active = self
+            .active_exec
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for cancellation in active.values() {
+            cancellation.cancel();
+        }
     }
 }
 
@@ -285,6 +328,7 @@ impl russh::server::Handler for EmbeddedSession {
         channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.cancel_exec(channel);
         self.discard_session_channel(channel).await;
         Ok(())
     }
@@ -297,16 +341,16 @@ impl russh::server::Handler for EmbeddedSession {
     ) -> Result<(), Self::Error> {
         if name != "sftp" {
             self.discard_session_channel(channel_id).await;
-            session.channel_failure(channel_id)?;
+            fail_session_channel(channel_id, session)?;
             return Ok(());
         }
 
         let Some(channel) = self.take_session_channel(channel_id).await else {
-            session.channel_failure(channel_id)?;
+            fail_session_channel(channel_id, session)?;
             return Ok(());
         };
         let Ok(session_slot) = self.sftp_slots.clone().try_acquire_owned() else {
-            session.channel_failure(channel_id)?;
+            fail_session_channel(channel_id, session)?;
             return Ok(());
         };
 
@@ -321,20 +365,74 @@ impl russh::server::Handler for EmbeddedSession {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.discard_session_channel(channel).await;
-        session.channel_failure(channel)?;
+        fail_session_channel(channel, session)?;
+        Ok(())
+    }
+
+    async fn pty_request(
+        &mut self,
+        channel: ChannelId,
+        _term: &str,
+        _col_width: u32,
+        _row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _modes: &[(russh::Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.discard_session_channel(channel).await;
+        fail_session_channel(channel, session)?;
         Ok(())
     }
 
     async fn exec_request(
         &mut self,
         channel: ChannelId,
-        _data: &[u8],
+        data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.discard_session_channel(channel).await;
-        session.channel_failure(channel)?;
+        let command = match exec::validate_command(data, MAX_EXEC_COMMAND_BYTES)
+            .and_then(|command| exec::prepare_command(&command))
+        {
+            Ok(command) => command,
+            Err(_) => {
+                self.discard_session_channel(channel).await;
+                fail_session_channel(channel, session)?;
+                return Ok(());
+            }
+        };
+        let Ok(slot) = self.exec_slots.clone().try_acquire_owned() else {
+            self.discard_session_channel(channel).await;
+            fail_session_channel(channel, session)?;
+            return Ok(());
+        };
+        let Some(channel_handle) = self.take_session_channel(channel).await else {
+            fail_session_channel(channel, session)?;
+            return Ok(());
+        };
+        let cancellation = self.exec_shutdown.child_token();
+        self.active_exec
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(channel, cancellation.clone());
+        session.channel_success(channel)?;
+
+        let active_exec = self.active_exec.clone();
+        tokio::spawn(async move {
+            let _slot = slot;
+            exec::run(channel_handle, command, cancellation).await;
+            active_exec
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&channel);
+        });
         Ok(())
     }
+}
+
+fn fail_session_channel(channel: ChannelId, session: &mut Session) -> Result<(), russh::Error> {
+    session.channel_failure(channel)?;
+    session.close(channel)
 }
 
 fn load_host_key(path: &Path) -> io::Result<PrivateKey> {

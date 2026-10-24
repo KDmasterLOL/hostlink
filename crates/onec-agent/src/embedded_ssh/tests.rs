@@ -302,7 +302,7 @@ async fn embedded_server_rejects_wrong_identity_user_and_host_key() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn embedded_server_keeps_shell_and_exec_requests_rejected() {
+async fn embedded_server_keeps_shell_and_pty_requests_rejected() {
     let fixture = start_fixture().await;
     let mut session = connect(&fixture, fixture.host_key.clone()).await;
     assert!(
@@ -310,36 +310,454 @@ async fn embedded_server_keeps_shell_and_exec_requests_rejected() {
         "enrolled controller key must authenticate"
     );
 
-    for command in [None, Some(b"echo must-not-run".as_slice())] {
-        let channel = session
-            .channel_open_session()
+    let mut pty_channel = session
+        .channel_open_session()
+        .await
+        .expect("session channel");
+    pty_channel
+        .request_pty(true, "xterm", 80, 24, 0, 0, &[])
+        .await
+        .expect("PTY request");
+    loop {
+        match tokio::time::timeout(Duration::from_secs(2), pty_channel.wait())
             .await
-            .expect("session channel");
-        if let Some(command) = command {
-            channel.exec(true, command).await.expect("exec request");
-        } else {
-            channel.request_shell(true).await.expect("shell request");
-        }
-
-        let mut channel = channel;
-        loop {
-            match tokio::time::timeout(Duration::from_secs(2), channel.wait())
-                .await
-                .expect("request rejection deadline")
-            {
-                Some(ChannelMsg::Failure) => break,
-                Some(ChannelMsg::Success) => panic!("shell/exec request must remain rejected"),
-                Some(_) => {}
-                None => panic!("channel closed without an explicit rejection"),
-            }
+            .expect("PTY rejection deadline")
+        {
+            Some(ChannelMsg::Failure) => break,
+            Some(ChannelMsg::Success) => panic!("PTY request must remain rejected"),
+            Some(_) => {}
+            None => panic!("rejected PTY channel closed without failure acknowledgement"),
         }
     }
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), pty_channel.wait())
+            .await
+            .expect("PTY channel close deadline"),
+        Some(ChannelMsg::Close)
+    ));
+
+    let mut channel = session.channel_open_session().await.expect("shell channel");
+    channel.request_shell(true).await.expect("shell request");
+    loop {
+        match tokio::time::timeout(Duration::from_secs(2), channel.wait())
+            .await
+            .expect("request rejection deadline")
+        {
+            Some(ChannelMsg::Failure) => break,
+            Some(ChannelMsg::Success) => panic!("shell request must remain rejected"),
+            Some(_) => {}
+            None => panic!("rejected channel closed without an explicit failure"),
+        }
+    }
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), channel.wait())
+            .await
+            .expect("shell channel close deadline"),
+        Some(ChannelMsg::Close)
+    ));
 
     session
         .disconnect(russh::Disconnect::ByApplication, "test complete", "en")
         .await
         .expect("SSH disconnect");
     fixture.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedded_server_exec_streams_binary_stdin_stdout_stderr_and_exit_status() {
+    let fixture = start_fixture().await;
+    let mut session = connect(&fixture, fixture.host_key.clone()).await;
+    assert!(authenticate(&mut session, "managed-user", fixture.client_key.clone()).await);
+
+    let channel = session
+        .channel_open_session()
+        .await
+        .expect("session channel");
+    channel
+        .exec(
+            true,
+            "cat; printf '\\nstdout-tail'; printf 'stderr-bytes' >&2; exit 7",
+        )
+        .await
+        .expect("exec request");
+    let (mut channel_input, channel_output) = channel.split();
+    let mut stdin = channel_output.make_writer();
+    let payload: Vec<u8> = (0..256 * 1024).map(|index| index as u8).collect();
+    stdin.write_all(&payload).await.expect("exec stdin bytes");
+    stdin.flush().await.expect("exec stdin flush");
+    channel_output.eof().await.expect("exec stdin EOF");
+    drop(stdin);
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_status = None;
+    let mut saw_eof = false;
+    let mut saw_close = false;
+    while let Some(message) = tokio::time::timeout(Duration::from_secs(10), channel_input.wait())
+        .await
+        .expect("exec output deadline")
+    {
+        match message {
+            ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
+            ChannelMsg::ExtendedData { data, ext: 1 } => stderr.extend_from_slice(&data),
+            ChannelMsg::ExitStatus { exit_status: code } => exit_status = Some(code),
+            ChannelMsg::Eof => saw_eof = true,
+            ChannelMsg::Close => {
+                saw_close = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(&stdout[..payload.len()], payload);
+    assert_eq!(&stdout[payload.len()..], b"\nstdout-tail");
+    assert_eq!(stderr, b"stderr-bytes");
+    assert_eq!(exit_status, Some(7));
+    assert!(saw_eof, "server must send EOF before closing the channel");
+    assert!(saw_close, "server must close the completed exec channel");
+
+    session
+        .disconnect(russh::Disconnect::ByApplication, "exec complete", "en")
+        .await
+        .expect("SSH disconnect");
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedded_server_rejects_invalid_exec_command_strings() {
+    let fixture = start_fixture().await;
+    let mut session = connect(&fixture, fixture.host_key.clone()).await;
+    assert!(authenticate(&mut session, "managed-user", fixture.client_key.clone()).await);
+
+    for command in [
+        Vec::new(),
+        b"\0invalid".to_vec(),
+        vec![0xff],
+        vec![b'x'; MAX_EXEC_COMMAND_BYTES + 1],
+    ] {
+        let mut channel = session
+            .channel_open_session()
+            .await
+            .expect("session channel");
+        channel.exec(true, command).await.expect("exec request");
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), channel.wait())
+                .await
+                .expect("exec rejection deadline")
+            {
+                Some(ChannelMsg::Failure) => break,
+                Some(ChannelMsg::Success) => panic!("invalid SSH exec string was accepted"),
+                Some(_) => {}
+                None => panic!("invalid exec channel closed without failure acknowledgement"),
+            }
+        }
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), channel.wait())
+                .await
+                .expect("invalid exec channel close deadline"),
+            Some(ChannelMsg::Close)
+        ));
+    }
+
+    session
+        .disconnect(
+            russh::Disconnect::ByApplication,
+            "invalid exec complete",
+            "en",
+        )
+        .await
+        .expect("SSH disconnect");
+    fixture.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedded_server_nonexistent_fixed_command_returns_stderr_and_nonzero_status() {
+    let fixture = start_fixture().await;
+    let mut session = connect(&fixture, fixture.host_key.clone()).await;
+    assert!(authenticate(&mut session, "managed-user", fixture.client_key.clone()).await);
+
+    let missing_executable = fixture
+        ._dir
+        .path()
+        .join("onec_950_fixed_missing_executable");
+    let command = format!("'{}'", missing_executable.display());
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .expect("session channel");
+    channel.exec(true, command).await.expect("exec request");
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_status = None;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), channel.wait())
+            .await
+            .expect("missing command deadline")
+        {
+            Some(ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
+            Some(ChannelMsg::ExtendedData { data, ext: 1 }) => stderr.extend_from_slice(&data),
+            Some(ChannelMsg::ExitStatus { exit_status: code }) => exit_status = Some(code),
+            Some(ChannelMsg::Close) => break,
+            Some(_) => {}
+            None => panic!("missing command channel did not finish"),
+        }
+    }
+    assert!(stdout.is_empty(), "missing command must not write stdout");
+    assert!(!stderr.is_empty(), "missing command must report on stderr");
+    assert_eq!(
+        exit_status,
+        Some(127),
+        "missing command must exit with shell status 127"
+    );
+
+    session
+        .disconnect(
+            russh::Disconnect::ByApplication,
+            "missing command complete",
+            "en",
+        )
+        .await
+        .expect("SSH disconnect");
+    fixture.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedded_server_bounds_concurrent_exec_sessions() {
+    let fixture = start_fixture().await;
+    let mut session = connect(&fixture, fixture.host_key.clone()).await;
+    assert!(authenticate(&mut session, "managed-user", fixture.client_key.clone()).await);
+
+    let mut active = Vec::new();
+    for _ in 0..MAX_ACTIVE_EXEC_SESSIONS {
+        let channel = session
+            .channel_open_session()
+            .await
+            .expect("session channel");
+        channel
+            .exec(true, "cat >/dev/null")
+            .await
+            .expect("exec request");
+        let (mut reader, writer) = channel.split();
+        assert!(matches!(reader.wait().await, Some(ChannelMsg::Success)));
+        active.push((reader, writer));
+    }
+
+    let mut rejected = session
+        .channel_open_session()
+        .await
+        .expect("overflow channel");
+    rejected
+        .exec(true, "cat >/dev/null")
+        .await
+        .expect("exec request");
+    loop {
+        match tokio::time::timeout(Duration::from_secs(2), rejected.wait())
+            .await
+            .expect("exec concurrency deadline")
+        {
+            Some(ChannelMsg::Failure) => break,
+            Some(ChannelMsg::Success) => panic!("exec above concurrency limit was accepted"),
+            Some(_) => {}
+            None => panic!("rejected exec channel closed without failure acknowledgement"),
+        }
+    }
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), rejected.wait())
+            .await
+            .expect("overflow exec channel close deadline"),
+        Some(ChannelMsg::Close)
+    ));
+
+    for (_, writer) in &active {
+        writer.close().await.expect("close active exec channel");
+    }
+    drop(active);
+    session
+        .disconnect(
+            russh::Disconnect::ByApplication,
+            "exec bound complete",
+            "en",
+        )
+        .await
+        .expect("SSH disconnect");
+    fixture.stop().await;
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedded_server_disconnect_kills_exec_process_tree() {
+    let fixture = start_fixture().await;
+    let mut session = connect(&fixture, fixture.host_key.clone()).await;
+    assert!(authenticate(&mut session, "managed-user", fixture.client_key.clone()).await);
+    let pid_path = fixture._dir.path().join("child.pid");
+    let command = background_child_pid_command(&pid_path);
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .expect("session channel");
+    channel.exec(true, command).await.expect("exec request");
+    loop {
+        match tokio::time::timeout(Duration::from_secs(2), channel.wait())
+            .await
+            .expect("exec start acknowledgement deadline")
+        {
+            Some(ChannelMsg::Success) => break,
+            Some(ChannelMsg::Failure) => panic!("exec request was rejected"),
+            Some(_) => {}
+            None => panic!("exec channel closed before acknowledgement"),
+        }
+    }
+    let child_pid = wait_for_linux_pid(&pid_path).await;
+
+    session
+        .disconnect(russh::Disconnect::ByApplication, "cancel exec", "en")
+        .await
+        .expect("SSH disconnect");
+    wait_for_linux_process_exit(child_pid, "client disconnect").await;
+    fixture.stop().await;
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn background_child_pid_command(pid_path: &std::path::Path) -> String {
+    format!(
+        "sleep 60 </dev/null >/dev/null 2>&1 & child=$!; printf '%s' \"$child\" > {}; wait",
+        pid_path.display()
+    )
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+async fn wait_for_linux_pid(pid_path: &std::path::Path) -> libc::pid_t {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(pid) = tokio::fs::read_to_string(pid_path).await
+                && let Ok(pid) = pid.parse::<libc::pid_t>()
+            {
+                break pid;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("child PID publication deadline")
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+async fn wait_for_linux_process_exit(pid: libc::pid_t, reason: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !linux_process_is_running(pid) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("exec descendant must exit after {reason}"));
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn linux_process_is_running(pid: libc::pid_t) -> bool {
+    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    !stat
+        .rsplit_once(')')
+        .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedded_server_exec_timeout_kills_process_tree_without_exit_status() {
+    let fixture = start_fixture().await;
+    let mut session = connect(&fixture, fixture.host_key.clone()).await;
+    assert!(authenticate(&mut session, "managed-user", fixture.client_key.clone()).await);
+    let pid_path = fixture._dir.path().join("timed-out-child.pid");
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .expect("session channel");
+    channel
+        .exec(true, background_child_pid_command(&pid_path))
+        .await
+        .expect("exec request");
+
+    loop {
+        match tokio::time::timeout(Duration::from_secs(2), channel.wait())
+            .await
+            .expect("exec start acknowledgement deadline")
+        {
+            Some(ChannelMsg::Success) => break,
+            Some(ChannelMsg::Failure) => panic!("exec request was rejected"),
+            Some(_) => {}
+            None => panic!("exec channel closed before acknowledgement"),
+        }
+    }
+    let child_pid = wait_for_linux_pid(&pid_path).await;
+
+    let mut saw_eof = false;
+    let mut exit_status = None;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(8), channel.wait())
+            .await
+            .expect("exec timeout deadline")
+        {
+            Some(ChannelMsg::ExitStatus { exit_status: code }) => exit_status = Some(code),
+            Some(ChannelMsg::Eof) => saw_eof = true,
+            Some(ChannelMsg::Close) => break,
+            Some(_) => {}
+            None => panic!("timed-out exec channel did not close"),
+        }
+    }
+    assert!(saw_eof, "timed-out process channel must send EOF");
+    assert_eq!(
+        exit_status, None,
+        "timeout must not fabricate a process exit code"
+    );
+    wait_for_linux_process_exit(child_pid, "timeout").await;
+    session
+        .disconnect(
+            russh::Disconnect::ByApplication,
+            "exec timeout complete",
+            "en",
+        )
+        .await
+        .expect("SSH disconnect");
+    fixture.stop().await;
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedded_server_shutdown_cancels_exec_process_tree() {
+    let fixture = start_fixture().await;
+    let mut session = connect(&fixture, fixture.host_key.clone()).await;
+    assert!(authenticate(&mut session, "managed-user", fixture.client_key.clone()).await);
+    let pid_path = fixture._dir.path().join("shutdown-child.pid");
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .expect("session channel");
+    channel
+        .exec(true, background_child_pid_command(&pid_path))
+        .await
+        .expect("exec request");
+    loop {
+        match tokio::time::timeout(Duration::from_secs(2), channel.wait())
+            .await
+            .expect("exec start acknowledgement deadline")
+        {
+            Some(ChannelMsg::Success) => break,
+            Some(ChannelMsg::Failure) => panic!("exec request was rejected"),
+            Some(_) => {}
+            None => panic!("exec channel closed before acknowledgement"),
+        }
+    }
+    let child_pid = wait_for_linux_pid(&pid_path).await;
+    fixture.stop().await;
+    wait_for_linux_process_exit(child_pid, "server shutdown").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
