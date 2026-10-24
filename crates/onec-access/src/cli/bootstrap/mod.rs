@@ -34,6 +34,18 @@ mod tests {
         }
     }
 
+    fn assert_best_effort_private_cleanup(script: &str) {
+        assert!(script.contains(
+            "foreach ($ownedFile in @($tokenPath,$installerPath,$archivePath,$agentExecutablePath))"
+        ));
+        assert!(script.contains("if (-not $rootIsOwned)"));
+        assert!(script.contains("FileAttributes]::ReparsePoint"));
+        assert!(script.contains("catch { $cleanupIncomplete=$true }"));
+        assert!(script.contains(
+            "HostLink bootstrap cleanup incomplete; private temporary files may remain."
+        ));
+    }
+
     #[test]
     fn direct_invite_bootstrap_is_pinned_agent_only_and_keeps_token_out_of_argv() {
         let script_sha = normalized_script_sha256(super::direct::HOSTLINK_AGENT_BOOTSTRAP);
@@ -46,19 +58,22 @@ mod tests {
             package_sha256: &package_sha,
             package_version: "1.2.3",
             package_target: "x86_64-win7-windows-msvc",
-            agent_executable_url: Some("https://downloads.example.test/hostlink-agent.exe"),
+            agent_executable_url: Some(
+                "https://downloads.example.test/x86_64-win7-windows-msvc/hostlink-agent.exe",
+            ),
             agent_executable_sha256: Some(&package_sha),
         });
         let decoded = decode_powershell_encoded_command(&powershell_encoded_command(&script));
 
         assert_eq!(decoded, script);
         assert_ps2_sha256_cleanup(&script);
+        assert_best_effort_private_cleanup(&script);
         assert!(script.contains("$installerRequest.AllowAutoRedirect=$false"));
         assert!(script.contains("$packageRequest.AllowAutoRedirect=$false"));
         assert!(script.contains("$agentRequest.AllowAutoRedirect=$false"));
         assert!(
             script.contains(
-                "$agentExecutableUrl='https://downloads.example.test/hostlink-agent.exe'"
+                "$agentExecutableUrl='https://downloads.example.test/x86_64-win7-windows-msvc/hostlink-agent.exe'"
             )
         );
         assert!(
@@ -119,6 +134,7 @@ mod tests {
         });
 
         assert_ps2_sha256_cleanup(&script);
+        assert_best_effort_private_cleanup(&script);
         assert!(script.contains("$agentExecutableUrl=''"));
         assert!(script.contains("if ($agentExecutableUrl -ne '')"));
         assert!(script.contains("if ($null -ne $agentExecutablePath)"));

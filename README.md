@@ -56,7 +56,9 @@ required when the selected package target is `x86_64-win7-windows-msvc` or
 path unless the pair is supplied. The controller pins the sidecar digest from the operator,
 preflights its same-origin HTTPS URL before creating the one-use invite, and the generated
 PowerShell 2 bootstrap verifies the downloaded bytes before passing the sidecar to the
-existing installer. A current-Windows executable is not a Win7-compatible substitute.
+existing installer. The sidecar URL must end in `/<package-target>/hostlink-agent.exe`,
+which binds the executable path to the selected ZIP target. A current-Windows executable is
+not a Win7-compatible substitute.
 The embedded SSH login is the fixed logical `hostlink` account; SSH commands run as the Agent
 process user and do not impersonate a Windows account. Durable jobs live in a current-user-only
 `jobs` directory shared by the Agent config and updater's active-job guard.

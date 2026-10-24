@@ -176,25 +176,38 @@ try {{
         if (($null -eq $installerExitCode) -or ($installerExitCode -ne 0)) {{ throw 'Installer exit status was missing or nonzero.' }}
     }} catch {{ throw 'HostLink Agent enrollment or installation failed. The invite may have been consumed; do not retry this token. Reconcile the target or create a new invite.' }}
 }} finally {{
+    $cleanupIncomplete=$false
     try {{
-        if ($null -ne $root -and [IO.Directory]::Exists($root)) {{
-            $fullRoot=[IO.Path]::GetFullPath($root).TrimEnd([char]92)
-            $tempPrefix=$tempRoot+[IO.Path]::DirectorySeparatorChar
-            if (-not $fullRoot.StartsWith($tempPrefix,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($fullRoot) -notmatch '^hostlink-invite-[0-9a-f]{{32}}$' -or ([IO.File]::GetAttributes($fullRoot) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{ throw 'Refusing to clean an unowned bootstrap directory.' }}
-            foreach ($ownedFile in @($tokenPath,$installerPath,$archivePath,$agentExecutablePath)) {{
-                if ($null -ne $ownedFile -and [IO.File]::Exists($ownedFile)) {{
-                    $fullFile=[IO.Path]::GetFullPath($ownedFile)
-                    if (-not $fullFile.StartsWith($fullRoot+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or ([IO.File]::GetAttributes($fullFile) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{ throw 'Refusing to clean an unowned bootstrap file.' }}
-                    [IO.File]::Delete($fullFile)
+        if ($null -ne $root) {{
+            if (-not [IO.Directory]::Exists($root)) {{
+                $cleanupIncomplete=$true
+            }} else {{
+                $fullRoot=[IO.Path]::GetFullPath($root).TrimEnd([char]92)
+                $tempPrefix=$tempRoot+[IO.Path]::DirectorySeparatorChar
+                $rootIsOwned=$fullRoot.StartsWith($tempPrefix,[StringComparison]::OrdinalIgnoreCase) -and [IO.Path]::GetFileName($fullRoot) -match '^hostlink-invite-[0-9a-f]{{32}}$' -and ([IO.File]::GetAttributes($fullRoot) -band [IO.FileAttributes]::ReparsePoint) -eq 0
+                if (-not $rootIsOwned) {{
+                    $cleanupIncomplete=$true
+                }} else {{
+                    foreach ($ownedFile in @($tokenPath,$installerPath,$archivePath,$agentExecutablePath)) {{
+                        if ($null -ne $ownedFile -and [IO.File]::Exists($ownedFile)) {{
+                            try {{
+                                $fullFile=[IO.Path]::GetFullPath($ownedFile)
+                                if (-not $fullFile.StartsWith($fullRoot+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or ([IO.File]::GetAttributes($fullFile) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{ throw 'Refusing to clean an unowned bootstrap file.' }}
+                                [IO.File]::Delete($fullFile)
+                            }} catch {{ $cleanupIncomplete=$true }}
+                        }}
+                    }}
+                    try {{ [IO.Directory]::Delete($fullRoot,$false) }} catch {{ $cleanupIncomplete=$true }}
                 }}
             }}
-            [IO.Directory]::Delete($fullRoot,$false)
         }}
-    }} finally {{
+    }} catch {{ $cleanupIncomplete=$true }}
+    if ($cleanupIncomplete) {{ try {{ Write-Warning 'HostLink bootstrap cleanup incomplete; private temporary files may remain.' }} catch {{ [Console]::Error.WriteLine('HostLink bootstrap cleanup incomplete; private temporary files may remain.') }} }}
+    try {{
         $token=$null
         if ([IntPtr]::Zero -ne $bstr) {{ [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }}
         if ($null -ne $secureToken) {{ $secureToken.Dispose() }}
-    }}
+    }} catch {{ try {{ Write-Warning 'HostLink bootstrap secret cleanup incomplete.' }} catch {{ [Console]::Error.WriteLine('HostLink bootstrap secret cleanup incomplete.') }} }}
 }}
 "#,
         ps_single_quote(input.hub_url),

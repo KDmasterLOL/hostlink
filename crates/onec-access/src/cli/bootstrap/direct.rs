@@ -55,10 +55,19 @@ pub(super) async fn validate_direct_install(
                     "direct Agent executable, installer script, and package URLs must share the same HTTPS origin",
                 ));
             }
-            if url.as_url().path_segments().and_then(Iterator::last) != Some("hostlink-agent.exe") {
-                return Err(hostlink_access::invalid_config(
-                    "direct Agent executable URL must select hostlink-agent.exe",
-                ));
+            let path_segments = url
+                .as_url()
+                .path_segments()
+                .map(|segments| segments.collect::<Vec<_>>())
+                .unwrap_or_default();
+            let segment_count = path_segments.len();
+            if segment_count < 2
+                || path_segments[segment_count - 2] != package_target
+                || path_segments[segment_count - 1] != "hostlink-agent.exe"
+            {
+                return Err(hostlink_access::invalid_config(format!(
+                    "direct Agent executable URL must end in /{package_target}/hostlink-agent.exe"
+                )));
             }
             (Some(url), Some(hash))
         }
@@ -329,7 +338,7 @@ mod tests {
             "1.2.3",
             "x86_64-win7-windows-msvc",
             (
-                Some("https://downloads.example.test/hostlink-agent.exe"),
+                Some("https://downloads.example.test/x86_64-win7-windows-msvc/hostlink-agent.exe"),
                 Some(&"a".repeat(64)),
             ),
         )
@@ -368,7 +377,7 @@ mod tests {
                     "1.2.3",
                     "x86_64-win7-windows-msvc",
                     (
-                        Some("https://downloads.example.test/hostlink-agent.exe"),
+                        Some("https://downloads.example.test/x86_64-win7-windows-msvc/hostlink-agent.exe"),
                         Some(&"a".repeat(64)),
                     ),
                 )
@@ -434,7 +443,7 @@ mod tests {
         );
         assert!(
             base(
-                Some("https://downloads.example.test/hostlink-agent.exe"),
+                Some("https://downloads.example.test/x86_64-win7-windows-msvc/hostlink-agent.exe"),
                 None
             )
             .await
@@ -451,18 +460,28 @@ mod tests {
                 .contains("provided together")
         );
         for url in [
-            "http://downloads.example.test/hostlink-agent.exe",
-            "https://user:pass@downloads.example.test/hostlink-agent.exe",
-            "https://foreign.example.test/hostlink-agent.exe",
-            "https://downloads.example.test/not-agent.exe",
-            "https://downloads.example.test/hostlink-agent.exe?redirect=1",
-            "https://downloads.example.test/hostlink-agent.exe#fragment",
+            "http://downloads.example.test/x86_64-win7-windows-msvc/hostlink-agent.exe",
+            "https://user:pass@downloads.example.test/x86_64-win7-windows-msvc/hostlink-agent.exe",
+            "https://foreign.example.test/x86_64-win7-windows-msvc/hostlink-agent.exe",
+            "https://downloads.example.test/x86_64-win7-windows-msvc/not-agent.exe",
+            "https://downloads.example.test/x86_64-win7-windows-msvc/hostlink-agent.exe?redirect=1",
+            "https://downloads.example.test/x86_64-win7-windows-msvc/hostlink-agent.exe#fragment",
         ] {
             assert!(base(Some(url), Some(&valid_hash)).await.is_err(), "{url}");
         }
+        let cross_target =
+            "https://downloads.example.test/i686-win7-windows-msvc/hostlink-agent.exe";
+        let error = base(Some(cross_target), Some(&valid_hash))
+            .await
+            .expect_err("sidecar target must match the package target before preflight");
+        assert!(
+            error
+                .to_string()
+                .contains("/x86_64-win7-windows-msvc/hostlink-agent.exe")
+        );
         assert!(
             base(
-                Some("https://downloads.example.test/hostlink-agent.exe"),
+                Some("https://downloads.example.test/x86_64-win7-windows-msvc/hostlink-agent.exe"),
                 Some("bad-hash"),
             )
             .await
