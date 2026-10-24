@@ -441,7 +441,7 @@ async fn embedded_server_windows_exec_streams_binary_stdio_and_exit_status() {
     let command = format!(
         r#"[IO.File]::WriteAllText('{escaped_marker_path}', 'started'); $stdinStream = [Console]::OpenStandardInput(); $stdoutStream = [Console]::OpenStandardOutput(); $buffer = New-Object byte[] 8192; while (($read = $stdinStream.Read($buffer, 0, $buffer.Length)) -gt 0) {{ $stdoutStream.Write($buffer, 0, $read) }}; $stdoutStream.Flush(); $stderrStream = [Console]::OpenStandardError(); $errorBytes = [byte[]](0, 255, 69, 82, 82, 13, 10); $stderrStream.Write($errorBytes, 0, $errorBytes.Length); $stderrStream.Flush(); exit 7"#
     );
-    let channel = session
+    let mut channel = session
         .channel_open_session()
         .await
         .expect("session channel");
