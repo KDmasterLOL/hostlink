@@ -75,6 +75,41 @@ class ArchitectureContractTest(unittest.TestCase):
             f"Missing neutral standalone binaries: {names}",
         )
 
+    def test_controller_invite_does_not_publish_toolkit_installers(self) -> None:
+        cli = CRATES / "onec-access" / "src" / "cli"
+        bootstrap = cli / "bootstrap"
+        code = "\n".join(
+            path.read_text(encoding="utf-8").split("#[cfg(test)]", 1)[0]
+            for path in bootstrap.rglob("*.rs")
+        )
+        for old in (
+            "Install-OnecToolkit.ps1",
+            "onec-toolkit-",
+            "WINDOWS_TOOLKIT_BOOTSTRAP",
+            "remote_runtime_migration_bootstrap",
+        ):
+            with self.subTest(forbidden=old):
+                self.assertNotIn(old, code, "Generic HostLink invite still owns Toolkit migration")
+        self.assertIn("Install-HostLink-Agent.ps1", code)
+        self.assertIn("hostlink-agent-", code)
+
+        commands = (cli / "commands" / "mod.rs").read_text(encoding="utf-8")
+        self.assertNotIn("MigrateRuntime", commands)
+        self.assertNotIn("MigrationReport", commands)
+        self.assertFalse((cli / "commands" / "migrate_runtime.rs").exists())
+        self.assertFalse((cli / "commands" / "migration_report.rs").exists())
+
+    def test_fresh_enrollment_has_one_secret_safe_agent_owner(self) -> None:
+        agent = CRATES / "onec-agent"
+        installer = (agent / "assets" / "Install-HostLink-Agent.ps1").read_text(
+            encoding="utf-8"
+        )
+        cli = (agent / "src" / "main.rs").read_text(encoding="utf-8")
+        self.assertIn("EnrollmentTokenFile", installer)
+        self.assertIn("HubUrl", installer)
+        self.assertNotIn("-EnrollToken ", installer)
+        self.assertIn("__prepare-enrollment", cli)
+
     def test_fresh_agent_bundle_uses_only_hostlink_assets(self) -> None:
         from package_hostlink import FILES
 
