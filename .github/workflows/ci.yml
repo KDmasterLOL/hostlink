@@ -114,6 +114,9 @@ jobs:
         with:
           name: hostlink-win-x64-${{ github.sha }}
           path: .dist/
+          # upload-artifact v4 excludes hidden parent directories by default.
+          # .dist contains only the just-built, SHA-verified test binaries/ZIPs.
+          include-hidden-files: true
           retention-days: 3
           if-no-files-found: error
           compression-level: 0

@@ -75,6 +75,19 @@ class ArchitectureContractTest(unittest.TestCase):
             f"Missing neutral standalone binaries: {names}",
         )
 
+    def test_windows_ci_uploads_hidden_dist_directory(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("uses: actions/upload-artifact@v4", workflow)
+        upload = workflow.split("uses: actions/upload-artifact@v4", 1)[1]
+        self.assertIn("path: .dist/", upload)
+        self.assertIn(
+            "include-hidden-files: true",
+            upload,
+            "actions/upload-artifact@v4 excludes hidden .dist by default",
+        )
+
     def test_controller_invite_does_not_publish_toolkit_installers(self) -> None:
         cli = CRATES / "onec-access" / "src" / "cli"
         bootstrap = cli / "bootstrap"
