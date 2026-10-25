@@ -58,6 +58,11 @@ UUID is printed **before** the first start request; on a lost acknowledgement,
 query status by UUID instead of resubmitting. Ordinary SSH `exec` remains
 channel-owned and does **not** survive a disconnect.
 
+The pinned SSH client also supports loopback-only TCP forwarding, local RDP
+mapping and target-side TCP probes through `russh` direct-tcpip. See
+[docs/TCP_FORWARDING.md](docs/TCP_FORWARDING.md) for commands, deadlines,
+concurrency limits and security behavior.
+
 A real Linux HOME Agent↔Client SSH test verifies accepted-once execution,
 disconnect/reconnect, binary stdout/stderr and exit code `7`. Native Win7
 x64/x86 and Windows Agent-owned durable execution/updater handoff remain

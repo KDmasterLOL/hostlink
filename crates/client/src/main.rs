@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use hostlink::{
     HostSpec,
     connect::{HostConnection, SshClientError},
+    forward::{self, ForwardServer},
     migration::{self, Readiness},
     run::{
         Cancel, JobSpec, JobStateKind, JobStatus, JobStream, Output, Seal, Start, Status,
@@ -11,10 +12,14 @@ use hostlink::{
     },
 };
 use sha2::{Digest as _, Sha256};
-use std::error::Error;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::{
+    error::Error,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    time::Duration,
+};
 
 const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -37,6 +42,31 @@ enum Command {
     Check {
         #[arg(long)]
         config: PathBuf,
+    },
+    /// Forward a loopback TCP port to a target reachable from the SSH host.
+    Forward {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long, value_parser = parse_socket_addr)]
+        listen: SocketAddr,
+        #[arg(long, value_parser = parse_socket_addr)]
+        target: SocketAddr,
+    },
+    /// Forward local RDP to 127.0.0.1:3389 on the SSH host.
+    Rdp {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long, default_value_t = 13389, value_parser = clap::value_parser!(u16).range(1..))]
+        listen_port: u16,
+    },
+    /// Probe TCP reachability from the SSH host through a direct-tcpip channel.
+    Probe {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long, value_parser = parse_socket_addr)]
+        target: SocketAddr,
+        #[arg(long, default_value_t = 1500, value_parser = clap::value_parser!(u64).range(1..=60000))]
+        timeout_ms: u64,
     },
     /// Execute a single remote shell command with binary stdin/out and exact exit status.
     Exec {
@@ -160,6 +190,12 @@ fn parse_stream(value: &str) -> Result<JobStream, String> {
     }
 }
 
+fn parse_socket_addr(value: &str) -> Result<SocketAddr, String> {
+    value
+        .parse()
+        .map_err(|_| "expected an IP:PORT socket address".into())
+}
+
 #[tokio::main]
 async fn main() {
     let result = run(Cli::parse()).await;
@@ -201,9 +237,38 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         );
     }
 
+    match &cli.command {
+        Command::Forward {
+            config,
+            listen,
+            target,
+        } => {
+            forward_cli(config, *listen, *target).await?;
+            return Ok(0);
+        }
+        Command::Rdp {
+            config,
+            listen_port,
+        } => {
+            let listen = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), *listen_port);
+            let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3389);
+            forward_cli(config, listen, target).await?;
+            return Ok(0);
+        }
+        Command::Probe {
+            target, timeout_ms, ..
+        } if target.port() == 0 || *timeout_ms == 0 => {
+            return Err("probe target port and timeout must be nonzero".into());
+        }
+        _ => {}
+    }
+
     let config_path = match &cli.command {
         Command::Migration { .. } => unreachable!("migration preflight returned above"),
         Command::Check { config }
+        | Command::Forward { config, .. }
+        | Command::Rdp { config, .. }
+        | Command::Probe { config, .. }
         | Command::Exec { config, .. }
         | Command::Upload { config, .. }
         | Command::Download { config, .. } => config.clone(),
@@ -318,6 +383,20 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         match cli.command {
             Command::Migration { .. } => unreachable!("migration preflight returned above"),
             Command::Check { .. } => Ok(0_i32),
+            Command::Probe { target, timeout_ms, .. } => {
+                let opened = tokio::time::timeout(
+                    Duration::from_millis(timeout_ms),
+                    client.open_forward(target),
+                )
+                .await
+                .map_err(|_| SshClientError::Timeout)??;
+                drop(opened);
+                eprintln!("hostlink: TCP probe succeeded for {target}");
+                Ok(0)
+            }
+            Command::Forward { .. } | Command::Rdp { .. } => {
+                Err("forward command dispatch failed".into())
+            }
             Command::Exec {
                 command,
                 stdin_file,
@@ -420,6 +499,36 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         (Err(primary), Err(cleanup)) => {
             Err(format!("operation failed: {primary}; SSH cleanup also failed: {cleanup}").into())
         }
+    }
+}
+
+async fn forward_cli(
+    config_path: &Path,
+    listen: SocketAddr,
+    target: SocketAddr,
+) -> Result<(), Box<dyn Error>> {
+    forward::validate_forward_listen(listen, false)?;
+    if target.port() == 0 {
+        return Err("forward target port must be nonzero".into());
+    }
+    let spec = load_host_spec(config_path)?;
+    let connection = HostConnection::connect(&spec).await?;
+    let server: ForwardServer = forward::start_local_forward(connection, listen, target).await?;
+    eprintln!(
+        "hostlink: forwarding {} to {} through pinned SSH; press Ctrl-C to stop",
+        server.local_addr(),
+        target
+    );
+    let signal = tokio::signal::ctrl_c().await;
+    let shutdown = server.shutdown().await;
+    match (signal, shutdown) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(Box::new(error)),
+        (Ok(()), Err(error)) => Err(Box::new(error)),
+        (Err(signal), Err(cleanup)) => Err(format!(
+            "Ctrl-C handling failed: {signal}; forward shutdown failed: {cleanup}"
+        )
+        .into()),
     }
 }
 
