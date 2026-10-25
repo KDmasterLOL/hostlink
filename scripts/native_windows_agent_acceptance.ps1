@@ -202,8 +202,10 @@ try {
     Assert-Condition ([Environment]::Is64BitOperatingSystem) 'The x64 MSVC package requires 64-bit Windows.'
     Assert-Condition ([Environment]::OSVersion.Version.Build -ge 22000) 'This harness is scoped to Windows 11 builds (22000 or newer).'
     Assert-Condition ([IO.File]::Exists((Join-Path $PSHOME 'powershell.exe'))) 'Windows PowerShell executable could not be resolved.'
-    $executionPolicies = Get-ExecutionPolicy -List
-    Assert-Condition ($executionPolicies.MachinePolicy -eq 'Undefined' -and $executionPolicies.UserPolicy -eq 'Undefined') 'A Group Policy controls PowerShell execution; the harness will not override it.'
+    # Get-ExecutionPolicy -List returns rows, not MachinePolicy/UserPolicy fields.
+    $machinePolicy = Get-ExecutionPolicy -Scope MachinePolicy
+    $userPolicy = Get-ExecutionPolicy -Scope UserPolicy
+    Assert-Condition ($machinePolicy -eq 'Undefined' -and $userPolicy -eq 'Undefined') 'A Group Policy controls PowerShell execution; the harness will not override it.'
     Assert-Condition ((Get-ExecutionPolicy) -ne 'Restricted') 'PowerShell is Restricted; start this disposable test run with -ExecutionPolicy Bypass (process scope only).'
     Add-Type -AssemblyName System.IO.Compression
     Assert-Condition ($null -ne [IO.Compression.ZipArchive]) 'The .NET ZipArchive API is unavailable.'

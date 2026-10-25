@@ -75,9 +75,11 @@ class NativeWindowsAgentAcceptanceTest(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("Get-ExecutionPolicy -List", harness)
-        self.assertIn("$executionPolicies.MachinePolicy -eq 'Undefined'", harness)
-        self.assertIn("$executionPolicies.UserPolicy -eq 'Undefined'", harness)
+        self.assertIn("Get-ExecutionPolicy -Scope MachinePolicy", harness)
+        self.assertIn("Get-ExecutionPolicy -Scope UserPolicy", harness)
+        self.assertIn("$machinePolicy -eq 'Undefined'", harness)
+        self.assertIn("$userPolicy -eq 'Undefined'", harness)
+        self.assertNotIn("$executionPolicies.MachinePolicy", harness)
         self.assertIn("-ExecutionPolicy Bypass", documentation)
         self.assertIn("do not change LocalMachine, CurrentUser, or Group Policy", documentation)
 
