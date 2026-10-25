@@ -376,7 +376,7 @@ fn status_from_io(e: io::Error) -> StatusCode {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
