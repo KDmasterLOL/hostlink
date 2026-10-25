@@ -70,6 +70,27 @@ pub struct Output {
     pub offset: u64,
 }
 
+/// Requests Agent-side verification and sealing of the exclusively uploaded artifact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Seal {
+    /// Digest-bound SFTP staging name: `<sha256>.upload`.
+    pub name: String,
+    /// Expected lowercase SHA-256 digest.
+    pub sha256: String,
+    /// Exact uploaded byte length.
+    pub size: u64,
+}
+
+/// Agent-resolved executable path and verified artifact digest.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SealedArtifact {
+    /// Canonical absolute path selected by the Agent.
+    pub program: String,
+    /// Digest verified by the Agent.
+    pub sha256: String,
+}
+
 /// Persisted Agent job lifecycle state.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -127,6 +148,44 @@ enum ProtocolError {
 }
 
 impl HostConnection {
+    /// Asks the Agent to verify and seal one staged artifact over jobs-v1.
+    ///
+    /// # Errors
+    /// Returns an error for invalid request values, malformed protocol replies,
+    /// a digest mismatch, or transport failure.
+    pub async fn job_seal(&mut self, request: &Seal) -> Result<SealedArtifact, SshClientError> {
+        if request.size > 64 * 1024 * 1024 || request.name != sealed_artifact_name(&request.sha256)?
+        {
+            return Err(protocol_invalid("invalid Seal request"));
+        }
+        let value = self
+            .job_request(serde_json::json!({
+                "version": 1,
+                "op": "seal",
+                "name": request.name,
+                "sha256": request.sha256,
+                "size": request.size,
+            }))
+            .await?;
+        if value.get("ok") == Some(&Value::Bool(false)) {
+            return Err(parse_remote_error(value)?);
+        }
+        require_keys(&value, &["version", "ok", "program", "sha256"])?;
+        let reply: SealSuccessReply = serde_json::from_value(value)
+            .map_err(|_| protocol_invalid("Seal reply fields are missing or unknown"))?;
+        if reply.version != 1 || !reply.ok || reply.sha256 != request.sha256 {
+            return Err(protocol_invalid(
+                "Seal reply version, success flag, or digest mismatch",
+            ));
+        }
+        validate_absolute_path(&reply.program)
+            .map_err(|_| protocol_invalid("Seal reply program is not an absolute path"))?;
+        Ok(SealedArtifact {
+            program: reply.program,
+            sha256: reply.sha256,
+        })
+    }
+
     /// Starts one Agent-owned durable job request over a fresh SSH channel.
     ///
     /// A transport failure may mean the Agent accepted the request without
@@ -238,6 +297,47 @@ impl HostConnection {
             }
         }
         decode_frame(&response).map_err(protocol_error)
+    }
+}
+
+/// Builds the only accepted SFTP staging name for a verified artifact digest.
+///
+/// # Errors
+/// Returns an error unless `sha256` is exactly 64 lowercase hexadecimal characters.
+pub fn sealed_artifact_name(sha256: &str) -> Result<String, SshClientError> {
+    if sha256.len() != 64
+        || !sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(protocol_invalid(
+            "artifact SHA-256 must be 64 lowercase hexadecimal characters",
+        ));
+    }
+    Ok(format!("{sha256}.upload"))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SealSuccessReply {
+    version: u8,
+    ok: bool,
+    program: String,
+    sha256: String,
+}
+
+fn validate_absolute_path(value: &str) -> Result<(), ()> {
+    let absolute = std::path::Path::new(value).is_absolute()
+        || (value.as_bytes().get(1) == Some(&b':')
+            && value
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic))
+        || value.starts_with("\\\\");
+    if absolute && !value.is_empty() && !value.as_bytes().contains(&0) {
+        Ok(())
+    } else {
+        Err(())
     }
 }
 
@@ -361,7 +461,7 @@ fn parse_output(value: Value, request: &Output) -> Result<JobOutput, SshClientEr
         .offset
         .checked_add(decoded.len() as u64)
         .ok_or_else(|| protocol_invalid("output offset overflow"))?;
-    if next_offset != expected_next || (decoded.is_empty() && !eof) {
+    if next_offset != expected_next {
         return Err(protocol_invalid("output next_offset is inconsistent"));
     }
     Ok(JobOutput {
