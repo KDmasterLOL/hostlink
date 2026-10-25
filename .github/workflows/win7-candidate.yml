@@ -1,14 +1,23 @@
-name: Win7 x64 MSVC Tier-3 candidate
+name: Win7 MSVC Tier-3 test candidate
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: Win7 MSVC target architecture
+        type: choice
+        required: true
+        default: x86_64-win7-windows-msvc
+        options:
+          - x86_64-win7-windows-msvc
+          - i686-win7-windows-msvc
 
 permissions:
   contents: read
 
 jobs:
   candidate:
-    name: Build source-exact Win7 x64 Agent candidate
+    name: Build source-exact Win7 ${{ inputs.target }} Agent candidate
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v7
@@ -20,10 +29,18 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force '.dist/evidence', '.dist/staging', '.dist/out' | Out-Null
+          $target = '${{ inputs.target }}'
+          $supportedTargets = @('x86_64-win7-windows-msvc', 'i686-win7-windows-msvc')
+          if ($supportedTargets -cnotcontains $target) { throw "Unsupported Win7 candidate target: $target" }
+          New-Item -ItemType Directory -Force '.dist/evidence', '.dist/staging', '.dist/out', ".dist/out/$target" | Out-Null
+          "TARGET=$target" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $head = (git rev-parse HEAD).Trim()
           if ($head -ne '${{ github.sha }}') { throw "Checkout HEAD $head does not match dispatch SHA ${{ github.sha }}" }
+          $tree = (git rev-parse 'HEAD^{tree}').Trim()
           "source_commit=$head" | Set-Content -Encoding ascii '.dist/evidence/build.txt'
+          "source_sha=$head" | Add-Content -Encoding ascii '.dist/evidence/build.txt'
+          "source_tree_sha=$tree" | Add-Content -Encoding ascii '.dist/evidence/build.txt'
+          "target=$target" | Add-Content -Encoding ascii '.dist/evidence/build.txt'
 
       - name: Initialize the installed MSVC and Windows SDK environment
         shell: pwsh
@@ -31,15 +48,33 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe is missing on the Windows runner' }
-          $vcvars = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Auxiliary\Build\vcvars64.bat' | Select-Object -First 1
-          if (-not $vcvars -or -not (Test-Path -LiteralPath $vcvars)) { throw 'Visual Studio x64 vcvars64.bat was not found' }
-          $environment = & $env:ComSpec /d /s /c "call `"$vcvars`" >nul && set"
-          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat failed with exit code $LASTEXITCODE" }
+          if ($env:TARGET -eq 'i686-win7-windows-msvc') {
+            $vcvars = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Auxiliary\Build\vcvarsall.bat' | Select-Object -First 1
+            if (-not $vcvars -or -not (Test-Path -LiteralPath $vcvars)) { throw 'Visual Studio vcvarsall.bat was not found' }
+            $environment = & $env:ComSpec /d /s /c "call `"$vcvars`" x64_x86 >nul && set"
+            $vcvarsLabel = 'vcvarsall.bat x64_x86'
+          } else {
+            $vcvars = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Auxiliary\Build\vcvars64.bat' | Select-Object -First 1
+            if (-not $vcvars -or -not (Test-Path -LiteralPath $vcvars)) { throw 'Visual Studio x64 vcvars64.bat was not found' }
+            $environment = & $env:ComSpec /d /s /c "call `"$vcvars`" >nul && set"
+            $vcvarsLabel = 'vcvars64.bat'
+          }
+          if ($LASTEXITCODE -ne 0) { throw "$vcvarsLabel failed with exit code $LASTEXITCODE" }
           foreach ($line in $environment) {
             if ($line -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process') }
           }
           foreach ($tool in @('cl.exe', 'link.exe', 'mt.exe', 'dumpbin.exe')) {
             if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "$tool is unavailable after initializing the MSVC/SDK environment" }
+          }
+          if ($env:TARGET -eq 'i686-win7-windows-msvc') {
+            if ($env:VSCMD_ARG_HOST_ARCH -ne 'x64' -or $env:VSCMD_ARG_TGT_ARCH -ne 'x86') { throw 'MSVC environment is not x64-host to x86-target' }
+            $libPaths = @($env:LIB -split ';')
+            if (-not ($libPaths | Where-Object { $_ -match '(?i)\\lib\\x86$' })) { throw 'MSVC x86 target libraries are missing from LIB' }
+            if (-not ($libPaths | Where-Object { $_ -match '(?i)\\um\\x86$' })) { throw 'Windows SDK x86 UM libraries are missing from LIB' }
+            if (-not ($libPaths | Where-Object { $_ -match '(?i)\\ucrt\\x86$' })) { throw 'Windows SDK x86 UCRT libraries are missing from LIB' }
+            if ($libPaths | Where-Object { $_ -match '(?i)\\(lib|um|ucrt)\\x64$' }) { throw 'MSVC LIB contains x64 target libraries in the x86 environment' }
+            'msvc_environment=x64-host-x86-target' | Add-Content -Encoding ascii '.dist/evidence/build.txt'
+            'msvc_target_libraries=MSVC+x86_Windows_SDK_UM+x86_UCRT' | Add-Content -Encoding ascii '.dist/evidence/build.txt'
           }
           "msvc_cl=$((Get-Command cl.exe).Source)" | Add-Content -Encoding ascii '.dist/evidence/build.txt'
           "msvc_link=$((Get-Command link.exe).Source)" | Add-Content -Encoding ascii '.dist/evidence/build.txt'
@@ -48,12 +83,12 @@ jobs:
           # verified MSVC/SDK environment required by later Cargo build steps.
           foreach ($name in @(
             'PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VCINSTALLDIR', 'VCToolsInstallDir',
-            'WindowsSdkDir', 'WindowsSDKVersion', 'UniversalCRTSdkDir', 'UCRTVersion'
+            'WindowsSdkDir', 'WindowsSDKVersion', 'UniversalCRTSdkDir', 'UCRTVersion', 'VSCMD_ARG_HOST_ARCH', 'VSCMD_ARG_TGT_ARCH'
           )) {
             $value = [Environment]::GetEnvironmentVariable($name, 'Process')
             if ([string]::IsNullOrEmpty($value)) {
               if ($name -in @('PATH', 'INCLUDE', 'LIB', 'LIBPATH')) {
-                throw "vcvars64.bat did not configure required $name"
+                throw "$vcvarsLabel did not configure required $name"
               }
               continue
             }
@@ -73,7 +108,7 @@ jobs:
           $rustcVersion | Set-Content -Encoding ascii '.dist/evidence/rustc-version.txt'
           $rustcVersion | ForEach-Object { "rustc_version=$($_)" } | Add-Content -Encoding ascii '.dist/evidence/build.txt'
           $targets = & rustc +nightly-2026-08-22 --print target-list
-          if ($LASTEXITCODE -ne 0 -or $targets -notcontains 'x86_64-win7-windows-msvc') { throw 'Pinned compiler does not list x86_64-win7-windows-msvc; refusing target substitution' }
+          if ($LASTEXITCODE -ne 0 -or $targets -notcontains $env:TARGET) { throw "Pinned compiler does not list $env:TARGET; refusing target substitution" }
 
       - name: Build Agent and standard library from source
         shell: pwsh
@@ -82,19 +117,18 @@ jobs:
           RUSTFLAGS: '-C target-feature=+crt-static'
         run: |
           $ErrorActionPreference = 'Stop'
-          $target = 'x86_64-win7-windows-msvc'
+          $target = $env:TARGET
           $buildOutput = & cargo +nightly-2026-08-22 -Z build-std=std,panic_abort build --release --locked -p hostlink-agent --bin hostlink-agent --target $target --verbose 2>&1
           $buildExit = $LASTEXITCODE
           $buildOutput | ForEach-Object { $_.ToString() } | Set-Content -Encoding utf8 '.dist/build-output.log'
           if ($buildExit -ne 0) { throw "Win7 Tier-3 source build failed with exit code $buildExit; no fallback target is permitted" }
-          $binary = 'target/x86_64-win7-windows-msvc/release/hostlink-agent.exe'
+          $binary = "target/$target/release/hostlink-agent.exe"
           if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Expected Win7 target binary was not produced' }
           $stdlibLines = Select-String -Path '.dist/build-output.log' -Pattern 'Compiling (std|panic_abort) v|Compiling (std|panic_abort) '
           if (-not $stdlibLines) { throw 'Build output does not show std/panic_abort compilation from rust-src' }
           # The pinned -Z build-std invocation plus compiler output is the proof.
           # Cargo does not guarantee std rlibs under the binary's release/deps path.
           # A previous CI run built the executable but failed on that assumed layout.
-          "target=$target" | Add-Content -Encoding ascii '.dist/evidence/build.txt'
           "stdlib_compile_evidence=$($stdlibLines.Line -join ' | ')" | Add-Content -Encoding utf8 '.dist/evidence/build.txt'
           'crt_mode=static' | Add-Content -Encoding ascii '.dist/evidence/build.txt'
 
@@ -102,13 +136,20 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $binary = (Resolve-Path 'target/x86_64-win7-windows-msvc/release/hostlink-agent.exe').Path
+          $target = $env:TARGET
+          $binary = (Resolve-Path "target/$target/release/hostlink-agent.exe").Path
           $headers = & dumpbin.exe /headers $binary 2>&1
           if ($LASTEXITCODE -ne 0) { throw 'dumpbin /headers failed' }
           $headers | Set-Content -Encoding utf8 '.dist/evidence/pe-headers.txt'
-          $machineLine = $headers | Select-String -Pattern '8664 machine \(x64\)' | Select-Object -First 1
-          if (-not $machineLine) { throw 'PE machine is not AMD64 (0x8664)' }
-          "pe_machine=AMD64 (0x8664)" | Add-Content -Encoding ascii '.dist/evidence/build.txt'
+          if ($target -eq 'i686-win7-windows-msvc') {
+            $machineLine = $headers | Select-String -Pattern '14C machine \(x86\)' | Select-Object -First 1
+            if (-not $machineLine) { throw 'PE machine is not i386 (0x14C)' }
+            'pe_machine=i386 (0x14C)' | Add-Content -Encoding ascii '.dist/evidence/build.txt'
+          } else {
+            $machineLine = $headers | Select-String -Pattern '8664 machine \(x64\)' | Select-Object -First 1
+            if (-not $machineLine) { throw 'PE machine is not AMD64 (0x8664)' }
+            'pe_machine=AMD64 (0x8664)' | Add-Content -Encoding ascii '.dist/evidence/build.txt'
+          }
           $manifestPath = Join-Path (Get-Location) '.dist/evidence/hostlink-agent.manifest.xml'
           $manifestOutput = & mt.exe -nologo "-inputresource:$binary;#1" "-out:$manifestPath" 2>&1
           if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $manifestPath)) {
@@ -126,36 +167,39 @@ jobs:
           }
           'dynamic_crt_imports=none' | Add-Content -Encoding ascii '.dist/evidence/build.txt'
           $hash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  hostlink-agent.exe" | Set-Content -Encoding ascii '.dist/out/hostlink-agent.exe.sha256'
           "candidate_sha256=$hash" | Add-Content -Encoding ascii '.dist/evidence/build.txt'
-          Copy-Item -LiteralPath $binary -Destination '.dist/out/hostlink-agent.exe'
-          $rawSidecar = [IO.File]::ReadAllText((Resolve-Path '.dist/out/hostlink-agent.exe.sha256').Path).Trim()
+          $rawOut = ".dist/out/$target/hostlink-agent.exe"
+          $rawSidecarPath = "$rawOut.sha256"
+          Copy-Item -LiteralPath $binary -Destination $rawOut
+          "$hash  hostlink-agent.exe" | Set-Content -Encoding ascii $rawSidecarPath
+          $rawSidecar = [IO.File]::ReadAllText((Resolve-Path $rawSidecarPath).Path).Trim()
           if ($rawSidecar -notmatch '^([0-9a-f]{64})  hostlink-agent\.exe$') { throw 'Raw candidate SHA-256 sidecar has the wrong format/name' }
-          if ((Get-FileHash -LiteralPath '.dist/out/hostlink-agent.exe' -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Matches[1]) { throw 'Raw candidate SHA-256 sidecar does not match the copied binary' }
+          if ((Get-FileHash -LiteralPath $rawOut -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Matches[1]) { throw 'Raw candidate SHA-256 sidecar does not match the copied binary' }
           'raw_sha256_sidecar=verified' | Add-Content -Encoding ascii '.dist/evidence/build.txt'
 
       - name: Assemble and verify Agent-only package
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $target = 'x86_64-win7-windows-msvc'
-          Copy-Item 'target/x86_64-win7-windows-msvc/release/hostlink-agent.exe', 'crates/onec-agent/assets/Install-HostLink-Agent.ps1', 'crates/onec-agent/assets/Run-HostLink-Agent.ps1', 'crates/onec-agent/assets/Update-HostLink-Agent.ps1' -Destination '.dist/staging/'
+          $target = $env:TARGET
+          Copy-Item "target/$target/release/hostlink-agent.exe", 'crates/onec-agent/assets/Install-HostLink-Agent.ps1', 'crates/onec-agent/assets/Run-HostLink-Agent.ps1', 'crates/onec-agent/assets/Update-HostLink-Agent.ps1' -Destination '.dist/staging/'
           python scripts/package_hostlink.py agent $target .dist/staging .dist/out
           if ($LASTEXITCODE -ne 0) { throw 'Agent-only ZIP packaging failed' }
-          $archive = '.dist/out/hostlink-agent-x86_64-win7-windows-msvc.zip'
+          $archive = ".dist/out/hostlink-agent-$target.zip"
           $sidecar = "$archive.sha256"
           if (-not (Test-Path -LiteralPath $archive) -or -not (Test-Path -LiteralPath $sidecar)) { throw 'Expected target-named ZIP or SHA-256 sidecar is missing' }
           $line = [IO.File]::ReadAllText((Resolve-Path $sidecar).Path).Trim()
           if ($line -notmatch '^([0-9a-f]{64})  (.+)$' -or $Matches[2] -ne [IO.Path]::GetFileName($archive)) { throw 'ZIP SHA-256 sidecar has the wrong format/name' }
-          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Matches[1]) { throw 'ZIP SHA-256 sidecar does not match the archive' }
+          $zipHash = $Matches[1]
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $zipHash) { throw 'ZIP SHA-256 sidecar does not match the archive' }
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $archive).Path)
           try {
             $expected = @(
-              'hostlink-agent-x86_64-win7-windows-msvc/hostlink-agent.exe',
-              'hostlink-agent-x86_64-win7-windows-msvc/Install-HostLink-Agent.ps1',
-              'hostlink-agent-x86_64-win7-windows-msvc/Run-HostLink-Agent.ps1',
-              'hostlink-agent-x86_64-win7-windows-msvc/Update-HostLink-Agent.ps1'
+              "hostlink-agent-$target/hostlink-agent.exe",
+              "hostlink-agent-$target/Install-HostLink-Agent.ps1",
+              "hostlink-agent-$target/Run-HostLink-Agent.ps1",
+              "hostlink-agent-$target/Update-HostLink-Agent.ps1"
             )
             $members = @($zip.Entries | ForEach-Object FullName)
             if (($members -join "`n") -cne ($expected -join "`n")) { throw "ZIP inventory mismatch: $($members -join ', ')" }
@@ -163,13 +207,13 @@ jobs:
             foreach ($entry in $zip.Entries) { $entryStream = $entry.Open(); try { $entryStream.CopyTo([IO.Stream]::Null) } finally { $entryStream.Dispose() } }
           } finally { $zip.Dispose() }
           "zip_inventory=$($expected -join ',')" | Add-Content -Encoding utf8 '.dist/evidence/build.txt'
-          "zip_sha256=$($Matches[1])" | Add-Content -Encoding ascii '.dist/evidence/build.txt'
+          "zip_sha256=$zipHash" | Add-Content -Encoding ascii '.dist/evidence/build.txt'
           'zip_sha256_sidecar=verified' | Add-Content -Encoding ascii '.dist/evidence/build.txt'
 
       - name: Upload short-lived test candidate
         uses: actions/upload-artifact@v4
         with:
-          name: hostlink-win7-x64-${{ github.sha }}
+          name: hostlink-win7-${{ inputs.target }}-${{ github.sha }}
           path: |
             .dist/out/
             .dist/evidence/
