@@ -44,7 +44,15 @@ pub(super) fn prepare_command(command: &str) -> io::Result<Command> {
                 "SSH exec requires a verified non-elevated, non-LocalSystem Windows user context",
             ));
         }
-        Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", command])
+        // Keep PowerShell from consuming redirected stdin before the command starts.
+        Command::new("powershell.exe").args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-InputFormat",
+            "None",
+            "-Command",
+            command,
+        ])
     };
 
     #[cfg(not(any(unix, windows)))]
