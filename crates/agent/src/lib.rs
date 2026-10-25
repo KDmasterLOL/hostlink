@@ -6,6 +6,7 @@ pub mod jobs;
 pub mod sftp;
 pub mod ssh;
 pub mod tunnel;
+pub mod update;
 
 use serde::Deserialize;
 use std::io;

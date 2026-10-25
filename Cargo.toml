@@ -18,6 +18,9 @@ clap = { version = "=4.6.6", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
+semver = "=1.0.28"
+zip = { version = "=6.0.0", default-features = false, features = ["deflate"] }
+libc = "=0.2.191"
 thiserror = "2.0.17"
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 tempfile = "3.27.0"
