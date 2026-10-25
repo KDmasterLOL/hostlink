@@ -147,6 +147,82 @@ fn invalid_command(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use processkit::{Outcome, RawOutputSink};
+    use std::sync::Mutex;
+
+    struct CaptureSink(Arc<Mutex<Vec<u8>>>);
+
+    impl RawOutputSink for CaptureSink {
+        fn write_chunk<'a>(&'a mut self, chunk: &'a [u8]) -> RawSinkFuture<'a> {
+            Box::pin(async move {
+                self.0
+                    .lock()
+                    .expect("capture lock")
+                    .extend_from_slice(chunk);
+                Ok(())
+            })
+        }
+
+        fn finish(&mut self) -> RawSinkFuture<'_> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn powershell_processkit_pipe_preserves_binary_stdin_and_exit_status() {
+        let command = r#"$inputStream=[Console]::OpenStandardInput();$outputStream=[Console]::OpenStandardOutput();$buffer=New-Object byte[] 8192;while(($count=$inputStream.Read($buffer,0,$buffer.Length))-gt 0){$outputStream.Write($buffer,0,$count)};$outputStream.Flush();$errorStream=[Console]::OpenStandardError();$errorBytes=[byte[]](0,255,69,82,82,13,10);$errorStream.Write($errorBytes,0,$errorBytes.Length);$errorStream.Flush();exit 7"#;
+        let safe_context = safe_windows_user_context().expect("inspect Windows user context");
+        let prepared = prepare_command(command);
+        if !safe_context {
+            assert!(matches!(
+                prepared,
+                Err(ref error) if error.kind() == io::ErrorKind::PermissionDenied
+            ));
+            return;
+        }
+
+        let stdout = Arc::new(Mutex::new(Vec::new()));
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        let command = prepared
+            .expect("verified Windows user context and PowerShell command")
+            .stdout_raw_sink({
+                let stdout = stdout.clone();
+                move || CaptureSink(stdout.clone())
+            })
+            .stderr_raw_sink({
+                let stderr = stderr.clone();
+                move || CaptureSink(stderr.clone())
+            });
+        let mut process = command
+            .timeout(Duration::from_secs(15))
+            .start()
+            .await
+            .expect("start PowerShell subprocess");
+
+        let payload: Vec<u8> = (0..4096).map(|index| (index * 37) as u8).collect();
+        let mut child_stdin = process.take_stdin().expect("piped child stdin");
+        child_stdin
+            .write_all(&payload)
+            .await
+            .expect("write exact binary stdin");
+        child_stdin.finish().await.expect("close child stdin");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(20), process.drain())
+            .await
+            .expect("PowerShell subprocess deadline")
+            .expect("drain PowerShell subprocess");
+        assert_eq!(outcome, Outcome::Exited(7));
+        assert_eq!(*stdout.lock().expect("stdout capture lock"), payload);
+        assert_eq!(
+            *stderr.lock().expect("stderr capture lock"),
+            [0_u8, 255, b'E', b'R', b'R', b'\r', b'\n']
+        );
+    }
+}
+
 use crate::environment::AgentEnvironmentPolicy;
 
 #[cfg(windows)]
