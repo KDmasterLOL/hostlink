@@ -76,6 +76,17 @@ function Set-PrivateFile([string]$Path) {
     # in icacls output; check its exit status and the resulting protected DACL.
     $null = @(& $icacls $full '/inheritance:r' '/grant:r' ('*' + $identity.User.Value + ':F') '*S-1-5-18:F' 2>&1)
     Assert-Condition ($LASTEXITCODE -eq 0) 'Could not restrict the private test file DACL.'
+    # OpenSSH ssh-keygen may create an explicit Administrators ACE even inside
+    # an owner-private directory. Remove only unapproved trustees from this
+    # newly generated, user-owned test file; verify the final ACL below.
+    $existingAcl = (New-Object IO.FileInfo($full)).GetAccessControl()
+    foreach ($entry in $existingAcl.Access) {
+        $trustee = $entry.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($trustee -ne $identity.User.Value -and $trustee -ne 'S-1-5-18') {
+            $null = @(& $icacls $full '/remove' ('*' + $trustee) 2>&1)
+            Assert-Condition ($LASTEXITCODE -eq 0) 'Could not remove an unapproved private-file ACL trustee.'
+        }
+    }
     $acl = (New-Object IO.FileInfo($full)).GetAccessControl()
     Assert-Condition ($acl.AreAccessRulesProtected) 'Private file DACL remains inherited.'
     foreach ($access in $acl.Access) {

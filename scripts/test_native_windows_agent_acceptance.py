@@ -70,6 +70,8 @@ class NativeWindowsAgentAcceptanceTest(unittest.TestCase):
         harness = self.harness_source()
         self.assertIn("$icacls = Join-Path $env:WINDIR 'System32\\icacls.exe'", harness)
         self.assertIn("'/inheritance:r' '/grant:r'", harness)
+        self.assertIn("$icacls $full '/remove'", harness)
+        self.assertIn("$trustee -ne $identity.User.Value", harness)
         self.assertIn("$acl.AreAccessRulesProtected", harness)
         self.assertIn("$sid -eq 'S-1-5-18'", harness)
         self.assertIn("$owner.Equals($identity.User)", harness)
