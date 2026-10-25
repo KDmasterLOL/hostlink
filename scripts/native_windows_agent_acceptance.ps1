@@ -13,9 +13,12 @@ $script:Workspace = $null
 $script:WorkspaceSentinel = $null
 $script:Root = $null
 $script:RootCreatedByThisRun = $false
+$script:RootAbsentAtStart = $false
 $script:RootSentinel = $null
 $script:RootInventory = $null
 $script:Success = $false
+$script:ReceiptWritten = $false
+$script:Stage = 'preflight'
 $script:CleanupState = 'not-started'
 $target = 'x86_64-pc-windows-msvc'
 
@@ -143,12 +146,50 @@ function Write-Receipt([string]$Status, [string]$Failure) {
         failure = $Failure
     }
     $json = ConvertTo-Json -InputObject $receipt -Depth 8
-    $stream = [IO.File]::Open($script:ReceiptPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $stream = $null
+    $complete = $false
+    $created = $false
     try {
+        $stream = [IO.File]::Open($script:ReceiptPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $created = $true
+        $stream.Dispose()
+        $stream = $null
+
+        # Restrict the closed, empty file before reopening it for receipt content.
+        Set-PrivateFile $script:ReceiptPath
+        Assert-NotReparse $script:ReceiptPath 'ReceiptFile before write'
+        $attributes = [IO.File]::GetAttributes($script:ReceiptPath)
+        Assert-Condition (($attributes -band [IO.FileAttributes]::Directory) -eq 0) 'ReceiptFile must be a regular file.'
+        $receiptInfo = New-Object IO.FileInfo($script:ReceiptPath)
+        $receiptAcl = $receiptInfo.GetAccessControl()
+        $receiptOwner = $receiptAcl.GetOwner([Security.Principal.SecurityIdentifier])
+        $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        Assert-Condition ($receiptOwner.Equals($currentUser)) 'ReceiptFile owner changed before write.'
+        Assert-Condition ($receiptAcl.AreAccessRulesProtected) 'ReceiptFile DACL is not private.'
+        Assert-Condition ($receiptInfo.Length -eq 0) 'ReceiptFile is not empty before write.'
+
+        $stream = [IO.File]::Open($script:ReceiptPath, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        Assert-Condition ($stream.Length -eq 0) 'ReceiptFile changed before write.'
         $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($json + "`n")
         $stream.Write($bytes, 0, $bytes.Length)
-    } finally { $stream.Dispose() }
-    Set-PrivateFile $script:ReceiptPath
+        $stream.Flush()
+        $stream.Dispose()
+        $stream = $null
+        $complete = $true
+    } finally {
+        if ($null -ne $stream) { try { $stream.Dispose() } catch { } }
+        if ($created -and -not $complete -and (Test-PathEntry $script:ReceiptPath)) {
+            try {
+                Assert-NotReparse $script:ReceiptPath 'ReceiptFile during failed-write cleanup'
+                $cleanupInfo = New-Object IO.FileInfo($script:ReceiptPath)
+                $cleanupOwner = $cleanupInfo.GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier])
+                $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().User
+                Assert-Condition ($cleanupOwner.Equals($currentUser)) 'ReceiptFile owner changed during failed-write cleanup.'
+                if ($cleanupInfo.Length -eq 0) { [IO.File]::Delete($script:ReceiptPath) }
+            } catch { }
+        }
+    }
+    $script:ReceiptWritten = $true
 }
 
 $failure = ''
@@ -161,6 +202,9 @@ try {
     Assert-Condition ([Environment]::Is64BitOperatingSystem) 'The x64 MSVC package requires 64-bit Windows.'
     Assert-Condition ([Environment]::OSVersion.Version.Build -ge 22000) 'This harness is scoped to Windows 11 builds (22000 or newer).'
     Assert-Condition ([IO.File]::Exists((Join-Path $PSHOME 'powershell.exe'))) 'Windows PowerShell executable could not be resolved.'
+    $executionPolicies = Get-ExecutionPolicy -List
+    Assert-Condition ($executionPolicies.MachinePolicy -eq 'Undefined' -and $executionPolicies.UserPolicy -eq 'Undefined') 'A Group Policy controls PowerShell execution; the harness will not override it.'
+    Assert-Condition ((Get-ExecutionPolicy) -ne 'Restricted') 'PowerShell is Restricted; start this disposable test run with -ExecutionPolicy Bypass (process scope only).'
     Add-Type -AssemblyName System.IO.Compression
     Assert-Condition ($null -ne [IO.Compression.ZipArchive]) 'The .NET ZipArchive API is unavailable.'
     Assert-Condition ([Environment]::UserInteractive -and [Diagnostics.Process]::GetCurrentProcess().SessionId -ne 0) 'An interactive user session is required.'
@@ -170,6 +214,7 @@ try {
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     Assert-Condition (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 'Run unelevated as a normal user.'
 
+    $script:Stage = 'input-validation'
     $archivePath = [IO.Path]::GetFullPath($AgentArchive)
     $installerPath = [IO.Path]::GetFullPath($Installer)
     Assert-Condition ([IO.Path]::IsPathRooted($AgentArchive) -and [IO.Path]::IsPathRooted($Installer)) 'AgentArchive and Installer must be absolute paths.'
@@ -179,12 +224,14 @@ try {
     Assert-Condition ((Get-Sha256 $archivePath) -eq $ArchiveSha256.ToLowerInvariant()) 'AgentArchive digest does not match ArchiveSha256.'
     Add-Result 'trusted-archive-digest' 'PASS' 'sha256-matches-supplied-trusted-digest'
 
+    $script:Stage = 'fresh-root-check'
     $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
     Assert-Condition (-not [string]::IsNullOrEmpty($localAppData)) 'LocalAppData is unavailable.'
     $script:Root = [IO.Path]::GetFullPath((Join-Path $localAppData 'HostLink\Agent'))
     $rootParent = [IO.Path]::GetDirectoryName($script:Root)
     Assert-PathChainNotReparse $rootParent 'HostLink root parent'
     Assert-Condition (-not (Test-PathEntry $script:Root)) 'The HostLink Agent root already exists; refusing to inspect, adopt, or modify it.'
+    $script:RootAbsentAtStart = $true
     Add-Result 'fresh-install-root' 'PASS' 'root-absent-at-start'
 
     $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
@@ -199,6 +246,7 @@ try {
     Add-Result 'owned-private-temp' 'PASS' 'unique-current-user-only-temporary-directory'
     if (-not [string]::IsNullOrEmpty($ReceiptFile)) { $script:ReceiptPath = Test-ReceiptPath $ReceiptFile }
 
+    $script:Stage = 'archive-contract'
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [IO.Compression.ZipFile]::OpenRead($archivePath)
     try {
@@ -236,6 +284,7 @@ try {
     $edition = $script:WindowsEdition
     $script:WindowsEdition = $edition -replace '[^A-Za-z0-9_.-]', ''
 
+    $script:Stage = 'fixture-creation'
     $configPath = Join-Path $script:Workspace 'agent.json'
     $secretPath = Join-Path $script:Workspace 'control.secret'
     $identityPath = Join-Path $script:Workspace 'ssh-identity'
@@ -293,6 +342,7 @@ try {
     [IO.File]::WriteAllText($configPath, (ConvertTo-Json -InputObject $config -Depth 8), (New-Object Text.UTF8Encoding($false)))
     Add-Result 'private-manual-config-and-ssh-fixtures' 'PASS' 'config-v1;root-jobs;private-secret;ed25519-keys;reserved-hostname;no-network'
 
+    $script:Stage = 'source-exact-version'
     # Query the executable from the archive only after extracting it to the owned workspace.
     $zip = [IO.Compression.ZipFile]::OpenRead($archivePath)
     try {
@@ -333,6 +383,7 @@ try {
         Add-Result 'negative-reparse-config' 'SKIP' 'Windows did not grant symbolic-link creation capability'
     }
 
+    $script:Stage = 'manual-install'
     $installResult = Invoke-PowerShellFile $installerPath @('-ArchiveFile', $archivePath, '-ArchiveSha256', $ArchiveSha256, '-PackageVersion', $packageVersion, '-Target', $target, '-ConfigFile', $configPath)
     Assert-Condition ($installResult.exit_code -eq 0) 'Source-exact manual-mode installer failed; any partial root is retained for investigation.'
     Assert-Condition ((Test-Path -LiteralPath $script:Root -PathType Container)) 'Installer returned success without creating the expected root.'
@@ -343,11 +394,13 @@ try {
     Set-PrivateFile $script:RootSentinel
     Add-Result 'native-manual-install' 'PASS' 'source-exact-msvc-installer-completed-unelevated'
 
+    $script:Stage = 'installed-check'
     $installedAgent = Join-Path $script:Root 'hostlink-agent\bin\hostlink-agent.exe'
     $checkOutput = @(& $installedAgent check --config $configPath 2>$null)
     Assert-Condition ($LASTEXITCODE -eq 0) 'Installed Agent check --config failed.'
     Add-Result 'installed-agent-check' 'PASS' 'check-command-exit-0'
 
+    $script:Stage = 'idempotent-update'
     $script:RootInventory = Get-RootInventory $script:Root
     $stagedArchive = Join-Path $script:Root '.native-acceptance-package.zip'
     [IO.File]::Copy($archivePath, $stagedArchive, $false)
@@ -365,17 +418,14 @@ try {
     Add-Result 'post-update-agent-check' 'PASS' 'check-command-exit-0'
     $script:Success = $true
     Add-Result 'native-windows-context' 'PASS' ('windows-build-' + [Environment]::OSVersion.Version.Build + ';edition-' + $script:WindowsEdition + ';powershell-' + $PSVersionTable.PSVersion.ToString() + ';clr-' + [Environment]::Version.ToString())
-    Write-Output ('PASS source_sha=' + $SourceSha.ToLowerInvariant())
-    Write-Output ('PASS archive_sha256=' + $ArchiveSha256.ToLowerInvariant())
-    Write-Output ('PASS agent_exe_sha256=' + $script:ArchiveAgentSha)
-    foreach ($result in $script:Results) { Write-Output ($result.status + ' ' + $result.name + ' ' + $result.detail) }
 } catch {
-    $failure = $_.Exception.Message -replace '[\r\n]+', ' '
-    $failure = $failure -replace '[A-Za-z]:\\[^ ]+', '<local-path>'
+    # Exception text can contain usernames, local paths, config values, or key material.
+    # Keep the receipt and console output limited to a stable stage identifier.
+    $failure = 'harness-failure-at-' + $script:Stage
     Add-Result 'harness' 'FAIL' $failure
     Write-Output ('FAIL ' + $failure)
 } finally {
-    if ($script:Success -and $script:RootCreatedByThisRun) {
+    if ($script:Success -and $script:RootAbsentAtStart -and $script:RootCreatedByThisRun -and $null -ne $script:RootInventory) {
         try {
             Assert-PathChainNotReparse ([IO.Path]::GetDirectoryName($script:Root)) 'HostLink root parent during cleanup'
             Assert-NotReparse $script:Root 'Install root during cleanup'
@@ -387,15 +437,19 @@ try {
             [IO.Directory]::Delete($script:Root, $true)
             Assert-Condition (-not (Test-PathEntry $script:Root)) 'Install root remains after cleanup.'
             $script:CleanupState = 'success-root-removed-and-absence-confirmed'
-            Write-Output 'PASS cleanup=root-removed-absence-confirmed'
+            Add-Result 'install-root-cleanup' 'PASS' 'root-removed-and-absence-confirmed'
         } catch {
             $script:CleanupState = 'warning-root-retained-cleanup-guard-failed'
-            Write-Output 'FAIL cleanup=root-retained-guard-failed'
-            Write-Warning 'Cleanup guard failed. The HostLink root was retained; inspect it manually. No recursive deletion was attempted after the guard failure.'
             $script:Success = $false
+            Add-Result 'install-root-cleanup' 'FAIL' 'root-retained-cleanup-guard-failed'
+            Write-Warning 'Cleanup guard failed. The HostLink root was retained; inspect it manually. No recursive deletion was attempted after the guard failure.'
         }
     } elseif (Test-PathEntry $script:Root) {
         $script:CleanupState = 'warning-root-retained-after-failure-or-uncertain-ownership'
+        if ($script:Success) {
+            $script:Success = $false
+            Add-Result 'install-root-cleanup' 'FAIL' 'root-retained-after-ownership-check'
+        }
         Write-Warning 'The HostLink root exists after a failed or uncertain run and was retained for investigation. Do not retry until you inspect it.'
     } else {
         $script:CleanupState = 'root-absent'
@@ -412,6 +466,12 @@ try {
             Remove-Item -LiteralPath $script:Workspace -Recurse -Force
         } catch {
             Write-Warning 'Owned temporary workspace cleanup failed; inspect the current user temporary directory.'
+            $script:Success = $false
+            if ($script:CleanupState -eq 'success-root-removed-and-absence-confirmed') {
+                $script:CleanupState = 'success-root-removed;warning-workspace-retained-after-cleanup-failure'
+            } else {
+                $script:CleanupState = 'warning-workspace-retained-after-cleanup-failure'
+            }
         }
     }
     try { Write-Receipt $(if ($script:Success) { 'PASS' } else { 'FAIL' }) $failure } catch {
@@ -420,5 +480,18 @@ try {
     }
 }
 
+if ($script:Success) {
+    Write-Output ('PASS source_sha=' + $SourceSha.ToLowerInvariant())
+    Write-Output ('PASS archive_sha256=' + $ArchiveSha256.ToLowerInvariant())
+    Write-Output ('PASS agent_exe_sha256=' + $script:ArchiveAgentSha)
+    foreach ($result in $script:Results) { Write-Output ($result.status + ' ' + $result.name + ' ' + $result.detail) }
+    Write-Output ('PASS cleanup=' + $script:CleanupState)
+    if ($script:ReceiptWritten) { Write-Output 'PASS receipt=written-private' }
+} else {
+    foreach ($result in $script:Results | Where-Object { $_.status -eq 'FAIL' }) {
+        Write-Output ('FAIL ' + $result.name + ' ' + $result.detail)
+    }
+    Write-Output ('FAIL cleanup=' + $script:CleanupState)
+}
 if (-not $script:Success) { exit 1 }
 exit 0

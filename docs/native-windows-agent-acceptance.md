@@ -34,6 +34,13 @@ Use a new receipt filename under the current user's `%TEMP%` directory. The
 script creates the receipt with create-new semantics and excludes usernames,
 machine names, paths, key material, and control secrets.
 
+If the current Windows PowerShell policy is `Restricted`, start the harness
+with the invocation below in the disposable test-user session. The
+`-ExecutionPolicy Bypass` option applies to that PowerShell process and its
+child processes only; do not change LocalMachine, CurrentUser, or Group Policy
+settings. A machine or user Group Policy that blocks script execution remains
+in force and must not be worked around for this acceptance run.
+
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\native_windows_agent_acceptance.ps1 `
   -SourceSha 0123456789abcdef0123456789abcdef01234567 `
@@ -50,7 +57,8 @@ prints CI paths, Windows usernames, hostnames, test keys, or secrets.
 
 ## Checks performed
 
-The script emits `PASS` markers and an optional JSON receipt containing the
+The script emits `PASS` markers only after checks, root/workspace cleanup, and
+requested receipt creation have completed. The private JSON receipt contains the
 source SHA, archive SHA-256, extracted Agent executable SHA-256, Windows build
 and edition, PowerShell/CLR versions, subcheck results, and cleanup result.
 Negative cases must fail before the install root appears:
