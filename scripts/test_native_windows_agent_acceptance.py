@@ -12,6 +12,11 @@ class NativeWindowsAgentAcceptanceTest(unittest.TestCase):
             encoding="utf-8"
         )
 
+    def test_windows_powershell_51_passes_an_explicit_empty_ssh_key_passphrase(self) -> None:
+        harness = self.harness_source()
+        self.assertIn("& $sshKeygen -q -t ed25519 -N '\"\"'", harness)
+        self.assertNotIn("& $sshKeygen -q -t ed25519 -N ''", harness)
+
     def test_harness_resolves_updater_from_installed_agent_bin(self) -> None:
         harness = self.harness_source()
         updater = (ROOT / "crates" / "onec-agent" / "src" / "managed_update.rs").read_text(

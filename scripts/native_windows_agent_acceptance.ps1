@@ -304,7 +304,9 @@ try {
         [pscustomobject]@{ path = $hostKeyPath; comment = 'hostlink-native-acceptance-host' }
     )
     foreach ($key in $keySpecifications) {
-        & $sshKeygen -q -t ed25519 -N '' -C $key.comment -f $key.path 2>$null
+        # Windows PowerShell 5.1 drops an unquoted empty native argument.
+        # This literal reaches ssh-keygen as an empty passphrase on Windows.
+        & $sshKeygen -q -t ed25519 -N '""' -C $key.comment -f $key.path 2>$null
         Assert-Condition ($LASTEXITCODE -eq 0 -and [IO.File]::Exists($key.path) -and [IO.File]::Exists($key.path + '.pub')) 'OpenSSH Ed25519 key generation failed.'
         Set-PrivateFile $key.path
     }
