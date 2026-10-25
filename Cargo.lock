@@ -924,6 +924,7 @@ name = "hostlink"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "libc",
  "rand",
  "russh",
  "russh-sftp",
@@ -935,6 +936,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "uuid",
+ "windows-permissions",
 ]
 
 [[package]]
