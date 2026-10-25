@@ -783,16 +783,17 @@ fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        if opened_metadata.volume_serial_number().is_none()
-            || opened_metadata.file_index().is_none()
-            || metadata.volume_serial_number() != opened_metadata.volume_serial_number()
-            || metadata.file_index() != opened_metadata.file_index()
+        if metadata.file_size() != opened_metadata.file_size()
+            || metadata.last_write_time() != opened_metadata.last_write_time()
+            || metadata.creation_time() != opened_metadata.creation_time()
         {
             return Err(invalid_data(
                 "job executable path changed while opening for verification",
             ));
         }
     }
+    #[cfg(windows)]
+    let original_identity = windows_file_identity(&file)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -836,12 +837,13 @@ fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
     {
         use std::os::windows::fs::MetadataExt;
         let path_after_hash = std::fs::symlink_metadata(program)?;
-        if after_hash.volume_serial_number() != opened_metadata.volume_serial_number()
-            || after_hash.file_index() != opened_metadata.file_index()
-            || after_hash.len() != opened_metadata.len()
-            || path_after_hash.file_attributes() & 0x400 != 0
-            || path_after_hash.volume_serial_number() != opened_metadata.volume_serial_number()
-            || path_after_hash.file_index() != opened_metadata.file_index()
+        if path_after_hash.file_attributes() & 0x400 != 0
+            || after_hash.file_size() != opened_metadata.file_size()
+            || after_hash.last_write_time() != opened_metadata.last_write_time()
+            || path_after_hash.file_size() != opened_metadata.file_size()
+            || path_after_hash.last_write_time() != opened_metadata.last_write_time()
+            || original_identity != windows_file_identity(&file)?
+            || original_identity != windows_file_identity(&std::fs::File::open(program)?)?
         {
             return Err(invalid_data(
                 "job executable changed during source verification",
@@ -868,6 +870,36 @@ fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
         }
     }
     Ok(program.to_path_buf())
+}
+
+/// Stable Win32 replacement for nightly-only MetadataExt file_index and
+/// volume_serial_number. GetFileInformationByHandle is present on NT6.1.
+#[cfg(windows)]
+fn windows_file_identity(file: &std::fs::File) -> io::Result<(u32, u64, u64, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: file is an open, owned File handle, and info points to a
+    // correctly sized writable Win32 output structure.
+    let result = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
+    if result == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    let size = (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow);
+    let write_time = (u64::from(info.ftLastWriteTime.dwHighDateTime) << 32)
+        | u64::from(info.ftLastWriteTime.dwLowDateTime);
+    // Ambiguous file identity or multiple hardlinks cannot establish
+    // that this source is the single privately controlled executable.
+    if index == 0 || info.nNumberOfLinks != 1 {
+        return Err(invalid_data(
+            "source-pinned Windows executable identity is ambiguous or multiply linked",
+        ));
+    }
+    Ok((info.dwVolumeSerialNumber, index, size, write_time))
 }
 
 fn digest_writer<'a>(digest: &'a mut Sha256) -> impl io::Write + 'a {
