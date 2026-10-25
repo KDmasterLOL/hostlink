@@ -243,6 +243,7 @@ fn validate_user_owned_root(root: &Path) -> io::Result<()> {
                 "Agent install root is outside this user's HostLink directory",
             ));
         }
+        validate_windows_private_acl(root, &metadata)?;
     }
     Ok(())
 }
@@ -281,6 +282,8 @@ fn validate_archive_path(root: &Path, archive: &Path) -> io::Result<PathBuf> {
     if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
         return Err(invalid("Agent archive is not a regular file"));
     }
+    #[cfg(windows)]
+    validate_windows_private_acl(&canonical_archive, &metadata)?;
     Ok(canonical_archive)
 }
 
@@ -398,6 +401,7 @@ fn validate_and_stage_archive(
             .write(true)
             .create_new(true)
             .open(&destination)?;
+        set_staged_file_permissions(&destination, relative)?;
         let mut hasher = Sha256::new();
         let mut written = 0_u64;
         let mut manifest_capture = (relative == PACKAGE_MANIFEST).then(Vec::new);
@@ -491,6 +495,8 @@ fn package_files(target: &str) -> Vec<String> {
 
 fn read_install_metadata(path: &Path) -> io::Result<InstallMetadata> {
     let file = open_private_file(path, false)?;
+    #[cfg(windows)]
+    validate_windows_private_acl(path, &file.metadata()?)?;
     let mut bytes = Vec::new();
     file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > 64 * 1024 {
@@ -519,6 +525,8 @@ fn validate_installed(bin_root: &Path, metadata: &InstallMetadata, target: &str)
             "installed Agent bin directory is missing or unsafe",
         ));
     }
+    #[cfg(windows)]
+    validate_windows_private_acl(bin_root, &bin_metadata)?;
     semver::Version::parse(&metadata.installed_version)
         .map_err(|_| invalid("installed Agent version metadata is malformed"))?;
     validate_sha256(&metadata.installed_package_sha256)
@@ -546,6 +554,8 @@ fn validate_installed(bin_root: &Path, metadata: &InstallMetadata, target: &str)
                 "installed Agent bin contains an unsafe or unexpected entry",
             ));
         }
+        #[cfg(windows)]
+        validate_windows_private_acl(&entry.path(), &entry.metadata()?)?;
     }
     if actual_names != expected {
         return Err(invalid(
@@ -1016,7 +1026,9 @@ fn set_private_directory(path: &Path) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    set_windows_private_acl(path, true)?;
+    #[cfg(not(any(unix, windows)))]
     let _ = path;
     Ok(())
 }
@@ -1032,7 +1044,12 @@ fn set_staged_file_permissions(path: &Path, relative: &str) -> io::Result<()> {
         };
         fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let _ = relative;
+        set_windows_private_acl(path, false)?;
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = (path, relative);
     Ok(())
 }
@@ -1046,6 +1063,93 @@ fn is_reparse_point(metadata: &fs::Metadata) -> bool {
 #[cfg(not(windows))]
 fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
+}
+
+#[cfg(windows)]
+fn validate_windows_private_acl(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_permissions::constants::{AceType, SeObjectType, SecurityInformation};
+    use windows_permissions::wrappers::GetNamedSecurityInfo;
+
+    if metadata.file_attributes() & 0x400 != 0 {
+        return Err(invalid("Windows updater path is a reparse point"));
+    }
+    let descriptor = GetNamedSecurityInfo(
+        path.as_os_str(),
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::Owner,
+    )
+    .map_err(io::Error::other)?;
+    let current =
+        windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
+    if descriptor.owner() != Some(current.as_ref()) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Windows updater path is not owned by the current user",
+        ));
+    }
+    let sddl = windows_permissions::wrappers::ConvertSecurityDescriptorToStringSecurityDescriptor(
+        &descriptor,
+        SecurityInformation::Dacl,
+    )
+    .map_err(io::Error::other)?;
+    if !sddl.to_string_lossy().starts_with("D:P") {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Windows updater ACL inherits permissions",
+        ));
+    }
+    let dacl = descriptor
+        .dacl()
+        .ok_or_else(|| invalid("Windows updater path has no DACL"))?;
+    for index in 0..dacl.len() {
+        let ace = dacl
+            .get_ace(index)
+            .ok_or_else(|| invalid("Windows updater DACL entry is unreadable"))?;
+        if matches!(
+            ace.ace_type(),
+            AceType::ACCESS_ALLOWED_ACE_TYPE
+                | AceType::ACCESS_ALLOWED_CALLBACK_ACE_TYPE
+                | AceType::ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
+                | AceType::ACCESS_ALLOWED_OBJECT_ACE_TYPE
+        ) && ace.sid() != Some(current.as_ref())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Windows updater ACL grants access to a foreign owner",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_windows_private_acl(path: &Path, directory: bool) -> io::Result<()> {
+    use windows_permissions::constants::{SeObjectType, SecurityInformation};
+    use windows_permissions::wrappers::{ConvertSidToStringSid, SetNamedSecurityInfo};
+    use windows_permissions::{LocalBox, SecurityDescriptor};
+
+    let current =
+        windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
+    let current = ConvertSidToStringSid(&current).map_err(io::Error::other)?;
+    let inheritance = if directory { "OICI" } else { "" };
+    let sddl = format!("D:P(A;{inheritance};FA;;;{})", current.to_string_lossy());
+    let descriptor: LocalBox<SecurityDescriptor> = sddl.parse().map_err(io::Error::other)?;
+    let dacl = descriptor
+        .dacl()
+        .ok_or_else(|| invalid("cannot create private Windows updater DACL"))?;
+    SetNamedSecurityInfo(
+        path.as_os_str(),
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        None,
+        None,
+        Some(dacl),
+        None,
+    )
+    .map_err(io::Error::other)?;
+    let metadata = fs::symlink_metadata(path)?;
+    validate_windows_private_acl(path, &metadata)
 }
 
 fn invalid(message: &'static str) -> io::Error {
