@@ -1,16 +1,16 @@
-# HostLink engineering contract
+# SSH-only parallel rewrite
 
-HostLink is a stand-alone, general-purpose managed-host SSH and reverse-tunnel product.
-It must not depend on OneC Toolkit source, 1C binaries, infobase models or project policy.
+Branch rewrite/russh-minimal is experimental and independent of current HostLink dev.
+Do not modify, merge or promote dev/main, tags or deployed infrastructure.
+The former Agent JSONL TCP listener, Win32 OpenSSH/sshd, release/update engine,
+legacy Nextest attestation, Hub and source dependencies are excluded from this
+compiled workspace. Keep only russh as SSH transport, russh-sftp and a bounded
+process execution primitive.
 
-Read README.md and docs/extraction.md before edits. Use task branches and clean
-worktrees for independent slices; do not overwrite another agent's work. Preserve exact
-protocol compatibility and host identities until migration is separately accepted.
-Prefer Rust standard-library and established crates to new generic abstractions.
-
-All target mutations, deployments, service migration, production host operations,
-main/tag/release publication and deletion from the original Toolkit are outside the
-initial extraction authorization. Test on owned disposable fixtures only.
-
-Verify fmt, Clippy, tests, executable/API parity, including Windows 7 where possible.
-Do not report acceptance of native scenarios unless actually run.
+Short SSH exec cancels on channel close; durable jobs are a different lifetime
+owned by the Agent process. Reconnect must NEVER silently replay a started job.
+Use exact host key pins, controller authorized Ed25519 keys, private owned paths,
+bounded concurrency and byte streams, fail-closed security and Windows 7 PS2 support.
+No unmanaged background processes, false success or unbounded retries.
+Changes to real servers require independently verified disposable scope; do not
+alter 1C production databases, running services or original OneC Toolkit.

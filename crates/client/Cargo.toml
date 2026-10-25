@@ -1,0 +1,23 @@
+[package]
+name = "hostlink"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+russh.workspace = true
+russh-sftp.workspace = true
+tokio.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+secrecy.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+rand.workspace = true
