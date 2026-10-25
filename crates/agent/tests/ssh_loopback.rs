@@ -52,6 +52,7 @@ async fn connect(addr: SocketAddr, host_key: &russh::keys::PublicKey) -> client:
     .expect("connect to embedded SSH server")
 }
 
+#[cfg(unix)]
 async fn authenticate(session: &mut client::Handle<Pin>, key: PrivateKey) -> bool {
     session
         .authenticate_publickey("agent", PrivateKeyWithHashAlg::new(Arc::new(key), None))
@@ -60,6 +61,7 @@ async fn authenticate(session: &mut client::Handle<Pin>, key: PrivateKey) -> boo
         .success()
 }
 
+#[cfg(unix)]
 async fn job_request(session: &mut client::Handle<Pin>, bytes: &[u8]) -> Vec<u8> {
     let mut channel = session
         .channel_open_session()
@@ -102,6 +104,7 @@ async fn job_request(session: &mut client::Handle<Pin>, bytes: &[u8]) -> Vec<u8>
     frame[4..].to_vec()
 }
 
+#[cfg(unix)]
 fn framed_json(value: &serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(value).expect("serialize jobs request")
 }
