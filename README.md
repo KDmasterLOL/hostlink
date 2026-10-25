@@ -7,9 +7,10 @@ Status: additive extraction in progress. The independent workspace contains
 neutral Rust packages `hostlink-access`, `hostlink-agent`, `hostlink-hub`,
 `hostlink-protocol`, and `hostlink-core`; the three binaries and standalone
 Agent-only package contract are separate from OneC Toolkit. Embedded SSH exec
-has Linux loopback regression coverage. External Windows/Win7 acceptance is
-still pending. Legacy wire and config identities remain preserved; no standalone
-release has yet passed native acceptance.
+has Linux loopback and native Windows 11 regression coverage. Windows 7
+PowerShell 2 SSH exec remains unaccepted, and no standalone release has passed
+the required full native compatibility matrix. Legacy wire and config
+identities remain preserved.
 
 The hidden `__embedded-ssh-preflight` command keeps its existing auth, SFTP and
 forwarding checks by default. Windows operators may explicitly add `--check-exec`
@@ -39,11 +40,12 @@ cargo test --workspace --locked
 python3 -m unittest discover -s scripts -p 'test_*.py' -v
 ```
 
-Source CI also compiles and packages independent Linux and current-Windows
-binaries without publishing them. This does not establish native compatibility
-or fleet-rollout acceptance. Windows 7 x64/x86 require separate source-exact
-Tier-3 toolchain and NT6.1 runtime testing; see
-[compatibility gates](docs/compatibility.md).
+The supported build/test workflow uses local HOME tooling rather than GitHub
+Actions as an executor. Source-exact HostLink `f573bd1` was locally built and
+packaged for Windows 7 x64/x86 with pinned nightly, `cargo-xwin`, compiled
+standard library and static CRT; both PE images and archive digests were verified.
+These are build candidates, **not** successful native Windows 7 runtime results.
+See [compatibility gates](docs/compatibility.md).
 
 The Agent-only Windows installer supports either a manually prepared `-ConfigFile` or a fresh
 user-scope Hub enrollment using `-HubUrl` and `-EnrollmentTokenFile` together. Manual configs
@@ -51,10 +53,12 @@ must explicitly set `jobs_dir` to the new `%LOCALAPPDATA%\HostLink\Agent\jobs` d
 otherwise installation fails before publishing because the updater could miss active work. Enrollment creates
 new private SSH identities and pinned Hub-provided keys before publishing config into a fresh
 `%LOCALAPPDATA%\HostLink\Agent` root. It never installs a service or starts the Agent. The script
-uses PowerShell 2-compatible syntax, but ZIP extraction requires the .NET Framework 4.5
-`ZipArchive` type. PowerShell 2 on stock Windows 7/CLR 2 is unverified and may not load that type;
-the installer fails closed when `ZipArchive` is unavailable. Native Win7 acceptance remains
-blocked until tested on an owned Win7 environment.
+uses PowerShell 2-compatible syntax. The original ZIP-only extraction path
+requires .NET Framework 4.5 `ZipArchive` and fails closed when unavailable.
+Windows 7 targets **require** the separately verified
+`-AgentExecutableFile`/`-AgentExecutableSha256` pair, which invokes the
+existing Rust Agent-only `__self-update` path without CLR4 `ZipArchive`.
+A native successful install on Windows 7 has not been demonstrated.
 Controller invites accept the optional paired flags `--direct-agent-executable-url` and
 `--direct-agent-executable-sha256` for a trusted `hostlink-agent.exe` sidecar. Both are
 required when the selected package target is `x86_64-win7-windows-msvc` or

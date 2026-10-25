@@ -38,20 +38,28 @@ remain the authority until a separately authorized, tested cutover.
 6. Only after the new release and infra orchestration are separately accepted
    may source ownership be removed from OneC Toolkit in a further task.
 
-## Automated CI coverage
+## Local build and native acceptance evidence
 
-The standalone `.github/workflows/ci.yml` checks locked Linux workspace
-compilation, format, strict Clippy, unit/loopback tests, negative architecture
-guards, and deterministic package inventories/SHA-256 sidecars. Current Windows
-x64 runs compile/Clippy and packages controller and Agent from independently
-built binaries. These jobs do not install or update managed machines or publish
-a release.
+GitHub Actions is no longer the HostLink build/test executor. Run locked Rust
+checks, strict Clippy, focused loopback regressions, negative architecture
+guards and packaging validation locally on HOME/approved disposable fixtures.
 
-Windows 7 triples `x86_64-win7-windows-msvc` and `i686-win7-windows-msvc`
-are Rust Tier 3 without distributed standard-library artifacts. Dedicated
-source-exact cross-toolchain builds, loader checks, process/tunnel behavior on
-owned NT6.1 fixtures, and version-skew evidence remain mandatory. Generic
-Windows CI is not a substitute. See the
+For **HostLink `f573bd1a12d3be3865af860d77d6442cd9f903d8`** HOME produced
+`x86_64-win7-windows-msvc` and `i686-win7-windows-msvc` Agent candidates
+using `nightly-2026-08-22`, `cargo-xwin 0.23.1`,
+`-Z build-std=std,panic_abort` and static CRT. Both builds and PE/ZIP checks
+passed: target machine x64 `0x8664`, x86 `0x14C`, no dynamic UCRT/VCRuntime
+imports, exact four-file Agent-only ZIP with SHA-256 sidecars. The archived
+build receipt is local to HOME at
+`~/.cache/hostlink/win7-builds/f573bd1/candidate-verification.json`.
+
+**Neither source-exact f573 Win7 candidate has passed an actual NT6.1 loader,
+SSH exec, installer or enrollment acceptance test.** An earlier Win7 candidate
+passed version/config and SSH auth/SFTP/TCP on a controlled NT6.1 user session,
+but its opt-in PowerShell 2 exec binary-stdin probe failed; its earlier evidence
+cannot be reused as proof for f573. Native access to the owned Win7 fixture must
+be restored before further acceptance. Tier-3 images are not ordinary
+`*-pc-windows-msvc` builds. See the
 [Rust platform documentation](https://doc.rust-lang.org/rustc/platform-support/win7-windows-msvc.html).
 
 The Agent-only PowerShell 2 installer can bypass CLR4 `ZipArchive` only when
@@ -59,9 +67,9 @@ both `-AgentExecutableFile` and `-AgentExecutableSha256` are supplied. It
 checks the staged candidate and ZIP against caller-provided SHA-256 pins, then
 uses that candidate's existing `__self-update --agent-only` command to verify
 and install the ZIP. Win7 targets require this pair; there is no alternate
-extractor. Current Windows MSVC artifacts are not Win7 candidates. No dedicated
-Tier-3 Win7 executable or native bootstrap acceptance is established by this
-installer change.
+extractor. Current Windows MSVC artifacts are not Win7 candidates. Dedicated
+Tier-3 Win7 x64/x86 binaries have been locally built and PE-inspected, but
+**native bootstrap and end-to-end enrollment acceptance are still missing**.
 
 Embedded SSH exec on Windows requires a verified non-elevated, non-LocalSystem
 process token; elevated contexts receive an explicit SSH request denial.

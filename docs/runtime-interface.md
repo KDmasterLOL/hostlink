@@ -65,10 +65,12 @@ Windows uses `powershell.exe -NoProfile -NonInteractive -Command` only after
 checking that the Agent process is non-elevated and not LocalSystem. The SSH
 authentication username is **not** an OS-level impersonation identity. Scripts
 in a privileged Windows service context are rejected rather than gaining
-LocalSystem rights. The installer source is checked for PowerShell 2 syntax, but
-its `ZipArchive` extraction needs .NET Framework 4.5; stock Windows 7 PowerShell
-2/CLR 2 may not provide that type. Win7 native installer acceptance remains
-blocked until verified in an owned environment.
+LocalSystem rights. The installer has a CLR4 `ZipArchive` dependency only on
+its ZIP-only extraction path; Windows 7 requires an exact-SHA verified
+`-AgentExecutableFile`/`-AgentExecutableSha256` sidecar, delegating ZIP
+verification and publication to the existing Rust Agent-only updater. This
+source-level design and successful Tier-3 compilation are **not** native Win7
+installer or PowerShell 2 SSH-exec acceptance.
 
 The convenient `hostlink run HOST LOCAL_SCRIPT` CLI is not implemented yet;
 callers may compose SFTP upload and explicit SSH exec themselves. SSH hooks
