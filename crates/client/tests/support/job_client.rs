@@ -190,7 +190,12 @@ fn start() -> Start {
     Start {
         id: ID.into(),
         spec: JobSpec {
-            program: "/usr/bin/true".into(),
+            program: if cfg!(windows) {
+                r"C:\hostlink-fixture\runner.exe"
+            } else {
+                "/usr/bin/true"
+            }
+            .into(),
             args: vec!["--version".into()],
             cwd: None,
             source_sha256: "a".repeat(64),

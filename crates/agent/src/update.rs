@@ -126,10 +126,10 @@ pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
     #[cfg(windows)]
     {
         let _ = (manifest, staged_files);
-        return Err(io::Error::new(
+        Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "Windows Agent update requires the stopped-runtime launcher handoff",
-        ));
+        ))
     }
 
     #[cfg(not(windows))]

@@ -13,6 +13,8 @@ fn private_file(path: &std::path::Path, content: &[u8]) {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("private test key ACL");
     }
+    #[cfg(windows)]
+    protect_windows_fixture(path, false);
 }
 
 fn private_directory(path: &std::path::Path) {
@@ -22,6 +24,34 @@ fn private_directory(path: &std::path::Path) {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
             .expect("private directory ACL");
     }
+    #[cfg(windows)]
+    protect_windows_fixture(path, true);
+}
+
+#[cfg(windows)]
+fn protect_windows_fixture(path: &std::path::Path, directory: bool) {
+    use windows_permissions::constants::{SeObjectType, SecurityInformation};
+    use windows_permissions::wrappers::{ConvertSidToStringSid, SetNamedSecurityInfo};
+    use windows_permissions::{LocalBox, SecurityDescriptor};
+
+    let current = windows_permissions::utilities::current_process_sid()
+        .expect("read current Windows user SID");
+    let sid = ConvertSidToStringSid(&current).expect("format current Windows user SID");
+    let flags = if directory { "OICI" } else { "" };
+    let descriptor: LocalBox<SecurityDescriptor> =
+        format!("D:P(A;{flags};FA;;;{})", sid.to_string_lossy())
+            .parse()
+            .expect("construct protected current-user DACL");
+    SetNamedSecurityInfo(
+        path.as_os_str(),
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Owner | SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        Some(current.as_ref()),
+        None,
+        descriptor.dacl(),
+        None,
+    )
+    .expect("install private owned Windows fixture ACL");
 }
 
 #[tokio::test]

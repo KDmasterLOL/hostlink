@@ -479,6 +479,7 @@ fn validate_gateway(gateway: &GatewayHop) -> Result<(), SshClientError> {
 mod tests {
     use super::*;
     use russh::client::Handler;
+    #[cfg(unix)]
     use tempfile::tempdir;
 
     const PINNED_KEY: &str = "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ";
