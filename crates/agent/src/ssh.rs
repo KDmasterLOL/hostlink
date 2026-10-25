@@ -1,16 +1,26 @@
 //! Authenticated embedded russh server for short exec, SFTP, and direct TCP forwarding.
 
-use crate::{AgentConfig, exec, sftp::SftpSession};
+use crate::{
+    AgentConfig, exec,
+    jobs::{self, Admission, JobId, JobOutput, JobSpec, JobState, JobStore},
+    sftp::SftpSession,
+};
 use russh::keys::ssh_key::authorized_keys::AuthorizedKeys;
-use russh::keys::{Algorithm, PrivateKey, PublicKey};
+use russh::keys::{Algorithm, PrivateKey, PublicKey, PublicKeyBase64};
 use russh::server::{Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelId};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Mutex, Semaphore};
 
 const HOST_KEY_MAX_BYTES: usize = 64 * 1024;
@@ -23,6 +33,12 @@ const MAX_ACTIVE_SFTP_SESSIONS: usize = 8;
 const MAX_ACTIVE_EXEC_SESSIONS: usize = 4;
 const MAX_PENDING_SESSION_CHANNELS: usize = 16;
 const MAX_EXEC_COMMAND_BYTES: usize = 16 * 1024;
+const JOB_SUBSYSTEM: &str = "hostlink-jobs-v1";
+const JOB_FRAME_MAX_BYTES: usize = 64 * 1024;
+const MAX_ACTIVE_JOBS: usize = 16;
+const MAX_JOB_CHANNELS: usize = 32;
+const JOB_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const JOB_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) struct PreparedEmbeddedSshConfig {
     expected_user: Arc<str>,
@@ -39,6 +55,7 @@ struct EmbeddedServer {
     exec_slots: Arc<Semaphore>,
     exec_shutdown: processkit::CancellationToken,
     jobs_root: PathBuf,
+    jobs: Arc<JobRuntime>,
     connection_slots: Arc<Semaphore>,
 }
 
@@ -50,9 +67,20 @@ struct EmbeddedSession {
     exec_slots: Arc<Semaphore>,
     exec_shutdown: processkit::CancellationToken,
     jobs_root: PathBuf,
+    jobs: Arc<JobRuntime>,
     _connection_slot: Option<tokio::sync::OwnedSemaphorePermit>,
     active_exec: Arc<std::sync::Mutex<HashMap<ChannelId, processkit::CancellationToken>>>,
     session_channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
+    authenticated_controller: Option<String>,
+}
+
+struct JobRuntime {
+    store: JobStore,
+    start_lock: Mutex<()>,
+    slots: Arc<Semaphore>,
+    channel_slots: Arc<Semaphore>,
+    accepting: AtomicBool,
+    shutdown: processkit::CancellationToken,
 }
 
 /// Serves authenticated SSH/SFTP traffic on the configured loopback listener until shutdown.
@@ -87,8 +115,18 @@ where
     }
     let prepared = prepare(config)?;
     let jobs_root = validate_jobs_root(&config.jobs_root)?;
+    let store = JobStore::open(&jobs_root)?;
+    store.recover_nonterminal()?;
+    let jobs = Arc::new(JobRuntime {
+        store,
+        start_lock: Mutex::new(()),
+        slots: Arc::new(Semaphore::new(MAX_ACTIVE_JOBS)),
+        channel_slots: Arc::new(Semaphore::new(MAX_JOB_CHANNELS)),
+        accepting: AtomicBool::new(true),
+        shutdown: processkit::CancellationToken::new(),
+    });
     if config.gateway.is_none() {
-        return serve_prepared_until(listener, prepared, jobs_root, shutdown).await;
+        return serve_prepared_until(listener, prepared, jobs_root, jobs, shutdown).await;
     }
     let cancellation = processkit::CancellationToken::new();
     let shutdown_signal = async {
@@ -100,6 +138,7 @@ where
         listener,
         prepared,
         jobs_root,
+        jobs.clone(),
         cancellation.clone().cancelled_owned(),
     ));
     let mut tunnel = Box::pin(crate::tunnel::run(
@@ -119,10 +158,11 @@ where
     }
 }
 
-pub(crate) async fn serve_prepared_until<F>(
+async fn serve_prepared_until<F>(
     listener: tokio::net::TcpListener,
     prepared: PreparedEmbeddedSshConfig,
     jobs_root: PathBuf,
+    jobs: Arc<JobRuntime>,
     shutdown: F,
 ) -> io::Result<()>
 where
@@ -148,6 +188,7 @@ where
         exec_slots: Arc::new(Semaphore::new(MAX_ACTIVE_EXEC_SESSIONS)),
         exec_shutdown: processkit::CancellationToken::new(),
         jobs_root,
+        jobs: jobs.clone(),
         connection_slots: Arc::new(Semaphore::new(MAX_AUTHENTICATED_SESSIONS)),
     };
     let exec_shutdown = server.exec_shutdown.clone();
@@ -171,6 +212,24 @@ where
         }
     };
     exec_shutdown.cancel();
+    {
+        let _start = jobs.start_lock.lock().await;
+        jobs.accepting.store(false, Ordering::Release);
+        jobs.shutdown.cancel();
+    }
+    let all_job_slots = jobs
+        .slots
+        .clone()
+        .acquire_many_owned(MAX_ACTIVE_JOBS as u32);
+    if tokio::time::timeout(SHUTDOWN_GRACE, all_job_slots)
+        .await
+        .is_err()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "durable job process trees did not finish during Agent shutdown",
+        ));
+    }
     result
 }
 
@@ -186,9 +245,11 @@ impl russh::server::Server for EmbeddedServer {
             exec_slots: self.exec_slots.clone(),
             exec_shutdown: self.exec_shutdown.clone(),
             jobs_root: self.jobs_root.clone(),
+            jobs: self.jobs.clone(),
             _connection_slot: self.connection_slots.clone().try_acquire_owned().ok(),
             active_exec: Arc::new(std::sync::Mutex::new(HashMap::new())),
             session_channels: Arc::new(Mutex::new(HashMap::new())),
+            authenticated_controller: None,
         }
     }
 }
@@ -255,11 +316,15 @@ impl russh::server::Handler for EmbeddedSession {
         user: &str,
         public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
-        Ok(if self.accepts(user, public_key) {
-            Auth::Accept
+        if self.accepts(user, public_key) {
+            self.authenticated_controller = Some(format!(
+                "{:x}",
+                Sha256::digest(public_key.public_key_bytes())
+            ));
+            Ok(Auth::Accept)
         } else {
-            Auth::reject()
-        })
+            Ok(Auth::reject())
+        }
     }
 
     async fn channel_open_direct_tcpip(
@@ -341,7 +406,7 @@ impl russh::server::Handler for EmbeddedSession {
         name: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if name != "sftp" {
+        if name != "sftp" && name != JOB_SUBSYSTEM {
             self.discard_session_channel(channel_id).await;
             fail_session_channel(channel_id, session)?;
             return Ok(());
@@ -351,17 +416,31 @@ impl russh::server::Handler for EmbeddedSession {
             fail_session_channel(channel_id, session)?;
             return Ok(());
         };
-        let Ok(session_slot) = self.sftp_slots.clone().try_acquire_owned() else {
+        if name == "sftp" {
+            let Ok(session_slot) = self.sftp_slots.clone().try_acquire_owned() else {
+                fail_session_channel(channel_id, session)?;
+                return Ok(());
+            };
+            session.channel_success(channel_id)?;
+            russh_sftp::server::run(
+                channel.into_stream(),
+                SftpSession::new(self.jobs_root.clone(), session_slot),
+            )
+            .await;
+        } else if let Some(owner) = self.authenticated_controller.clone() {
+            let Ok(channel_slot) = self.jobs.channel_slots.clone().try_acquire_owned() else {
+                fail_session_channel(channel_id, session)?;
+                return Ok(());
+            };
+            session.channel_success(channel_id)?;
+            let jobs = self.jobs.clone();
+            tokio::spawn(async move {
+                let _channel_slot = channel_slot;
+                handle_job_channel(channel, jobs, owner).await;
+            });
+        } else {
             fail_session_channel(channel_id, session)?;
-            return Ok(());
-        };
-
-        session.channel_success(channel_id)?;
-        russh_sftp::server::run(
-            channel.into_stream(),
-            SftpSession::new(self.jobs_root.clone(), session_slot),
-        )
-        .await;
+        }
         Ok(())
     }
 
@@ -433,6 +512,498 @@ impl russh::server::Handler for EmbeddedSession {
                 .remove(&channel);
         });
         Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", deny_unknown_fields)]
+enum JobRequest {
+    #[serde(rename = "start")]
+    Start {
+        version: u8,
+        id: String,
+        spec: JobSpec,
+    },
+    #[serde(rename = "status")]
+    Status { version: u8, id: String },
+    #[serde(rename = "output")]
+    Output {
+        version: u8,
+        id: String,
+        stream: JobOutput,
+        offset: u64,
+    },
+}
+
+#[derive(Serialize)]
+struct JobResponse {
+    version: u8,
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<JobState>,
+    data_base64: Option<String>,
+    next_offset: Option<u64>,
+    eof: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'static str>,
+}
+
+impl JobResponse {
+    fn success(id: impl Into<String>, state: JobState) -> Self {
+        Self {
+            version: 1,
+            ok: true,
+            id: Some(id.into()),
+            state: Some(state),
+            data_base64: None,
+            next_offset: None,
+            eof: None,
+            error: None,
+        }
+    }
+
+    fn error(message: &'static str) -> Self {
+        Self {
+            version: 1,
+            ok: false,
+            id: None,
+            state: None,
+            data_base64: None,
+            next_offset: None,
+            eof: None,
+            error: Some(message),
+        }
+    }
+}
+
+async fn handle_job_channel(channel: Channel<Msg>, runtime: Arc<JobRuntime>, owner: String) {
+    let mut stream = channel.into_stream();
+    let response =
+        match tokio::time::timeout(JOB_REQUEST_TIMEOUT, read_job_frame(&mut stream)).await {
+            Err(_) => JobResponse::error("jobs-v1 request timed out"),
+            Ok(Err(_)) => JobResponse::error("invalid jobs-v1 frame"),
+            Ok(Ok(bytes)) => match serde_json::from_slice::<JobRequest>(&bytes) {
+                Ok(request) => handle_job_request(request, &runtime, &owner).await,
+                Err(_) => JobResponse::error("malformed jobs-v1 request"),
+            },
+        };
+    let body = serde_json::to_vec(&response).unwrap_or_else(|_| {
+        br#"{"version":1,"ok":false,"error":"response encoding failed"}"#.to_vec()
+    });
+    if let Ok(size) = u32::try_from(body.len()) {
+        let _ = stream.write_all(&size.to_be_bytes()).await;
+        let _ = stream.write_all(&body).await;
+        let _ = stream.shutdown().await;
+    }
+}
+
+async fn read_job_frame(stream: &mut russh::ChannelStream<Msg>) -> io::Result<Vec<u8>> {
+    let mut header = [0_u8; 4];
+    stream.read_exact(&mut header).await?;
+    let length = u32::from_be_bytes(header) as usize;
+    if length == 0 || length > JOB_FRAME_MAX_BYTES {
+        return Err(invalid_data("jobs-v1 request frame length is invalid"));
+    }
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).await?;
+    let mut trailing = [0_u8; 1];
+    match tokio::time::timeout(Duration::from_secs(2), stream.read(&mut trailing)).await {
+        Ok(Ok(0)) => Ok(body),
+        _ => Err(invalid_data("jobs-v1 accepts exactly one request frame")),
+    }
+}
+
+async fn handle_job_request(
+    request: JobRequest,
+    runtime: &Arc<JobRuntime>,
+    owner: &str,
+) -> JobResponse {
+    let (version, id_text) = match &request {
+        JobRequest::Start { version, id, .. }
+        | JobRequest::Status { version, id }
+        | JobRequest::Output { version, id, .. } => (*version, id.as_str()),
+    };
+    if version != 1 {
+        return JobResponse::error("unsupported jobs-v1 version");
+    }
+    let Ok(id) = JobId::parse(id_text) else {
+        return JobResponse::error("invalid job ID");
+    };
+    match request {
+        JobRequest::Start { spec, .. } => {
+            let _start = runtime.start_lock.lock().await;
+            if !runtime.accepting.load(Ordering::Acquire) {
+                return JobResponse::error("Agent is shutting down");
+            }
+            let admission = match runtime.store.admit(id, owner, &spec) {
+                Ok(admission) => admission,
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                    return JobResponse::error("job belongs to another controller");
+                }
+                Err(_) => return JobResponse::error("job admission failed"),
+            };
+            match admission {
+                Admission::Existing(record) => {
+                    JobResponse::success(record.id.to_string(), record.state)
+                }
+                Admission::Created(record) => {
+                    #[cfg(windows)]
+                    {
+                        let _ = record;
+                        let _ = runtime.store.transition(
+                            id,
+                            owner,
+                            JobState::Prepared,
+                            JobState::Failed,
+                        );
+                        return JobResponse::error("durable jobs are unsupported on Windows");
+                    }
+                    #[cfg(not(windows))]
+                    if verify_job_source(&spec).is_err() {
+                        let _ = runtime.store.transition(
+                            id,
+                            owner,
+                            JobState::Prepared,
+                            JobState::Failed,
+                        );
+                        return JobResponse::error("source executable verification failed");
+                    }
+                    #[cfg(not(windows))]
+                    let permit = match runtime.slots.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            let _ = runtime.store.transition(
+                                id,
+                                owner,
+                                JobState::Prepared,
+                                JobState::Failed,
+                            );
+                            return JobResponse::error("active job limit reached");
+                        }
+                    };
+                    #[cfg(not(windows))]
+                    if runtime
+                        .store
+                        .transition(id, owner, JobState::Prepared, JobState::Running)
+                        .is_err()
+                    {
+                        let _ = runtime.store.transition(
+                            id,
+                            owner,
+                            JobState::Prepared,
+                            JobState::Failed,
+                        );
+                        return JobResponse::error("job start reservation failed");
+                    }
+                    #[cfg(not(windows))]
+                    let runtime = runtime.clone();
+                    #[cfg(not(windows))]
+                    let owner = owner.to_owned();
+                    #[cfg(not(windows))]
+                    let response = JobResponse::success(id.to_string(), JobState::Running);
+                    #[cfg(not(windows))]
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        run_job(runtime, owner, record).await;
+                    });
+                    #[cfg(not(windows))]
+                    {
+                        response
+                    }
+                }
+            }
+        }
+        JobRequest::Status { .. } => match runtime.store.lookup(id, owner) {
+            Ok(record) => JobResponse::success(record.id.to_string(), record.state),
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                JobResponse::error("job belongs to another controller")
+            }
+            Err(_) => JobResponse::error("job status unavailable"),
+        },
+        JobRequest::Output { stream, offset, .. } => {
+            match runtime.store.read_output(id, owner, stream, offset) {
+                Ok((data, next, eof)) => {
+                    let Ok(record) = runtime.store.lookup(id, owner) else {
+                        return JobResponse::error("job status unavailable");
+                    };
+                    let mut response = JobResponse::success(record.id.to_string(), record.state);
+                    use base64::Engine as _;
+                    response.data_base64 =
+                        Some(base64::engine::general_purpose::STANDARD.encode(data));
+                    response.next_offset = Some(next);
+                    response.eof = Some(eof);
+                    response
+                }
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                    JobResponse::error("job belongs to another controller")
+                }
+                Err(_) => JobResponse::error("job output unavailable"),
+            }
+        }
+    }
+}
+
+fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
+    if !spec.program.starts_with(std::path::MAIN_SEPARATOR)
+        || !Path::new(&spec.program).is_absolute()
+        || spec.program.contains('\0')
+    {
+        return Err(invalid_data("job executable must be an absolute path"));
+    }
+    let program = Path::new(&spec.program);
+    let metadata = std::fs::symlink_metadata(program)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(invalid_data(
+            "job executable must be a regular non-symlink file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(invalid_data("job executable has no execute permission"));
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(program)?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.is_file() {
+        return Err(invalid_data("job executable must be a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if opened_metadata.uid() != unsafe { libc::geteuid() }
+            || opened_metadata.nlink() != 1
+            || opened_metadata.permissions().mode() & 0o222 != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "job executable must be Agent-owned, singly linked and read-only",
+            ));
+        }
+    }
+    let mut digest = Sha256::new();
+    io::copy(&mut file, &mut digest_writer(&mut digest))?;
+    if format!("{:x}", digest.finalize()) != spec.source_sha256 {
+        return Err(invalid_data("job executable digest mismatch"));
+    }
+    let after_hash = file.metadata()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let path_after_hash = std::fs::symlink_metadata(program)?;
+        if after_hash.dev() != opened_metadata.dev()
+            || after_hash.ino() != opened_metadata.ino()
+            || after_hash.len() != opened_metadata.len()
+            || after_hash.mtime() != opened_metadata.mtime()
+            || after_hash.mtime_nsec() != opened_metadata.mtime_nsec()
+            || after_hash.ctime() != opened_metadata.ctime()
+            || after_hash.ctime_nsec() != opened_metadata.ctime_nsec()
+            || path_after_hash.file_type().is_symlink()
+            || path_after_hash.dev() != opened_metadata.dev()
+            || path_after_hash.ino() != opened_metadata.ino()
+        {
+            return Err(invalid_data(
+                "job executable changed during source verification",
+            ));
+        }
+    }
+    // The open descriptor is hashed, then ProcessKit launches by pathname. Read-only ownership
+    // checks reduce external mutation, but cannot pin the executed inode against a same-UID path
+    // replacement between this check and exec; this is not an exec-by-fd guarantee.
+    if let Some(cwd) = &spec.cwd {
+        let metadata = std::fs::symlink_metadata(cwd)?;
+        if !cwd.is_absolute() || !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(invalid_data(
+                "job working directory must be absolute and safe",
+            ));
+        }
+    }
+    Ok(program.to_path_buf())
+}
+
+fn digest_writer<'a>(digest: &'a mut Sha256) -> impl io::Write + 'a {
+    struct DigestWriter<'a>(&'a mut Sha256);
+    impl io::Write for DigestWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    DigestWriter(digest)
+}
+
+async fn run_job(runtime: Arc<JobRuntime>, owner: String, record: crate::jobs::JobRecord) {
+    let id = record.id;
+    if verify_job_source(&record.spec).is_err() {
+        let _ = runtime
+            .store
+            .transition(id, &owner, JobState::Running, JobState::Failed);
+        return;
+    }
+    let (out, out_sync) = match open_job_output(&runtime, id, JobOutput::Stdout) {
+        Ok(files) => files,
+        Err(_) => {
+            let _ = runtime
+                .store
+                .transition(id, &owner, JobState::Running, JobState::Failed);
+            return;
+        }
+    };
+    let (err, err_sync) = match open_job_output(&runtime, id, JobOutput::Stderr) {
+        Ok(files) => files,
+        Err(_) => {
+            let _ = runtime
+                .store
+                .transition(id, &owner, JobState::Running, JobState::Failed);
+            return;
+        }
+    };
+    let overflowed = Arc::new(AtomicBool::new(false));
+    let cancel = runtime.shutdown.child_token();
+    let mut command = processkit::Command::new(&record.spec.program)
+        .args(&record.spec.args)
+        .stdin(processkit::Stdin::empty())
+        .stdout_raw_tee(CappedOutputWriter::new(
+            out,
+            overflowed.clone(),
+            cancel.clone(),
+        ))
+        .stderr_raw_tee(CappedOutputWriter::new(
+            err,
+            overflowed.clone(),
+            cancel.clone(),
+        ))
+        .output_buffer(processkit::OutputBufferPolicy::bounded(256).with_max_bytes(64 * 1024))
+        .timeout(JOB_TIMEOUT)
+        .timeout_grace(Duration::from_secs(2))
+        .kill_on_parent_death()
+        .cancel_on(cancel);
+    if let Some(cwd) = &record.spec.cwd {
+        command = command.current_dir(cwd);
+    }
+    #[cfg(windows)]
+    {
+        let _ = runtime
+            .store
+            .transition(id, &owner, JobState::Running, JobState::Failed);
+        return;
+    }
+    #[cfg(not(windows))]
+    {
+        // ProcessKit's private process group owns ordinary timeout/cancellation cleanup. On Linux
+        // kill_on_parent_death reaches only the direct child; Agent shutdown therefore also
+        // cancels and joins every worker. SIGKILL of the Agent cannot be claimed to reap all
+        // arbitrary grandchildren on Linux.
+        let outcome = match command.start().await {
+            Ok(child) => child.drain().await,
+            Err(_) => {
+                let _ = runtime
+                    .store
+                    .transition(id, &owner, JobState::Running, JobState::Failed);
+                return;
+            }
+        };
+        let sync_results =
+            tokio::task::spawn_blocking(move || (out_sync.sync_all(), err_sync.sync_all())).await;
+        let overflow = overflowed.load(Ordering::Acquire);
+        let next = if runtime.shutdown.is_cancelled() {
+            JobState::Interrupted
+        } else if overflow
+            || sync_results.is_err()
+            || sync_results.is_ok_and(|(out, err)| out.is_err() || err.is_err())
+        {
+            JobState::Failed
+        } else {
+            match outcome {
+                Ok(processkit::Outcome::Exited(code)) => JobState::Exited { code },
+                Ok(
+                    processkit::Outcome::Signalled(_)
+                    | processkit::Outcome::TimedOut
+                    | processkit::Outcome::InactivityTimedOut,
+                ) => JobState::Failed,
+                Err(_) => JobState::Failed,
+                _ => JobState::Failed,
+            }
+        };
+        let _ = runtime
+            .store
+            .transition(id, &owner, JobState::Running, next);
+    }
+}
+
+fn open_job_output(
+    runtime: &JobRuntime,
+    id: JobId,
+    stream: JobOutput,
+) -> io::Result<(tokio::fs::File, std::fs::File)> {
+    let file = jobs::open_output_append(&runtime.store.output_path(id, stream))?;
+    let sync_file = file.try_clone()?;
+    Ok((tokio::fs::File::from_std(file), sync_file))
+}
+
+struct CappedOutputWriter {
+    file: tokio::fs::File,
+    written: u64,
+    overflowed: Arc<AtomicBool>,
+    cancel: processkit::CancellationToken,
+}
+
+impl CappedOutputWriter {
+    fn new(
+        file: tokio::fs::File,
+        overflowed: Arc<AtomicBool>,
+        cancel: processkit::CancellationToken,
+    ) -> Self {
+        Self {
+            file,
+            written: 0,
+            overflowed,
+            cancel,
+        }
+    }
+}
+
+impl AsyncWrite for CappedOutputWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let remaining = jobs::MAX_JOB_OUTPUT_BYTES.saturating_sub(self.written) as usize;
+        if remaining == 0 && !buffer.is_empty() {
+            self.overflowed.store(true, Ordering::Release);
+            self.cancel.cancel();
+            return Poll::Ready(Err(io::Error::other("job output exceeds 8 MiB limit")));
+        }
+        let allowed = buffer.len().min(remaining);
+        match Pin::new(&mut self.file).poll_write(cx, &buffer[..allowed]) {
+            Poll::Ready(Ok(written)) => {
+                self.written += written as u64;
+                Poll::Ready(Ok(written))
+            }
+            other => other,
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.file).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.file).poll_shutdown(cx)
     }
 }
 
@@ -647,4 +1218,170 @@ fn validate_private_acl(path: &Path) -> io::Result<()> {
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod durable_job_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    async fn prepared_job(
+        args: Vec<String>,
+        cwd: &Path,
+    ) -> (
+        tempfile::TempDir,
+        Arc<JobRuntime>,
+        String,
+        crate::jobs::JobRecord,
+    ) {
+        let temp = tempfile::tempdir().expect("private test root");
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private root mode");
+        let jobs_root = temp.path().join("jobs");
+        std::fs::create_dir(&jobs_root).expect("create job store root");
+        std::fs::set_permissions(&jobs_root, std::fs::Permissions::from_mode(0o700))
+            .expect("private job store mode");
+        let source = temp.path().join("pinned-sh");
+        std::fs::copy(
+            std::fs::canonicalize("/bin/sh").expect("resolve shell"),
+            &source,
+        )
+        .expect("stage executable");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o500))
+            .expect("make executable read-only");
+        let spec = JobSpec {
+            program: source.display().to_string(),
+            args,
+            cwd: Some(cwd.to_path_buf()),
+            source_sha256: format!(
+                "{:x}",
+                Sha256::digest(std::fs::read(&source).expect("hash executable"))
+            ),
+        };
+        let store = JobStore::open(jobs_root).expect("open private store");
+        let id = JobId::new();
+        let owner = "d".repeat(64);
+        let Admission::Created(_) = store.admit(id, &owner, &spec).expect("admit job") else {
+            panic!("fresh job ID is newly admitted");
+        };
+        let record = store
+            .transition(id, &owner, JobState::Prepared, JobState::Running)
+            .expect("reserve worker state");
+        let runtime = Arc::new(JobRuntime {
+            store,
+            start_lock: Mutex::new(()),
+            slots: Arc::new(Semaphore::new(MAX_ACTIVE_JOBS)),
+            channel_slots: Arc::new(Semaphore::new(MAX_JOB_CHANNELS)),
+            accepting: AtomicBool::new(true),
+            shutdown: processkit::CancellationToken::new(),
+        });
+        let _ = record;
+        let record = runtime
+            .store
+            .lookup(id, &owner)
+            .expect("read admitted record");
+        (temp, runtime, owner, record)
+    }
+
+    fn linux_process_is_running(pid: u32) -> bool {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        let Some((_, fields)) = stat.rsplit_once(')') else {
+            return false;
+        };
+        !fields.trim_start().starts_with("Z ")
+    }
+
+    #[tokio::test]
+    async fn agent_shutdown_cancels_the_owned_process_tree() {
+        assert_eq!(
+            processkit::Command::kill_on_parent_death_scope(),
+            processkit::ParentDeathCleanup::DirectChildOnly,
+            "Linux abrupt parent death is documented as direct-child-only"
+        );
+        let temp = tempfile::tempdir().expect("working directory");
+        let pid_path = temp.path().join("descendant-pid");
+        let script = format!("sleep 300 & echo $! > '{}'; wait", pid_path.display());
+        let (temp_root, runtime, owner, record) =
+            prepared_job(vec!["-c".into(), script], temp.path()).await;
+        let id = record.id;
+        let worker = tokio::spawn(run_job(runtime.clone(), owner.clone(), record));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !pid_path.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("descendant pid file appears");
+        let pid: u32 = std::fs::read_to_string(&pid_path)
+            .expect("read descendant pid")
+            .trim()
+            .parse()
+            .expect("valid descendant pid");
+
+        runtime.shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("worker teardown deadline")
+            .expect("worker task");
+        assert_eq!(
+            runtime
+                .store
+                .lookup(id, &owner)
+                .expect("read final state")
+                .state,
+            JobState::Interrupted
+        );
+        for _ in 0..100 {
+            if !linux_process_is_running(pid) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !linux_process_is_running(pid),
+            "owned descendant was reaped"
+        );
+        drop(temp_root);
+    }
+
+    #[tokio::test]
+    async fn output_overflow_kills_the_tree_and_never_records_zero_exit() {
+        let temp = tempfile::tempdir().expect("working directory");
+        let (temp_root, runtime, owner, record) = prepared_job(
+            vec!["-c".into(), "head -c 8388609 /dev/zero".into()],
+            temp.path(),
+        )
+        .await;
+        let id = record.id;
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            run_job(runtime.clone(), owner.clone(), record),
+        )
+        .await
+        .expect("overflow teardown deadline");
+        assert_eq!(
+            runtime
+                .store
+                .lookup(id, &owner)
+                .expect("read final state")
+                .state,
+            JobState::Failed
+        );
+        assert_eq!(
+            std::fs::metadata(runtime.store.output_path(id, JobOutput::Stdout))
+                .expect("bounded stdout file")
+                .len(),
+            jobs::MAX_JOB_OUTPUT_BYTES
+        );
+        assert!(
+            !matches!(
+                runtime.store.lookup(id, &owner).expect("read status").state,
+                JobState::Exited { code: 0 }
+            ),
+            "an over-limit stream cannot be reported as successful"
+        );
+        drop(temp_root);
+    }
 }

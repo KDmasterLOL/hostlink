@@ -1,8 +1,6 @@
 //! Source-pinned durable job identities, private state and update admission guards.
 //!
-//! This module deliberately does not start a process or claim reconnect parity yet.
-//! A transport-independent worker can later consume admitted jobs, but it must never
-//! infer permission to start again from a lost SSH acknowledgement.
+//! Durable Agent-owned job records, process output and lifecycle state.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -14,6 +12,8 @@ use uuid::Uuid;
 const SCHEMA_VERSION: u32 = 1;
 const MAX_RECORD_BYTES: usize = 64 * 1024;
 const MAX_JOBS: usize = 4096;
+pub(crate) const MAX_JOB_OUTPUT_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_OUTPUT_CHUNK_BYTES: usize = 24 * 1024;
 
 /// A shared file lock: job admission and Agent update must exclude one another.
 pub const UPDATE_LOCK_FILE: &str = "update.lock";
@@ -167,6 +167,21 @@ impl JobStore {
                 .ok_or_else(|| invalid("jobs root has no parent"))?,
         )?;
         let dir = self.job_dir(id);
+        let missing = match fs::symlink_metadata(&dir) {
+            Ok(_) => false,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+            Err(error) => return Err(error),
+        };
+        if missing {
+            let mut count = 0_usize;
+            for entry in fs::read_dir(&self.root)? {
+                let _ = entry?;
+                count = count.saturating_add(1);
+                if count >= MAX_JOBS {
+                    return Err(invalid("maximum number of durable jobs reached"));
+                }
+            }
+        }
         match fs::create_dir(&dir) {
             Ok(()) => {
                 restrict_private_path(&dir, true)?;
@@ -227,6 +242,72 @@ impl JobStore {
         Ok(record)
     }
 
+    /// Recover nonterminal records left by a previous Agent process without replaying them.
+    pub fn recover_nonterminal(&self) -> io::Result<()> {
+        let install_root = self
+            .root
+            .parent()
+            .ok_or_else(|| invalid("jobs root has no parent"))?;
+        let _update_lock = acquire_update_lock(install_root)?;
+        for child in fs::read_dir(&self.root)? {
+            let child = child?;
+            let id_name = child.file_name();
+            let id = id_name
+                .to_str()
+                .ok_or_else(|| invalid("job directory name is not UTF-8"))
+                .and_then(JobId::parse)?;
+            let record = self.read(id)?;
+            if matches!(record.state, JobState::Prepared | JobState::Running) {
+                self.transition(
+                    id,
+                    &record.controller_key_sha256,
+                    record.state,
+                    JobState::Interrupted,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn output_path(&self, id: JobId, stream: JobOutput) -> PathBuf {
+        self.job_dir(id).join(stream.file_name())
+    }
+
+    /// Read a bounded raw output slice, preserving arbitrary bytes across reconnects.
+    pub(crate) fn read_output(
+        &self,
+        id: JobId,
+        owner: &str,
+        stream: JobOutput,
+        offset: u64,
+    ) -> io::Result<(Vec<u8>, u64, bool)> {
+        let record = self.lookup(id, owner)?;
+        let path = self.output_path(id, stream);
+        let mut file = match read_bounded_output(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if offset != 0 {
+                    return Err(invalid("output offset exceeds available bytes"));
+                }
+                if record.state.blocks_update() {
+                    return Ok((Vec::new(), 0, false));
+                }
+                return Ok((Vec::new(), 0, true));
+            }
+            Err(error) => return Err(error),
+        };
+        let len = file.metadata()?.len();
+        if offset > len {
+            return Err(invalid("output offset exceeds available bytes"));
+        }
+        use std::io::Seek;
+        file.seek(io::SeekFrom::Start(offset))?;
+        let mut bytes = vec![0; MAX_OUTPUT_CHUNK_BYTES.min((len - offset) as usize)];
+        file.read_exact(&mut bytes)?;
+        let next = offset + bytes.len() as u64;
+        Ok((bytes, next, !record.state.blocks_update() && next == len))
+    }
+
     fn job_dir(&self, id: JobId) -> PathBuf {
         self.root.join(id.to_string())
     }
@@ -246,6 +327,47 @@ impl JobStore {
         }
         Ok(record)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum JobOutput {
+    Stdout,
+    Stderr,
+}
+
+impl JobOutput {
+    fn file_name(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout.bin",
+            Self::Stderr => "stderr.bin",
+        }
+    }
+}
+
+pub(crate) fn open_output_append(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create_new(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path)?;
+    restrict_private_path(path, false)?;
+    if file.metadata()?.len() > MAX_JOB_OUTPUT_BYTES {
+        return Err(invalid("job output exceeds configured limit"));
+    }
+    Ok(file)
+}
+
+fn read_bounded_output(path: &Path) -> io::Result<File> {
+    validate_private_path(path, false)?;
+    let file = File::open(path)?;
+    if file.metadata()?.len() > MAX_JOB_OUTPUT_BYTES {
+        return Err(invalid("job output exceeds configured limit"));
+    }
+    Ok(file)
 }
 
 /// Conservative updater interlock. Invalid/unknown entries fail CLOSED.
@@ -539,6 +661,19 @@ mod tests {
         assert!(store.admit(id, &owner, &conflict).is_err());
         assert!(store.lookup(id, &"c".repeat(64)).is_err());
         assert_eq!(active_ids(&store.root).unwrap(), vec![id.to_string()]);
+    }
+
+    #[test]
+    fn missing_output_rejects_nonzero_offset() {
+        let (_temp, store) = fixture();
+        let id = JobId::new();
+        let owner = "b".repeat(64);
+        store.admit(id, &owner, &sample()).unwrap();
+        assert!(store.read_output(id, &owner, JobOutput::Stdout, 1).is_err());
+        assert_eq!(
+            store.read_output(id, &owner, JobOutput::Stdout, 0).unwrap(),
+            (Vec::new(), 0, false)
+        );
     }
 
     #[test]
