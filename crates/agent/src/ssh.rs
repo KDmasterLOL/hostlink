@@ -1096,6 +1096,11 @@ async fn run_job(
         // keep the Agent updater blocked forever.
         match outcome {
             Ok(_) => JobState::Failed,
+            Err(error) if matches!(error.reason(), processkit::ErrorReason::Cancelled { .. }) => {
+                // ProcessKit confirms full-tree teardown for Cancelled; only a
+                // Teardown/error with uncertain surviving processes stays blocked.
+                JobState::Failed
+            }
             Err(_) => JobState::Interrupted,
         }
     } else {
