@@ -30,7 +30,10 @@ $supportedTargets = @(
     'i686-win7-windows-msvc'
 )
 if ($supportedTargets -cnotcontains $Target) { throw 'Unsupported Windows package target.' }
-if ((-not [Environment]::Is64BitOperatingSystem) -and $Target.StartsWith('x86_64-')) {
+# CLR 2 (Windows PowerShell 2) lacks Environment.Is64BitOperatingSystem.
+# A 32-bit PowerShell process on x64 Windows receives PROCESSOR_ARCHITEW6432.
+$is64BitOS = ([IntPtr]::Size -eq 8) -or ($env:PROCESSOR_ARCHITEW6432 -eq 'AMD64')
+if (-not $is64BitOS -and $Target.StartsWith('x86_64-')) {
     throw 'A 64-bit Agent package cannot be installed on a 32-bit Windows operating system.'
 }
 if ($PackageVersion -notmatch '^\d+\.\d+\.\d+([+-][0-9A-Za-z.-]+)?$') {

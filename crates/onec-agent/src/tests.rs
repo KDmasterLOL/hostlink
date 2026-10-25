@@ -155,6 +155,10 @@ fn hostlink_agent_assets_expose_only_the_fresh_root_and_exact_update_flow() {
             "PowerShell 2 has no PSScriptRoot"
         );
         assert!(!script.to_ascii_lowercase().contains("get-filehash"));
+        assert!(
+            !script.contains("[Environment]::Is64BitOperatingSystem"),
+            "{name} must not use the .NET 4-only OS-bitness property on CLR 2"
+        );
         let violations = legacy_powershell_violations(script);
         assert!(
             violations.is_empty(),
@@ -170,7 +174,7 @@ fn hostlink_agent_assets_expose_only_the_fresh_root_and_exact_update_flow() {
         "$ArchiveSha256",
         "$PackageVersion",
         "$Target",
-        "Is64BitOperatingSystem",
+        "$is64BitOS = ([IntPtr]::Size -eq 8) -or ($env:PROCESSOR_ARCHITEW6432 -eq 'AMD64')",
         "HostLink\\Agent",
         "LocalApplicationData",
         "hostlink-agent.exe",
@@ -221,6 +225,12 @@ fn hostlink_agent_assets_expose_only_the_fresh_root_and_exact_update_flow() {
     }
     assert!(run.contains("hostlink-agent.exe"));
     assert!(run.contains("sha256"));
+    assert!(
+        update.contains(
+            "$is64BitOS = ([IntPtr]::Size -eq 8) -or ($env:PROCESSOR_ARCHITEW6432 -eq 'AMD64')"
+        ),
+        "the CLR2 updater must accept x64 Windows from x64 and WOW64 PowerShell sessions"
+    );
     assert!(run.contains("$agent = Join-Path $bin 'hostlink-agent.exe'"));
     assert!(install.contains("manual configuration mode"));
     assert!(install.contains("$manualConfig.ContainsKey('jobs_dir')"));

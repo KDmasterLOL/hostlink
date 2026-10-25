@@ -10,7 +10,9 @@ if ($ArchiveSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw 'ArchiveSha256 must be
 if ($PackageVersion -notmatch '^\d+\.\d+\.\d+([+-][0-9A-Za-z.-]+)?$') { throw 'PackageVersion must be an exact semantic version.' }
 $supportedTargets = @('x86_64-pc-windows-msvc', 'x86_64-win7-windows-msvc', 'i686-win7-windows-msvc')
 if ($supportedTargets -cnotcontains $Target) { throw 'Unsupported Windows package target.' }
-if ((-not [Environment]::Is64BitOperatingSystem) -and $Target.StartsWith('x86_64-')) {
+# The .NET 4 Is64BitOperatingSystem property is unavailable to PowerShell 2 / CLR 2.
+$is64BitOS = ([IntPtr]::Size -eq 8) -or ($env:PROCESSOR_ARCHITEW6432 -eq 'AMD64')
+if (-not $is64BitOS -and $Target.StartsWith('x86_64-')) {
     throw 'A 64-bit Agent package cannot be installed on a 32-bit Windows operating system.'
 }
 if (-not [IO.Path]::IsPathRooted($ArchiveFile)) { throw 'ArchiveFile must be an absolute path inside the HostLink Agent root.' }
