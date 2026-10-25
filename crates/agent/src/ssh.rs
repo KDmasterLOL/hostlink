@@ -79,6 +79,13 @@ struct JobRuntime {
     channel_slots: Arc<Semaphore>,
     accepting: AtomicBool,
     shutdown: processkit::CancellationToken,
+    active_jobs: std::sync::Mutex<HashMap<JobId, Arc<JobCancellation>>>,
+}
+
+/// Process cancellation is Agent-owned and unrelated to SSH channel lifetimes.
+struct JobCancellation {
+    process: processkit::CancellationToken,
+    requested: AtomicBool,
 }
 
 /// Serves authenticated SSH/SFTP traffic on the configured loopback listener until shutdown.
@@ -122,6 +129,7 @@ where
         channel_slots: Arc::new(Semaphore::new(MAX_JOB_CHANNELS)),
         accepting: AtomicBool::new(true),
         shutdown: processkit::CancellationToken::new(),
+        active_jobs: std::sync::Mutex::new(HashMap::new()),
     });
     if config.gateway.is_none() {
         return serve_prepared_until(listener, prepared, jobs, shutdown).await;
@@ -531,6 +539,8 @@ enum JobRequest {
     },
     #[serde(rename = "status")]
     Status { version: u8, id: String },
+    #[serde(rename = "cancel")]
+    Cancel { version: u8, id: String },
     #[serde(rename = "output")]
     Output {
         version: u8,
@@ -670,6 +680,7 @@ async fn handle_job_request(
     let (version, id_text) = match &request {
         JobRequest::Start { version, id, .. }
         | JobRequest::Status { version, id }
+        | JobRequest::Cancel { version, id }
         | JobRequest::Output { version, id, .. } => (*version, id.as_str()),
         JobRequest::Seal { .. } => unreachable!("seal requests are handled before job dispatch"),
     };
@@ -731,12 +742,26 @@ async fn handle_job_request(
                         );
                         return JobResponse::error("job start reservation failed");
                     }
+                    let active = Arc::new(JobCancellation {
+                        process: runtime.shutdown.child_token(),
+                        requested: AtomicBool::new(false),
+                    });
+                    runtime
+                        .active_jobs
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(id, active.clone());
                     let runtime = runtime.clone();
                     let owner = owner.to_owned();
                     let response = JobResponse::success(id.to_string(), JobState::Running);
                     tokio::spawn(async move {
                         let _permit = permit;
-                        run_job(runtime, owner, record).await;
+                        run_job(runtime.clone(), owner, record, active).await;
+                        runtime
+                            .active_jobs
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&id);
                     });
                     response
                 }
@@ -749,6 +774,40 @@ async fn handle_job_request(
             }
             Err(_) => JobResponse::error("job status unavailable"),
         },
+        JobRequest::Cancel { .. } => {
+            // Serialize with admission: only the actual authenticated controller
+            // may cancel the Agent-owned worker, never the SSH channel itself.
+            let _start = runtime.start_lock.lock().await;
+            let record = match runtime.store.lookup(id, owner) {
+                Ok(record) => record,
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                    return JobResponse::error("job belongs to another controller");
+                }
+                Err(_) => return JobResponse::error("job status unavailable"),
+            };
+            match record.state {
+                JobState::Running => {
+                    let active = runtime
+                        .active_jobs
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(&id)
+                        .cloned();
+                    let Some(active) = active else {
+                        // A persisted Running record without a worker is ambiguous.
+                        return JobResponse::error("job cancellation unavailable");
+                    };
+                    active.requested.store(true, Ordering::Release);
+                    active.process.cancel();
+                    // Cancellation is not terminal until the process tree is gone.
+                    JobResponse::success(id.to_string(), JobState::Running)
+                }
+                JobState::Prepared | JobState::Interrupted => {
+                    JobResponse::error("job has no cancellable worker")
+                }
+                state => JobResponse::success(id.to_string(), state),
+            }
+        }
         JobRequest::Output { stream, offset, .. } => {
             match runtime.store.read_output(id, owner, stream, offset) {
                 Ok((data, next, eof)) => {
@@ -956,7 +1015,12 @@ fn digest_writer<'a>(digest: &'a mut Sha256) -> impl io::Write + 'a {
     DigestWriter(digest)
 }
 
-async fn run_job(runtime: Arc<JobRuntime>, owner: String, record: crate::jobs::JobRecord) {
+async fn run_job(
+    runtime: Arc<JobRuntime>,
+    owner: String,
+    record: crate::jobs::JobRecord,
+    active: Arc<JobCancellation>,
+) {
     let id = record.id;
     if verify_job_source(&record.spec).is_err() {
         let _ = runtime
@@ -983,7 +1047,7 @@ async fn run_job(runtime: Arc<JobRuntime>, owner: String, record: crate::jobs::J
         }
     };
     let overflowed = Arc::new(AtomicBool::new(false));
-    let cancel = runtime.shutdown.child_token();
+    let cancel = active.process.clone();
     let mut command = processkit::Command::new(&record.spec.program)
         .args(&record.spec.args)
         .stdin(processkit::Stdin::empty())
@@ -1026,6 +1090,14 @@ async fn run_job(runtime: Arc<JobRuntime>, owner: String, record: crate::jobs::J
         || sync_results.is_ok_and(|(out, err)| out.is_err() || err.is_err())
     {
         JobState::Failed
+    } else if active.requested.load(Ordering::Acquire) {
+        // ProcessKit completed its child/tree drain. A verified cancellation is
+        // terminal non-success; unlike uncertain crash interruption it must not
+        // keep the Agent updater blocked forever.
+        match outcome {
+            Ok(_) => JobState::Failed,
+            Err(_) => JobState::Interrupted,
+        }
     } else {
         match outcome {
             Ok(processkit::Outcome::Exited(code)) => JobState::Exited { code },
@@ -1415,6 +1487,7 @@ mod durable_job_tests {
             channel_slots: Arc::new(Semaphore::new(MAX_JOB_CHANNELS)),
             accepting: AtomicBool::new(true),
             shutdown: processkit::CancellationToken::new(),
+            active_jobs: std::sync::Mutex::new(HashMap::new()),
         });
         let _ = record;
         let record = runtime
@@ -1447,7 +1520,11 @@ mod durable_job_tests {
         let (temp_root, runtime, owner, record) =
             prepared_job(vec!["-c".into(), script], temp.path()).await;
         let id = record.id;
-        let worker = tokio::spawn(run_job(runtime.clone(), owner.clone(), record));
+        let active = Arc::new(JobCancellation {
+            process: runtime.shutdown.child_token(),
+            requested: AtomicBool::new(false),
+        });
+        let worker = tokio::spawn(run_job(runtime.clone(), owner.clone(), record, active));
         tokio::time::timeout(Duration::from_secs(5), async {
             while !pid_path.exists() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1498,7 +1575,15 @@ mod durable_job_tests {
         let id = record.id;
         tokio::time::timeout(
             Duration::from_secs(10),
-            run_job(runtime.clone(), owner.clone(), record),
+            run_job(
+                runtime.clone(),
+                owner.clone(),
+                record,
+                Arc::new(JobCancellation {
+                    process: runtime.shutdown.child_token(),
+                    requested: AtomicBool::new(false),
+                }),
+            ),
         )
         .await
         .expect("overflow teardown deadline");

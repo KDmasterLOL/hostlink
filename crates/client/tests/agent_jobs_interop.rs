@@ -4,7 +4,7 @@
 use hostlink::{
     HostSpec,
     connect::HostConnection,
-    run::{JobSpec, JobStateKind, JobStream, Output, Start, Status},
+    run::{Cancel, JobSpec, JobStateKind, JobStream, Output, Start, Status},
 };
 use hostlink_agent::{AgentConfig, ssh};
 use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
@@ -58,6 +58,7 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = listener.local_addr().unwrap();
+    let jobs_probe = jobs.clone();
     let config = AgentConfig {
         listen: endpoint,
         user: "hostlink".into(),
@@ -202,6 +203,111 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
         "x",
         "idempotent reattachment must not duplicate side effects"
     );
+    // Cancel a second source-pinned job after a descendant exists, then verify
+    // that cancellation terminates the entire process tree and leaves a
+    // terminal non-success state rather than an indefinitely blocked update.
+    let pid_file = root.path().join("owned-cancel-descendant");
+    let cancel_id = uuid::Uuid::new_v4().to_string();
+    let cancel_request = Start {
+        id: cancel_id.clone(),
+        spec: JobSpec {
+            args: vec![
+                "-c".into(),
+                format!("sleep 300 & echo $! > '{}'; wait", pid_file.display()),
+            ],
+            ..request.spec.clone()
+        },
+    };
+    let accepted = resumed
+        .job_start(&cancel_request)
+        .await
+        .expect("start cancellable job");
+    assert!(matches!(accepted.state.state, JobStateKind::Running));
+    tokio::time::timeout(Duration::from_secs(7), async {
+        while !pid_file.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("owned descendant PID published");
+    let child_pid: u32 = fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let cancel = Cancel {
+        id: cancel_id.clone(),
+    };
+    let mut other = HostConnection::connect(&second_spec).await.unwrap();
+    assert!(
+        other.job_cancel(&cancel).await.is_err(),
+        "different authorized key must not cancel a foreign job"
+    );
+    other.close().await.unwrap();
+    let cancellation = resumed
+        .job_cancel(&cancel)
+        .await
+        .expect("request owned job cancellation");
+    assert_eq!(cancellation.id, cancel_id);
+    assert!(matches!(
+        cancellation.state.state,
+        JobStateKind::Running | JobStateKind::Failed
+    ));
+    resumed.close().await.expect("close after cancel request");
+    let mut resumed = HostConnection::connect(&spec)
+        .await
+        .expect("reattach cancellation status");
+    let mut final_state = None;
+    for _ in 0..140 {
+        let status = resumed
+            .job_status(&Status {
+                id: cancel_id.clone(),
+            })
+            .await
+            .unwrap();
+        if matches!(
+            status.state.state,
+            JobStateKind::Failed | JobStateKind::Interrupted
+        ) {
+            final_state = Some(status.state.state);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    assert_eq!(
+        final_state,
+        Some(JobStateKind::Failed),
+        "verified cancelled tree must be terminal failure, not unknown interruption"
+    );
+    for _ in 0..140 {
+        let alive = fs::read_to_string(format!("/proc/{child_pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .is_some_and(|(_, fields)| !fields.trim_start().starts_with("Z "))
+        });
+        if !alive {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let alive = fs::read_to_string(format!("/proc/{child_pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .is_some_and(|(_, fields)| !fields.trim_start().starts_with("Z "))
+    });
+    assert!(
+        !alive,
+        "ProcessKit must kill the cancellable job's descendant"
+    );
+    assert!(
+        hostlink_agent::jobs::active_ids(&jobs_probe)
+            .unwrap()
+            .is_empty(),
+        "completed cancellation must no longer block Agent update"
+    );
+    let repeated = resumed
+        .job_cancel(&cancel)
+        .await
+        .expect("terminal cancel is idempotent");
+    assert_eq!(repeated.state.state, JobStateKind::Failed);
     resumed.close().await.expect("close resumed SSH session");
     stop.send(()).expect("server active");
     tokio::time::timeout(Duration::from_secs(7), server)

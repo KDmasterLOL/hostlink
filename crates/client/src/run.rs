@@ -49,6 +49,12 @@ pub struct Status {
     pub id: JobId,
 }
 
+/// Requests cancellation by canonical durable job identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct Cancel {
+    pub id: JobId,
+}
+
 /// Selects one persisted output stream.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -209,6 +215,17 @@ impl HostConnection {
         validate_id(&request.id)?;
         let value = self
             .job_request(serde_json::json!({ "version": 1, "op": "status", "id": request.id }))
+            .await?;
+        parse_status(value, &request.id)
+    }
+
+    /// Requests cancellation without claiming a running process is already terminated.
+    ///
+    /// On a lost ACK, query status after reconnecting; never replay a start.
+    pub async fn job_cancel(&mut self, request: &Cancel) -> Result<JobStatus, SshClientError> {
+        validate_id(&request.id)?;
+        let value = self
+            .job_request(serde_json::json!({ "version": 1, "op": "cancel", "id": request.id }))
             .await?;
         parse_status(value, &request.id)
     }
