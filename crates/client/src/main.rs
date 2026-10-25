@@ -79,8 +79,10 @@ enum Command {
     },
     /// Forward a loopback TCP port to a target reachable from the SSH host.
     Forward {
-        #[arg(long)]
-        config: PathBuf,
+        #[arg(long, group = "host_selection", required_unless_present = "host")]
+        config: Option<PathBuf>,
+        #[arg(long, group = "host_selection", required_unless_present = "config")]
+        host: Option<String>,
         #[arg(long, value_parser = parse_socket_addr)]
         listen: SocketAddr,
         #[arg(long, value_parser = parse_socket_addr)]
@@ -88,15 +90,19 @@ enum Command {
     },
     /// Forward local RDP to 127.0.0.1:3389 on the SSH host.
     Rdp {
-        #[arg(long)]
-        config: PathBuf,
+        #[arg(long, group = "host_selection", required_unless_present = "host")]
+        config: Option<PathBuf>,
+        #[arg(long, group = "host_selection", required_unless_present = "config")]
+        host: Option<String>,
         #[arg(long, default_value_t = 13389, value_parser = clap::value_parser!(u16).range(1..))]
         listen_port: u16,
     },
     /// Probe TCP reachability from the SSH host through a direct-tcpip channel.
     Probe {
-        #[arg(long)]
-        config: PathBuf,
+        #[arg(long, group = "host_selection", required_unless_present = "host")]
+        config: Option<PathBuf>,
+        #[arg(long, group = "host_selection", required_unless_present = "config")]
+        host: Option<String>,
         #[arg(long, value_parser = parse_socket_addr)]
         target: SocketAddr,
         #[arg(long, default_value_t = 1500, value_parser = clap::value_parser!(u64).range(1..=60000))]
@@ -609,19 +615,21 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
     match &cli.command {
         Command::Forward {
             config,
+            host,
             listen,
             target,
         } => {
-            forward_cli(config, *listen, *target).await?;
+            forward_cli(config.as_deref(), host.as_deref(), *listen, *target).await?;
             return Ok(0);
         }
         Command::Rdp {
             config,
+            host,
             listen_port,
         } => {
             let listen = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), *listen_port);
             let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3389);
-            forward_cli(config, listen, target).await?;
+            forward_cli(config.as_deref(), host.as_deref(), listen, target).await?;
             return Ok(0);
         }
         Command::Probe {
@@ -645,9 +653,9 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
             | JobCommand::Cancel { config, host, .. }
             | JobCommand::Output { config, host, .. } => (config.clone(), host.clone()),
         },
-        Command::Forward { config, .. }
-        | Command::Rdp { config, .. }
-        | Command::Probe { config, .. } => (Some(config.clone()), None),
+        Command::Forward { config, host, .. }
+        | Command::Rdp { config, host, .. }
+        | Command::Probe { config, host, .. } => (config.clone(), host.clone()),
         Command::Hub { .. }
         | Command::List { .. }
         | Command::Info { .. }
@@ -761,14 +769,7 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         // The ID must be recoverable even if upload, Seal, or start loses its ACK.
         eprintln!("hostlink: job id: {}", request.id);
     }
-    let spec = if let Some(host) = selected_host.as_deref() {
-        let config = load_hub_config(&config_path)?;
-        HubClient::from_config(&config)?
-            .resolve_host_spec(host, &config)
-            .await?
-    } else {
-        load_host_spec(&config_path)?
-    };
+    let spec = resolve_target_spec(&config_path, selected_host.as_deref()).await?;
     let mut client = HostConnection::connect(&spec).await?;
     // All errors must still close both the target and optional gateway SSH sessions.
     let operation: Result<i32, Box<dyn Error>> = async {
@@ -901,8 +902,24 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
     }
 }
 
-async fn forward_cli(
+async fn resolve_target_spec(
     config_path: &Path,
+    host: Option<&str>,
+) -> Result<HostSpec, Box<dyn Error>> {
+    match host {
+        Some(host) => {
+            let config = load_hub_config(config_path)?;
+            Ok(HubClient::from_config(&config)?
+                .resolve_host_spec(host, &config)
+                .await?)
+        }
+        None => Ok(load_host_spec(config_path)?),
+    }
+}
+
+async fn forward_cli(
+    config_path: Option<&Path>,
+    host: Option<&str>,
     listen: SocketAddr,
     target: SocketAddr,
 ) -> Result<(), Box<dyn Error>> {
@@ -910,7 +927,11 @@ async fn forward_cli(
     if target.port() == 0 {
         return Err("forward target port must be nonzero".into());
     }
-    let spec = load_host_spec(config_path)?;
+    let config_path = match config_path {
+        Some(path) => path.to_owned(),
+        None => default_hub_config_path()?,
+    };
+    let spec = resolve_target_spec(&config_path, host).await?;
     let connection = HostConnection::connect(&spec).await?;
     let server: ForwardServer = forward::start_local_forward(connection, listen, target).await?;
     eprintln!(

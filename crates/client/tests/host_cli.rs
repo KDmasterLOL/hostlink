@@ -52,3 +52,48 @@ fn explicit_config_is_independent_of_default_hub_environment() {
         "explicit --config must read that file rather than requiring HOME: {stderr}"
     );
 }
+
+#[test]
+fn forwarding_probe_and_rdp_accept_exactly_one_host_selection() {
+    let commands: &[&[&str]] = &[
+        &[
+            "forward",
+            "--listen",
+            "127.0.0.1:13389",
+            "--target",
+            "127.0.0.1:3389",
+        ],
+        &["rdp"],
+        &["probe", "--target", "127.0.0.1:443"],
+    ];
+    for command in commands {
+        let mut selected = command.to_vec();
+        selected.extend(["--host", "lab-win7"]);
+        let output = hostlink(&selected);
+        assert!(
+            !output.status.success(),
+            "there is no configured Hub fixture"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("unexpected argument") && !stderr.contains("required arguments"),
+            "named host selector was rejected by the CLI: {stderr}"
+        );
+
+        let mut both = command.to_vec();
+        both.extend(["--host", "lab-win7", "--config", "host.json"]);
+        let output = hostlink(&both);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("cannot be used with"),
+            "both host selection methods must be rejected"
+        );
+
+        let output = hostlink(command);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("required"),
+            "missing host selector must be rejected"
+        );
+    }
+}
