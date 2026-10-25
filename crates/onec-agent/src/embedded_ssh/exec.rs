@@ -148,7 +148,7 @@ fn invalid_command(message: &'static str) -> io::Error {
 }
 
 #[cfg(all(test, windows))]
-mod tests {
+mod windows_process_tests {
     use super::*;
     use processkit::{Outcome, RawOutputSink};
     use std::sync::Mutex;
@@ -205,7 +205,7 @@ mod tests {
         let payload: Vec<u8> = (0..4096).map(|index| (index * 37) as u8).collect();
         let mut child_stdin = process.take_stdin().expect("piped child stdin");
         child_stdin
-            .write_all(&payload)
+            .write(&payload)
             .await
             .expect("write exact binary stdin");
         child_stdin.finish().await.expect("close child stdin");
