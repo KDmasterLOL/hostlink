@@ -26,5 +26,6 @@ libc = "=0.2.191"
 windows-permissions = "=0.2.4"
 
 [dev-dependencies]
+hostlink-agent = { path = "../agent" }
 tempfile.workspace = true
 rand.workspace = true
