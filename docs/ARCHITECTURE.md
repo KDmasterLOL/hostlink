@@ -1,4 +1,4 @@
-# SSH-only HostLink target model
+# HostLink russh execution plane and mandatory Hub management plane
 
 Huly 1C-987; source dev SHA 5a1f80b4c44c393dd8cc83faacf0a3ebc49de342.
 This is a planned architecture and not a claim of passing acceptance.
@@ -44,9 +44,14 @@ pinned test binary through SFTP, uses typed argv in a durable manifest (not
 SSH exec-string quoting), supports test --list and normal execution, and
 retrieves raw outputs and actual exit statuses after reconnect.
 
-Outside first milestone: real Hub enrollment and fleet install/deployment,
-legacy
-Wire JSONL Agent protocol and Lasting Nextest attestations, Windows service
-ownership, migration of any deployed Agent/OneC fleet, main/tag/release.
+The **first two-crate execution milestone** excludes Hub only temporarily. The final product
+requires authoritative Hub inventory, short-lived invitations, fresh Agent enrollment,
+named-host selection and revocation. These management functions use a separate Hub HTTPS
+control plane and do not revive the removed Agent TCP JSONL execution carrier. See
+[MANAGED_FLEET_ARCHITECTURE.md](MANAGED_FLEET_ARCHITECTURE.md) for the binding public API and
+security/operational requirements. The retired generic Nextest attestation/Toolkit release
+engine and unauthorized Windows service ownership remain excluded.
+Migration of deployed Agents, main/tag/release and production network writes still require
+separate explicit authorization.
 Native Windows11 and Win7 x64/x86 source-exact acceptance needed separately,
 including active-job update deferral, stopped-runtime handoff and rollback.

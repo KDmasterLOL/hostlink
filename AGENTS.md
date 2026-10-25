@@ -1,11 +1,13 @@
-# SSH-only parallel rewrite
+# Managed HostLink with one russh execution transport
 
 Branch rewrite/russh-minimal is experimental and independent of current HostLink dev.
 Do not modify, merge or promote dev/main, tags or deployed infrastructure.
 The former Agent JSONL TCP listener, Win32 OpenSSH/sshd, legacy Toolkit release engine,
-legacy Nextest attestation, Hub and source dependencies are excluded from this
-compiled workspace. Keep only russh as SSH transport, russh-sftp and a bounded
-process execution primitive.
+and legacy Nextest attestation are excluded. **Hub registration/inventory/invitation/revocation
+are REQUIRED product functions**: implement them under a separate HostLink Hub management owner,
+without restoring the old Agent RPC or a second execution transport. The target workspace includes
+Agent, Client and a focused Hub; see docs/MANAGED_FLEET_ARCHITECTURE.md. Keep russh + russh-sftp
+as the sole Agent/Controller execution and file-transfer carrier.
 
 Short SSH exec cancels on channel close; durable jobs are a different lifetime
 owned by the Agent process. Reconnect must NEVER silently replay a started job.

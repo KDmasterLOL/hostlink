@@ -1,4 +1,4 @@
-# HostLink SSH-only rewrite: release and migration plan
+# HostLink russh execution rewrite: staged integration and managed-fleet migration
 
 Status date: 2026-10-25. Parent Huly: 1C-987.
 Verified baseline: rewrite/russh-minimal@4b34e31f7e007c4f17e700f7b22cef41dbd1c508.
@@ -6,7 +6,7 @@ Experimental development only. No changes to installed agents, HostLink dev/main
 
 ## Evidence already established
 
-- New standalone HostLink is a two-crate Rust workspace with russh Agent and russh Client, without legacy Agent JSONL RPC, OpenSSH subprocesses, managed Hub or Nextest attestations.
+- Verified initial rewrite is a two-crate russh Agent+Client execution milestone without legacy Agent JSONL RPC, external OpenSSH subprocess or Nextest attestation engine; a focused **Hub management crate is REQUIRED** for final fleet inventory/invite/enrollment/revocation (1C-1019/1020/1021).
 - HOME Linux actual pinned Agent-to-Client TCP/SSH: short exec, binary stdin/stdout/stderr, exit 7, SFTP, authenticated durable start once, drop SSH, reattach, binary output offsets, unchanged effects, wrong-key rejection. Fmt/check/strict Clippy/tests PASS.
 - WORK Windows11 clean source at rewrite/28370a5: fmt/check/strict Clippy/workspace tests PASS, including actual short exec and Agent/Client SFTP; 4b34e31 only changes Rust stable toolchain and docs. Source-exact final candidate retest is mandatory.
 - Old, supported HostLink dev has actual NT6.1.7601 PS2 x64 and x86/WOW64 native SSH/exec/SFTP PASS. This is NOT proof for the rewrite.
@@ -61,6 +61,13 @@ Implemented locally by 1C-1010: `hostlink migration preflight` reads bounded old
 C3. Final source-exact release acceptance (new child).
 - On one exact SHA: cargo fmt, check, strict Clippy, workspace tests on Linux and Windows11; both Win7 PE targets plus actual NT6.1 smoke; user-scope Windows durable reconnect, updater active-job deferral/rollback, SFTP seal + typed run, gateway mode and SSH reconnect; negative authorization and cleanup.
 - Huly status Todo -> In Progress -> Merging -> Done only when matching SHA evidence is attached. Gate: explicit user authorization before dev promotion, main/tag/release, switching installed Agents or modifying production networks.
+
+## D. Mandatory Hub-backed managed fleet (new, required for replacement)
+
+- 1C-1019: restore one authoritative Hub control-plane owner: secret-free fleet inventory, canonical host identities, one-use expiring invites, fresh Agent registration and exact gateway/SSH trust projection, truthful revocation. No second Agent command transport, no legacy per-Agent JSONL control secret. Separate new state root and versioned API; do not alter currently deployed old Hub.
+- 1C-1020: `hostlink list/info/verify/invite/display-name/remove`, named-host `check/exec/upload/download/run/job` through newly resolved/pinned existing russh HostSpec. Fast inventory by default; optional bounded per-host live probe with honest timestamps/status. Manual HostSpec mode stays explicit.
+- 1C-1021: digest-pinned Win7/Win11/Linux user-scope bootstrap, one-use token, locally generated Ed25519 Agent identities, Hub enrollment, exact approved gateway route, private Agent configuration and side-by-side rollback. No silent adoption of running Agents.
+- All Hub APIs, anti-goals, ownership and canonical caller expectations are defined in [MANAGED_FLEET_ARCHITECTURE.md](MANAGED_FLEET_ARCHITECTURE.md). No release/replacement acceptance while these mandatory features are absent. Existing 1C-1010 offline preflight is not a Hub replacement.
 
 ## Order, ownership, no conflicts
 

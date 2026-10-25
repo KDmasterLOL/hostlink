@@ -1,13 +1,16 @@
-# HostLink — SSH-only rewrite
+# HostLink — managed fleet with russh remote execution
 
-Experimental parallel rewrite. Not a drop-in replacement, release, deployment
-or installed fleet cutover. Source baseline: dev 5a1f80b4c44c393dd8cc83faacf0a3ebc49de342.
+Experimental parallel rewrite. The current two-crate SSH milestone is not a drop-in
+replacement, release, deployment or installed fleet cutover. The final product MUST also
+include Hub-backed inventory, invitations, enrollment, host discovery and revocation. Source baseline: dev 5a1f80b4c44c393dd8cc83faacf0a3ebc49de342.
 
 Target packages:
-- hostlink-agent: embedded SSH server, optional outbound reverse tunnel,
-  SFTP, short exec, durable job lifecycle and a minimal Agent-only updater.
-- hostlink: pinned SSH client, exec, transfer, forwarding and job-based
-  test execution/reconnect.
+- hostlink-agent: embedded SSH server, outbound reverse tunnel, SFTP,
+  short exec, durable jobs, secure fresh enrollment and Agent-only updater.
+- hostlink: Hub-managed host selection/invite/list/revoke plus pinned SSH
+  client, exec, transfer, forwarding and resumable test execution.
+- hostlink-hub (proposed): authoritative identity, route/gateway registry,
+  invitations, enrollment, SSH authorization and revocation; **no execution RPC**.
 
 Updates must pin the exact Agent artifact SHA-256/version/target, defer active
 jobs and reject unsafe roots. Source-exact Windows stopped-process handoff and
@@ -15,7 +18,9 @@ rollback are required gates, not currently working features.
 
 The original HostLink `dev` tree remains unchanged. This experimental branch
 has runnable CLI binaries; it is **not ready for deployment or fleet migration**.
-The design contract and remaining gates are in `docs/ARCHITECTURE.md`.
+The managed-fleet target and acceptance gates are in
+[docs/MANAGED_FLEET_ARCHITECTURE.md](docs/MANAGED_FLEET_ARCHITECTURE.md)
+and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Rust compiler policy
 

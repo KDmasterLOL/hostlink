@@ -23,7 +23,7 @@ The inspector compares the old Hub, Controller, and Agent gateway route where th
 
 | Legacy function | New path or disposition |
 | --- | --- |
-| Hub JSONL control listener and Hub API token | Retired. No compatibility listener or token conversion. |
+| Old Agent JSONL control listener, old per-Agent RPC/control token | Retired; no compatibility listener or token conversion. New HostLink Hub **registry/enrollment/revocation** remains REQUIRED as a separate HTTPS management plane (1C-1019/1020/1021). |
 | Pinned SSH target check/exec | `hostlink check` / `hostlink exec` with explicit `HostSpec`. |
 | File transfer | `hostlink upload` / `hostlink download` over Agent SFTP. |
 | Durable task start/readback | `hostlink job` / `hostlink run`; a started job is never silently replayed. |
