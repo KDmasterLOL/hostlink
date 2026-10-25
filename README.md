@@ -9,8 +9,9 @@ Target packages:
   short exec, durable jobs, secure fresh enrollment and Agent-only updater.
 - hostlink: Hub-managed host selection/invite/list/revoke plus pinned SSH
   client, exec, transfer, forwarding and resumable test execution.
-- hostlink-hub (proposed): authoritative identity, route/gateway registry,
-  invitations, enrollment, SSH authorization and revocation; **no execution RPC**.
+- hostlink-hub: authoritative identity, route/gateway registry, invitations,
+  enrollment, SSH authorization and revocation; **no execution RPC**. See
+  [crates/hub/README.md](crates/hub/README.md) for server configuration/API.
 
 Updates must pin the exact Agent artifact SHA-256/version/target, defer active
 jobs and reject unsafe roots. Source-exact Windows stopped-process handoff and
@@ -39,6 +40,8 @@ cargo test --offline --locked --workspace
 cargo clippy --offline --locked --workspace --all-targets -- -D warnings
 cargo run --offline --locked -p hostlink-agent -- check --config agent.json
 cargo run --offline --locked -p hostlink-agent -- run --config agent.json
+cargo run --offline --locked -p hostlink-hub -- check --config hub.json
+cargo run --offline --locked -p hostlink-hub -- serve --config hub.json
 cargo run --offline --locked -p hostlink -- check --config host.json
 cargo run --offline --locked -p hostlink -- exec --config host.json --command 'echo hello'
 cargo run --offline --locked -p hostlink -- migration preflight --help

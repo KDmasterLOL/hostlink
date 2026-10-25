@@ -1,0 +1,35 @@
+[package]
+name = "hostlink-hub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+
+[[bin]]
+name = "hostlink-hub"
+path = "src/main.rs"
+required-features = ["server"]
+
+[features]
+default = ["server"]
+server = ["dep:axum", "dep:clap", "dep:getrandom", "dep:hex", "dep:serde_json", "dep:sha2", "dep:tokio", "dep:url"]
+
+[dependencies]
+axum = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+serde.workspace = true
+serde_json = { workspace = true, optional = true }
+secrecy = { workspace = true, features = ["serde"] }
+sha2 = { workspace = true, optional = true }
+ssh-key = { workspace = true, features = ["ed25519", "rand_core"] }
+tokio = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+
+[dev-dependencies]
+base64.workspace = true
+tempfile.workspace = true
+tower.workspace = true
