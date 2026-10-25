@@ -1,0 +1,29 @@
+# HostLink rewrite тАФ externally observable capability parity
+
+Source audit: 2026-10-25. Old HostLink `dev@5a1f80b`, new SSH-only rewrite `e9140457f39324ceabdc893adee0a4cf03bff93c`. This is a behavioral inventory, **not** an instruction to resurrect Hub/RPC, managed Toolkit release, external OpenSSH, or attestations. The replacement's owner is a pinned `russh` Client plus an unprivileged `russh` Agent; static SSH host configuration is **not** the same as Hub enrollment.
+
+## Observable commands/capabilities
+
+| Old controller surface (`crates/onec-access/src/cli/commands`) | New canonical API/CLI at audited SHA | Classification and migration implication |
+| --- | --- | --- |
+| `check`, `verify`, `info` | `hostlink check --config HOST` uses an authenticated, pinned SSH session | **Core connection established**, but Hub metadata/Agent status fields are intentionally not reproduced. |
+| `exec` | `hostlink exec --config HOST --command STRING`; `hostlink job start` has exact typed program/argv/digest | **Behavioral difference:** short SSH exec is shell-command text, while old Agent exec used typed program invocation. Use typed durable job/run when command interpolation is unacceptable. Preserve binary stdin/stdout/stderr and nonzero exit; don't silently reinterpret argv. |
+| `upload`, `download` | `hostlink upload/download`, `HostConnection::sftp_upload/download` | **Present**, but now scoped to authenticated-controller-owned SFTP artifacts, size-bounded and create-only; not arbitrary legacy filesystem mutation. |
+| `run-local`, `run-local-job` | `hostlink run --config HOST --binary FILE -- [argv...]` (SFTP upload тЖТ hash Seal тЖТ source-pinned durable job) | **Primary functional replacement**. Proven Linux SSH E2E including exit 7 and same-ID no duplicate launch; full old native/Nextest evidence and effect-policy engine deliberately NOT inside HostLink. |
+| `job start/status/logs/result/wait/cancel` | `hostlink job start/status/output`, `HostConnection::job_start/status/output`; `run` follows output to exit | **Incomplete:** `cancel` is absent from jobs-v1 protocol/CLI despite parent 1C-987 requiring explicit cancellation. Logs/status/readback exist at bounded offsets; standalone wait/result convenience command is absent and not a separate engine requirement. |
+| `forward`, `rdp` | `HostConnection::open_forward(destination: SocketAddr)` direct-tcpip channel; gateway transit supported | **Library support only:** no local-listener CLI forward/RDP replacement yet. Before exposing a listener, require controller-loopback-only binding, bounded sessions/bytes, full cleanup, and target-side forwarding policy review. |
+| `probe` | Can run a remote command or use target-side TCP forward but no dedicated probe operation | **Not feature-equivalent**. Decide based on actual consumers, not by recreating old Hub RPC. |
+| `remove-scoped` | SFTP Agent protocol permits scoped operations, but Client CLI exposes only upload/download | **No equivalent public owned-root delete** at this SHA. Any new cleanup must prove identity-bound terminal artifact ownership; never add unconstrained remote delete. |
+| `configure`, `show`, `list`, `display-name`, `invite`, `remove` | Explicit `HostSpec` with exact endpoint/identity/host pin and optional `GatewayHop` | **Intentionally retired Hub inventory/enrollment lifecycle.** 1C-1010 must produce read-only preflight and manual side-by-side migration; do not fake enrollment from a static host entry. |
+| `sync-ssh`, `ssh` | Embedded `russh` transport without OpenSSH subprocesses; no interactive PTY | **Deliberate anti-goal** per 1C-987. Standard SSH exec, SFTP and typed jobs replace supported noninteractive workflows. |
+| Managed Agent update | `hostlink-agent update`: exact Agent-only archive/version/target/SHA with job interlock | **Linux implemented**; Windows stopped-runtime handoff and rollback are still required (1C-1004). Do not confuse with the retired OneC Toolkit update engine. |
+
+## Explicit acceptance gaps and ownership
+
+1. **P0 product gap:** Jobs-v1 cancellation is explicitly required by 1C-987 but absent from both wire request enums. A same-key, same-UUID cancel must find the *Agent-owned* running worker, not cancel the SSH channel; terminate the whole process tree, persist an unambiguous terminal non-success state and release update interlock only when truly terminal. Unknown job/owner and repeated cancel must fail closed or be idempotent without lying about termination. Coordinate with 1C-1003 Windows worker before touching shared `crates/agent/src/{ssh,jobs}.rs`; client owns `crates/client/src/{run,main}.rs`. Add positive/negative Linux and native Windows reconnect tests.
+2. **Source-exact Windows/native:** current rewrite Windows11 durable reconnect, Win7 x64/x86 and safe update/handoff need same-artifact receipts (1C-1003/1004/1008/1011). Old `dev` Win7 evidence cannot be transferred.
+3. **Gateway and real host cutover:** reverse port forwarding pinned across both identities, loss/restart and fallback (1C-1009); offline old config inventory and separate owner-scoped sidecar (1C-1010) before any managed replacement.
+4. **Operator TCP-forward parity:** decide and implement a bounded loopback-only CLI forward on top of existing `HostConnection::open_forward` if interactive forwarding/RDP is part of required workflows. No service proxy, auto-routing Hub, or broad network access beyond an explicitly approved destination.
+5. **Artifact lifecycle:** verify terminal owned cleanup and protected SFTP/Seal retention limits. Never remove an artifact with uncertain or foreign ownership.
+
+The old command catalog is from `origin/dev:crates/onec-access/src/cli/commands/mod.rs`; new APIs were read from `crates/client/src/{main,lib,forward,run,sftp}.rs` and `crates/agent/src/{ssh,jobs,update}.rs`. This audit is tied to `e914045`; reevaluate after integrated Codex slices rather than assuming files or semantics remain unchanged.
