@@ -131,26 +131,8 @@ fn invalid_command(message: &'static str) -> io::Error {
 #[cfg(all(test, windows))]
 mod windows_process_tests {
     use super::*;
-    use processkit::{Outcome, RawOutputSink};
-    use std::sync::Mutex;
-
-    struct CaptureSink(Arc<Mutex<Vec<u8>>>);
-
-    impl RawOutputSink for CaptureSink {
-        fn write_chunk<'a>(&'a mut self, chunk: &'a [u8]) -> RawSinkFuture<'a> {
-            Box::pin(async move {
-                self.0
-                    .lock()
-                    .expect("capture lock")
-                    .extend_from_slice(chunk);
-                Ok(())
-            })
-        }
-
-        fn finish(&mut self) -> RawSinkFuture<'_> {
-            Box::pin(async { Ok(()) })
-        }
-    }
+    use processkit::Outcome;
+    use tokio::io::AsyncReadExt;
 
     #[tokio::test]
     async fn powershell_processkit_pipe_preserves_binary_stdin_and_exit_status() {
@@ -165,19 +147,15 @@ mod windows_process_tests {
             return;
         }
 
-        let stdout = Arc::new(Mutex::new(Vec::new()));
-        let stderr = Arc::new(Mutex::new(Vec::new()));
-        let command = prepared
+        // The published processkit 3.3.4 API exposes raw byte tees, not
+        // RawOutputSink. Draining both pipes concurrently avoids blocking
+        // on the test's bounded duplex buffers.
+        let (stdout_writer, mut stdout_reader) = tokio::io::duplex(16 * 1024);
+        let (stderr_writer, mut stderr_reader) = tokio::io::duplex(4 * 1024);
+        let mut process = prepared
             .expect("verified Windows user context and PowerShell command")
-            .stdout_raw_sink({
-                let stdout = stdout.clone();
-                move || CaptureSink(stdout.clone())
-            })
-            .stderr_raw_sink({
-                let stderr = stderr.clone();
-                move || CaptureSink(stderr.clone())
-            });
-        let mut process = command
+            .stdout_raw_tee(stdout_writer)
+            .stderr_raw_tee(stderr_writer)
             .timeout(Duration::from_secs(15))
             .start()
             .await
@@ -191,16 +169,28 @@ mod windows_process_tests {
             .expect("write exact binary stdin");
         child_stdin.finish().await.expect("close child stdin");
 
-        let outcome = tokio::time::timeout(Duration::from_secs(20), process.drain())
-            .await
-            .expect("PowerShell subprocess deadline")
-            .expect("drain PowerShell subprocess");
+        let (outcome, stdout, stderr) = tokio::time::timeout(Duration::from_secs(20), async {
+            tokio::try_join!(
+                async { process.drain().await.map_err(io::Error::other) },
+                async {
+                    let mut bytes = Vec::new();
+                    stdout_reader.read_to_end(&mut bytes).await?;
+                    Ok::<_, io::Error>(bytes)
+                },
+                async {
+                    let mut bytes = Vec::new();
+                    stderr_reader.read_to_end(&mut bytes).await?;
+                    Ok::<_, io::Error>(bytes)
+                }
+            )
+        })
+        .await
+        .expect("PowerShell subprocess deadline")
+        .expect("drain PowerShell subprocess and raw pipes");
+
         assert_eq!(outcome, Outcome::Exited(7));
-        assert_eq!(*stdout.lock().expect("stdout capture lock"), payload);
-        assert_eq!(
-            *stderr.lock().expect("stderr capture lock"),
-            [0_u8, 255, b'E', b'R', b'R', b'\r', b'\n']
-        );
+        assert_eq!(stdout, payload);
+        assert_eq!(stderr, [0_u8, 255, b'E', b'R', b'R', b'\r', b'\n']);
     }
 }
 
