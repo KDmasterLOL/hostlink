@@ -7,7 +7,7 @@ mod exec;
 mod preflight;
 mod sftp;
 
-pub use preflight::preflight_embedded_ssh;
+pub use preflight::{preflight_embedded_ssh, preflight_embedded_ssh_with_exec};
 
 use russh::keys::ssh_key::authorized_keys::AuthorizedKeys;
 use russh::keys::{Algorithm, PrivateKey, PublicKey};

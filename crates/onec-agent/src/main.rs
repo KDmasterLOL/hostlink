@@ -1,5 +1,4 @@
 use clap::{Args, Parser, Subcommand};
-use hostlink_agent::embedded_ssh::preflight_embedded_ssh;
 use hostlink_agent::{
     AgentConfig, AgentPackageUpdateRequest, DirectPackageUpdateRequest, PrepareEnrollmentRequest,
     RuntimeUpdateOutcome, RuntimeUpdatePreflightOutcome, install_service, post_enrollment_json,
@@ -221,6 +220,9 @@ struct EmbeddedSshPreflightArgs {
     identity: PathBuf,
     #[arg(long, value_name = "PATH")]
     scratch_dir: PathBuf,
+    /// Also validate the fixed local Windows SSH exec probe.
+    #[arg(long)]
+    check_exec: bool,
 }
 
 fn main() {
@@ -263,13 +265,25 @@ async fn run_embedded_ssh_preflight_command(args: EmbeddedSshPreflightArgs) -> i
             "embedded SSH preflight requires embedded_ssh_server in agent config",
         )
     })?;
-    preflight_embedded_ssh(
+    hostlink_agent::embedded_ssh::preflight_embedded_ssh_with_exec(
         embedded,
         &args.host_public_key,
         &args.identity,
         &args.scratch_dir,
+        args.check_exec,
     )
-    .await
+    .await?;
+    write_embedded_ssh_preflight_success(args.check_exec, std::io::stdout().lock())
+}
+
+fn write_embedded_ssh_preflight_success(
+    check_exec: bool,
+    mut output: impl std::io::Write,
+) -> io::Result<()> {
+    if check_exec {
+        writeln!(output, "EMBEDDED_SSH_EXEC_PROBE_PASS")?;
+    }
+    Ok(())
 }
 
 fn run(command: Command) -> io::Result<()> {
@@ -473,6 +487,41 @@ mod tests {
         assert!(
             Cli::try_parse_from(["hostlink-agent", "service", "--config", "agent.json"]).is_ok()
         );
+        let default_preflight = Cli::try_parse_from([
+            "hostlink-agent",
+            "__embedded-ssh-preflight",
+            "--config",
+            "agent.json",
+            "--host-public-key",
+            "host.pub",
+            "--identity",
+            "identity",
+            "--scratch-dir",
+            "scratch",
+        ])
+        .expect("legacy preflight arguments remain valid");
+        let Command::EmbeddedSshPreflight(default_preflight) = default_preflight.command else {
+            panic!("expected embedded SSH preflight");
+        };
+        assert!(!default_preflight.check_exec);
+        let exec_preflight = Cli::try_parse_from([
+            "hostlink-agent",
+            "__embedded-ssh-preflight",
+            "--config",
+            "agent.json",
+            "--host-public-key",
+            "host.pub",
+            "--identity",
+            "identity",
+            "--scratch-dir",
+            "scratch",
+            "--check-exec",
+        ])
+        .expect("opt-in exec probe parses");
+        let Command::EmbeddedSshPreflight(exec_preflight) = exec_preflight.command else {
+            panic!("expected embedded SSH preflight");
+        };
+        assert!(exec_preflight.check_exec);
         assert!(
             Cli::try_parse_from(["hostlink-agent", "__job-worker", "--job-dir", "job"]).is_ok()
         );
@@ -642,5 +691,15 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn embedded_ssh_exec_pass_marker_is_opt_in_only() {
+        let mut output = Vec::new();
+        write_embedded_ssh_preflight_success(false, &mut output).expect("default output");
+        assert!(output.is_empty(), "default preflight must stay silent");
+
+        write_embedded_ssh_preflight_success(true, &mut output).expect("opt-in output");
+        assert_eq!(output, b"EMBEDDED_SSH_EXEC_PROBE_PASS\n");
     }
 }

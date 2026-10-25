@@ -50,6 +50,38 @@ pub async fn preflight_embedded_ssh(
     controller_identity: &Path,
     scratch_dir: &Path,
 ) -> io::Result<()> {
+    preflight_embedded_ssh_with_exec(
+        config,
+        advertised_host_public_key,
+        controller_identity,
+        scratch_dir,
+        false,
+    )
+    .await
+}
+
+/// As [`preflight_embedded_ssh`], optionally validating the fixed Windows exec probe.
+pub async fn preflight_embedded_ssh_with_exec(
+    config: &EmbeddedSshServerConfig,
+    advertised_host_public_key: &Path,
+    controller_identity: &Path,
+    scratch_dir: &Path,
+    check_exec: bool,
+) -> io::Result<()> {
+    if check_exec {
+        #[cfg(windows)]
+        if !super::exec::safe_windows_user_context()? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "embedded SSH exec preflight requires a verified non-elevated, non-LocalSystem Windows user context",
+            ));
+        }
+        #[cfg(not(windows))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "embedded SSH exec preflight is available only on Windows",
+        ));
+    }
     if !scratch_dir.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -102,6 +134,7 @@ pub async fn preflight_embedded_ssh(
             expected_host_key,
             controller_identity,
             scratch_dir,
+            check_exec,
         ),
     )
     .await
@@ -138,6 +171,7 @@ async fn run_client_probe(
     expected_host_key: PublicKey,
     controller_identity: Arc<russh::keys::PrivateKey>,
     scratch_dir: &Path,
+    check_exec: bool,
 ) -> io::Result<()> {
     let mut session = client::connect(
         Arc::new(client::Config::default()),
@@ -269,6 +303,11 @@ async fn run_client_probe(
     }
     echo.await.map_err(io::Error::other)??;
 
+    if check_exec {
+        #[cfg(windows)]
+        run_exec_probe(&mut session).await?;
+    }
+
     session
         .disconnect(
             russh::Disconnect::ByApplication,
@@ -277,6 +316,96 @@ async fn run_client_probe(
         )
         .await
         .map_err(io::Error::other)
+}
+
+#[cfg(windows)]
+async fn run_exec_probe(session: &mut client::Handle<StrictHostKey>) -> io::Result<()> {
+    use russh::ChannelMsg;
+
+    const COMMAND: &str = "$i=[Console]::OpenStandardInput();$o=[Console]::OpenStandardOutput();$b=New-Object byte[] 1024;while(($n=$i.Read($b,0,$b.Length))-gt 0){$o.Write($b,0,$n)};[Console]::Error.Write('hostlink-exec-probe');exit 7";
+    const INPUT: &[u8] = b"HostLink embedded SSH exec probe\0\x01\x7f\xff";
+    const STDERR: &[u8] = b"hostlink-exec-probe";
+    const OUTPUT_LIMIT: usize = 1024;
+    const STDERR_LIMIT: usize = 128;
+
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .map_err(io::Error::other)?;
+    channel
+        .exec(true, COMMAND)
+        .await
+        .map_err(io::Error::other)?;
+    loop {
+        match channel.wait().await {
+            Some(ChannelMsg::Success) => break,
+            Some(ChannelMsg::Failure) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "embedded SSH exec probe request was rejected",
+                ));
+            }
+            Some(_) => {}
+            None => {
+                return Err(io::Error::other(
+                    "embedded SSH exec channel closed before acknowledgement",
+                ));
+            }
+        }
+    }
+
+    channel.data_bytes(INPUT).await.map_err(io::Error::other)?;
+    channel.eof().await.map_err(io::Error::other)?;
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    let (mut exit_status, mut eof, mut close) = (None, false, false);
+    while !close {
+        match channel.wait().await {
+            Some(ChannelMsg::Data { data }) => {
+                if stdout.len().saturating_add(data.len()) > OUTPUT_LIMIT {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "embedded SSH exec probe stdout exceeded its limit",
+                    ));
+                }
+                stdout.extend_from_slice(&data);
+            }
+            Some(ChannelMsg::ExtendedData { data, ext: 1 }) => {
+                if stderr.len().saturating_add(data.len()) > STDERR_LIMIT {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "embedded SSH exec probe stderr exceeded its limit",
+                    ));
+                }
+                stderr.extend_from_slice(&data);
+            }
+            Some(ChannelMsg::ExtendedData { .. }) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "embedded SSH exec probe returned unsupported extended data",
+                ));
+            }
+            Some(ChannelMsg::ExitStatus {
+                exit_status: status,
+            }) => exit_status = Some(status),
+            Some(ChannelMsg::Eof) => eof = true,
+            Some(ChannelMsg::Close) => close = true,
+            Some(_) => {}
+            None => {
+                return Err(io::Error::other(
+                    "embedded SSH exec channel ended without close",
+                ));
+            }
+        }
+    }
+    // russh 0.63 responds to the peer's CHANNEL_CLOSE while processing it, then removes
+    // the channel. Sending a second close here can fail with ChannelClosed.
+    if stdout != INPUT || stderr != STDERR || exit_status != Some(7) || !eof {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "embedded SSH exec probe output, stderr, exit status, EOF, or close did not match",
+        ));
+    }
+    Ok(())
 }
 
 async fn open_sftp(session: &russh::client::Handle<StrictHostKey>) -> io::Result<SftpSession> {

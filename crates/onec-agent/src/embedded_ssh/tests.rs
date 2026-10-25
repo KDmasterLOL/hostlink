@@ -1185,7 +1185,7 @@ fn embedded_preflight_does_not_own_a_tokio_runtime() {
     assert!(cli.contains("fn run_embedded_ssh_preflight_command"));
     assert!(cli.contains("tokio::runtime::Builder::new_multi_thread()"));
     assert!(cli.contains(".block_on(run_embedded_ssh_preflight_command(args))"));
-    assert!(cli.contains("preflight_embedded_ssh("));
+    assert!(cli.contains("preflight_embedded_ssh_with_exec("));
     assert!(cli.contains(".await"));
 }
 

@@ -11,6 +11,12 @@ has Linux loopback regression coverage. External Windows/Win7 acceptance is
 still pending. Legacy wire and config identities remain preserved; no standalone
 release has yet passed native acceptance.
 
+The hidden `__embedded-ssh-preflight` command keeps its existing auth, SFTP and
+forwarding checks by default. Windows operators may explicitly add `--check-exec`
+to validate the fixed local PowerShell exec probe; it requires a verified
+non-elevated, non-LocalSystem process context and reports
+`EMBEDDED_SSH_EXEC_PROBE_PASS` on success.
+
 - No dependency on 1C domain concepts in the target architecture.
 - Existing installed Agent configurations, protocol fields, SSH keys and signed
   observations must not be silently renamed or invalidated.
