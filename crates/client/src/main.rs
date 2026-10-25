@@ -5,6 +5,7 @@ use hostlink::{
     HostSpec,
     connect::{HostConnection, SshClientError},
     forward::{self, ForwardServer},
+    hub::{self, HubClient, HubConfig},
     migration::{self, Readiness},
     run::{
         Cancel, JobSpec, JobStateKind, JobStatus, JobStream, Output, Seal, Start, Status,
@@ -38,10 +39,43 @@ enum Command {
         #[command(subcommand)]
         command: MigrationCommand,
     },
+    /// Manage the authoritative Hub registry and controller-local Hub settings.
+    Hub {
+        #[command(subcommand)]
+        command: HubCommand,
+    },
+    /// List authoritative registered hosts without probing by default.
+    List {
+        #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show registry facts for a registered host without probing SSH.
+    Info { host: String },
+    /// Verify a registered host using its current Hub pins and SSH identity.
+    Verify { host: String },
+    /// Create an invitation. The one-use token is printed only by this explicit command.
+    Invite {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(60..=86400))]
+        ttl_seconds: u64,
+    },
+    /// Change a host's display-only label.
+    DisplayName { host: String, display_name: String },
+    /// Revoke new managed access; does not uninstall the Agent or terminate existing sessions.
+    Remove {
+        host: String,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Establish and close a pinned authenticated SSH connection.
     Check {
-        #[arg(long)]
-        config: PathBuf,
+        #[arg(long, group = "host_selection", required_unless_present = "host")]
+        config: Option<PathBuf>,
+        #[arg(long, group = "host_selection", required_unless_present = "config")]
+        host: Option<String>,
     },
     /// Forward a loopback TCP port to a target reachable from the SSH host.
     Forward {
@@ -70,8 +104,10 @@ enum Command {
     },
     /// Execute a single remote shell command with binary stdin/out and exact exit status.
     Exec {
-        #[arg(long)]
-        config: PathBuf,
+        #[arg(long, group = "host_selection", required_unless_present = "host")]
+        config: Option<PathBuf>,
+        #[arg(long, group = "host_selection", required_unless_present = "config")]
+        host: Option<String>,
         #[arg(long)]
         command: String,
         /// Path to a bounded binary stdin payload; "-" reads controller stdin.
@@ -80,8 +116,10 @@ enum Command {
     },
     /// Create a new remote file using authenticated SFTP (never overwrite).
     Upload {
-        #[arg(long)]
-        config: PathBuf,
+        #[arg(long, group = "host_selection", required_unless_present = "host")]
+        config: Option<PathBuf>,
+        #[arg(long, group = "host_selection", required_unless_present = "config")]
+        host: Option<String>,
         #[arg(long)]
         local: PathBuf,
         #[arg(long)]
@@ -89,8 +127,10 @@ enum Command {
     },
     /// Download an SFTP file to a new local file (never overwrite).
     Download {
-        #[arg(long)]
-        config: PathBuf,
+        #[arg(long, group = "host_selection", required_unless_present = "host")]
+        config: Option<PathBuf>,
+        #[arg(long, group = "host_selection", required_unless_present = "config")]
+        host: Option<String>,
         #[arg(long)]
         remote: String,
         #[arg(long)]
@@ -103,8 +143,10 @@ enum Command {
     },
     /// Upload, seal and run a source-pinned test binary with exact argv.
     Run {
-        #[arg(long)]
-        config: PathBuf,
+        #[arg(long, group = "host_selection", required_unless_present = "host")]
+        config: Option<PathBuf>,
+        #[arg(long, group = "host_selection", required_unless_present = "config")]
+        host: Option<String>,
         #[arg(long)]
         binary: PathBuf,
         /// Caller-owned canonical UUID; a UUID v4 is generated when omitted.
@@ -137,8 +179,10 @@ enum MigrationCommand {
 enum JobCommand {
     /// Start one durable job request without retrying it.
     Start {
-        #[arg(long)]
-        config: PathBuf,
+        #[arg(long, group = "host_selection", required_unless_present = "host")]
+        config: Option<PathBuf>,
+        #[arg(long, group = "host_selection", required_unless_present = "config")]
+        host: Option<String>,
         /// Absolute executable path on the managed host.
         #[arg(long)]
         program: String,
@@ -157,22 +201,28 @@ enum JobCommand {
     },
     /// Read the persisted state of a durable job.
     Status {
-        #[arg(long)]
-        config: PathBuf,
+        #[arg(long, group = "host_selection", required_unless_present = "host")]
+        config: Option<PathBuf>,
+        #[arg(long, group = "host_selection", required_unless_present = "config")]
+        host: Option<String>,
         #[arg(long)]
         id: String,
     },
     /// Request cancellation of one owned Agent job; read status to confirm termination.
     Cancel {
-        #[arg(long)]
-        config: PathBuf,
+        #[arg(long, group = "host_selection", required_unless_present = "host")]
+        config: Option<PathBuf>,
+        #[arg(long, group = "host_selection", required_unless_present = "config")]
+        host: Option<String>,
         #[arg(long)]
         id: String,
     },
     /// Read one raw output stream from a persisted byte offset.
     Output {
-        #[arg(long)]
-        config: PathBuf,
+        #[arg(long, group = "host_selection", required_unless_present = "host")]
+        config: Option<PathBuf>,
+        #[arg(long, group = "host_selection", required_unless_present = "config")]
+        host: Option<String>,
         #[arg(long)]
         id: String,
         #[arg(long, value_parser = parse_stream)]
@@ -180,6 +230,27 @@ enum JobCommand {
         #[arg(long)]
         offset: u64,
     },
+}
+
+#[derive(Subcommand)]
+enum HubCommand {
+    /// Save controller-local Hub URL, token source, SSH user and pinned identity paths.
+    Configure {
+        #[arg(long)]
+        hub_url: String,
+        #[arg(long)]
+        token_file: PathBuf,
+        #[arg(long)]
+        ssh_user: String,
+        #[arg(long)]
+        identity: PathBuf,
+        #[arg(long)]
+        gateway_identity: PathBuf,
+    },
+    /// Display non-secret controller-local Hub settings.
+    Show,
+    /// Check Hub operator API reachability and bearer authorization only.
+    Check,
 }
 
 fn parse_stream(value: &str) -> Result<JobStream, String> {
@@ -196,6 +267,246 @@ fn parse_socket_addr(value: &str) -> Result<SocketAddr, String> {
         .map_err(|_| "expected an IP:PORT socket address".into())
 }
 
+fn default_hub_config_path() -> Result<PathBuf, Box<dyn Error>> {
+    #[cfg(windows)]
+    let root = std::env::var_os("APPDATA").ok_or("APPDATA is unavailable")?;
+    #[cfg(not(windows))]
+    let root = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
+    #[cfg(windows)]
+    let path = PathBuf::from(root).join("HostLink").join("hub.json");
+    #[cfg(not(windows))]
+    let path = PathBuf::from(root).join(".config/hostlink/hub.json");
+    Ok(std::env::var_os("HOSTLINK_HUB_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or(path))
+}
+
+fn load_hub_config(path: &Path) -> Result<HubConfig, Box<dyn Error>> {
+    Ok(HubClient::read_config(path)?)
+}
+
+fn configured_hub_client() -> Result<(HubClient, HubConfig), Box<dyn Error>> {
+    let config = load_hub_config(&default_hub_config_path()?)?;
+    let client = HubClient::from_config(&config)?;
+    Ok((client, config))
+}
+
+async fn hub_command(command: &HubCommand) -> Result<i32, Box<dyn Error>> {
+    match command {
+        HubCommand::Configure {
+            hub_url,
+            token_file,
+            ssh_user,
+            identity,
+            gateway_identity,
+        } => {
+            let config = HubConfig {
+                hub_url: hub_url.clone(),
+                token_file: token_file.clone(),
+                ssh_user: ssh_user.clone(),
+                identity: identity.clone(),
+                gateway_identity: gateway_identity.clone(),
+            };
+            HubClient::from_config(&config)?;
+            let path = default_hub_config_path()?;
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+                }
+            }
+            let bytes = serde_json::to_vec_pretty(&config)?;
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&path).map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    io::Error::new(
+                        error.kind(),
+                        "Hub config already exists; remove it explicitly before reconfiguring",
+                    )
+                } else {
+                    error
+                }
+            })?;
+            let publication = set_private_file_acl(&mut file)
+                .and_then(|()| file.write_all(&bytes))
+                .and_then(|()| file.sync_all());
+            drop(file);
+            if let Err(error) = publication {
+                return match fs::remove_file(&path) {
+                    Ok(()) => Err(error.into()),
+                    Err(cleanup) => Err(io::Error::other(format!(
+                        "Hub config write failed: {error}; owned partial config cleanup failed: {cleanup}"
+                    )).into()),
+                };
+            }
+            println!("Hub config saved to {}", path.display());
+        }
+        HubCommand::Show => {
+            let config = load_hub_config(&default_hub_config_path()?)?;
+            serde_json::to_writer_pretty(io::stdout().lock(), &config)?;
+            io::stdout().lock().write_all(b"\n")?;
+        }
+        HubCommand::Check => {
+            let (client, _) = configured_hub_client()?;
+            let gateways = client.info().await?;
+            println!(
+                "Hub v2 management API reachable; approved gateways: {}",
+                gateways.len()
+            );
+        }
+    }
+    Ok(0)
+}
+
+#[cfg(windows)]
+fn set_private_file_acl(file: &mut File) -> io::Result<()> {
+    use windows_permissions::{
+        SecurityDescriptor,
+        constants::{SeObjectType, SecurityInformation},
+        utilities::current_process_sid,
+        wrappers::SetSecurityInfo,
+    };
+
+    let owner = current_process_sid()?;
+    let descriptor: windows_permissions::LocalBox<SecurityDescriptor> =
+        format!("D:P(A;;FA;;;{owner})")
+            .parse()
+            .map_err(|error: io::Error| error)?;
+    let dacl = descriptor
+        .dacl()
+        .ok_or_else(|| io::Error::other("private config ACL could not be constructed"))?;
+    SetSecurityInfo(
+        file,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl | SecurityInformation::Owner,
+        Some(&owner),
+        None,
+        Some(dacl),
+        None,
+    )
+}
+
+#[cfg(not(windows))]
+fn set_private_file_acl(_file: &mut File) -> io::Result<()> {
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct HostCheck {
+    machine_id: String,
+    name: String,
+    status: &'static str,
+    observed_at_unix: u64,
+}
+
+async fn list_command(check: bool, json: bool) -> Result<i32, Box<dyn Error>> {
+    let (client, config) = configured_hub_client()?;
+    let hosts = client.list_hosts().await?;
+    if !check {
+        if json {
+            serde_json::to_writer_pretty(io::stdout().lock(), &hosts)?;
+            io::stdout().lock().write_all(b"\n")?;
+        } else {
+            for host in hosts {
+                println!(
+                    "{}\t{}\t{}\t{} {}\t{}\tgateway-loopback=127.0.0.1:{}",
+                    host.name,
+                    host.machine_id,
+                    host.display_name.as_deref().unwrap_or(""),
+                    host.os,
+                    host.arch,
+                    host.agent_version,
+                    host.remote_port,
+                );
+            }
+        }
+        return Ok(0);
+    }
+    let gateway = match client.info().await {
+        Ok(gateways) => match gateways.as_slice() {
+            [gateway] => Some(gateway.clone()),
+            _ => None,
+        },
+        Err(_) => None,
+    };
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let mut tasks = tokio::task::JoinSet::new();
+    for host in hosts {
+        let semaphore = semaphore.clone();
+        let config = config.clone();
+        let gateway = gateway.clone();
+        tasks.spawn(async move {
+            let Ok(_permit) = semaphore.acquire_owned().await else {
+                return HostCheck {
+                    machine_id: host.machine_id.to_string(),
+                    name: host.name,
+                    status: "unknown",
+                    observed_at_unix: 0,
+                };
+            };
+            let observed_at_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let status = match gateway {
+                None => "unknown",
+                Some(gateway) => match hub::host_spec_from(host.clone(), &gateway, &config).await {
+                    Err(hub::HubClientError::Invalid(_)) => "identity_mismatch",
+                    Err(_) => "unknown",
+                    Ok(spec) => {
+                        match tokio::time::timeout(
+                            Duration::from_secs(20),
+                            HostConnection::connect(&spec),
+                        )
+                        .await
+                        {
+                            Ok(Ok(connection)) => match connection.close().await {
+                                Ok(()) => "online",
+                                Err(_) => "unknown",
+                            },
+                            Ok(Err(SshClientError::Russh(russh::Error::UnknownKey))) => {
+                                "identity_mismatch"
+                            }
+                            Ok(Err(_)) | Err(_) => "unreachable",
+                        }
+                    }
+                },
+            };
+            HostCheck {
+                machine_id: host.machine_id.to_string(),
+                name: host.name,
+                status,
+                observed_at_unix,
+            }
+        });
+    }
+    let mut statuses = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        statuses.push(result.map_err(|_| "host status task failed")?);
+    }
+    statuses.sort_by(|left, right| left.name.cmp(&right.name));
+    if json {
+        serde_json::to_writer_pretty(io::stdout().lock(), &statuses)?;
+        io::stdout().lock().write_all(b"\n")?;
+    } else {
+        for status in statuses {
+            println!(
+                "{}\t{}\t{}\t{}",
+                status.name, status.machine_id, status.status, status.observed_at_unix
+            );
+        }
+    }
+    Ok(0)
+}
+
 #[tokio::main]
 async fn main() {
     let result = run(Cli::parse()).await;
@@ -209,6 +520,64 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
+    match &cli.command {
+        Command::Hub { command } => return hub_command(command).await,
+        Command::List { check, json } => return list_command(*check, *json).await,
+        Command::Info { host } => {
+            let (client, _) = configured_hub_client()?;
+            let host = client.resolve_host(host).await?;
+            serde_json::to_writer_pretty(io::stdout().lock(), &host)?;
+            io::stdout().lock().write_all(b"\n")?;
+            return Ok(0);
+        }
+        Command::Verify { host } => {
+            let (client, config) = configured_hub_client()?;
+            let spec = client.resolve_host_spec(host, &config).await?;
+            let connection = HostConnection::connect(&spec).await?;
+            connection.close().await?;
+            println!("verified {} using pinned russh identity", host);
+            return Ok(0);
+        }
+        Command::Invite { name, ttl_seconds } => {
+            let (client, _) = configured_hub_client()?;
+            let invite = client.invite(name.clone(), *ttl_seconds).await?;
+            // This is the explicit bootstrap boundary requested by the operator.
+            use secrecy::ExposeSecret;
+            println!(
+                "token: {}\nexpires_at: {}\nartifact_binding: missing",
+                invite.token.expose_secret(),
+                invite.expires_at
+            );
+            return Ok(0);
+        }
+        Command::DisplayName { host, display_name } => {
+            let (client, _) = configured_hub_client()?;
+            let host = client.resolve_host(host).await?;
+            let updated = client.set_display_name(&host, display_name).await?;
+            serde_json::to_writer_pretty(io::stdout().lock(), &updated)?;
+            io::stdout().lock().write_all(b"\n")?;
+            return Ok(0);
+        }
+        Command::Remove { host, yes } => {
+            if !yes {
+                return Err("revocation requires explicit --yes confirmation".into());
+            }
+            let (client, _) = configured_hub_client()?;
+            let host = client.resolve_host(host).await?;
+            let receipt = client.revoke(&host).await?;
+            println!(
+                "revoked {}: new_connections={}, existing_sessions_terminated={}, remote_uninstall={}, projection={}",
+                host.machine_id,
+                receipt.revoked_new_connections,
+                receipt.confirmed_session_terminated,
+                receipt.remote_uninstall,
+                receipt.authorized_key_projection
+            );
+            return Ok(0);
+        }
+        _ => {}
+    }
+
     if let Command::Migration {
         command:
             MigrationCommand::Preflight {
@@ -263,22 +632,37 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         _ => {}
     }
 
-    let config_path = match &cli.command {
+    let (selected_config, selected_host) = match &cli.command {
         Command::Migration { .. } => unreachable!("migration preflight returned above"),
-        Command::Check { config }
-        | Command::Forward { config, .. }
-        | Command::Rdp { config, .. }
-        | Command::Probe { config, .. }
-        | Command::Exec { config, .. }
-        | Command::Upload { config, .. }
-        | Command::Download { config, .. } => config.clone(),
-        Command::Run { config, .. } => config.clone(),
+        Command::Check { config, host }
+        | Command::Exec { config, host, .. }
+        | Command::Upload { config, host, .. }
+        | Command::Download { config, host, .. }
+        | Command::Run { config, host, .. } => (config.clone(), host.clone()),
         Command::Job { command } => match command {
-            JobCommand::Start { config, .. }
-            | JobCommand::Status { config, .. }
-            | JobCommand::Cancel { config, .. }
-            | JobCommand::Output { config, .. } => config.clone(),
+            JobCommand::Start { config, host, .. }
+            | JobCommand::Status { config, host, .. }
+            | JobCommand::Cancel { config, host, .. }
+            | JobCommand::Output { config, host, .. } => (config.clone(), host.clone()),
         },
+        Command::Forward { config, .. }
+        | Command::Rdp { config, .. }
+        | Command::Probe { config, .. } => (Some(config.clone()), None),
+        Command::Hub { .. }
+        | Command::List { .. }
+        | Command::Info { .. }
+        | Command::Verify { .. }
+        | Command::Invite { .. }
+        | Command::DisplayName { .. }
+        | Command::Remove { .. } => unreachable!("Hub commands returned above"),
+    };
+    let config_path = selected_config
+        .clone()
+        .unwrap_or(default_hub_config_path()?);
+    let target_hint = if selected_host.is_some() {
+        "--host <HOST>"
+    } else {
+        "--config <PATH>"
     };
 
     // Validate bounded job input before reading credentials or opening SSH.
@@ -376,12 +760,26 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         // The ID must be recoverable even if upload, Seal, or start loses its ACK.
         eprintln!("hostlink: job id: {}", request.id);
     }
-    let spec = load_host_spec(&config_path)?;
+    let spec = if let Some(host) = selected_host.as_deref() {
+        let config = load_hub_config(&config_path)?;
+        HubClient::from_config(&config)?
+            .resolve_host_spec(host, &config)
+            .await?
+    } else {
+        load_host_spec(&config_path)?
+    };
     let mut client = HostConnection::connect(&spec).await?;
     // All errors must still close both the target and optional gateway SSH sessions.
     let operation: Result<i32, Box<dyn Error>> = async {
         match cli.command {
             Command::Migration { .. } => unreachable!("migration preflight returned above"),
+            Command::Hub { .. }
+            | Command::List { .. }
+            | Command::Info { .. }
+            | Command::Verify { .. }
+            | Command::Invite { .. }
+            | Command::DisplayName { .. }
+            | Command::Remove { .. } => unreachable!("Hub commands returned above"),
             Command::Check { .. } => Ok(0_i32),
             Command::Probe { target, timeout_ms, .. } => {
                 let opened = tokio::time::timeout(
@@ -433,8 +831,8 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
                 (JobCommand::Start { .. }, Some(PreparedJob::Start(request))) => {
                     let status = client.job_start(&request).await.map_err(|error| {
                         format!(
-                            "job start outcome UNKNOWN for {}: {error}; query with `hostlink job status --config <PATH> --id {}` before any further action",
-                            request.id, request.id
+                            "job start outcome UNKNOWN for {}: {error}; query with `hostlink job status {} --id {}` before any further action",
+                            request.id, target_hint, request.id
                         )
                     })?;
                     write_job_status(&status)?;
@@ -486,7 +884,7 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
             },
             Command::Run { .. } => {
                 let request = prepared_run.ok_or("internal run command preparation mismatch")?;
-                run_test_binary(&mut client, request, &spec, &config_path).await
+                run_test_binary(&mut client, request, &spec, target_hint).await
             }
         }
     }
@@ -554,16 +952,12 @@ async fn run_test_binary(
     client: &mut HostConnection,
     request: PreparedRun,
     host: &HostSpec,
-    config_path: &Path,
+    target_hint: &str,
 ) -> Result<i32, Box<dyn Error>> {
     let unknown = |stage: &str, error: &dyn Error| {
         format!(
-            "run outcome UNKNOWN during {stage} for {}: {error}; do not rerun or resend start; inspect with `hostlink job status --config {} --id {}` and `hostlink job output --config {} --id {} --stream stdout --offset 0` (repeat for stderr and returned offsets)",
-            request.id,
-            config_path.display(),
-            request.id,
-            config_path.display(),
-            request.id,
+            "run outcome UNKNOWN during {stage} for {}: {error}; do not rerun or resend start; inspect with `hostlink job status {} --id {}` and `hostlink job output {} --id {} --stream stdout --offset 0` (repeat for stderr and returned offsets)",
+            request.id, target_hint, request.id, target_hint, request.id,
         )
     };
 

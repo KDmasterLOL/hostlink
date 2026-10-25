@@ -75,6 +75,13 @@ UUID is printed **before** the first start request; on a lost acknowledgement,
 query status by UUID instead of resubmitting. Ordinary SSH `exec` remains
 channel-owned and does **not** survive a disconnect.
 
+The client also supports Hub v2 inventory and named host selection while
+keeping explicit `--config PATH` as a mutually exclusive option. Start with
+`hostlink hub configure`, then use `hostlink list` for registry data or
+`hostlink list --check` for bounded pinned SSH probes. See
+[docs/CLIENT_HUB.md](docs/CLIENT_HUB.md) for operator commands, private token
+requirements, gateway routing and truthful revocation behavior.
+
 The pinned SSH client also supports loopback-only TCP forwarding, local RDP
 mapping and target-side TCP probes through `russh` direct-tcpip. See
 [docs/TCP_FORWARDING.md](docs/TCP_FORWARDING.md) for commands, deadlines,

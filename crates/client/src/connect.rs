@@ -346,7 +346,7 @@ fn open_identity(path: &Path) -> Result<File, SshClientError> {
     Ok(file)
 }
 
-fn validate_identity_file(file: &File) -> Result<(), SshClientError> {
+pub(crate) fn validate_private_file(file: &File) -> Result<(), SshClientError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -370,6 +370,10 @@ fn validate_identity_file(file: &File) -> Result<(), SshClientError> {
         ));
     }
     Ok(())
+}
+
+fn validate_identity_file(file: &File) -> Result<(), SshClientError> {
+    validate_private_file(file)
 }
 
 #[cfg(windows)]

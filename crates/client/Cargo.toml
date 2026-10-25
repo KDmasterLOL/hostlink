@@ -18,6 +18,8 @@ base64.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 secrecy.workspace = true
+reqwest.workspace = true
+hostlink-hub = { path = "../hub", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.191"
@@ -27,5 +29,7 @@ windows-permissions = "=0.2.4"
 
 [dev-dependencies]
 hostlink-agent = { path = "../agent" }
+hostlink-hub = { path = "../hub", features = ["server"] }
+axum.workspace = true
 tempfile.workspace = true
 rand.workspace = true
