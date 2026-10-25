@@ -31,5 +31,6 @@ windows-permissions = "=0.2.4"
 hostlink-agent = { path = "../agent" }
 hostlink-hub = { path = "../hub", features = ["server"] }
 axum.workspace = true
+tower.workspace = true
 tempfile.workspace = true
 rand.workspace = true

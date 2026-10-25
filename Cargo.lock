@@ -1060,6 +1060,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tower",
  "uuid",
  "windows-permissions",
 ]

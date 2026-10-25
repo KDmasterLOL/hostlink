@@ -1,14 +1,26 @@
 //! Real Agent -> russh gateway reverse tunnel -> pinned Controller integration.
-use hostlink::{GatewayHop, HostSpec, connect::HostConnection};
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
+use hostlink::{
+    connect::HostConnection,
+    hub::{HubConfig as ControllerHubConfig, host_spec_from},
+};
 use hostlink_agent::{AgentConfig, ReverseGateway, ssh};
+use hostlink_hub::{
+    EnrollRequest, EnrollResponse, GatewayEndpoint, HubConfig as ServerHubConfig, HubService,
+    InviteRequest, InviteResponse, MachineId,
+};
 use russh::{
     Channel, ChannelOpenFailure,
     keys::{Algorithm, PrivateKey, PublicKey, ssh_key::LineEnding},
     server::{self, Auth, Msg, Server as _},
 };
+use secrecy::SecretString;
 use sha2::Digest as _;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     net::SocketAddr,
     sync::{
         Arc,
@@ -17,6 +29,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::Mutex;
+use tower::ServiceExt;
 
 #[derive(Clone)]
 struct Gateway {
@@ -272,19 +285,119 @@ async fn reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins() {
     .await
     .expect("reverse forwarding readiness");
 
-    let spec = HostSpec {
-        endpoint: agent_addr,
-        user: "agent".into(),
-        identity: controller_file.clone(),
-        host_public_key: agent_host.public_key().to_openssh().unwrap(),
-        gateway: Some(GatewayHop {
-            address: gw_addr,
-            user: "gateway".into(),
-            identity: gateway_user_file.clone(),
-            host_public_key: gw_pin.to_openssh().unwrap(),
-            reverse_port,
-        }),
-    };
+    // Exercise the real Hub registry/registration wire contract with the
+    // same generated identities and reverse port as the active russh gateway.
+    // Hub API calls remain in-process here: the client HTTPS TLS/proxy gates
+    // are tested separately by the Hub Client tests.
+    let projection = root.path().join("managed-gateway");
+    std::fs::create_dir(&projection).expect("managed gateway projection root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&projection, std::fs::Permissions::from_mode(0o700))
+            .expect("gateway projection root private");
+    }
+    let projected_keys = projection.join("hostlink-v2-authorized_keys");
+    const OPERATOR_TOKEN: &str = "disposable-hub-operator-token-0123456789abcdef";
+    let hub = hostlink_hub::router(
+        HubService::new(ServerHubConfig {
+            listen: SocketAddr::from(([127, 0, 0, 1], 27400)),
+            public_url: "https://hub.fixture.test".into(),
+            state_root: root.path().join("hostlink-hub-v2"),
+            authorized_keys: projected_keys.clone(),
+            gateways: vec![GatewayEndpoint {
+                host: "127.0.0.1".into(),
+                user: "gateway".into(),
+                port: gw_addr.port(),
+                host_public_key: gw_pin.to_openssh().unwrap(),
+            }],
+            operator_ssh_public_keys: vec![controller.public_key().to_openssh().unwrap()],
+            operator_token: SecretString::from(OPERATOR_TOKEN),
+            gateway_lookup_token: SecretString::from(
+                "disposable-hub-gateway-lookup-0123456789abcdef",
+            ),
+            port_from: reverse_port,
+            port_to: reverse_port,
+            reserved_ports: BTreeSet::new(),
+        })
+        .expect("isolated managed Hub"),
+    );
+    let invite_response = hub
+        .clone()
+        .oneshot(
+            Request::post("/v2/invites")
+                .header("authorization", format!("Bearer {OPERATOR_TOKEN}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&InviteRequest {
+                        ttl_seconds: 900,
+                        name: Some("managed-agent".into()),
+                        rotate_machine_id: None,
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("Hub v2 invite HTTP");
+    assert_eq!(invite_response.status(), StatusCode::CREATED);
+    let invite: InviteResponse = serde_json::from_slice(
+        &to_bytes(invite_response.into_body(), 64 * 1024)
+            .await
+            .expect("invite body"),
+    )
+    .expect("typed one-use invite");
+    let enroll_response = hub
+        .clone()
+        .oneshot(
+            Request::post("/v2/enroll")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&EnrollRequest {
+                        token: invite.token.clone(),
+                        machine_id: MachineId::parse("managed-agent-id").unwrap(),
+                        name: "managed-agent".into(),
+                        hostname: "managed-fixture".into(),
+                        os: "linux".into(),
+                        arch: "x86_64".into(),
+                        agent_version: "0.1.0".into(),
+                        ssh_public_key: gateway_user.public_key().to_openssh().unwrap(),
+                        ssh_host_public_key: agent_host.public_key().to_openssh().unwrap(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("Hub v2 enrollment HTTP");
+    assert_eq!(enroll_response.status(), StatusCode::CREATED);
+    let enrolled: EnrollResponse = serde_json::from_slice(
+        &to_bytes(enroll_response.into_body(), 64 * 1024)
+            .await
+            .expect("enrollment body"),
+    )
+    .expect("typed registered host");
+    assert_eq!(enrolled.host.remote_port, reverse_port);
+    assert!(
+        std::fs::read_to_string(&projected_keys)
+            .expect("approved reverse key projection")
+            .contains("hostlink-agent:managed-agent-id")
+    );
+    let spec = host_spec_from(
+        enrolled.host.clone(),
+        &enrolled.gateways[0],
+        &ControllerHubConfig {
+            hub_url: "https://hub.fixture.test".into(),
+            token_file: root.path().join("no-network-token"),
+            ssh_user: "agent".into(),
+            identity: controller_file.clone(),
+            gateway_identity: gateway_user_file.clone(),
+        },
+    )
+    .await
+    .expect("build pinned HostSpec from actual Hub-issued identity/route");
+    assert_eq!(spec.gateway.as_ref().unwrap().address, gw_addr);
+    assert_eq!(spec.host_public_key, enrolled.host.ssh_host_public_key);
     let mut host = tokio::time::timeout(Duration::from_secs(15), HostConnection::connect(&spec))
         .await
         .expect("nested SSH deadline")
@@ -307,6 +420,31 @@ async fn reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins() {
         artifact
     );
     host.close().await.expect("close nested sessions");
+    // A consumed invite cannot overwrite the registered public SSH host key.
+    let replay = hub
+        .clone()
+        .oneshot(
+            Request::post("/v2/enroll")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&EnrollRequest {
+                        token: invite.token,
+                        machine_id: MachineId::parse("managed-agent-id").unwrap(),
+                        name: "managed-agent".into(),
+                        hostname: "managed-fixture".into(),
+                        os: "linux".into(),
+                        arch: "x86_64".into(),
+                        agent_version: "0.1.0".into(),
+                        ssh_public_key: gateway_user.public_key().to_openssh().unwrap(),
+                        ssh_host_public_key: wrong.public_key().to_openssh().unwrap(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("Hub v2 replay HTTP");
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
     // Exercise the Agent's outbound authentication and mapping checks against the
     // live russh gateway while the first reverse mapping is still owned.
     let mut wrong_agent_pin = agent_config.clone();
