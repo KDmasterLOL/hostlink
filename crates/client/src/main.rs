@@ -6,7 +6,7 @@ use hostlink::{
     connect::{HostConnection, SshClientError},
     migration::{self, Readiness},
     run::{
-        JobSpec, JobStateKind, JobStatus, JobStream, Output, Seal, Start, Status,
+        Cancel, JobSpec, JobStateKind, JobStatus, JobStream, Output, Seal, Start, Status,
         sealed_artifact_name,
     },
 };
@@ -132,6 +132,13 @@ enum JobCommand {
         #[arg(long)]
         id: String,
     },
+    /// Request cancellation of one owned Agent job; read status to confirm termination.
+    Cancel {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        id: String,
+    },
     /// Read one raw output stream from a persisted byte offset.
     Output {
         #[arg(long)]
@@ -204,6 +211,7 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         Command::Job { command } => match command {
             JobCommand::Start { config, .. }
             | JobCommand::Status { config, .. }
+            | JobCommand::Cancel { config, .. }
             | JobCommand::Output { config, .. } => config.clone(),
         },
     };
@@ -249,6 +257,12 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         } => {
             validate_job_id(id)?;
             Some(PreparedJob::Status(Status { id: id.clone() }))
+        }
+        Command::Job {
+            command: JobCommand::Cancel { id, .. },
+        } => {
+            validate_job_id(id)?;
+            Some(PreparedJob::Cancel(Cancel { id: id.clone() }))
         }
         Command::Job {
             command: JobCommand::Output { id, .. },
@@ -349,6 +363,16 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
                 }
                 (JobCommand::Status { .. }, Some(PreparedJob::Status(request))) => {
                     let status = client.job_status(&request).await?;
+                    write_job_status(&status)?;
+                    Ok(0)
+                }
+                (JobCommand::Cancel { .. }, Some(PreparedJob::Cancel(request))) => {
+                    let status = client.job_cancel(&request).await.map_err(|error| {
+                        format!(
+                            "job cancel outcome UNKNOWN for {}: {error}; query job status for this id before further action",
+                            request.id,
+                        )
+                    })?;
                     write_job_status(&status)?;
                     Ok(0)
                 }
@@ -575,6 +599,7 @@ fn sftp_failure_may_be_existing_file(error: &SshClientError) -> bool {
 enum PreparedJob {
     Start(Start),
     Status(Status),
+    Cancel(Cancel),
     Output,
 }
 
