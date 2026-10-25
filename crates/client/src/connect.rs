@@ -380,10 +380,11 @@ fn validate_windows_identity_acl(file: &File) -> Result<(), SshClientError> {
     };
     use windows_permissions::{LocalBox, Sid};
 
+    // Owner is not included when only DACL is requested from Windows.
     let descriptor = GetSecurityInfo(
         file,
         SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Dacl,
+        SecurityInformation::Dacl | SecurityInformation::Owner,
     )?;
     let current = windows_permissions::utilities::current_process_sid()?;
     if descriptor.owner() != Some(current.as_ref()) {

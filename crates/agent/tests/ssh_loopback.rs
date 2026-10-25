@@ -6,6 +6,29 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(windows)]
+fn private_windows_test_path(path: &std::path::Path, directory: bool) {
+    use windows_permissions::constants::{SeObjectType, SecurityInformation};
+    use windows_permissions::wrappers::{ConvertSidToStringSid, SetNamedSecurityInfo};
+    use windows_permissions::{LocalBox, SecurityDescriptor};
+    let current = windows_permissions::utilities::current_process_sid()
+        .expect("current user token for fixture");
+    let sid = ConvertSidToStringSid(&current).expect("SID string");
+    let flags = if directory { "OICI" } else { "" };
+    let sddl = format!("D:P(A;{flags};FA;;;{})", sid.to_string_lossy());
+    let descriptor: LocalBox<SecurityDescriptor> = sddl.parse().expect("protected fixture DACL");
+    SetNamedSecurityInfo(
+        path.as_os_str(),
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Owner | SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        Some(current.as_ref()),
+        None,
+        Some(descriptor.dacl().expect("DACL")),
+        None,
+    )
+    .expect("apply current-user-only private test fixture ACL");
+}
+
 struct Pin(russh::keys::PublicKey);
 impl Handler for Pin {
     type Error = russh::Error;
@@ -103,6 +126,8 @@ async fn loopback_auth_and_exec_keep_binary_streams_and_exit_status() {
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
             .expect("private fixture owner directory");
     }
+    #[cfg(windows)]
+    private_windows_test_path(temp.path(), true);
     let host = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("host key");
     let controller =
         PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("controller key");
@@ -111,10 +136,14 @@ async fn loopback_auth_and_exec_keep_binary_streams_and_exit_status() {
     let auth_path = temp.path().join("authorized_keys");
     let jobs = temp.path().join("jobs");
     std::fs::create_dir(&jobs).expect("jobs root");
+    #[cfg(windows)]
+    private_windows_test_path(&jobs, true);
     let pem = host
         .to_openssh(russh::keys::ssh_key::LineEnding::LF)
         .expect("encode host key");
     std::fs::write(&host_path, pem.as_bytes()).expect("write host key");
+    #[cfg(windows)]
+    private_windows_test_path(&host_path, false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -135,6 +164,8 @@ async fn loopback_auth_and_exec_keep_binary_streams_and_exit_status() {
         std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600))
             .expect("private authorized_keys fixture");
     }
+    #[cfg(windows)]
+    private_windows_test_path(&auth_path, false);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("prebind loopback listener");
@@ -206,7 +237,12 @@ async fn loopback_auth_and_exec_keep_binary_streams_and_exit_status() {
         .await
         .expect("open session channel");
     channel
-        .exec(true, "cat; printf '\\000\\377' >&2; exit 7")
+        .exec(true, {
+            #[cfg(unix)]
+            { r"cat; printf '\000\377' >&2; exit 7" }
+            #[cfg(windows)]
+            { r"$i=[Console]::OpenStandardInput();$o=[Console]::OpenStandardOutput();$b=New-Object byte[] 1024;while(($n=$i.Read($b,0,$b.Length))-gt 0){$o.Write($b,0,$n)};$o.Flush();$e=[Console]::OpenStandardError();$x=[byte[]](0,255);$e.Write($x,0,2);$e.Flush();exit 7" }
+        })
         .await
         .expect("request exec");
     loop {

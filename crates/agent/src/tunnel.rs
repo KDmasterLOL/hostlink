@@ -296,6 +296,34 @@ mod tests {
     use russh::keys::ssh_key::LineEnding;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[cfg(windows)]
+    fn protect_test_fixture(path: &Path, directory: bool) {
+        use windows_permissions::constants::{SeObjectType, SecurityInformation};
+        use windows_permissions::wrappers::{ConvertSidToStringSid, SetNamedSecurityInfo};
+        use windows_permissions::{LocalBox, SecurityDescriptor};
+
+        let owner = windows_permissions::utilities::current_process_sid()
+            .expect("read the current Windows fixture owner");
+        let sid = ConvertSidToStringSid(&owner).expect("encode fixture owner SID");
+        let inheritance = if directory { "OICI" } else { "" };
+        let dacl: LocalBox<SecurityDescriptor> =
+            format!("D:P(A;{inheritance};FA;;;{})", sid.to_string_lossy())
+                .parse()
+                .expect("construct current-user private DACL");
+        SetNamedSecurityInfo(
+            path.as_os_str(),
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Owner
+                | SecurityInformation::Dacl
+                | SecurityInformation::ProtectedDacl,
+            Some(owner.as_ref()),
+            None,
+            dacl.dacl(),
+            None,
+        )
+        .expect("set the verified private fixture owner and protected DACL");
+    }
+
     #[tokio::test]
     async fn transient_gateway_loss_retries_until_shutdown() {
         let temp = tempfile::tempdir().expect("private test directory");
@@ -305,6 +333,8 @@ mod tests {
             std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
                 .expect("private test directory permissions");
         }
+        #[cfg(windows)]
+        protect_test_fixture(temp.path(), true);
 
         let identity =
             PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("controller identity");
@@ -331,6 +361,11 @@ mod tests {
                 .expect("private identity permissions");
             std::fs::set_permissions(&pin_path, std::fs::Permissions::from_mode(0o600))
                 .expect("private pin permissions");
+        }
+        #[cfg(windows)]
+        {
+            protect_test_fixture(&identity_path, false);
+            protect_test_fixture(&pin_path, false);
         }
 
         let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
