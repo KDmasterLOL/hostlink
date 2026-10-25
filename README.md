@@ -7,9 +7,10 @@ Status: additive extraction in progress. The independent workspace contains
 neutral Rust packages `hostlink-access`, `hostlink-agent`, `hostlink-hub`,
 `hostlink-protocol`, and `hostlink-core`; the three binaries and standalone
 Agent-only package contract are separate from OneC Toolkit. Embedded SSH exec
-has Linux loopback and native Windows 11 regression coverage. Windows 7
-PowerShell 2 SSH exec remains unaccepted, and no standalone release has passed
-the required full native compatibility matrix. Legacy wire and config
+has Linux loopback and native Windows 11 regression coverage. Source-exact
+Windows 7 x64 and x86 (WOW64) non-elevated SSH exec/SFTP/TCP preflight also
+passed on NT6.1. Full release, privileged-service refusal and independent
+installer/enrollment acceptance remain separate gates. Legacy wire and config
 identities remain preserved.
 
 The hidden `__embedded-ssh-preflight` command keeps its existing auth, SFTP and
@@ -44,8 +45,10 @@ The supported build/test workflow uses local HOME tooling rather than GitHub
 Actions as an executor. Source-exact HostLink `f573bd1` was locally built and
 packaged for Windows 7 x64/x86 with pinned nightly, `cargo-xwin`, compiled
 standard library and static CRT; both PE images and archive digests were verified.
-These are build candidates, **not** successful native Windows 7 runtime results.
-See [compatibility gates](docs/compatibility.md).
+Those f573 artifacts were build-only candidates. A newer source-exact
+`ba31a1057eca0388b62e58c1c53e3efbe0a3aa47` Agent passed native
+Windows 7 x64 and x86 (WOW64) user-scope embedded SSH exec acceptance;
+installation/enrollment was not performed. See [compatibility gates](docs/compatibility.md).
 
 The Agent-only Windows installer supports either a manually prepared `-ConfigFile` or a fresh
 user-scope Hub enrollment using `-HubUrl` and `-EnrollmentTokenFile` together. Manual configs

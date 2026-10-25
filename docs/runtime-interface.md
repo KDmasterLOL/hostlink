@@ -61,19 +61,21 @@ manager, no embedded bootstrap magic and no executable arbitrary PowerShell
 from unauthenticated Hub metadata.
 
 Unix SSH `exec` uses `sh -c` under the Agent's operating-system identity.
-Windows uses `powershell.exe -NoProfile -NonInteractive -InputFormat None
--Command` only after checking that the Agent process is non-elevated and not
-LocalSystem. `-InputFormat None` allows Windows PowerShell 2 to consume raw
-binary stdin; Microsoft public help does not list the None value for -InputFormat. The SSH
-authentication username is **not** an OS-level impersonation identity. Scripts
+Windows uses `powershell.exe -NoProfile -NonInteractive -InputFormat None -Command`
+after verifying the Agent process is non-elevated and not LocalSystem.
+`-InputFormat None` prevents Windows PowerShell 2 from consuming redirected
+binary stdin before the SSH command executes; the `None` value is not listed
+in Microsoft's public `-InputFormat` help.
+The SSH authentication username is **not** an OS-level impersonation identity. Scripts
 in a privileged Windows service context are rejected rather than gaining
 LocalSystem rights. The installer has a CLR4 `ZipArchive` dependency only on
 its ZIP-only extraction path; Windows 7 requires an exact-SHA verified
 `-AgentExecutableFile`/`-AgentExecutableSha256` sidecar, delegating ZIP
 verification and publication to the existing Rust Agent-only updater. The
-source-exact Windows 7 SSH exec end-to-end result remains pending; neither this
-source-level design nor successful Tier-3 compilation establishes native
-Windows 7 installer or SSH-exec acceptance.
+source-exact `ba31a1057eca0388b62e58c1c53e3efbe0a3aa47` Win7 x64 and
+x86 (WOW64) non-elevated user-scope SSH exec/SFTP/TCP preflight passed with
+binary stdout/stderr, exit 7, EOF/Close. These results do **not** establish
+fresh Windows 7 installer/enrollment or privileged-service acceptance.
 
 The convenient `hostlink run HOST LOCAL_SCRIPT` CLI is not implemented yet;
 callers may compose SFTP upload and explicit SSH exec themselves. SSH hooks

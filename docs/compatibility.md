@@ -53,12 +53,23 @@ imports, exact four-file Agent-only ZIP with SHA-256 sidecars. The archived
 build receipt is local to HOME at
 `~/.cache/hostlink/win7-builds/f573bd1/candidate-verification.json`.
 
-**Neither source-exact f573 Win7 candidate has passed an actual NT6.1 loader,
-SSH exec, installer or enrollment acceptance test.** An earlier Win7 candidate
-passed version/config and SSH auth/SFTP/TCP on a controlled NT6.1 user session,
-but its opt-in PowerShell 2 exec binary-stdin probe failed; its earlier evidence
-cannot be reused as proof for f573. Native access to the owned Win7 fixture must
-be restored before further acceptance. Tier-3 images are not ordinary
+The historical `f573bd1` candidates were build-only and did not demonstrate
+native PowerShell 2 SSH exec. In the later independent HostLink
+`dev@ba31a1057eca0388b62e58c1c53e3efbe0a3aa47`, the explicit Windows
+`-InputFormat None` launcher fix passed source-exact runtime tests on a real
+non-elevated NT6.1.7601 user session: x64 and x86/WOW64 `--version`,
+`check --config`, SSH key authentication, SFTP, TCP forwarding and the opt-in
+41-byte binary SSH exec probe (stdout, stderr, exit 7, EOF, Close) all PASS.
+PE architecture and absence of dynamic UCRT/VCRuntime imports also PASS.
+SHA-256: x64 `ac5ecdd7fb7b807b6d6fad92aab6509ebdb1a879c833ef040c7f226fd2849f79`,
+x86 `74ed5a52a8c85cf9d7d82c9546d784080a02a5b4fb4a11f405736734cc17879d`.
+The wrong SSH host-key negative test failed closed; a protected owner-marked
+TEMP fixture was removed with an independent absence readback and no Agent
+installation or production 1C modification. The private local acceptance
+receipt is `~/.cache/hostlink/win7-builds/ba31a1057eca0388/hostlink-950-native-receipt.json`.
+Native elevated/LocalSystem refusal, installer/enrollment and full standalone
+release compatibility remain **unaccepted**, as do original Toolkit migration
+and the independent Nextest target runner. Tier-3 images are not ordinary
 `*-pc-windows-msvc` builds. See the
 [Rust platform documentation](https://doc.rust-lang.org/rustc/platform-support/win7-windows-msvc.html).
 
