@@ -15,6 +15,36 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(any(windows, test))]
+const EXEC_PROBE_COMMAND: &str = "$i=[Console]::OpenStandardInput();$o=[Console]::OpenStandardOutput();$b=New-Object byte[] 1024;while(($n=$i.Read($b,0,$b.Length))-gt 0){$o.Write($b,0,$n)};$o.Flush();$e=[Console]::OpenStandardError();$x=[byte[]](104,111,115,116,108,105,110,107,45,101,120,101,99,45,112,114,111,98,101);$e.Write($x,0,$x.Length);$e.Flush();exit 7";
+#[cfg(any(windows, test))]
+const EXEC_PROBE_INPUT: &[u8] = b"HostLink embedded SSH exec probe\0\x01\x7f\xff";
+#[cfg(any(windows, test))]
+const EXEC_PROBE_STDERR: &[u8] = b"hostlink-exec-probe";
+#[cfg(windows)]
+const EXEC_PROBE_OUTPUT_LIMIT: usize = 1024;
+#[cfg(windows)]
+const EXEC_PROBE_STDERR_LIMIT: usize = 128;
+
+#[cfg(any(windows, test))]
+fn exec_probe_mismatch(
+    stdout: &[u8],
+    stderr: &[u8],
+    exit_status: Option<u32>,
+    eof: bool,
+    close: bool,
+) -> Option<String> {
+    let stdout_matches = stdout == EXEC_PROBE_INPUT;
+    let stderr_matches = stderr == EXEC_PROBE_STDERR;
+    let status_matches = exit_status == Some(7);
+    (!(stdout_matches && stderr_matches && status_matches && eof && close)).then(|| {
+        format!(
+            "embedded SSH exec probe mismatch: stdout_match={stdout_matches} stdout_len={} stderr_match={stderr_matches} stderr_len={} exit_status={exit_status:?} eof={eof} close={close}",
+            stdout.len(),
+            stderr.len(),
+        )
+    })
+}
 
 struct StrictHostKey {
     expected: PublicKey,
@@ -322,18 +352,12 @@ async fn run_client_probe(
 async fn run_exec_probe(session: &mut client::Handle<StrictHostKey>) -> io::Result<()> {
     use russh::ChannelMsg;
 
-    const COMMAND: &str = "$i=[Console]::OpenStandardInput();$o=[Console]::OpenStandardOutput();$b=New-Object byte[] 1024;while(($n=$i.Read($b,0,$b.Length))-gt 0){$o.Write($b,0,$n)};[Console]::Error.Write('hostlink-exec-probe');exit 7";
-    const INPUT: &[u8] = b"HostLink embedded SSH exec probe\0\x01\x7f\xff";
-    const STDERR: &[u8] = b"hostlink-exec-probe";
-    const OUTPUT_LIMIT: usize = 1024;
-    const STDERR_LIMIT: usize = 128;
-
     let mut channel = session
         .channel_open_session()
         .await
         .map_err(io::Error::other)?;
     channel
-        .exec(true, COMMAND)
+        .exec(true, EXEC_PROBE_COMMAND)
         .await
         .map_err(io::Error::other)?;
     loop {
@@ -354,14 +378,17 @@ async fn run_exec_probe(session: &mut client::Handle<StrictHostKey>) -> io::Resu
         }
     }
 
-    channel.data_bytes(INPUT).await.map_err(io::Error::other)?;
+    channel
+        .data_bytes(EXEC_PROBE_INPUT)
+        .await
+        .map_err(io::Error::other)?;
     channel.eof().await.map_err(io::Error::other)?;
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     let (mut exit_status, mut eof, mut close) = (None, false, false);
     while !close {
         match channel.wait().await {
             Some(ChannelMsg::Data { data }) => {
-                if stdout.len().saturating_add(data.len()) > OUTPUT_LIMIT {
+                if stdout.len().saturating_add(data.len()) > EXEC_PROBE_OUTPUT_LIMIT {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "embedded SSH exec probe stdout exceeded its limit",
@@ -370,7 +397,7 @@ async fn run_exec_probe(session: &mut client::Handle<StrictHostKey>) -> io::Resu
                 stdout.extend_from_slice(&data);
             }
             Some(ChannelMsg::ExtendedData { data, ext: 1 }) => {
-                if stderr.len().saturating_add(data.len()) > STDERR_LIMIT {
+                if stderr.len().saturating_add(data.len()) > EXEC_PROBE_STDERR_LIMIT {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "embedded SSH exec probe stderr exceeded its limit",
@@ -391,19 +418,18 @@ async fn run_exec_probe(session: &mut client::Handle<StrictHostKey>) -> io::Resu
             Some(ChannelMsg::Close) => close = true,
             Some(_) => {}
             None => {
-                return Err(io::Error::other(
-                    "embedded SSH exec channel ended without close",
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    exec_probe_mismatch(&stdout, &stderr, exit_status, eof, close)
+                        .expect("channel ended before close is an exec probe mismatch"),
                 ));
             }
         }
     }
     // russh 0.63 responds to the peer's CHANNEL_CLOSE while processing it, then removes
     // the channel. Sending a second close here can fail with ChannelClosed.
-    if stdout != INPUT || stderr != STDERR || exit_status != Some(7) || !eof {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "embedded SSH exec probe output, stderr, exit status, EOF, or close did not match",
-        ));
+    if let Some(mismatch) = exec_probe_mismatch(&stdout, &stderr, exit_status, eof, close) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, mismatch));
     }
     Ok(())
 }
@@ -440,4 +466,80 @@ async fn open_sftp(session: &russh::client::Handle<StrictHostKey>) -> io::Result
     SftpSession::new(channel.into_stream())
         .await
         .map_err(io::Error::other)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exec_probe_reports_each_mismatch_without_output_bytes() {
+        let cases = [
+            (
+                &b"changed"[..],
+                EXEC_PROBE_STDERR,
+                Some(7),
+                true,
+                true,
+                "stdout_match=false",
+            ),
+            (
+                EXEC_PROBE_INPUT,
+                &b"changed"[..],
+                Some(7),
+                true,
+                true,
+                "stderr_match=false",
+            ),
+            (
+                EXEC_PROBE_INPUT,
+                EXEC_PROBE_STDERR,
+                Some(1),
+                true,
+                true,
+                "exit_status=Some(1)",
+            ),
+            (
+                EXEC_PROBE_INPUT,
+                EXEC_PROBE_STDERR,
+                Some(7),
+                false,
+                true,
+                "eof=false",
+            ),
+            (
+                EXEC_PROBE_INPUT,
+                EXEC_PROBE_STDERR,
+                Some(7),
+                true,
+                false,
+                "close=false",
+            ),
+        ];
+
+        for (stdout, stderr, status, eof, close, reason) in cases {
+            let message = exec_probe_mismatch(stdout, stderr, status, eof, close)
+                .expect("mismatch must be diagnosed");
+            assert!(message.contains(reason), "{message}");
+            assert!(message.contains(&format!("stdout_len={}", stdout.len())));
+            assert!(message.contains(&format!("stderr_len={}", stderr.len())));
+            assert!(!message.contains("changed"), "raw output leaked: {message}");
+        }
+
+        assert_eq!(
+            exec_probe_mismatch(EXEC_PROBE_INPUT, EXEC_PROBE_STDERR, Some(7), true, true,),
+            None
+        );
+    }
+
+    #[test]
+    fn exec_probe_command_uses_raw_clr2_streams_and_flushes() {
+        assert!(EXEC_PROBE_COMMAND.contains("[Console]::OpenStandardError()"));
+        assert!(EXEC_PROBE_COMMAND.contains("$o.Flush()"));
+        assert!(EXEC_PROBE_COMMAND.contains("$e.Flush()"));
+        assert!(EXEC_PROBE_COMMAND.contains("$e.Write($x,0,$x.Length)"));
+        assert!(EXEC_PROBE_COMMAND.contains("exit 7"));
+        assert!(!EXEC_PROBE_COMMAND.contains(".Error.Write"));
+        assert!(!EXEC_PROBE_COMMAND.contains("CopyTo"));
+    }
 }
