@@ -5,12 +5,16 @@
 //! Windows publication is deliberately refused until the stopped-process launcher handoff is
 //! integrated; replacing a running Windows executable is never attempted here.
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{self, MapAccess, Visitor},
+};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::{collections::btree_map::Entry, fmt};
 use zip::ZipArchive;
 
 const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
@@ -54,6 +58,7 @@ struct PackageManifest {
     component: String,
     target: String,
     version: String,
+    #[serde(deserialize_with = "deserialize_unique_file_map")]
     files: BTreeMap<String, FileIdentity>,
 }
 
@@ -71,7 +76,58 @@ struct InstallMetadata {
     target: String,
     installed_version: String,
     installed_package_sha256: String,
+    #[serde(deserialize_with = "deserialize_unique_file_map")]
     installed_files: BTreeMap<String, FileIdentity>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapReceipt {
+    format: u32,
+    component: String,
+    target: String,
+    version: String,
+    archive_sha256: String,
+    sidecar_sha256: String,
+    #[serde(deserialize_with = "deserialize_unique_file_map")]
+    files: BTreeMap<String, FileIdentity>,
+}
+
+fn deserialize_unique_file_map<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, FileIdentity>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct UniqueFileMapVisitor;
+
+    impl<'de> Visitor<'de> for UniqueFileMapVisitor {
+        type Value = BTreeMap<String, FileIdentity>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a map of unique Agent package file identities")
+        }
+
+        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            let mut files = BTreeMap::new();
+            while let Some((name, identity)) = map.next_entry::<String, FileIdentity>()? {
+                match files.entry(name) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(identity);
+                    }
+                    Entry::Occupied(_) => {
+                        return Err(de::Error::custom("duplicate Agent package manifest file"));
+                    }
+                }
+            }
+            Ok(files)
+        }
+    }
+
+    deserializer.deserialize_map(UniqueFileMapVisitor)
 }
 
 #[cfg(not(windows))]
@@ -104,7 +160,13 @@ pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
     #[cfg(not(windows))]
     recover_interrupted_publication(&request.install_root)?;
 
-    let (manifest, staged_files) = validate_and_stage_archive(request, &archive_path)?;
+    let (manifest, staged_files) = validate_and_stage_archive(
+        &archive_path,
+        &request.archive_sha256,
+        &request.target,
+        &request.version,
+        &request.install_root,
+    )?;
     let bin_root = request.install_root.join("bin");
     let metadata_path = request.install_root.join(INSTALL_METADATA);
     let old_metadata = read_install_metadata(&metadata_path)?;
@@ -282,18 +344,22 @@ fn validate_archive_path(root: &Path, archive: &Path) -> io::Result<PathBuf> {
     if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
         return Err(invalid("Agent archive is not a regular file"));
     }
+    validate_path_has_no_reparse_components(archive)?;
     #[cfg(windows)]
     validate_windows_private_acl(&canonical_archive, &metadata)?;
     Ok(canonical_archive)
 }
 
 fn validate_and_stage_archive(
-    request: &AgentUpdateRequest,
     archive_path: &Path,
+    archive_sha256: &str,
+    target: &str,
+    version: &str,
+    staging_parent: &Path,
 ) -> io::Result<(PackageManifest, tempfile::TempDir)> {
     let stage = tempfile::Builder::new()
-        .prefix(".agent-update-")
-        .tempdir_in(&request.install_root)?;
+        .prefix(".agent-package-")
+        .tempdir_in(staging_parent)?;
     set_private_directory(stage.path())?;
     let staged_archive = stage.path().join("package.zip");
     let mut source = File::open(archive_path)?;
@@ -329,16 +395,17 @@ fn validate_and_stage_archive(
     }
     archive_copy.sync_all()?;
     drop(archive_copy);
-    if hash_file(&staged_archive, MAX_ARCHIVE_BYTES)? != request.archive_sha256 {
+    if hash_file(&staged_archive, MAX_ARCHIVE_BYTES)? != archive_sha256 {
         return Err(invalid("selected Agent archive SHA-256 does not match"));
     }
     let mut archive = ZipArchive::new(File::open(&staged_archive)?)
         .map_err(|error| invalid_owned(format!("invalid Agent ZIP archive: {error}")))?;
-    let prefix = format!("hostlink-agent-{}/", request.target);
-    let expected = package_files(&request.target)
+    let prefix = format!("hostlink-agent-{target}/");
+    let expected_order = package_files(target)
         .into_iter()
         .chain(std::iter::once(PACKAGE_MANIFEST.to_owned()))
-        .collect::<BTreeSet<_>>();
+        .collect::<Vec<_>>();
+    let expected = expected_order.iter().cloned().collect::<BTreeSet<_>>();
     if archive.len() != expected.len() {
         return Err(invalid(
             "Agent archive member inventory does not match the package contract",
@@ -362,6 +429,7 @@ fn validate_and_stage_archive(
         if relative.contains('/')
             || relative.contains('\\')
             || relative.is_empty()
+            || expected_order.get(index).map(String::as_str) != Some(relative)
             || !expected.contains(relative)
             || !entry.is_file()
             || entry.enclosed_name().is_none()
@@ -452,8 +520,8 @@ fn validate_and_stage_archive(
         .map_err(|error| invalid_owned(format!("invalid Agent package manifest: {error}")))?;
     if manifest.format != 1
         || manifest.component != "agent"
-        || manifest.target != request.target
-        || manifest.version != request.version
+        || manifest.target != target
+        || manifest.version != version
     {
         return Err(invalid(
             "Agent package manifest does not match the selected version and target",
@@ -461,13 +529,249 @@ fn validate_and_stage_archive(
     }
     if manifest.files != identities
         || manifest.files.keys().cloned().collect::<BTreeSet<_>>()
-            != package_files(&request.target).into_iter().collect()
+            != package_files(target).into_iter().collect()
     {
         return Err(invalid(
             "Agent package manifest file identities do not match the archive",
         ));
     }
     Ok((manifest, stage))
+}
+
+/// Verify an exact package for a fresh install and publish its verified members into a new,
+/// caller-owned private directory. The running sidecar must be the exact executable in the ZIP.
+///
+/// # Errors
+///
+/// Returns an error for invalid source digest, target, version, archive inventory, permissions,
+/// manifest identities, sidecar mismatch, unsafe output parent, or any failed file operation.
+pub fn verify_fresh_package(
+    archive_path: &Path,
+    archive_sha256: &str,
+    target: &str,
+    version: &str,
+    output: &Path,
+) -> io::Result<()> {
+    validate_sha256(archive_sha256)?;
+    semver::Version::parse(version)
+        .map_err(|_| invalid("Agent package version must be exact semantic version"))?;
+    if version != env!("CARGO_PKG_VERSION") {
+        return Err(invalid(
+            "verifier sidecar version does not match selected package version",
+        ));
+    }
+    if !supported_targets().contains(&target) || !target_matches_runtime(target) {
+        return Err(invalid("Agent package target does not match this runtime"));
+    }
+    let metadata = fs::symlink_metadata(archive_path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+        return Err(invalid("Agent archive is not a regular file"));
+    }
+    validate_path_has_no_reparse_components(archive_path)?;
+    let parent = output
+        .parent()
+        .ok_or_else(|| invalid("package output must have a parent directory"))?;
+    validate_fresh_output_parent(parent)?;
+    if output.exists() || fs::symlink_metadata(output).is_ok() {
+        return Err(invalid("package output already exists"));
+    }
+    let canonical_archive = fs::canonicalize(archive_path)?;
+    let (manifest, staged) =
+        validate_and_stage_archive(&canonical_archive, archive_sha256, target, version, parent)?;
+    let executable = package_files(target)
+        .into_iter()
+        .find(|name| name == "hostlink-agent" || name == "hostlink-agent.exe")
+        .ok_or_else(|| invalid("Agent executable is missing from package contract"))?;
+    let running = std::env::current_exe()?;
+    let expected_executable = manifest
+        .files
+        .get(&executable)
+        .ok_or_else(|| invalid("Agent executable identity is missing from manifest"))?;
+    if hash_file(&running, MAX_ENTRY_BYTES)? != expected_executable.sha256 {
+        return Err(invalid(
+            "verifier sidecar does not match the package Agent executable",
+        ));
+    }
+    let install_metadata = InstallMetadata {
+        format: 1,
+        target: target.to_owned(),
+        installed_version: version.to_owned(),
+        installed_package_sha256: archive_sha256.to_owned(),
+        installed_files: manifest.files.clone(),
+    };
+    let metadata_path = staged.path().join(INSTALL_METADATA);
+    let mut metadata_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&metadata_path)?;
+    metadata_file
+        .write_all(&serde_json::to_vec_pretty(&install_metadata).map_err(io::Error::other)?)?;
+    metadata_file.sync_all()?;
+    set_staged_file_permissions(&metadata_path, INSTALL_METADATA)?;
+    let receipt_path = staged.path().join("bootstrap-receipt.json");
+    let mut receipt_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&receipt_path)?;
+    receipt_file.write_all(
+        &serde_json::to_vec_pretty(&serde_json::json!({
+            "format": 1,
+            "component": manifest.component,
+            "target": manifest.target,
+            "version": manifest.version,
+            "archive_sha256": archive_sha256,
+            "sidecar_sha256": expected_executable.sha256,
+            "files": manifest.files,
+        }))
+        .map_err(io::Error::other)?,
+    )?;
+    receipt_file.sync_all()?;
+    set_staged_file_permissions(&receipt_path, "bootstrap-receipt.json")?;
+    File::open(staged.path())?.sync_all()?;
+    fs::rename(staged.path(), output)?;
+    #[cfg(not(windows))]
+    sync_directory(parent)?;
+    println!(
+        "Verified Agent package: target={target} version={version} archive_sha256={archive_sha256}"
+    );
+    Ok(())
+}
+
+/// Complete a fresh bootstrap only after the ZIP's extracted binaries and receipt are installed.
+///
+/// # Errors
+///
+/// Returns an error unless the install root, enrollment state, installed package, source receipt,
+/// and pending marker all validate. On error the pending marker remains for reconciliation.
+pub fn finalize_fresh_install(root: &Path) -> io::Result<()> {
+    validate_user_owned_root(root)?;
+    let pending = root.join("enrollment.pending");
+    let pending_file = open_private_file(&pending, false)?;
+    #[cfg(windows)]
+    validate_windows_private_acl(&pending, &pending_file.metadata()?)?;
+    drop(pending_file);
+
+    let state = root.join("state");
+    let state_metadata = fs::symlink_metadata(&state)?;
+    if !state_metadata.is_dir()
+        || state_metadata.file_type().is_symlink()
+        || is_reparse_point(&state_metadata)
+    {
+        return Err(invalid("fresh Agent state directory is missing or unsafe"));
+    }
+    #[cfg(not(windows))]
+    validate_private_directory(&state, &state_metadata)?;
+    #[cfg(windows)]
+    validate_windows_private_acl(&state, &state_metadata)?;
+    let config = state.join("agent.json");
+    let config_metadata = fs::symlink_metadata(&config)?;
+    if !config_metadata.is_file()
+        || config_metadata.file_type().is_symlink()
+        || is_reparse_point(&config_metadata)
+    {
+        return Err(invalid("fresh Agent configuration is missing or unsafe"));
+    }
+    #[cfg(windows)]
+    validate_windows_private_acl(&config, &config_metadata)?;
+
+    let metadata_path = root.join(INSTALL_METADATA);
+    let installed = read_install_metadata(&metadata_path)?;
+    if !supported_targets().contains(&installed.target.as_str())
+        || !target_matches_runtime(&installed.target)
+        || installed.installed_version != env!("CARGO_PKG_VERSION")
+    {
+        return Err(invalid(
+            "fresh installed package target or version does not match this Agent",
+        ));
+    }
+    validate_installed(&root.join("bin"), &installed, &installed.target)?;
+    let receipt_path = root.join("bootstrap-receipt.json");
+    let receipt_file = open_private_file(&receipt_path, false)?;
+    #[cfg(windows)]
+    validate_windows_private_acl(&receipt_path, &receipt_file.metadata()?)?;
+    let mut receipt_bytes = Vec::new();
+    receipt_file
+        .take(MAX_MANIFEST_BYTES + 1)
+        .read_to_end(&mut receipt_bytes)?;
+    if receipt_bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(invalid("bootstrap receipt exceeds its size limit"));
+    }
+    let receipt: BootstrapReceipt = serde_json::from_slice(&receipt_bytes)
+        .map_err(|error| invalid_owned(format!("invalid bootstrap receipt: {error}")))?;
+    let executable = package_files(&installed.target)
+        .into_iter()
+        .find(|name| name == "hostlink-agent" || name == "hostlink-agent.exe")
+        .ok_or_else(|| invalid("Agent executable is missing from package contract"))?;
+    if receipt.format != 1
+        || receipt.component != "agent"
+        || receipt.target != installed.target
+        || receipt.version != installed.installed_version
+        || receipt.archive_sha256 != installed.installed_package_sha256
+        || receipt.files != installed.installed_files
+    {
+        return Err(invalid(
+            "bootstrap receipt does not match installed package metadata",
+        ));
+    }
+    let executable_identity = receipt
+        .files
+        .get(&executable)
+        .ok_or_else(|| invalid("bootstrap receipt omits the Agent executable"))?;
+    if receipt.sidecar_sha256 != executable_identity.sha256 {
+        return Err(invalid(
+            "bootstrap receipt sidecar identity does not match the package",
+        ));
+    }
+    fs::remove_file(&pending)?;
+    #[cfg(not(windows))]
+    sync_directory(root)?;
+    Ok(())
+}
+
+fn validate_fresh_output_parent(path: &Path) -> io::Result<()> {
+    validate_path_has_no_reparse_components(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+        return Err(invalid(
+            "package output parent is not a real private directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions and reads only the current process identity.
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+            return Err(invalid(
+                "package output parent is not private and user-owned",
+            ));
+        }
+    }
+    #[cfg(windows)]
+    validate_windows_private_acl(path, &metadata)?;
+    Ok(())
+}
+
+fn validate_path_has_no_reparse_components(path: &Path) -> io::Result<()> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return Err(invalid(
+            "bootstrap path must be absolute and contain no traversal",
+        ));
+    }
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&current)?;
+        if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+            return Err(invalid(
+                "bootstrap path contains a symlink or reparse point",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn package_files(target: &str) -> Vec<String> {

@@ -69,6 +69,17 @@ private Ed25519 identity. Neither component silently creates or enrolls keys.
 Only use disposable current-user fixtures until the native acceptance matrix
 passes.
 
+Fresh user enrollment is available as `hostlink-agent enroll`; it uses the Hub
+v2 `/v2/enroll` DTO, creates distinct machine and SSH host Ed25519 keys, and
+publishes a private config only after validating the Hub response. The Win7
+PowerShell 2 and Linux bootstrap scripts require independent exact source pins
+for the package ZIP and target-specific verifier sidecar. The sidecar shares the
+updater's strict ZIP/member manifest validator, verifies its own bytes match the
+ZIP executable, and writes install integrity metadata plus a source-bound
+bootstrap receipt before the token prompt. See
+[docs/ENROLLMENT.md](docs/ENROLLMENT.md) for the full bootstrap contract and
+native acceptance limits.
+
 Durable jobs use the same authenticated SSH connection, with
 `hostlink job start`, `hostlink job status` and `hostlink job output`. The job
 UUID is printed **before** the first start request; on a lost acknowledgement,

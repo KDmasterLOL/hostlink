@@ -1068,11 +1068,14 @@ dependencies = [
 name = "hostlink-agent"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "base64 0.22.1",
  "clap",
+ "hostlink-hub",
  "libc",
  "processkit",
  "rand",
+ "reqwest",
  "russh",
  "russh-sftp",
  "secrecy",
@@ -1084,6 +1087,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "tower",
  "uuid",
  "windows-permissions",
  "windows-sys 0.61.2",

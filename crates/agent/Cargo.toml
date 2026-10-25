@@ -24,6 +24,8 @@ uuid.workspace = true
 secrecy.workspace = true
 processkit.workspace = true
 rand.workspace = true
+hostlink-hub = { path = "../hub", default-features = false }
+reqwest.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
@@ -33,3 +35,6 @@ windows-permissions = "0.2.4"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [dev-dependencies]
+axum.workspace = true
+hostlink-hub = { path = "../hub", features = ["server"] }
+tower.workspace = true
