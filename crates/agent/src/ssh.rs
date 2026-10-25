@@ -54,7 +54,6 @@ struct EmbeddedServer {
     sftp_slots: Arc<Semaphore>,
     exec_slots: Arc<Semaphore>,
     exec_shutdown: processkit::CancellationToken,
-    jobs_root: PathBuf,
     jobs: Arc<JobRuntime>,
     connection_slots: Arc<Semaphore>,
 }
@@ -66,7 +65,6 @@ struct EmbeddedSession {
     sftp_slots: Arc<Semaphore>,
     exec_slots: Arc<Semaphore>,
     exec_shutdown: processkit::CancellationToken,
-    jobs_root: PathBuf,
     jobs: Arc<JobRuntime>,
     _connection_slot: Option<tokio::sync::OwnedSemaphorePermit>,
     active_exec: Arc<std::sync::Mutex<HashMap<ChannelId, processkit::CancellationToken>>>,
@@ -126,7 +124,7 @@ where
         shutdown: processkit::CancellationToken::new(),
     });
     if config.gateway.is_none() {
-        return serve_prepared_until(listener, prepared, jobs_root, jobs, shutdown).await;
+        return serve_prepared_until(listener, prepared, jobs, shutdown).await;
     }
     let cancellation = processkit::CancellationToken::new();
     let shutdown_signal = async {
@@ -137,7 +135,6 @@ where
     let mut server = Box::pin(serve_prepared_until(
         listener,
         prepared,
-        jobs_root,
         jobs.clone(),
         cancellation.clone().cancelled_owned(),
     ));
@@ -161,7 +158,6 @@ where
 async fn serve_prepared_until<F>(
     listener: tokio::net::TcpListener,
     prepared: PreparedEmbeddedSshConfig,
-    jobs_root: PathBuf,
     jobs: Arc<JobRuntime>,
     shutdown: F,
 ) -> io::Result<()>
@@ -187,7 +183,6 @@ where
         sftp_slots: Arc::new(Semaphore::new(MAX_ACTIVE_SFTP_SESSIONS)),
         exec_slots: Arc::new(Semaphore::new(MAX_ACTIVE_EXEC_SESSIONS)),
         exec_shutdown: processkit::CancellationToken::new(),
-        jobs_root,
         jobs: jobs.clone(),
         connection_slots: Arc::new(Semaphore::new(MAX_AUTHENTICATED_SESSIONS)),
     };
@@ -244,7 +239,6 @@ impl russh::server::Server for EmbeddedServer {
             sftp_slots: self.sftp_slots.clone(),
             exec_slots: self.exec_slots.clone(),
             exec_shutdown: self.exec_shutdown.clone(),
-            jobs_root: self.jobs_root.clone(),
             jobs: self.jobs.clone(),
             _connection_slot: self.connection_slots.clone().try_acquire_owned().ok(),
             active_exec: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -417,14 +411,25 @@ impl russh::server::Handler for EmbeddedSession {
             return Ok(());
         };
         if name == "sftp" {
+            let Some(owner) = self.authenticated_controller.clone() else {
+                fail_session_channel(channel_id, session)?;
+                return Ok(());
+            };
             let Ok(session_slot) = self.sftp_slots.clone().try_acquire_owned() else {
                 fail_session_channel(channel_id, session)?;
                 return Ok(());
             };
+            let artifacts = match self.jobs.store.artifacts(&owner) {
+                Ok(artifacts) => artifacts,
+                Err(_) => {
+                    fail_session_channel(channel_id, session)?;
+                    return Ok(());
+                }
+            };
             session.channel_success(channel_id)?;
             russh_sftp::server::run(
                 channel.into_stream(),
-                SftpSession::new(self.jobs_root.clone(), session_slot),
+                SftpSession::new(artifacts, session_slot),
             )
             .await;
         } else if let Some(owner) = self.authenticated_controller.clone() {
@@ -533,6 +538,13 @@ enum JobRequest {
         stream: JobOutput,
         offset: u64,
     },
+    #[serde(rename = "seal")]
+    Seal {
+        version: u8,
+        name: String,
+        sha256: String,
+        size: u64,
+    },
 }
 
 #[derive(Serialize)]
@@ -580,32 +592,58 @@ impl JobResponse {
 
 async fn handle_job_channel(channel: Channel<Msg>, runtime: Arc<JobRuntime>, owner: String) {
     let mut stream = channel.into_stream();
-    let response =
-        match tokio::time::timeout(JOB_REQUEST_TIMEOUT, read_job_frame(&mut stream)).await {
-            Err(_) => JobResponse::error("jobs-v1 request timed out"),
-            Ok(Err(_)) => JobResponse::error("invalid jobs-v1 frame"),
-            Ok(Ok(bytes)) => match serde_json::from_slice::<JobRequest>(&bytes) {
-                Ok(request) => handle_job_request(request, &runtime, &owner).await,
-                Err(_) => JobResponse::error("malformed jobs-v1 request"),
-            },
-        };
-    // An error reply is a separate, minimal jobs-v1 wire shape. Status/output
-    // fields are present (null when unused) only for successful replies.
-    let body = if response.ok {
-        serde_json::to_vec(&response)
-    } else {
-        serde_json::to_vec(&serde_json::json!({
-            "version": response.version,
-            "ok": false,
-            "error": response.error.unwrap_or("jobs-v1 request failed"),
-        }))
-    }
-    .unwrap_or_else(|_| br#"{"version":1,"ok":false,"error":"response encoding failed"}"#.to_vec());
+    let body = match tokio::time::timeout(JOB_REQUEST_TIMEOUT, read_job_frame(&mut stream)).await {
+        Err(_) => error_job_body(1, "jobs-v1 request timed out"),
+        Ok(Err(_)) => error_job_body(1, "invalid jobs-v1 frame"),
+        Ok(Ok(bytes)) => match serde_json::from_slice::<JobRequest>(&bytes) {
+            Ok(JobRequest::Seal {
+                version,
+                name,
+                sha256,
+                size,
+            }) => {
+                let result = if version != 1 {
+                    Err("unsupported jobs-v1 version")
+                } else {
+                    runtime
+                        .store
+                        .artifacts(&owner)
+                        .and_then(|artifacts| artifacts.seal(&name, &sha256, size))
+                        .map_err(|_| "artifact seal failed")
+                };
+                match result {
+                    Ok(program) => serde_json::to_vec(&serde_json::json!({"version":1,"ok":true,"program":program,"sha256":sha256})),
+                    Err(error) => Ok(error_job_body(1, error)),
+                }
+                .unwrap_or_else(|_| error_job_body(1, "response encoding failed"))
+            }
+            Ok(request) => {
+                let response = handle_job_request(request, &runtime, &owner).await;
+                if response.ok {
+                    serde_json::to_vec(&response)
+                        .unwrap_or_else(|_| error_job_body(1, "response encoding failed"))
+                } else {
+                    error_job_body(
+                        response.version,
+                        response.error.unwrap_or("jobs-v1 request failed"),
+                    )
+                }
+            }
+            Err(_) => error_job_body(1, "malformed jobs-v1 request"),
+        },
+    };
     if let Ok(size) = u32::try_from(body.len()) {
         let _ = stream.write_all(&size.to_be_bytes()).await;
         let _ = stream.write_all(&body).await;
         let _ = stream.shutdown().await;
     }
+}
+
+fn error_job_body(version: u8, error: &'static str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({"version":version,"ok":false,"error":error}))
+        .unwrap_or_else(|_| {
+            br#"{"version":1,"ok":false,"error":"response encoding failed"}"#.to_vec()
+        })
 }
 
 async fn read_job_frame(stream: &mut russh::ChannelStream<Msg>) -> io::Result<Vec<u8>> {
@@ -633,6 +671,7 @@ async fn handle_job_request(
         JobRequest::Start { version, id, .. }
         | JobRequest::Status { version, id }
         | JobRequest::Output { version, id, .. } => (*version, id.as_str()),
+        JobRequest::Seal { .. } => unreachable!("seal requests are handled before job dispatch"),
     };
     if version != 1 {
         return JobResponse::error("unsupported jobs-v1 version");
@@ -730,6 +769,7 @@ async fn handle_job_request(
                 Err(_) => JobResponse::error("job output unavailable"),
             }
         }
+        JobRequest::Seal { .. } => unreachable!("seal requests are handled before job dispatch"),
     }
 }
 
