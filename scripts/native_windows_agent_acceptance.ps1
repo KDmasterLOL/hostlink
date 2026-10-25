@@ -64,12 +64,24 @@ function Set-PrivateDirectory([string]$Path) {
 }
 
 function Set-PrivateFile([string]$Path) {
+    $full = [IO.Path]::GetFullPath($Path)
+    Assert-Condition ([IO.File]::Exists($full)) 'Private file must exist before ACL restriction.'
+    Assert-NotReparse $full 'Private file ACL target'
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $security = New-Object Security.AccessControl.FileSecurity
-    $security.SetAccessRuleProtection($true, $false)
-    $rule = New-Object Security.AccessControl.FileSystemAccessRule($identity.User, [Security.AccessControl.FileSystemRights]::FullControl, [Security.AccessControl.AccessControlType]::Allow)
-    [void]$security.AddAccessRule($rule)
-    Set-Acl -LiteralPath $Path -AclObject $security
+    $owner = (New-Object IO.FileInfo($full)).GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier])
+    Assert-Condition ($owner.Equals($identity.User)) 'Private file must be owned by this test user.'
+    $icacls = Join-Path $env:WINDIR 'System32\icacls.exe'
+    Assert-Condition ([IO.File]::Exists($icacls)) 'Windows icacls.exe is required.'
+    # The non-admin test user can change the DACL of its own file. Suppress paths
+    # in icacls output; check its exit status and the resulting protected DACL.
+    $null = @(& $icacls $full '/inheritance:r' '/grant:r' ('*' + $identity.User.Value + ':F') '*S-1-5-18:F' 2>&1)
+    Assert-Condition ($LASTEXITCODE -eq 0) 'Could not restrict the private test file DACL.'
+    $acl = (New-Object IO.FileInfo($full)).GetAccessControl()
+    Assert-Condition ($acl.AreAccessRulesProtected) 'Private file DACL remains inherited.'
+    foreach ($access in $acl.Access) {
+        $sid = $access.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        Assert-Condition (($sid -eq $identity.User.Value -or $sid -eq 'S-1-5-18') -and -not $access.IsInherited -and $access.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow) 'Private file has an unapproved ACL entry.'
+    }
 }
 
 function Get-Sha256([string]$Path) {

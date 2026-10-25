@@ -52,6 +52,15 @@ class NativeWindowsAgentAcceptanceTest(unittest.TestCase):
         self.assertLess(harness.index("Write-Receipt $(if ($script:Success)"), harness.index("if ($script:Success) {\n    Write-Output ('PASS source_sha="))
         self.assertIn("if ($script:ReceiptWritten) { Write-Output 'PASS receipt=written-private' }", harness)
 
+    def test_non_admin_file_acl_uses_built_in_icacls_and_verifies_the_dacl(self) -> None:
+        harness = self.harness_source()
+        self.assertIn("$icacls = Join-Path $env:WINDIR 'System32\\icacls.exe'", harness)
+        self.assertIn("'/inheritance:r' '/grant:r'", harness)
+        self.assertIn("$acl.AreAccessRulesProtected", harness)
+        self.assertIn("$sid -eq 'S-1-5-18'", harness)
+        self.assertIn("$owner.Equals($identity.User)", harness)
+        self.assertNotIn("Set-Acl -LiteralPath", harness)
+
     def test_receipt_is_acl_restricted_before_content_and_failure_is_path_free(self) -> None:
         harness = self.harness_source()
         receipt = harness[harness.index("function Write-Receipt") : harness.index("$failure = ''")]
