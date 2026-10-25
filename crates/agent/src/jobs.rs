@@ -640,7 +640,7 @@ pub(crate) fn validate_private_path(path: &Path, directory: bool) -> io::Result<
     Ok(())
 }
 
-fn restrict_private_path(path: &Path, directory: bool) -> io::Result<()> {
+pub(crate) fn restrict_private_path(path: &Path, directory: bool) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

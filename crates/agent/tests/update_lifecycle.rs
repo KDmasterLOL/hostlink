@@ -1,13 +1,16 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use hostlink_agent::jobs::{JobId, JobSpec, JobState, JobStore, active_ids};
-use hostlink_agent::update::{AgentUpdateOutcome, AgentUpdateRequest, apply};
+use hostlink_agent::update::{
+    AgentUpdateOutcome, AgentUpdateRequest, apply, finalize_fresh_install, verify_fresh_package,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 
@@ -214,6 +217,336 @@ fn active_job_blocks_update_despite_unrelated_empty_jobs_directory() {
         fs::read(root.join("bin/hostlink-agent")).expect("original binary"),
         b"old installed Agent binary"
     );
+}
+
+#[test]
+fn fresh_package_verifier_extracts_exact_manifest_and_installed_metadata() {
+    let (temp, _root) = install_root();
+    let sidecar_path = PathBuf::from(env!("CARGO_BIN_EXE_hostlink-agent"));
+    let sidecar = fs::read(&sidecar_path).expect("read target Agent sidecar bytes");
+    let version = env!("CARGO_PKG_VERSION");
+    let files = BTreeMap::from([("hostlink-agent".to_owned(), identity(&sidecar))]);
+    let manifest = json!({
+        "format": 1,
+        "component": "agent",
+        "target": TARGET,
+        "version": version,
+        "files": files,
+    });
+    let archive = temp.path().join("fresh-package.zip");
+    let mut zip = zip::ZipWriter::new(File::create(&archive).expect("create archive"));
+    zip.start_file(
+        format!("hostlink-agent-{TARGET}/hostlink-agent"),
+        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated),
+    )
+    .expect("start executable member");
+    zip.write_all(&sidecar).expect("write executable");
+    zip.start_file(
+        format!("hostlink-agent-{TARGET}/manifest.json"),
+        SimpleFileOptions::default(),
+    )
+    .expect("start manifest member");
+    zip.write_all(&serde_json::to_vec(&manifest).expect("manifest JSON"))
+        .expect("write manifest");
+    zip.finish().expect("finish archive");
+    let archive_sha256 = format!("{:x}", Sha256::digest(fs::read(&archive).expect("archive")));
+    let output = temp.path().join("fresh-stage");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("private output parent");
+    }
+
+    let verification = Command::new(&sidecar_path)
+        .args([
+            "bootstrap-verify",
+            "--archive",
+            archive.to_str().expect("archive path UTF-8"),
+            "--sha256",
+            &archive_sha256,
+            "--target",
+            TARGET,
+            "--version",
+            version,
+            "--output",
+            output.to_str().expect("output path UTF-8"),
+        ])
+        .output()
+        .expect("run target Agent verifier sidecar");
+    assert!(
+        verification.status.success(),
+        "sidecar rejected the authentic exact package: {}",
+        String::from_utf8_lossy(&verification.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verification.stdout).contains(&archive_sha256));
+
+    assert_eq!(
+        fs::read(output.join("hostlink-agent")).expect("extracted sidecar"),
+        sidecar
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("install.json")).expect("metadata"))
+            .expect("metadata JSON");
+    assert_eq!(metadata["format"], 1);
+    assert_eq!(metadata["target"], TARGET);
+    assert_eq!(metadata["installed_version"], version);
+    assert_eq!(metadata["installed_package_sha256"], archive_sha256);
+    assert_eq!(
+        metadata["installed_files"]["hostlink-agent"]["sha256"],
+        format!("{:x}", Sha256::digest(&sidecar))
+    );
+
+    let root = temp.path().join("installed-agent");
+    fs::create_dir(&root).expect("fresh root");
+    let state = root.join("state");
+    let bin = root.join("bin");
+    fs::create_dir(&state).expect("state directory");
+    fs::create_dir(&bin).expect("bin directory");
+    fs::write(state.join("agent.json"), b"validated enrollment config").expect("config");
+    fs::write(
+        root.join("enrollment.pending"),
+        b"reconcile until installer completes\n",
+    )
+    .expect("pending marker");
+    fs::copy(output.join("hostlink-agent"), bin.join("hostlink-agent"))
+        .expect("publish verified executable");
+    fs::copy(output.join("install.json"), root.join("install.json"))
+        .expect("publish install metadata");
+    fs::copy(
+        output.join("bootstrap-receipt.json"),
+        root.join("bootstrap-receipt.json"),
+    )
+    .expect("publish source receipt");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("private root");
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).expect("private state");
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).expect("private bin");
+        fs::set_permissions(
+            bin.join("hostlink-agent"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .expect("private executable");
+        fs::set_permissions(state.join("agent.json"), fs::Permissions::from_mode(0o600))
+            .expect("private config");
+        fs::set_permissions(root.join("install.json"), fs::Permissions::from_mode(0o600))
+            .expect("private metadata");
+        fs::set_permissions(
+            root.join("bootstrap-receipt.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("private receipt");
+        fs::set_permissions(
+            root.join("enrollment.pending"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("private pending marker");
+    }
+    fs::write(root.join("bootstrap-receipt.json"), b"{}").expect("tamper with source receipt");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            root.join("bootstrap-receipt.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("keep tampered receipt private");
+    }
+    assert!(finalize_fresh_install(&root).is_err());
+    assert!(root.join("enrollment.pending").is_file());
+    fs::copy(
+        output.join("bootstrap-receipt.json"),
+        root.join("bootstrap-receipt.json"),
+    )
+    .expect("restore verified source receipt");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            root.join("bootstrap-receipt.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("restore private receipt permissions");
+    }
+    finalize_fresh_install(&root).expect("finalize exact package install");
+    assert!(!root.join("enrollment.pending").exists());
+    assert!(verify_fresh_package(&archive, &archive_sha256, TARGET, version, &output).is_err());
+}
+
+#[test]
+fn fresh_package_verifier_rejects_wrong_source_target_and_sidecar_before_output() {
+    let (temp, _root) = install_root();
+    let executable = b"not the running verifier sidecar";
+    let (archive, digest) = package(temp.path(), env!("CARGO_PKG_VERSION"), executable);
+    let output = temp.path().join("rejected-stage");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
+            .expect("make output parent unsafe");
+        assert!(
+            verify_fresh_package(
+                &archive,
+                &digest,
+                TARGET,
+                env!("CARGO_PKG_VERSION"),
+                &output
+            )
+            .is_err()
+        );
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("private output parent");
+    }
+
+    assert!(
+        verify_fresh_package(
+            &archive,
+            &"0".repeat(64),
+            TARGET,
+            env!("CARGO_PKG_VERSION"),
+            &output
+        )
+        .is_err()
+    );
+    assert!(verify_fresh_package(&archive, &digest, TARGET, "99.0.0", &output).is_err());
+    assert!(
+        verify_fresh_package(
+            &archive,
+            &digest,
+            "i686-win7-windows-msvc",
+            env!("CARGO_PKG_VERSION"),
+            &output
+        )
+        .is_err()
+    );
+    assert!(
+        verify_fresh_package(
+            &archive,
+            &digest,
+            TARGET,
+            env!("CARGO_PKG_VERSION"),
+            &output
+        )
+        .is_err()
+    );
+    assert!(!output.exists());
+}
+
+#[test]
+fn fresh_package_verifier_rejects_out_of_order_zip_members() {
+    let (temp, _root) = install_root();
+    let version = env!("CARGO_PKG_VERSION");
+    let archive = temp.path().join("out-of-order.zip");
+    let manifest = json!({
+        "format": 1,
+        "component": "agent",
+        "target": TARGET,
+        "version": version,
+        "files": {"hostlink-agent": identity(b"unreached")},
+    });
+    let mut zip = zip::ZipWriter::new(File::create(&archive).expect("create archive"));
+    zip.start_file(
+        format!("hostlink-agent-{TARGET}/manifest.json"),
+        SimpleFileOptions::default(),
+    )
+    .expect("start manifest first");
+    zip.write_all(&serde_json::to_vec(&manifest).expect("manifest JSON"))
+        .expect("write manifest");
+    zip.start_file(
+        format!("hostlink-agent-{TARGET}/hostlink-agent"),
+        SimpleFileOptions::default(),
+    )
+    .expect("start executable second");
+    zip.write_all(b"unreached").expect("write executable");
+    zip.finish().expect("finish archive");
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(fs::read(&archive).expect("archive bytes"))
+    );
+    let output = temp.path().join("out-of-order-stage");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("private output parent");
+    }
+
+    assert!(verify_fresh_package(&archive, &digest, TARGET, version, &output).is_err());
+    assert!(!output.exists());
+}
+
+#[test]
+fn fresh_package_verifier_rejects_duplicate_manifest_members() {
+    let (temp, _root) = install_root();
+    let version = env!("CARGO_PKG_VERSION");
+    let executable = b"small invalid package executable";
+    let identity = serde_json::to_string(&identity(executable)).expect("file identity");
+    let manifest = format!(
+        r#"{{"format":1,"component":"agent","target":"{TARGET}","version":"{version}","files":{{"hostlink-agent":{identity},"hostlink-agent":{identity}}}}}"#
+    );
+    let archive = temp.path().join("duplicate-manifest.zip");
+    let mut zip = zip::ZipWriter::new(File::create(&archive).expect("create archive"));
+    zip.start_file(
+        format!("hostlink-agent-{TARGET}/hostlink-agent"),
+        SimpleFileOptions::default(),
+    )
+    .expect("start executable");
+    zip.write_all(executable).expect("write executable");
+    zip.start_file(
+        format!("hostlink-agent-{TARGET}/manifest.json"),
+        SimpleFileOptions::default(),
+    )
+    .expect("start manifest");
+    zip.write_all(manifest.as_bytes())
+        .expect("write duplicate manifest");
+    zip.finish().expect("finish archive");
+    let archive_digest = format!("{:x}", Sha256::digest(fs::read(&archive).expect("archive")));
+    let output = temp.path().join("duplicate-manifest-stage");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("private output parent");
+    }
+
+    assert!(verify_fresh_package(&archive, &archive_digest, TARGET, version, &output).is_err());
+    assert!(!output.exists());
+}
+
+#[test]
+fn fresh_package_verifier_rejects_missing_required_member() {
+    let (temp, _root) = install_root();
+    let version = env!("CARGO_PKG_VERSION");
+    let archive = temp.path().join("missing-member.zip");
+    let manifest = json!({
+        "format": 1,
+        "component": "agent",
+        "target": TARGET,
+        "version": version,
+        "files": {"hostlink-agent": identity(b"missing")},
+    });
+    let mut zip = zip::ZipWriter::new(File::create(&archive).expect("create archive"));
+    zip.start_file(
+        format!("hostlink-agent-{TARGET}/manifest.json"),
+        SimpleFileOptions::default(),
+    )
+    .expect("start manifest");
+    zip.write_all(&serde_json::to_vec(&manifest).expect("manifest JSON"))
+        .expect("write manifest");
+    zip.finish().expect("finish archive");
+    let digest = format!("{:x}", Sha256::digest(fs::read(&archive).expect("archive")));
+    let output = temp.path().join("missing-member-stage");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("private output parent");
+    }
+
+    assert!(verify_fresh_package(&archive, &digest, TARGET, version, &output).is_err());
+    assert!(!output.exists());
 }
 
 #[test]

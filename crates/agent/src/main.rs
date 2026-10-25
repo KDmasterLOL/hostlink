@@ -2,7 +2,9 @@
 
 use clap::{Parser, Subcommand};
 use hostlink_agent::{
-    AgentConfig, ssh,
+    AgentConfig,
+    enrollment::EnrollmentOptions,
+    ssh,
     update::{AgentUpdateOutcome, AgentUpdateRequest},
 };
 use std::fs::{self, File};
@@ -47,6 +49,42 @@ enum Command {
         #[arg(long)]
         version: String,
     },
+    /// Enroll a fresh user-owned Agent root with a one-use Hub invitation.
+    Enroll {
+        #[arg(long)]
+        hub_url: String,
+        #[arg(long)]
+        token_file: PathBuf,
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        gateway_index: Option<usize>,
+        /// Retain the pending marker until bootstrap-finalize verifies package publication.
+        #[arg(long, hide = true)]
+        retain_pending: bool,
+    },
+    /// Verify a fresh-install ZIP with this exact target-specific executable sidecar.
+    BootstrapVerify {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        sha256: String,
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Finish a verified fresh install and remove its enrollment reconciliation marker.
+    BootstrapFinalize {
+        #[arg(long)]
+        root: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -66,10 +104,21 @@ async fn run(cli: Cli) -> io::Result<()> {
         }
         Command::Run { config } => {
             let config = load_config(&config)?;
-            ssh::serve(&config, async {
+            let shutdown = tokio_util::sync::CancellationToken::new();
+            let signal_shutdown = shutdown.clone();
+            tokio::spawn(async move {
                 let _ = tokio::signal::ctrl_c().await;
-            })
-            .await
+                signal_shutdown.cancel();
+            });
+            if config.gateway.is_some() {
+                tokio::try_join!(
+                    ssh::serve(&config, shutdown.clone().cancelled_owned()),
+                    hostlink_agent::tunnel::run(&config, shutdown.cancelled_owned()),
+                )?;
+            } else {
+                ssh::serve(&config, shutdown.cancelled_owned()).await?;
+            }
+            Ok(())
         }
         Command::Update {
             root,
@@ -99,6 +148,45 @@ async fn run(cli: Cli) -> io::Result<()> {
                     format!("Agent update deferred: {} jobs not terminal", job_ids.len()),
                 )),
             }
+        }
+        Command::Enroll {
+            hub_url,
+            token_file,
+            root,
+            name,
+            user,
+            gateway_index,
+            retain_pending,
+        } => {
+            let result = hostlink_agent::enrollment::prepare_enrollment(&EnrollmentOptions {
+                hub_url,
+                token_file,
+                install_root: root,
+                name,
+                user,
+                gateway_index,
+                retain_pending,
+            })
+            .await?;
+            println!("Agent enrolled: {}", result.machine_id);
+            println!("Configuration: {}", result.config_path.display());
+            println!(
+                "Run with: hostlink-agent run --config {}",
+                result.config_path.display()
+            );
+            Ok(())
+        }
+        Command::BootstrapVerify {
+            archive,
+            sha256,
+            target,
+            version,
+            output,
+        } => hostlink_agent::update::verify_fresh_package(
+            &archive, &sha256, &target, &version, &output,
+        ),
+        Command::BootstrapFinalize { root } => {
+            hostlink_agent::update::finalize_fresh_install(&root)
         }
     }
 }

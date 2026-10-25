@@ -1,6 +1,7 @@
 //! Embedded SSH Agent: authenticated transport, execution, and durable jobs.
 //! The former Agent JSONL listener, OpenSSH process and updater are absent.
 
+pub mod enrollment;
 pub mod exec;
 pub mod jobs;
 pub mod sftp;
@@ -8,13 +9,13 @@ pub mod ssh;
 pub mod tunnel;
 pub mod update;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 /// Configuration for a loopback-bound SSH Agent running as an unprivileged user.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     pub listen: SocketAddr,
@@ -26,7 +27,7 @@ pub struct AgentConfig {
 }
 
 /// Optional pinned reverse-SSH gateway.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReverseGateway {
     pub host: String,
