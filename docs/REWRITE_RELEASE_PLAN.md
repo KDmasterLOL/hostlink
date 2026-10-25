@@ -56,6 +56,8 @@ C2. Dry-run migration inventory (new child).
 - Produce per-host compatibility report: authentication key, target host public-key pin, assigned gateway/port, executable/architecture, user-owned install root, old control consumers, target-side process owner, installer/update compatibility. Missing identity => explicit blocker, never a fabricated fallback.
 - Run new Agent side-by-side with old on an isolated port and separate owned root. Demonstrate one-host new Controller success and proved fallback to old. Do not deploy or alter a live service in this issue.
 
+Implemented locally by 1C-1010: `hostlink migration preflight` reads bounded old Hub/Controller/Agent JSON snapshots plus explicit new Agent/HostSpec files and emits a redacted static per-host report. It performs no SSH/network operations or writes. See [MIGRATION_RUNBOOK.md](MIGRATION_RUNBOOK.md) for invocation, manual side-by-side verification and rollback. A passing static report does not satisfy the disposable gateway/Windows/runtime gates above.
+
 C3. Final source-exact release acceptance (new child).
 - On one exact SHA: cargo fmt, check, strict Clippy, workspace tests on Linux and Windows11; both Win7 PE targets plus actual NT6.1 smoke; user-scope Windows durable reconnect, updater active-job deferral/rollback, SFTP seal + typed run, gateway mode and SSH reconnect; negative authorization and cleanup.
 - Huly status Todo -> In Progress -> Merging -> Done only when matching SHA evidence is attached. Gate: explicit user authorization before dev promotion, main/tag/release, switching installed Agents or modifying production networks.

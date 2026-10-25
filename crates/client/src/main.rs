@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use hostlink::{
     HostSpec,
     connect::{HostConnection, SshClientError},
+    migration::{self, Readiness},
     run::{
         JobSpec, JobStateKind, JobStatus, JobStream, Output, Seal, Start, Status,
         sealed_artifact_name,
@@ -27,6 +28,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect legacy snapshots and explicit russh configs without SSH or writes.
+    Migration {
+        #[command(subcommand)]
+        command: MigrationCommand,
+    },
     /// Establish and close a pinned authenticated SSH connection.
     Check {
         #[arg(long)]
@@ -77,6 +83,23 @@ enum Command {
         /// Exact test-runner arguments, separated from CLI options with `--`.
         #[arg(last = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrationCommand {
+    /// Produce a redacted, offline per-host readiness report.
+    Preflight {
+        #[arg(long)]
+        old_hub: PathBuf,
+        #[arg(long)]
+        old_controller: PathBuf,
+        #[arg(long)]
+        old_agent: PathBuf,
+        #[arg(long)]
+        new_agent: PathBuf,
+        #[arg(long)]
+        new_host: PathBuf,
     },
 }
 
@@ -143,7 +166,36 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
+    if let Command::Migration {
+        command:
+            MigrationCommand::Preflight {
+                old_hub,
+                old_controller,
+                old_agent,
+                new_agent,
+                new_host,
+            },
+    } = &cli.command
+    {
+        let report = migration::preflight(old_hub, old_controller, old_agent, new_agent, new_host)
+            .map_err(io::Error::other)?;
+        serde_json::to_writer_pretty(io::stdout().lock(), &report)?;
+        io::stdout().lock().write_all(b"\n")?;
+        return Ok(
+            if report
+                .hosts
+                .iter()
+                .any(|host| host.readiness == Readiness::Blocked)
+            {
+                2
+            } else {
+                0
+            },
+        );
+    }
+
     let config_path = match &cli.command {
+        Command::Migration { .. } => unreachable!("migration preflight returned above"),
         Command::Check { config }
         | Command::Exec { config, .. }
         | Command::Upload { config, .. }
@@ -250,6 +302,7 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
     // All errors must still close both the target and optional gateway SSH sessions.
     let operation: Result<i32, Box<dyn Error>> = async {
         match cli.command {
+            Command::Migration { .. } => unreachable!("migration preflight returned above"),
             Command::Check { .. } => Ok(0_i32),
             Command::Exec {
                 command,
@@ -705,6 +758,27 @@ mod tests {
         assert_eq!(program, "/opt/tests/bin");
         assert_eq!(source_sha256, "a".repeat(64));
         assert_eq!(args, ["--list", "suite::test name"]);
+    }
+
+    #[test]
+    fn migration_preflight_requires_all_local_explicit_inputs() {
+        let cli = Cli::try_parse_from([
+            "hostlink",
+            "migration",
+            "preflight",
+            "--old-hub",
+            "hub.json",
+            "--old-controller",
+            "controller.json",
+            "--old-agent",
+            "agent.json",
+            "--new-agent",
+            "new-agent.json",
+            "--new-host",
+            "host.json",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::Migration { .. }));
     }
 
     #[test]

@@ -36,7 +36,10 @@ cargo run --offline --locked -p hostlink-agent -- check --config agent.json
 cargo run --offline --locked -p hostlink-agent -- run --config agent.json
 cargo run --offline --locked -p hostlink -- check --config host.json
 cargo run --offline --locked -p hostlink -- exec --config host.json --command 'echo hello'
+cargo run --offline --locked -p hostlink -- migration preflight --help
 ```
+
+`hostlink migration preflight` inspects bounded local legacy Hub/Controller/Agent snapshots and explicit new Agent/HostSpec configs. It emits a redacted per-host READY/REVIEW/BLOCKED report without SSH, network access, credential conversion, or file writes. See [docs/MIGRATION_RUNBOOK.md](docs/MIGRATION_RUNBOOK.md) for required inputs and manual side-by-side verification/rollback; static readiness is not deployment acceptance.
 
 The Agent listens on loopback and requires an Ed25519 host key and authorized
 controller keys. The controller pins the Agent host public key and requires a
