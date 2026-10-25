@@ -12,6 +12,20 @@ class NativeWindowsAgentAcceptanceTest(unittest.TestCase):
             encoding="utf-8"
         )
 
+    def test_fixture_failure_reports_only_a_bounded_safe_substage(self) -> None:
+        harness = self.harness_source()
+        for stage in (
+            "fixture-ed25519-keygen",
+            "fixture-ed25519-private-acl",
+            "fixture-public-key-material",
+            "fixture-random-secret",
+            "fixture-secret-private-acl",
+            "fixture-config-serialization",
+        ):
+            self.assertIn("$script:Stage = '" + stage + "'", harness)
+        self.assertIn("$failure = 'harness-failure-at-' + $script:Stage", harness)
+        self.assertNotIn("$failure = $_.Exception.Message", harness)
+
     def test_windows_powershell_51_passes_an_explicit_empty_ssh_key_passphrase(self) -> None:
         harness = self.harness_source()
         self.assertIn("& $sshKeygen -q -t ed25519 -N '\"\"'", harness)

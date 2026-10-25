@@ -316,24 +316,30 @@ try {
         [pscustomobject]@{ path = $hostKeyPath; comment = 'hostlink-native-acceptance-host' }
     )
     foreach ($key in $keySpecifications) {
+        $script:Stage = 'fixture-ed25519-keygen'
         # Windows PowerShell 5.1 drops an unquoted empty native argument.
         # This literal reaches ssh-keygen as an empty passphrase on Windows.
         & $sshKeygen -q -t ed25519 -N '""' -C $key.comment -f $key.path 2>$null
         Assert-Condition ($LASTEXITCODE -eq 0 -and [IO.File]::Exists($key.path) -and [IO.File]::Exists($key.path + '.pub')) 'OpenSSH Ed25519 key generation failed.'
+        $script:Stage = 'fixture-ed25519-private-acl'
         Set-PrivateFile $key.path
     }
+    $script:Stage = 'fixture-public-key-material'
     $identityPublic = [IO.File]::ReadAllText($identityPath + '.pub').Trim()
     $hostPublic = [IO.File]::ReadAllText($hostKeyPath + '.pub').Trim()
     $hostParts = $hostPublic -split '\s+'
     Assert-Condition ($hostParts.Count -ge 2) 'OpenSSH returned an invalid host public key.'
     [IO.File]::WriteAllText($knownHostsPath, ('gateway.example.test ' + $hostParts[0] + ' ' + $hostParts[1] + "`n"), (New-Object Text.UTF8Encoding($false)))
     [IO.File]::WriteAllText($authorizedKeysPath, ($identityPublic + "`n"), (New-Object Text.UTF8Encoding($false)))
+    $script:Stage = 'fixture-random-secret'
     $secret = New-Object byte[] 32
     $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
     try { $rng.GetBytes($secret) } finally { $rng.Dispose() }
     [IO.File]::WriteAllText($secretPath, [Convert]::ToBase64String($secret), (New-Object Text.UTF8Encoding($false)))
     [Array]::Clear($secret, 0, $secret.Length)
+    $script:Stage = 'fixture-secret-private-acl'
     Set-PrivateFile $secretPath
+    $script:Stage = 'fixture-config-serialization'
     $config = [ordered]@{
         version = 1
         name = 'native-acceptance'
