@@ -589,9 +589,18 @@ async fn handle_job_channel(channel: Channel<Msg>, runtime: Arc<JobRuntime>, own
                 Err(_) => JobResponse::error("malformed jobs-v1 request"),
             },
         };
-    let body = serde_json::to_vec(&response).unwrap_or_else(|_| {
-        br#"{"version":1,"ok":false,"error":"response encoding failed"}"#.to_vec()
-    });
+    // An error reply is a separate, minimal jobs-v1 wire shape. Status/output
+    // fields are present (null when unused) only for successful replies.
+    let body = if response.ok {
+        serde_json::to_vec(&response)
+    } else {
+        serde_json::to_vec(&serde_json::json!({
+            "version": response.version,
+            "ok": false,
+            "error": response.error.unwrap_or("jobs-v1 request failed"),
+        }))
+    }
+    .unwrap_or_else(|_| br#"{"version":1,"ok":false,"error":"response encoding failed"}"#.to_vec());
     if let Ok(size) = u32::try_from(body.len()) {
         let _ = stream.write_all(&size.to_be_bytes()).await;
         let _ = stream.write_all(&body).await;
