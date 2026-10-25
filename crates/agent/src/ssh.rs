@@ -658,18 +658,6 @@ async fn handle_job_request(
                     JobResponse::success(record.id.to_string(), record.state)
                 }
                 Admission::Created(record) => {
-                    #[cfg(windows)]
-                    {
-                        let _ = record;
-                        let _ = runtime.store.transition(
-                            id,
-                            owner,
-                            JobState::Prepared,
-                            JobState::Failed,
-                        );
-                        return JobResponse::error("durable jobs are unsupported on Windows");
-                    }
-                    #[cfg(not(windows))]
                     if verify_job_source(&spec).is_err() {
                         let _ = runtime.store.transition(
                             id,
@@ -679,7 +667,6 @@ async fn handle_job_request(
                         );
                         return JobResponse::error("source executable verification failed");
                     }
-                    #[cfg(not(windows))]
                     let permit = match runtime.slots.clone().try_acquire_owned() {
                         Ok(permit) => permit,
                         Err(_) => {
@@ -692,7 +679,6 @@ async fn handle_job_request(
                             return JobResponse::error("active job limit reached");
                         }
                     };
-                    #[cfg(not(windows))]
                     if runtime
                         .store
                         .transition(id, owner, JobState::Prepared, JobState::Running)
@@ -706,21 +692,14 @@ async fn handle_job_request(
                         );
                         return JobResponse::error("job start reservation failed");
                     }
-                    #[cfg(not(windows))]
                     let runtime = runtime.clone();
-                    #[cfg(not(windows))]
                     let owner = owner.to_owned();
-                    #[cfg(not(windows))]
                     let response = JobResponse::success(id.to_string(), JobState::Running);
-                    #[cfg(not(windows))]
                     tokio::spawn(async move {
                         let _permit = permit;
                         run_job(runtime, owner, record).await;
                     });
-                    #[cfg(not(windows))]
-                    {
-                        response
-                    }
+                    response
                 }
             }
         }
@@ -755,10 +734,7 @@ async fn handle_job_request(
 }
 
 fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
-    if !spec.program.starts_with(std::path::MAIN_SEPARATOR)
-        || !Path::new(&spec.program).is_absolute()
-        || spec.program.contains('\0')
-    {
+    if !Path::new(&spec.program).is_absolute() || spec.program.contains('\0') {
         return Err(invalid_data("job executable must be an absolute path"));
     }
     let program = Path::new(&spec.program);
@@ -767,6 +743,23 @@ fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
         return Err(invalid_data(
             "job executable must be a regular non-symlink file",
         ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err(invalid_data("job executable must not be a reparse point"));
+        }
+        if !crate::exec::safe_windows_user_context()? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "durable jobs require a verified non-elevated, non-LocalSystem Windows user context",
+            ));
+        }
+        jobs::validate_private_path(program, false)?;
+        if let Some(parent) = program.parent() {
+            jobs::validate_private_path(parent, true)?;
+        }
     }
     #[cfg(unix)]
     {
@@ -786,6 +779,19 @@ fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
     let opened_metadata = file.metadata()?;
     if !opened_metadata.is_file() {
         return Err(invalid_data("job executable must be a regular file"));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if opened_metadata.volume_serial_number().is_none()
+            || opened_metadata.file_index().is_none()
+            || metadata.volume_serial_number() != opened_metadata.volume_serial_number()
+            || metadata.file_index() != opened_metadata.file_index()
+        {
+            return Err(invalid_data(
+                "job executable path changed while opening for verification",
+            ));
+        }
     }
     #[cfg(unix)]
     {
@@ -826,6 +832,22 @@ fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
             ));
         }
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        let path_after_hash = std::fs::symlink_metadata(program)?;
+        if after_hash.volume_serial_number() != opened_metadata.volume_serial_number()
+            || after_hash.file_index() != opened_metadata.file_index()
+            || after_hash.len() != opened_metadata.len()
+            || path_after_hash.file_attributes() & 0x400 != 0
+            || path_after_hash.volume_serial_number() != opened_metadata.volume_serial_number()
+            || path_after_hash.file_index() != opened_metadata.file_index()
+        {
+            return Err(invalid_data(
+                "job executable changed during source verification",
+            ));
+        }
+    }
     // The open descriptor is hashed, then ProcessKit launches by pathname. Read-only ownership
     // checks reduce external mutation, but cannot pin the executed inode against a same-UID path
     // replacement between this check and exec; this is not an exec-by-fd guarantee.
@@ -835,6 +857,14 @@ fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
             return Err(invalid_data(
                 "job working directory must be absolute and safe",
             ));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                return Err(invalid_data("job working directory is a reparse point"));
+            }
+            jobs::validate_private_path(cwd, true)?;
         }
     }
     Ok(program.to_path_buf())
@@ -903,54 +933,42 @@ async fn run_job(runtime: Arc<JobRuntime>, owner: String, record: crate::jobs::J
     if let Some(cwd) = &record.spec.cwd {
         command = command.current_dir(cwd);
     }
-    #[cfg(windows)]
+    // ProcessKit owns timeout, cancellation and child cleanup. Windows uses its Job Object,
+    // including kill-on-close for the complete process tree; Linux uses its private process group.
+    let outcome = match command.start().await {
+        Ok(child) => child.drain().await,
+        Err(_) => {
+            let _ = runtime
+                .store
+                .transition(id, &owner, JobState::Running, JobState::Failed);
+            return;
+        }
+    };
+    let sync_results =
+        tokio::task::spawn_blocking(move || (out_sync.sync_all(), err_sync.sync_all())).await;
+    let overflow = overflowed.load(Ordering::Acquire);
+    let next = if runtime.shutdown.is_cancelled() {
+        JobState::Interrupted
+    } else if overflow
+        || sync_results.is_err()
+        || sync_results.is_ok_and(|(out, err)| out.is_err() || err.is_err())
     {
-        let _ = runtime
-            .store
-            .transition(id, &owner, JobState::Running, JobState::Failed);
-        return;
-    }
-    #[cfg(not(windows))]
-    {
-        // ProcessKit's private process group owns ordinary timeout/cancellation cleanup. On Linux
-        // kill_on_parent_death reaches only the direct child; Agent shutdown therefore also
-        // cancels and joins every worker. SIGKILL of the Agent cannot be claimed to reap all
-        // arbitrary grandchildren on Linux.
-        let outcome = match command.start().await {
-            Ok(child) => child.drain().await,
-            Err(_) => {
-                let _ = runtime
-                    .store
-                    .transition(id, &owner, JobState::Running, JobState::Failed);
-                return;
-            }
-        };
-        let sync_results =
-            tokio::task::spawn_blocking(move || (out_sync.sync_all(), err_sync.sync_all())).await;
-        let overflow = overflowed.load(Ordering::Acquire);
-        let next = if runtime.shutdown.is_cancelled() {
-            JobState::Interrupted
-        } else if overflow
-            || sync_results.is_err()
-            || sync_results.is_ok_and(|(out, err)| out.is_err() || err.is_err())
-        {
-            JobState::Failed
-        } else {
-            match outcome {
-                Ok(processkit::Outcome::Exited(code)) => JobState::Exited { code },
-                Ok(
-                    processkit::Outcome::Signalled(_)
-                    | processkit::Outcome::TimedOut
-                    | processkit::Outcome::InactivityTimedOut,
-                ) => JobState::Failed,
-                Err(_) => JobState::Failed,
-                _ => JobState::Failed,
-            }
-        };
-        let _ = runtime
-            .store
-            .transition(id, &owner, JobState::Running, next);
-    }
+        JobState::Failed
+    } else {
+        match outcome {
+            Ok(processkit::Outcome::Exited(code)) => JobState::Exited { code },
+            Ok(
+                processkit::Outcome::Signalled(_)
+                | processkit::Outcome::TimedOut
+                | processkit::Outcome::InactivityTimedOut,
+            ) => JobState::Failed,
+            Err(_) => JobState::Failed,
+            _ => JobState::Failed,
+        }
+    };
+    let _ = runtime
+        .store
+        .transition(id, &owner, JobState::Running, next);
 }
 
 fn open_job_output(
@@ -1019,6 +1037,48 @@ impl AsyncWrite for CappedOutputWriter {
 fn fail_session_channel(channel: ChannelId, session: &mut Session) -> Result<(), russh::Error> {
     session.channel_failure(channel)?;
     session.close(channel)
+}
+
+#[cfg(all(test, unix))]
+mod job_source_tests {
+    use super::{JobSpec, verify_job_source};
+    use sha2::{Digest as _, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn job_source_rejects_digest_mismatch_and_symlink() {
+        let temp = tempfile::tempdir().expect("private source fixture");
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("protect source fixture");
+        let source = temp.path().join("worker");
+        std::fs::copy(std::env::current_exe().expect("test executable"), &source)
+            .expect("copy source fixture");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o500))
+            .expect("make source immutable to group and others");
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(std::fs::read(&source).expect("source bytes"))
+        );
+        let mut spec = JobSpec {
+            program: source.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            cwd: None,
+            source_sha256: "0".repeat(64),
+        };
+        assert!(
+            verify_job_source(&spec).is_err(),
+            "wrong pinned digest fails closed"
+        );
+
+        spec.source_sha256 = digest;
+        let link = temp.path().join("worker-link");
+        std::os::unix::fs::symlink(&source, &link).expect("create source symlink");
+        spec.program = link.to_string_lossy().into_owned();
+        assert!(
+            verify_job_source(&spec).is_err(),
+            "symlink source fails closed"
+        );
+    }
 }
 
 fn load_host_key(path: &Path) -> io::Result<PrivateKey> {
