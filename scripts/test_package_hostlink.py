@@ -45,14 +45,28 @@ class PackageTest(unittest.TestCase):
         b, _ = package("agent", target, self.source, other)
         self.assertEqual(archive.read_bytes(), b.read_bytes())
 
-    def test_missing_file_invalid_target_and_symlink_rejected_without_output(self) -> None:
+    def test_missing_file_and_invalid_target_rejected_without_output(self) -> None:
         self.assertRaises(ValueError, package, "agent", "unknown", self.source, self.output)
         self.assertRaises(
             ValueError, package, "agent", "x86_64-pc-windows-msvc", self.source, self.output
         )
         self.source_files("controller", "x86_64-pc-windows-msvc")
         (self.source / "hostlink.exe").unlink()
-        (self.source / "hostlink.exe").symlink_to(self.base / "outside")
+        self.assertRaises(
+            ValueError, package, "controller", "x86_64-pc-windows-msvc", self.source, self.output
+        )
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_symlinked_source_rejected_without_output(self) -> None:
+        self.source_files("controller", "x86_64-pc-windows-msvc")
+        source_file = self.source / "hostlink.exe"
+        source_file.unlink()
+        try:
+            source_file.symlink_to(self.base / "outside")
+        except OSError as error:
+            if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+                self.skipTest("Windows user lacks the symlink creation privilege")
+            raise
         self.assertRaises(
             ValueError, package, "controller", "x86_64-pc-windows-msvc", self.source, self.output
         )
