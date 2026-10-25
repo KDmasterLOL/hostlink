@@ -32,3 +32,23 @@ fn host_target_is_required_before_any_connection_attempt() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("required"));
 }
+
+#[cfg(unix)]
+#[test]
+fn explicit_config_is_independent_of_default_hub_environment() {
+    let output = Command::new(env!("CARGO_BIN_EXE_hostlink"))
+        .env_remove("HOME")
+        .args([
+            "check",
+            "--config",
+            "/definitely-missing-hostlink-fixture.json",
+        ])
+        .output()
+        .expect("start hostlink CLI without HOME");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No such file or directory"),
+        "explicit --config must read that file rather than requiring HOME: {stderr}"
+    );
+}

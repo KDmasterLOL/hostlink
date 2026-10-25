@@ -656,9 +656,10 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         | Command::DisplayName { .. }
         | Command::Remove { .. } => unreachable!("Hub commands returned above"),
     };
-    let config_path = selected_config
-        .clone()
-        .unwrap_or(default_hub_config_path()?);
+    let config_path = match selected_config {
+        Some(path) => path,
+        None => default_hub_config_path()?,
+    };
     let target_hint = if selected_host.is_some() {
         "--host <HOST>"
     } else {
