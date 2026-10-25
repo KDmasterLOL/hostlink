@@ -44,7 +44,6 @@ $bstr=[IntPtr]::Zero
 $token=$null
 $root=$null
 $tokenPath=$null
-$installerPath=$null
 $archivePath=$null
 $agentExecutablePath=$null
 try {{
@@ -83,7 +82,6 @@ try {{
         if (-not ($tokenSids -contains $entrySid)) {{ $tokenSids+= $entrySid }}
     }}
     if ($tokenSids.Count -ne 2) {{ throw 'Enrollment token file ACL is incomplete.' }}
-    $installerPath=Join-Path $root 'Install-HostLink-Agent.ps1'
     $installerRequest=[Net.HttpWebRequest]::Create($installerUrl)
     $installerRequest.AllowAutoRedirect=$false
     $installerRequest.Timeout=15000
@@ -108,7 +106,7 @@ try {{
     $hasher=[Security.Cryptography.SHA256]::Create()
     try {{ $actual=([BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized)))).Replace('-','').ToLowerInvariant() }} finally {{ $hasher.Clear() }}
     if ($actual -ne $installerSha256) {{ throw 'Install-HostLink-Agent.ps1 SHA-256 mismatch.' }}
-    [IO.File]::WriteAllBytes($installerPath,$installerBytes)
+    $installerBlock=[scriptblock]::Create($installerScript)
     $archivePath=Join-Path $root 'hostlink-agent.zip'
     $packageRequest=[Net.HttpWebRequest]::Create($packageUrl)
     $packageRequest.AllowAutoRedirect=$false
@@ -168,9 +166,9 @@ try {{
     try {{
         $LASTEXITCODE=$null
         if ($null -ne $agentExecutablePath) {{
-            & $installerPath -ArchiveFile ([IO.Path]::GetFullPath($archivePath)) -ArchiveSha256 $packageSha256 -PackageVersion $packageVersion -Target $packageTarget -HubUrl $hubUrl -EnrollmentTokenFile ([IO.Path]::GetFullPath($tokenPath)) -AgentExecutableFile ([IO.Path]::GetFullPath($agentExecutablePath)) -AgentExecutableSha256 $agentExecutableSha256
+            & $installerBlock -ArchiveFile ([IO.Path]::GetFullPath($archivePath)) -ArchiveSha256 $packageSha256 -PackageVersion $packageVersion -Target $packageTarget -HubUrl $hubUrl -EnrollmentTokenFile ([IO.Path]::GetFullPath($tokenPath)) -AgentExecutableFile ([IO.Path]::GetFullPath($agentExecutablePath)) -AgentExecutableSha256 $agentExecutableSha256
         }} else {{
-            & $installerPath -ArchiveFile ([IO.Path]::GetFullPath($archivePath)) -ArchiveSha256 $packageSha256 -PackageVersion $packageVersion -Target $packageTarget -HubUrl $hubUrl -EnrollmentTokenFile ([IO.Path]::GetFullPath($tokenPath))
+            & $installerBlock -ArchiveFile ([IO.Path]::GetFullPath($archivePath)) -ArchiveSha256 $packageSha256 -PackageVersion $packageVersion -Target $packageTarget -HubUrl $hubUrl -EnrollmentTokenFile ([IO.Path]::GetFullPath($tokenPath))
         }}
         $installerExitCode=$LASTEXITCODE
         if (($null -eq $installerExitCode) -or ($installerExitCode -ne 0)) {{ throw 'Installer exit status was missing or nonzero.' }}
@@ -188,7 +186,7 @@ try {{
                 if (-not $rootIsOwned) {{
                     $cleanupIncomplete=$true
                 }} else {{
-                    foreach ($ownedFile in @($tokenPath,$installerPath,$archivePath,$agentExecutablePath)) {{
+                    foreach ($ownedFile in @($tokenPath,$archivePath,$agentExecutablePath)) {{
                         if ($null -ne $ownedFile -and [IO.File]::Exists($ownedFile)) {{
                             try {{
                                 $fullFile=[IO.Path]::GetFullPath($ownedFile)
@@ -239,7 +237,7 @@ pub(super) fn powershell_encoded_command(script: &str) -> String {
 
 pub(super) fn powershell_command_line(script: &str) -> String {
     format!(
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {}",
+        "powershell.exe -NoProfile -EncodedCommand {}",
         powershell_encoded_command(script)
     )
 }

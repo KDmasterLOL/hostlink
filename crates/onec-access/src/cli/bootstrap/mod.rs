@@ -7,8 +7,8 @@ pub(in crate::cli) use invite::invite;
 #[cfg(test)]
 mod tests {
     use super::render::{
-        RemoteDirectInviteBootstrap, normalized_script_sha256, powershell_encoded_command,
-        remote_direct_invite_bootstrap,
+        RemoteDirectInviteBootstrap, normalized_script_sha256, powershell_command_line,
+        powershell_encoded_command, remote_direct_invite_bootstrap,
     };
 
     fn decode_powershell_encoded_command(encoded: &str) -> String {
@@ -35,15 +35,32 @@ mod tests {
     }
 
     fn assert_best_effort_private_cleanup(script: &str) {
-        assert!(script.contains(
-            "foreach ($ownedFile in @($tokenPath,$installerPath,$archivePath,$agentExecutablePath))"
-        ));
+        assert!(
+            script.contains(
+                "foreach ($ownedFile in @($tokenPath,$archivePath,$agentExecutablePath))"
+            )
+        );
         assert!(script.contains("if (-not $rootIsOwned)"));
         assert!(script.contains("FileAttributes]::ReparsePoint"));
         assert!(script.contains("catch { $cleanupIncomplete=$true }"));
         assert!(script.contains(
             "HostLink bootstrap cleanup incomplete; private temporary files may remain."
         ));
+    }
+
+    fn assert_verified_scriptblock_invocation(script: &str) {
+        let verified = script
+            .find("if ($actual -ne $installerSha256)")
+            .expect("installer digest is checked");
+        let compiled = script
+            .find("$installerBlock=[scriptblock]::Create($installerScript)")
+            .expect("verified installer source is compiled as a ScriptBlock");
+        assert!(compiled > verified, "compile only after digest validation");
+        assert_eq!(script.matches("& $installerBlock -ArchiveFile").count(), 2);
+        assert!(!script.contains("& $installerPath"));
+        assert!(!script.contains("WriteAllBytes($installerPath"));
+        assert!(!script.contains("Set-ExecutionPolicy"));
+        assert!(!script.contains("-ExecutionPolicy Bypass"));
     }
 
     #[test]
@@ -68,6 +85,7 @@ mod tests {
         assert_eq!(decoded, script);
         assert_ps2_sha256_cleanup(&script);
         assert_best_effort_private_cleanup(&script);
+        assert_verified_scriptblock_invocation(&script);
         assert!(script.contains("$installerRequest.AllowAutoRedirect=$false"));
         assert!(script.contains("$packageRequest.AllowAutoRedirect=$false"));
         assert!(script.contains("$agentRequest.AllowAutoRedirect=$false"));
@@ -107,6 +125,9 @@ mod tests {
         assert!(script.contains("The invite may have been consumed; do not retry this token."));
         assert!(script.contains("ZeroFreeBSTR"));
         assert!(script.contains("do not retry this token"));
+        assert!(script.contains(
+            "& $installerBlock -ArchiveFile ([IO.Path]::GetFullPath($archivePath)) -ArchiveSha256 $packageSha256 -PackageVersion $packageVersion -Target $packageTarget -HubUrl $hubUrl -EnrollmentTokenFile ([IO.Path]::GetFullPath($tokenPath)) -AgentExecutableFile ([IO.Path]::GetFullPath($agentExecutablePath)) -AgentExecutableSha256 $agentExecutableSha256"
+        ));
         assert!(script.contains("Read-Host 'One-use HostLink enrollment token' -AsSecureString"));
         assert!(!script.contains("Enrollment token: "));
         assert!(!script.contains("-EnrollToken "));
@@ -135,8 +156,21 @@ mod tests {
 
         assert_ps2_sha256_cleanup(&script);
         assert_best_effort_private_cleanup(&script);
+        assert_verified_scriptblock_invocation(&script);
         assert!(script.contains("$agentExecutableUrl=''"));
         assert!(script.contains("if ($agentExecutableUrl -ne '')"));
         assert!(script.contains("if ($null -ne $agentExecutablePath)"));
+        assert!(script.contains(
+            "& $installerBlock -ArchiveFile ([IO.Path]::GetFullPath($archivePath)) -ArchiveSha256 $packageSha256 -PackageVersion $packageVersion -Target $packageTarget -HubUrl $hubUrl -EnrollmentTokenFile ([IO.Path]::GetFullPath($tokenPath))"
+        ));
+    }
+
+    #[test]
+    fn powershell_command_does_not_override_execution_policy() {
+        let command = powershell_command_line("Write-Output 'bootstrap'");
+
+        assert!(command.starts_with("powershell.exe -NoProfile -EncodedCommand "));
+        assert!(!command.contains("Set-ExecutionPolicy"));
+        assert!(!command.contains("-ExecutionPolicy Bypass"));
     }
 }
