@@ -216,7 +216,10 @@ async fn tunnel_once(
         ))
     })?
     .map_err(ssh_failure)?;
-    if forwarded != u32::from(gateway.remote_port) {
+    // RFC 4254 returns an allocated port only when the requested port is 0.
+    // russh therefore returns 0 for a confirmed *fixed-port* forward. The
+    // matching address and port are enforced again for each forwarded channel.
+    if forwarded != 0 {
         return Err(AttemptFailure::permanent(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "gateway did not confirm the exact requested reverse loopback port",
@@ -249,7 +252,14 @@ async fn tunnel_once(
     let result = connection.await;
     workers.abort_all();
     while workers.join_next().await.is_some() {}
-    result
+    // An SSH gateway can close gracefully without an error. A clean remote
+    // disconnect is still a lost tunnel and must retry, not stop Agent routing.
+    result.and_then(|()| {
+        Err(AttemptFailure::transient(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "gateway SSH session closed",
+        )))
+    })
 }
 
 fn load_gateway_key(path: &Path) -> io::Result<russh::keys::PublicKey> {
