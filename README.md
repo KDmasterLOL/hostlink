@@ -29,9 +29,12 @@ The rewrite follows the installed Rust stable toolchain (currently 1.99.1)
 for local Linux/modern Windows checks. The workspace MSRV remains 1.98.1:
 raising the minimum is not required just to use a newer compiler. `stable`
 is intentionally rolling, not a byte-for-byte reproducible compiler pin;
-run `rustc --version` when recording acceptance. The Windows 7 Tier 3
-MSVC build uses its separately validated pinned nightly and `build-std`,
-which this change does not alter.
+run `rustc --version` when recording acceptance. The Windows 7 Tier 3 MSVC
+targets have no precompiled Rust standard library. Build both Agent and Client
+targets with the separately pinned `nightly-2026-08-22`, `cargo-xwin`, and
+`build-std`; ordinary Windows MSVC targets are not substitutes. The
+source-exact build and PE evidence workflow is documented in
+[docs/WIN7_REWRITE_ACCEPTANCE.md](docs/WIN7_REWRITE_ACCEPTANCE.md).
 
 ## Development commands
 
@@ -46,6 +49,17 @@ cargo run --offline --locked -p hostlink -- check --config host.json
 cargo run --offline --locked -p hostlink -- exec --config host.json --command 'echo hello'
 cargo run --offline --locked -p hostlink -- migration preflight --help
 ```
+
+```sh
+scripts/build-win7-candidate.sh \
+  --source-sha "$(git rev-parse HEAD)" \
+  --output-dir "target/win7-candidate-$(git rev-parse HEAD)"
+```
+
+The Win7 builder requires a clean task worktree and a new output directory
+inside ignored `target/`. It builds both exact Win7 target triples and writes
+PE inspection reports plus a source-bound JSON receipt. A successful cross
+build is not native Windows 7 acceptance.
 
 `hostlink migration preflight` inspects bounded local legacy Hub/Controller/Agent snapshots and explicit new Agent/HostSpec configs. It emits a redacted per-host READY/REVIEW/BLOCKED report without SSH, network access, credential conversion, or file writes. See [docs/MIGRATION_RUNBOOK.md](docs/MIGRATION_RUNBOOK.md) for required inputs and manual side-by-side verification/rollback; static readiness is not deployment acceptance.
 
