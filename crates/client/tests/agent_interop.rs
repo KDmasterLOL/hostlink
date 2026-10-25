@@ -132,19 +132,28 @@ async fn agent_and_controller_authenticate_stream_execute_and_transfer() {
     );
     assert_eq!(result.exit_code, 7, "remote nonzero status was lost");
 
+    // SFTP is now a per-controller, create-only artifact staging area:
+    // filenames are SHA-256-addressed and terminate in .upload.
+    use sha2::{Digest as _, Sha256};
     let contents = b"hostlink-russh-private-sftp\x00\xff";
-    host.sftp_upload("integration.bin", contents)
-        .await
-        .expect("SFTP create");
+    let artifact_name = format!("{:x}.upload", Sha256::digest(contents));
     assert!(
-        host.sftp_upload("integration.bin", b"overwrite")
+        host.sftp_upload("integration.bin", contents).await.is_err(),
+        "legacy arbitrary SFTP names must not bypass scoped staging",
+    );
+    host.sftp_upload(&artifact_name, contents)
+        .await
+        .expect("scoped SFTP create");
+    assert!(
+        host.sftp_upload(&artifact_name, b"overwrite")
             .await
-            .is_err()
+            .is_err(),
+        "exclusive upload must not overwrite an existing artifact"
     );
     let downloaded = host
-        .sftp_download("integration.bin")
+        .sftp_download(&artifact_name)
         .await
-        .expect("SFTP download");
+        .expect("scoped SFTP download");
     assert_eq!(downloaded, contents);
 
     host.close().await.expect("SSH session close");
