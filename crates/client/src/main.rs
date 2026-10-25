@@ -3,9 +3,13 @@
 use clap::{Parser, Subcommand};
 use hostlink::{
     HostSpec,
-    connect::HostConnection,
-    run::{JobSpec, JobStateKind, JobStatus, JobStream, Output, Start, Status},
+    connect::{HostConnection, SshClientError},
+    run::{
+        JobSpec, JobStateKind, JobStatus, JobStream, Output, Seal, Start, Status,
+        sealed_artifact_name,
+    },
 };
+use sha2::{Digest as _, Sha256};
 use std::error::Error;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -60,6 +64,19 @@ enum Command {
     Job {
         #[command(subcommand)]
         command: JobCommand,
+    },
+    /// Upload, seal and run a source-pinned test binary with exact argv.
+    Run {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        binary: PathBuf,
+        /// Caller-owned canonical UUID; a UUID v4 is generated when omitted.
+        #[arg(long)]
+        id: Option<String>,
+        /// Exact test-runner arguments, separated from CLI options with `--`.
+        #[arg(last = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 }
 
@@ -130,11 +147,12 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         Command::Check { config }
         | Command::Exec { config, .. }
         | Command::Upload { config, .. }
-        | Command::Download { config, .. } => config,
+        | Command::Download { config, .. } => config.clone(),
+        Command::Run { config, .. } => config.clone(),
         Command::Job { command } => match command {
             JobCommand::Start { config, .. }
             | JobCommand::Status { config, .. }
-            | JobCommand::Output { config, .. } => config,
+            | JobCommand::Output { config, .. } => config.clone(),
         },
     };
 
@@ -189,12 +207,45 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         _ => None,
     };
 
+    let prepared_run = match &cli.command {
+        Command::Run {
+            binary, id, args, ..
+        } => {
+            let bytes = read_existing_file(binary, MAX_FILE_BYTES)?;
+            let digest = format!("{:x}", Sha256::digest(&bytes));
+            let artifact_name = sealed_artifact_name(&digest)?;
+            let id = id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            validate_job_id(&id)?;
+            if args.iter().any(|arg| arg.as_bytes().contains(&0)) {
+                return Err("run arguments must not contain NUL".into());
+            }
+            let encoded = serde_json::to_vec(args)?;
+            if encoded.len() > 64 * 1024 {
+                return Err("run arguments exceed 64 KiB".into());
+            }
+            Some(PreparedRun {
+                id,
+                bytes,
+                digest,
+                artifact_name,
+                args: args.clone(),
+            })
+        }
+        _ => None,
+    };
+
     if let Some(PreparedJob::Start(request)) = &prepared_job {
         // This precedes HostConnection::connect so a lost start acknowledgement
         // always leaves the caller with the ID needed for a status query.
         eprintln!("hostlink: job id: {}", request.id);
     }
-    let spec = load_host_spec(config_path)?;
+    if let Some(request) = &prepared_run {
+        // The ID must be recoverable even if upload, Seal, or start loses its ACK.
+        eprintln!("hostlink: job id: {}", request.id);
+    }
+    let spec = load_host_spec(&config_path)?;
     let mut client = HostConnection::connect(&spec).await?;
     // All errors must still close both the target and optional gateway SSH sessions.
     let operation: Result<i32, Box<dyn Error>> = async {
@@ -277,6 +328,10 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
                 }
                 _ => Err("internal job command preparation mismatch".into()),
             },
+            Command::Run { .. } => {
+                let request = prepared_run.ok_or("internal run command preparation mismatch")?;
+                run_test_binary(&mut client, request, &spec, &config_path).await
+            }
         }
     }
     .await;
@@ -289,6 +344,179 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
             Err(format!("operation failed: {primary}; SSH cleanup also failed: {cleanup}").into())
         }
     }
+}
+
+struct PreparedRun {
+    id: String,
+    bytes: Vec<u8>,
+    digest: String,
+    artifact_name: String,
+    args: Vec<String>,
+}
+
+impl PreparedRun {
+    fn seal_request(&self) -> Seal {
+        Seal {
+            name: self.artifact_name.clone(),
+            sha256: self.digest.clone(),
+            size: self.bytes.len() as u64,
+        }
+    }
+}
+
+async fn run_test_binary(
+    client: &mut HostConnection,
+    request: PreparedRun,
+    host: &HostSpec,
+    config_path: &Path,
+) -> Result<i32, Box<dyn Error>> {
+    let unknown = |stage: &str, error: &dyn Error| {
+        format!(
+            "run outcome UNKNOWN during {stage} for {}: {error}; do not rerun or resend start; inspect with `hostlink job status --config {} --id {}` and `hostlink job output --config {} --id {} --stream stdout --offset 0` (repeat for stderr and returned offsets)",
+            request.id,
+            config_path.display(),
+            request.id,
+            config_path.display(),
+            request.id,
+        )
+    };
+
+    // Only generic SFTP Failure can mean CREATE_EXCL found an existing file.
+    // Every other refusal (permissions, path validation, timeout, transport)
+    // remains UNKNOWN and must not be hidden by a Seal request.
+    match client
+        .sftp_upload(&request.artifact_name, &request.bytes)
+        .await
+    {
+        Ok(()) => {}
+        Err(error) if sftp_failure_may_be_existing_file(&error) => {
+            // Do not retry or overwrite. The authenticated Seal verifies the
+            // complete contents of this exact digest-bound name.
+        }
+        Err(error) => return Err(unknown("upload", &error).into()),
+    }
+    let sealed = client
+        .job_seal(&request.seal_request())
+        .await
+        .map_err(|error| unknown("Seal", &error))?;
+    if sealed.sha256 != request.digest {
+        return Err(unknown(
+            "Seal digest verification",
+            &io::Error::other("Agent digest mismatch"),
+        )
+        .into());
+    }
+    let start = Start {
+        id: request.id.clone(),
+        spec: JobSpec {
+            program: sealed.program,
+            args: request.args,
+            cwd: None,
+            source_sha256: request.digest,
+        },
+    };
+    client
+        .job_start(&start)
+        .await
+        .map_err(|error| unknown("start", &error))?;
+
+    let (mut stdout_offset, mut stderr_offset) = (0_u64, 0_u64);
+    let (mut stdout_eof, mut stderr_eof) = (false, false);
+    let mut read_failures = 0_u8;
+    loop {
+        let status = match client
+            .job_status(&Status {
+                id: request.id.clone(),
+            })
+            .await
+        {
+            Ok(status) => status,
+            Err(error) if !matches!(error, SshClientError::Invalid(_)) => {
+                read_failures += 1;
+                if read_failures > 3 {
+                    return Err(unknown("status reattach", &error).into());
+                }
+                *client = HostConnection::connect(host)
+                    .await
+                    .map_err(|connect_error| unknown("status reconnect", &connect_error))?;
+                continue;
+            }
+            Err(error) => return Err(unknown("status reattach", &error).into()),
+        };
+        for (stream, offset, eof) in [
+            (JobStream::Stdout, &mut stdout_offset, &mut stdout_eof),
+            (JobStream::Stderr, &mut stderr_offset, &mut stderr_eof),
+        ] {
+            let output = match client
+                .job_output(&Output {
+                    id: request.id.clone(),
+                    stream,
+                    offset: *offset,
+                })
+                .await
+            {
+                Ok(output) => output,
+                Err(error) if !matches!(error, SshClientError::Invalid(_)) => {
+                    read_failures += 1;
+                    if read_failures > 3 {
+                        return Err(unknown("output reattach", &error).into());
+                    }
+                    *client = HostConnection::connect(host)
+                        .await
+                        .map_err(|connect_error| unknown("output reconnect", &connect_error))?;
+                    continue;
+                }
+                Err(error) => return Err(unknown("output reattach", &error).into()),
+            };
+            *offset = output.next_offset;
+            *eof = output.eof;
+            match stream {
+                JobStream::Stdout => {
+                    let mut writer = io::stdout().lock();
+                    writer.write_all(&output.data)?;
+                    writer.flush()?;
+                }
+                JobStream::Stderr => {
+                    let mut writer = io::stderr().lock();
+                    writer.write_all(&output.data)?;
+                    writer.flush()?;
+                }
+            }
+        }
+        match status.state.state {
+            JobStateKind::Exited | JobStateKind::Failed | JobStateKind::Interrupted
+                if stdout_eof && stderr_eof =>
+            {
+                return match status.state.state {
+                    JobStateKind::Exited => {
+                        Ok(status.state.code.ok_or("exited job omitted its code")?)
+                    }
+                    JobStateKind::Failed | JobStateKind::Interrupted => Err(unknown(
+                        "terminal status",
+                        &io::Error::other(format!("job ended in {}", state_name(&status))),
+                    )
+                    .into()),
+                    JobStateKind::Prepared | JobStateKind::Running => unreachable!(),
+                };
+            }
+            JobStateKind::Prepared
+            | JobStateKind::Running
+            | JobStateKind::Exited
+            | JobStateKind::Failed
+            | JobStateKind::Interrupted => {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+        }
+        read_failures = 0;
+    }
+}
+
+fn sftp_failure_may_be_existing_file(error: &SshClientError) -> bool {
+    matches!(
+        error,
+        SshClientError::Sftp(russh_sftp::client::error::Error::Status(status))
+            if status.status_code == russh_sftp::protocol::StatusCode::Failure
+    )
 }
 
 enum PreparedJob {
@@ -477,6 +705,103 @@ mod tests {
         assert_eq!(program, "/opt/tests/bin");
         assert_eq!(source_sha256, "a".repeat(64));
         assert_eq!(args, ["--list", "suite::test name"]);
+    }
+
+    #[test]
+    fn run_parses_test_runner_arguments_without_shell_reinterpretation() {
+        let cli = Cli::try_parse_from([
+            "hostlink",
+            "run",
+            "--config",
+            "host.json",
+            "--binary",
+            "runner",
+            "--id",
+            "00000000-0000-4000-8000-000000000000",
+            "--",
+            "--list",
+            "suite::test name",
+            "--exact",
+        ])
+        .unwrap();
+        let Command::Run { args, .. } = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(args, ["--list", "suite::test name", "--exact"]);
+    }
+
+    #[test]
+    fn run_local_binary_validation_rejects_directories_and_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(read_existing_file(root.path(), MAX_FILE_BYTES).is_err());
+        let binary = root.path().join("runner");
+        fs::write(&binary, b"test binary").unwrap();
+        assert_eq!(
+            read_existing_file(&binary, MAX_FILE_BYTES).unwrap(),
+            b"test binary"
+        );
+        let oversized = root.path().join("oversized-runner");
+        File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        assert!(read_existing_file(&oversized, MAX_FILE_BYTES).is_err());
+        #[cfg(unix)]
+        {
+            let link = root.path().join("runner-link");
+            std::os::unix::fs::symlink(&binary, &link).unwrap();
+            assert!(read_existing_file(&link, MAX_FILE_BYTES).is_err());
+        }
+    }
+
+    #[test]
+    fn run_staging_name_is_the_digest_bound_seal_name() {
+        let bytes = b"runner payload";
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        let artifact_name = sealed_artifact_name(&digest).unwrap();
+        assert_eq!(artifact_name.len(), 71);
+        assert_eq!(artifact_name, format!("{digest}.upload"));
+        let prepared = PreparedRun {
+            id: "00000000-0000-4000-8000-000000000000".into(),
+            bytes: bytes.to_vec(),
+            digest: digest.clone(),
+            artifact_name: artifact_name.clone(),
+            args: vec!["--list".into()],
+        };
+        assert_eq!(
+            prepared.artifact_name,
+            format!("{}.upload", prepared.digest)
+        );
+        let seal = prepared.seal_request();
+        assert_eq!(seal.name, prepared.artifact_name);
+        assert_eq!(seal.sha256, prepared.digest);
+        assert_eq!(seal.size, bytes.len() as u64);
+        assert_eq!(prepared.bytes, bytes);
+    }
+
+    #[test]
+    fn only_generic_remote_sftp_failure_can_enter_exact_seal_verification() {
+        let failure = || {
+            SshClientError::Sftp(russh_sftp::client::error::Error::Status(
+                russh_sftp::protocol::Status {
+                    id: 1,
+                    status_code: russh_sftp::protocol::StatusCode::Failure,
+                    error_message: "Failure".into(),
+                    language_tag: "en-US".into(),
+                },
+            ))
+        };
+        let denied = SshClientError::Sftp(russh_sftp::client::error::Error::Status(
+            russh_sftp::protocol::Status {
+                id: 1,
+                status_code: russh_sftp::protocol::StatusCode::PermissionDenied,
+                error_message: "Permission denied".into(),
+                language_tag: "en-US".into(),
+            },
+        ));
+        assert!(sftp_failure_may_be_existing_file(&failure()));
+        assert!(!sftp_failure_may_be_existing_file(&denied));
+        assert!(!sftp_failure_may_be_existing_file(&SshClientError::Timeout));
     }
 
     #[test]

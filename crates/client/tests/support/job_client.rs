@@ -25,6 +25,10 @@ enum Reply {
     Partial,
     BinaryOutput,
     BadOffset,
+    EmptyRunning,
+    SealSuccess,
+    SealWrongDigest,
+    SealMalformed,
     Close,
 }
 
@@ -120,6 +124,32 @@ impl server::Handler for Fixture {
                     "version": 1, "ok": true, "id": ID,
                     "state": {"state": "running"},
                     "data_base64": "AP8K/w==", "next_offset": 9, "eof": false
+                })
+                .to_string()
+                .into_bytes(),
+                Reply::EmptyRunning => serde_json::json!({
+                    "version": 1, "ok": true, "id": ID,
+                    "state": {"state": "running"},
+                    "data_base64": "", "next_offset": 0, "eof": false
+                })
+                .to_string()
+                .into_bytes(),
+                Reply::SealSuccess => serde_json::json!({
+                    "version": 1, "ok": true,
+                    "program": if cfg!(windows) { r"C:\\agent\\artifacts\\pinned.exe" } else { "/agent/artifacts/pinned" },
+                    "sha256": "a".repeat(64)
+                })
+                .to_string()
+                .into_bytes(),
+                Reply::SealWrongDigest => serde_json::json!({
+                    "version": 1, "ok": true,
+                    "program": if cfg!(windows) { r"C:\\agent\\artifacts\\pinned.exe" } else { "/agent/artifacts/pinned" },
+                    "sha256": "b".repeat(64)
+                })
+                .to_string()
+                .into_bytes(),
+                Reply::SealMalformed => serde_json::json!({
+                    "version": 1, "ok": true, "program": "relative/path", "sha256": "a".repeat(64)
                 })
                 .to_string()
                 .into_bytes(),
@@ -234,6 +264,91 @@ async fn start_status_and_binary_output_use_one_subsystem_request_each() {
     assert_eq!(output.next_offset, 4);
     assert!(!output.eof);
     assert_eq!(requests.lock().await[0]["op"], "output");
+    finish(connection, task).await;
+}
+
+#[tokio::test]
+async fn seal_uses_frozen_contract_and_returns_agent_path_only_after_digest_match() {
+    let (mut connection, task, requests) = connected(Reply::SealSuccess).await;
+    let sealed = connection
+        .job_seal(&Seal {
+            name: format!("{}.upload", "a".repeat(64)),
+            sha256: "a".repeat(64),
+            size: 123,
+        })
+        .await
+        .expect("exact Seal response");
+    assert_eq!(sealed.sha256, "a".repeat(64));
+    assert!(std::path::Path::new(&sealed.program).is_absolute() || cfg!(windows));
+    assert_eq!(requests.lock().await[0]["version"], 1);
+    assert_eq!(requests.lock().await[0]["op"], "seal");
+    assert_eq!(
+        requests.lock().await[0]["name"],
+        format!("{}.upload", "a".repeat(64))
+    );
+    assert_eq!(requests.lock().await[0]["sha256"], "a".repeat(64));
+    assert_eq!(requests.lock().await[0]["size"], 123);
+    finish(connection, task).await;
+
+    let (mut connection, task, _) = connected(Reply::SealWrongDigest).await;
+    assert!(
+        connection
+            .job_seal(&Seal {
+                name: format!("{}.upload", "a".repeat(64)),
+                sha256: "a".repeat(64),
+                size: 123,
+            })
+            .await
+            .is_err()
+    );
+    finish(connection, task).await;
+
+    let (mut connection, task, _) = connected(Reply::SealMalformed).await;
+    assert!(
+        connection
+            .job_seal(&Seal {
+                name: format!("{}.upload", "a".repeat(64)),
+                sha256: "a".repeat(64),
+                size: 123,
+            })
+            .await
+            .is_err()
+    );
+    finish(connection, task).await;
+
+    for invalid_name in [".upload".to_owned(), format!("{}.upload", "b".repeat(64))] {
+        let (mut connection, task, requests) = connected(Reply::SealSuccess).await;
+        assert!(
+            connection
+                .job_seal(&Seal {
+                    name: invalid_name,
+                    sha256: "a".repeat(64),
+                    size: 123,
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            requests.lock().await.is_empty(),
+            "invalid name must fail before sending"
+        );
+        finish(connection, task).await;
+    }
+}
+
+#[tokio::test]
+async fn empty_output_before_first_bytes_is_valid_while_job_runs() {
+    let (mut connection, task, _) = connected(Reply::EmptyRunning).await;
+    let output = connection
+        .job_output(&Output {
+            id: ID.into(),
+            stream: JobStream::Stdout,
+            offset: 0,
+        })
+        .await
+        .expect("empty running stream is a valid read");
+    assert!(output.data.is_empty());
+    assert!(!output.eof);
     finish(connection, task).await;
 }
 
