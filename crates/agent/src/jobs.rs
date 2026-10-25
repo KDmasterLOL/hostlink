@@ -412,7 +412,7 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn validate_private_path(path: &Path, directory: bool) -> io::Result<()> {
+pub(crate) fn validate_private_path(path: &Path, directory: bool) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || metadata.is_dir() != directory {
         return Err(invalid(
