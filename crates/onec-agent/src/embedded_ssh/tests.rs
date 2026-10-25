@@ -498,8 +498,13 @@ async fn embedded_server_windows_exec_streams_binary_stdio_and_exit_status() {
     let (mut channel_input, channel_output) = channel.split();
     let mut stdin = channel_output.make_writer();
     let payload: Vec<u8> = (0..4096).map(|index| (index * 37) as u8).collect();
-    stdin.write_all(&payload).await.expect("exec stdin bytes");
-    stdin.flush().await.expect("exec stdin flush");
+    for fragment in payload.chunks(257) {
+        stdin
+            .write_all(fragment)
+            .await
+            .expect("exec stdin fragment");
+        stdin.flush().await.expect("exec stdin fragment flush");
+    }
     channel_output.eof().await.expect("exec stdin EOF");
     drop(stdin);
 
