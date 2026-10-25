@@ -18,6 +18,12 @@ thiserror.workspace = true
 uuid.workspace = true
 secrecy.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.191"
+
+[target.'cfg(windows)'.dependencies]
+windows-permissions = "=0.2.4"
+
 [dev-dependencies]
 tempfile.workspace = true
 rand.workspace = true
