@@ -17,6 +17,16 @@ The original HostLink `dev` tree remains unchanged. This experimental branch
 has runnable CLI binaries; it is **not ready for deployment or fleet migration**.
 The design contract and remaining gates are in `docs/ARCHITECTURE.md`.
 
+## Rust compiler policy
+
+The rewrite follows the installed Rust stable toolchain (currently 1.99.1)
+for local Linux/modern Windows checks. The workspace MSRV remains 1.98.1:
+raising the minimum is not required just to use a newer compiler. `stable`
+is intentionally rolling, not a byte-for-byte reproducible compiler pin;
+run `rustc --version` when recording acceptance. The Windows 7 Tier 3
+MSVC build uses its separately validated pinned nightly and `build-std`,
+which this change does not alter.
+
 ## Development commands
 
 ```sh
