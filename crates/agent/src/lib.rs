@@ -4,6 +4,7 @@
 pub mod enrollment;
 pub mod exec;
 pub mod jobs;
+pub mod service;
 pub mod sftp;
 pub mod ssh;
 pub mod tunnel;
