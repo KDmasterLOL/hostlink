@@ -69,3 +69,30 @@ The default invite flow requires an exact target (`i686-win7-windows-msvc`, `x86
 Before `POST /v2/invites`, the client fetches the installer with redirects disabled, TLS certificate verification enabled, a 1 MiB bound and a 30 second deadline. It checks the independently supplied script digest and the expected platform installer interface. Any missing pin, malformed or swapped source, redirect, download error, digest mismatch, invalid UTF-8 or installer contract mismatch fails before an invitation is issued. The generated Windows PowerShell 2 or POSIX command repeats the bounded HTTPS download and exact installer SHA-256 verification on the target before executing the verified bytes. Installer arguments are shell-quoted, and the installer itself checks the sidecar and ZIP pins, target and version before prompting for the invitation token.
 
 The one-use token is displayed separately from the copyable command. It is never embedded in the command, script, URL or environment; the installed bootstrap securely prompts for it. Manual enrollment is available only through explicit `hostlink invite --token-only` and does not print a runnable command.
+
+## Multi-gateway Client routing
+
+Hub-managed `--host` operations resolve the host and the current `/v2/info`
+gateway list before opening SSH. With one approved gateway, the client keeps
+the existing behavior. With multiple gateways, configure an exact primary
+route in the owner-only controller Hub config using `preferred_gateway` with
+the exact `host:port` value from `/v2/info`; the client never chooses an array
+index or guesses a preferred edge. All listed routes are bounded to sixteen,
+validated for unique identities and Ed25519 pins, and resolved before SSH.
+
+The chosen route is tried first. The remaining Hub-approved routes are tried
+in Hub order only when establishing the gateway SSH connection fails with a
+transient connect refusal, reset, timeout, or disconnect. Pin mismatch,
+public-key authentication failure, reverse-port channel refusal, and nested
+Agent host-key mismatch stop immediately. A failed gateway is cleaned up
+before the next route is attempted. Once the nested Agent session has started,
+operations are never replayed on another route; in particular, a job start
+whose acknowledgement is lost remains an unknown outcome for the caller.
+
+The old manual `HostSpec` JSON with one `gateway` remains valid. Its optional
+`alternates` field defaults to an empty list. Direct unmanaged configs remain
+separate from Hub route selection.
+
+CLI command callers use `--host` for managed routing: `check`, `exec`, `run`,
+`job start/status/cancel/output`, `forward`, `rdp`, and `probe`. `--config PATH`
+continues to load a manual `HostSpec` and does not consult Hub settings.

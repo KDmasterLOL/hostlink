@@ -14,7 +14,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{GatewayHop, HostSpec};
+use crate::{GatewayHop, GatewayRoute, HostSpec};
 
 const MAX_BODY_BYTES: usize = 64 * 1024;
 const MAX_CREDENTIAL_BYTES: u64 = 64 * 1024;
@@ -34,6 +34,9 @@ pub struct HubConfig {
     pub identity: PathBuf,
     /// Owner-only Ed25519 identity used for the approved gateway.
     pub gateway_identity: PathBuf,
+    /// Explicit primary Hub route as `host:port`; required when Hub lists multiple gateways.
+    #[serde(default)]
+    pub preferred_gateway: Option<String>,
 }
 
 /// Confirmed result of Hub revocation.
@@ -167,6 +170,7 @@ impl HubClient {
         for gateway in &gateways {
             gateway.validate().map_err(HubClientError::Invalid)?;
         }
+        validate_gateway_list(&gateways)?;
         Ok(gateways)
     }
 
@@ -228,7 +232,7 @@ impl HubClient {
         Ok(receipt)
     }
 
-    /// Resolves a fresh authoritative host and its single approved gateway into the existing pinned SSH type.
+    /// Resolves a fresh authoritative host and its explicitly selected approved routes.
     pub async fn resolve_host_spec(
         &self,
         selector: &str,
@@ -236,21 +240,7 @@ impl HubClient {
     ) -> Result<HostSpec, HubClientError> {
         let host = self.resolve_host(selector).await?;
         let gateways = self.info().await?;
-        let gateway = match gateways.as_slice() {
-            [gateway] => gateway,
-            [] => {
-                return Err(HubClientError::Invalid(
-                    "Hub has no approved gateway".into(),
-                ));
-            }
-            _ => {
-                return Err(HubClientError::Invalid(
-                    "Hub advertises multiple gateways; explicit route selection is not supported"
-                        .into(),
-                ));
-            }
-        };
-        host_spec_from(host, gateway, config).await
+        host_spec_from_approved_routes(host, &gateways, config).await
     }
 
     async fn get_json<T: for<'de> Deserialize<'de>>(
@@ -411,6 +401,45 @@ fn validate_pin(value: &str) -> Result<(), HubClientError> {
     Ok(())
 }
 
+/// Resolves the host's exact gateway pins from one authoritative Hub inventory.
+///
+/// Only a trusted configured gateway is a valid primary when the Hub advertises
+/// multiple routes. The remaining Hub-approved routes are retained solely for
+/// transient initial-connection failures, never for key/authentication failures.
+pub async fn host_spec_from_approved_routes(
+    host: RegisteredHost,
+    gateways: &[GatewayEndpoint],
+    config: &HubConfig,
+) -> Result<HostSpec, HubClientError> {
+    validate_gateway_list(gateways)?;
+    let primary_index = match (gateways, config.preferred_gateway.as_deref()) {
+        ([_], None) => 0,
+        ([], _) => {
+            return Err(HubClientError::Invalid(
+                "Hub has no approved gateway".into(),
+            ));
+        }
+        (_, selected) => select_primary_gateway(gateways, selected)?,
+    };
+    let resolved_routes = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut routes = Vec::with_capacity(gateways.len());
+        let mut resolved = std::collections::BTreeSet::new();
+        for gateway in gateways {
+            let address = resolve_gateway(gateway).await?;
+            if !resolved.insert((address, gateway.user.as_str())) {
+                return Err(HubClientError::Invalid(
+                    "Hub routes resolve to duplicate gateway endpoints".into(),
+                ));
+            }
+            routes.push((gateway, address));
+        }
+        Ok::<_, HubClientError>(routes)
+    })
+    .await
+    .map_err(|_| HubClientError::GatewayDns)??;
+    host_spec_from_routes(host, &resolved_routes, primary_index, config)
+}
+
 /// Resolves one registry record and an already-selected approved route into the existing SSH type.
 pub async fn host_spec_from(
     host: RegisteredHost,
@@ -418,21 +447,106 @@ pub async fn host_spec_from(
     config: &HubConfig,
 ) -> Result<HostSpec, HubClientError> {
     let address = resolve_gateway(gateway).await?;
+    host_spec_from_routes(host, &[(gateway, address)], 0, config)
+}
+
+fn host_spec_from_routes(
+    host: RegisteredHost,
+    routes: &[(&GatewayEndpoint, SocketAddr)],
+    primary_index: usize,
+    config: &HubConfig,
+) -> Result<HostSpec, HubClientError> {
+    let (gateway, address) = routes.get(primary_index).ok_or(HubClientError::Response)?;
     validate_pin(&host.ssh_host_public_key)?;
-    validate_pin(&gateway.host_public_key)?;
+    let mut alternates = Vec::with_capacity(routes.len().saturating_sub(1));
+    for (index, (endpoint, address)) in routes.iter().enumerate() {
+        validate_pin(&endpoint.host_public_key)?;
+        if index != primary_index {
+            alternates.push(GatewayRoute {
+                address: *address,
+                user: endpoint.user.clone(),
+                identity: config.gateway_identity.clone(),
+                host_public_key: endpoint.host_public_key.clone(),
+            });
+        }
+    }
     Ok(HostSpec {
         endpoint: SocketAddr::from(([127, 0, 0, 1], host.remote_port)),
         user: config.ssh_user.clone(),
         identity: config.identity.clone(),
         host_public_key: host.ssh_host_public_key,
         gateway: Some(GatewayHop {
-            address,
+            address: *address,
             user: gateway.user.clone(),
             identity: config.gateway_identity.clone(),
             host_public_key: gateway.host_public_key.clone(),
             reverse_port: host.remote_port,
+            alternates,
         }),
     })
+}
+
+fn validate_gateway_list(gateways: &[GatewayEndpoint]) -> Result<(), HubClientError> {
+    if gateways.len() > 16 {
+        return Err(HubClientError::Invalid(
+            "Hub lists more than 16 approved gateways".into(),
+        ));
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    let mut pins = std::collections::BTreeSet::new();
+    for gateway in gateways {
+        if gateway.user.is_empty()
+            || gateway.user.len() > 64
+            || !gateway
+                .user
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        {
+            return Err(HubClientError::Invalid(
+                "Hub gateway SSH user is invalid for the Client".into(),
+            ));
+        }
+        let identity = (
+            gateway.host.to_ascii_lowercase(),
+            gateway.port,
+            gateway.user.as_str(),
+        );
+        if !identities.insert(identity) {
+            return Err(HubClientError::Invalid(
+                "Hub lists a duplicate gateway identity".into(),
+            ));
+        }
+        if !pins.insert(gateway.host_public_key.as_str()) {
+            return Err(HubClientError::Invalid(
+                "Hub lists a duplicate gateway host key pin".into(),
+            ));
+        }
+        validate_pin(&gateway.host_public_key)?;
+    }
+    Ok(())
+}
+
+fn select_primary_gateway(
+    gateways: &[GatewayEndpoint],
+    preferred: Option<&str>,
+) -> Result<usize, HubClientError> {
+    let Some(preferred) = preferred else {
+        return Err(HubClientError::Invalid(
+            "Hub lists multiple gateways; set preferred_gateway to an exact host:port from /v2/info".into(),
+        ));
+    };
+    let matches: Vec<_> = gateways
+        .iter()
+        .enumerate()
+        .filter(|(_, gateway)| format!("{}:{}", gateway.host, gateway.port) == preferred)
+        .map(|(index, _)| index)
+        .collect();
+    match matches.as_slice() {
+        [index] => Ok(*index),
+        _ => Err(HubClientError::Invalid(
+            "preferred_gateway does not match exactly one Hub-approved host:port".into(),
+        )),
+    }
 }
 
 async fn resolve_gateway(gateway: &GatewayEndpoint) -> Result<SocketAddr, HubClientError> {
@@ -488,6 +602,58 @@ mod tests {
             .public_key()
             .to_openssh()
             .expect("encode Ed25519 public key")
+    }
+
+    #[test]
+    fn gateway_selection_requires_exact_approved_host_and_port() {
+        let first = GatewayEndpoint {
+            host: "edge-a.example".into(),
+            user: "gateway".into(),
+            port: 2222,
+            host_public_key: public_key(),
+        };
+        let second = GatewayEndpoint {
+            host: "edge-b.example".into(),
+            user: "gateway".into(),
+            port: 2222,
+            host_public_key: public_key(),
+        };
+        let gateways = vec![first, second];
+        assert!(select_primary_gateway(&gateways, None).is_err());
+        assert_eq!(
+            select_primary_gateway(&gateways, Some("edge-b.example:2222")).unwrap(),
+            1
+        );
+        assert!(select_primary_gateway(&gateways, Some("edge-b.example:2223")).is_err());
+        assert!(select_primary_gateway(&gateways, Some("edge-c.example:2222")).is_err());
+    }
+
+    #[test]
+    fn gateway_inventory_is_bounded_and_rejects_duplicate_identities_and_pins() {
+        let pin = public_key();
+        let endpoint = GatewayEndpoint {
+            host: "edge.example".into(),
+            user: "gateway".into(),
+            port: 2222,
+            host_public_key: pin.clone(),
+        };
+        assert!(validate_gateway_list(&[endpoint.clone(), endpoint.clone()]).is_err());
+        let duplicate_pin = GatewayEndpoint {
+            host: "other.example".into(),
+            user: "gateway".into(),
+            port: 2222,
+            host_public_key: pin,
+        };
+        assert!(validate_gateway_list(&[endpoint.clone(), duplicate_pin]).is_err());
+        let many: Vec<_> = (0..17)
+            .map(|index| GatewayEndpoint {
+                host: format!("edge-{index}.example"),
+                user: "gateway".into(),
+                port: 2222,
+                host_public_key: public_key(),
+            })
+            .collect();
+        assert!(validate_gateway_list(&many).is_err());
     }
 
     fn local_client(base: &str, token: &str, timeout: Duration) -> HubClient {
@@ -636,6 +802,7 @@ mod tests {
                     ssh_user: "agent-user".into(),
                     identity: PathBuf::from("controller_ed25519"),
                     gateway_identity: PathBuf::from("gateway_ed25519"),
+                    preferred_gateway: None,
                 },
             )
             .await

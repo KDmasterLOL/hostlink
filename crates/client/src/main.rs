@@ -274,6 +274,9 @@ enum HubCommand {
         identity: PathBuf,
         #[arg(long)]
         gateway_identity: PathBuf,
+        /// Exact Hub route host:port selected as primary when /v2/info lists multiple gateways.
+        #[arg(long)]
+        preferred_gateway: Option<String>,
     },
     /// Display non-secret controller-local Hub settings.
     Show,
@@ -327,6 +330,7 @@ async fn hub_command(command: &HubCommand) -> Result<i32, Box<dyn Error>> {
             ssh_user,
             identity,
             gateway_identity,
+            preferred_gateway,
         } => {
             let config = HubConfig {
                 hub_url: hub_url.clone(),
@@ -334,6 +338,7 @@ async fn hub_command(command: &HubCommand) -> Result<i32, Box<dyn Error>> {
                 ssh_user: ssh_user.clone(),
                 identity: identity.clone(),
                 gateway_identity: gateway_identity.clone(),
+                preferred_gateway: preferred_gateway.clone(),
             };
             HubClient::from_config(&config)?;
             let path = default_hub_config_path()?;
@@ -458,19 +463,16 @@ async fn list_command(check: bool, json: bool) -> Result<i32, Box<dyn Error>> {
         }
         return Ok(0);
     }
-    let gateway = match client.info().await {
-        Ok(gateways) => match gateways.as_slice() {
-            [gateway] => Some(gateway.clone()),
-            _ => None,
-        },
-        Err(_) => None,
-    };
+    // Keep the inventory request fast and separate. Explicit --check reuses a
+    // single authoritative set of Hub-approved routes, even when more than
+    // one gateway is configured.
+    let gateways = client.info().await.ok();
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
     let mut tasks = tokio::task::JoinSet::new();
     for host in hosts {
         let semaphore = semaphore.clone();
         let config = config.clone();
-        let gateway = gateway.clone();
+        let gateways = gateways.clone();
         tasks.spawn(async move {
             let Ok(_permit) = semaphore.acquire_owned().await else {
                 return HostCheck {
@@ -484,29 +486,35 @@ async fn list_command(check: bool, json: bool) -> Result<i32, Box<dyn Error>> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let status = match gateway {
+            let status = match gateways {
                 None => "unknown",
-                Some(gateway) => match hub::host_spec_from(host.clone(), &gateway, &config).await {
-                    Err(hub::HubClientError::Invalid(_)) => "identity_mismatch",
-                    Err(_) => "unknown",
-                    Ok(spec) => {
-                        match tokio::time::timeout(
-                            Duration::from_secs(20),
-                            HostConnection::connect(&spec),
-                        )
+                Some(gateways) => {
+                    match hub::host_spec_from_approved_routes(host.clone(), &gateways, &config)
                         .await
-                        {
-                            Ok(Ok(connection)) => match connection.close().await {
-                                Ok(()) => "online",
-                                Err(_) => "unknown",
-                            },
-                            Ok(Err(SshClientError::Russh(russh::Error::UnknownKey))) => {
-                                "identity_mismatch"
+                    {
+                        // Invalid operator route selection is not evidence that a
+                        // remote host's public key changed.
+                        Err(hub::HubClientError::Invalid(_)) => "unknown",
+                        Err(_) => "unknown",
+                        Ok(spec) => {
+                            match tokio::time::timeout(
+                                Duration::from_secs(20),
+                                HostConnection::connect(&spec),
+                            )
+                            .await
+                            {
+                                Ok(Ok(connection)) => match connection.close().await {
+                                    Ok(()) => "online",
+                                    Err(_) => "unknown",
+                                },
+                                Ok(Err(SshClientError::Russh(russh::Error::UnknownKey))) => {
+                                    "identity_mismatch"
+                                }
+                                Ok(Err(_)) | Err(_) => "unreachable",
                             }
-                            Ok(Err(_)) | Err(_) => "unreachable",
                         }
                     }
-                },
+                }
             };
             HostCheck {
                 machine_id: host.machine_id.to_string(),

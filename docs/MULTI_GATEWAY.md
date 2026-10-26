@@ -32,3 +32,15 @@ public key. No public reverse listener is requested.
 Linux fixture tests exercise real russh gateway authentication, the approved
 fallback path, permanent pin failure, route validation, and shutdown. Native
 Windows 11 and Windows 7 acceptance remains a separate platform gate.
+
+## Controller behavior
+
+For Hub-managed commands, the controller requires an exact
+`preferred_gateway: "host:port"` in its local Hub config whenever `/v2/info`
+contains multiple routes. It validates the entire bounded route list and every
+Ed25519 host pin before connecting. The selected primary is tried first; other
+approved edges are attempted only after transient gateway connection failures.
+Authentication denial, pin mismatch, reverse-port refusal, and nested Agent
+pin mismatch are permanent. A started command or durable job is never replayed
+after route loss. See [CLIENT_HUB.md](CLIENT_HUB.md) for the Client CLI and
+configuration details.

@@ -18,6 +18,7 @@ fn hub_client_loads_owner_only_token_without_network_io() {
         ssh_user: "hostlink".into(),
         identity: PathBuf::from("controller_ed25519"),
         gateway_identity: PathBuf::from("gateway_ed25519"),
+        preferred_gateway: None,
     };
 
     assert!(HubClient::from_config(&config).is_ok());
@@ -48,6 +49,7 @@ fn hub_client_rejects_shared_or_linked_token_files() {
         ssh_user: "hostlink".into(),
         identity: PathBuf::from("controller_ed25519"),
         gateway_identity: PathBuf::from("gateway_ed25519"),
+        preferred_gateway: None,
     };
     fs::set_permissions(&token_file, fs::Permissions::from_mode(0o644)).unwrap();
     assert!(matches!(
