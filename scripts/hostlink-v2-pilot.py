@@ -137,9 +137,17 @@ def proc_identity(pid: int) -> dict | None:
 
 def identity_matches(record: dict) -> bool:
     now = proc_identity(record.get("pid", -1))
-    return bool(now and now["start"] == record.get("start") and now["exe"] == record.get("exe")
-                and now["dev"] == record.get("dev") and now["ino"] == record.get("ino")
-                and now["cmd"] == record.get("cmd") and now["hub_config"] == record.get("hub_config"))
+    if not now or any(now[key] != record.get(key) for key in ("start", "exe", "dev", "ino")):
+        return False
+    if record.get("role") == "sshd":
+        # OpenSSH overwrites its process title and clears parts of environ
+        # after startup. Its captured PID birth + executable inode/digest are
+        # stable; do not mistake this normal re-title for PID reuse.
+        return (pathlib.Path(now["exe"]).name == "sshd"
+                and bool(record.get("cmd"))
+                and pathlib.Path(record["cmd"][0]).name == "sshd"
+                and isinstance(record.get("listen_port"), int))
+    return now["cmd"] == record.get("cmd") and now["hub_config"] == record.get("hub_config")
 
 
 def process_stopped(record: dict) -> bool:

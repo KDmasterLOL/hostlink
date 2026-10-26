@@ -125,6 +125,20 @@ class PilotLifecycleTests(unittest.TestCase):
         self.run_cli("down", "--root", str(self.root), expected=2)
         os.kill(current, 0)
 
+    def test_sshd_retitle_does_not_obscure_source_owned_process_identity(self):
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location("pilot_sshd_retitle", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        now = {"pid": 123, "start": 500, "exe": "/usr/sbin/sshd", "dev": 7, "ino": 9,
+               "cmd": ["sshd: /tmp/example/sshd_config [listener]"], "hub_config": []}
+        record = {**now, "role": "sshd", "cmd": ["/usr/sbin/sshd", "-D"], "listen_port": 23001}
+        with patch.object(helper, "proc_identity", return_value=now):
+            self.assertTrue(helper.identity_matches(record))
+            self.assertFalse(helper.identity_matches({**record, "start": 501}))
+            self.assertFalse(helper.identity_matches({**record, "ino": 10}))
+            self.assertFalse(helper.identity_matches({**record, "role": "agent"}))
+
     def test_duplicate_pid_ledger_is_rejected_before_signalling(self):
         self.prepare()
         current = os.getpid()
