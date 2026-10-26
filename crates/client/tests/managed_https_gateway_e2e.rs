@@ -14,6 +14,7 @@ use secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
+    io::Write,
     net::{SocketAddr, TcpListener, TcpStream},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -285,12 +286,20 @@ fn hub_config(
     path
 }
 
-fn write_caddyfile(path: &Path, url_port: u16, cert: &Path, key: &Path, hub: SocketAddr) {
+fn write_caddyfile(
+    path: &Path,
+    url_port: u16,
+    cert: &Path,
+    key: &Path,
+    hub: SocketAddr,
+    artifacts: &Path,
+) {
     let content = format!(
-        "{{\n  admin off\n  auto_https off\n}}\nhttps://localhost:{url_port} {{\n  bind 127.0.0.1\n  tls {} {}\n  reverse_proxy http://{}\n}}\n",
+        "{{\n  admin off\n  auto_https off\n}}\nhttps://localhost:{url_port} {{\n  bind 127.0.0.1\n  tls {} {}\n  route {{\n    @redirect path /redirect\n    redir @redirect /0.1.0/install-hostlink-agent.sh 302\n    @hub path /v2/*\n    handle @hub {{\n      reverse_proxy http://{}\n    }}\n    handle {{\n      root * {}\n      file_server\n    }}\n  }}\n}}\n",
         cert.display(),
         key.display(),
-        hub
+        hub,
+        artifacts.display()
     );
     private_write(path, content);
 }
@@ -299,9 +308,113 @@ fn cli_env(command: &mut Command, config: &Path) {
     command.env("HOSTLINK_HUB_CONFIG", config);
 }
 
+fn invite_args(
+    installer_url: &str,
+    installer_sha: &str,
+    agent_url: &str,
+    agent_sha: &str,
+    archive_url: &str,
+    archive_sha: &str,
+) -> Vec<String> {
+    [
+        "invite",
+        "--name",
+        "managed-fixture",
+        "--ssh-user",
+        &std::env::var("USER").unwrap(),
+        "--ttl-seconds",
+        "900",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--version",
+        "0.1.0",
+        "--installer-url",
+        installer_url,
+        "--installer-sha256",
+        installer_sha,
+        "--agent-url",
+        agent_url,
+        "--agent-sha256",
+        agent_sha,
+        "--archive-url",
+        archive_url,
+        "--archive-sha256",
+        archive_sha,
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn file_sha256(path: &Path) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(fs::read(path).expect("read pinned artifact"))
+    )
+}
+
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn expect_bootstrap_rejection(
+    children: &mut Children,
+    root: &Path,
+    xdg_data: &Path,
+    ca_bundle: &Path,
+    command: &str,
+    label: &str,
+) -> String {
+    let log = root.join(format!("{label}.pty.log"));
+    let shell_command = format!("/bin/sh -c {}", sh_quote(command));
+    let mut terminal = Command::new("script");
+    terminal
+        .args(["-qefc", &shell_command, "/dev/null"])
+        .env("HOME", root)
+        .env("XDG_DATA_HOME", xdg_data)
+        .env("CURL_CA_BUNDLE", ca_bundle)
+        .env("SSL_CERT_FILE", ca_bundle)
+        .stdin(Stdio::piped())
+        .stdout(private_log(&log))
+        .stderr(Stdio::null());
+    children.start(terminal);
+    let index = children.children.len() - 1;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let output = fs::read_to_string(&log).unwrap_or_default();
+        if output.contains("One-use HostLink invite token:") {
+            // SAFETY: Children::start puts this exact fixture command in its own process group.
+            unsafe {
+                libc::kill(-(children.children[index].id() as i32), libc::SIGKILL);
+            }
+            let _ = children.children[index].wait();
+            panic!("{label} reached token prompt before rejection: {output}");
+        }
+        if let Some(status) = children.children[index]
+            .try_wait()
+            .expect("inspect rejected bootstrap process")
+        {
+            assert!(!status.success(), "{label} unexpectedly succeeded");
+            return output;
+        }
+        assert!(Instant::now() < deadline, "{label} rejection deadline");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires openssh-server, Caddy, OpenSSL, and the fixture script"]
 async fn actual_https_hub_enrollment_openssh_projection_and_managed_russh_flow() {
+    run_managed_https_gateway_fixture(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires openssh-server, Caddy, OpenSSL, packaged artifacts, and the fixture script"]
+async fn actual_cli_invite_https_installer_enrollment_and_managed_russh_flow() {
+    run_managed_https_gateway_fixture(true).await;
+}
+
+async fn run_managed_https_gateway_fixture(installer_flow: bool) {
     let agent_bin = PathBuf::from(
         std::env::var_os("HOSTLINK_AGENT_BIN").expect("fixture script sets HOSTLINK_AGENT_BIN"),
     );
@@ -389,8 +502,18 @@ async fn actual_https_hub_enrollment_openssh_projection_and_managed_russh_flow()
     let tls_port = free_port();
     let tls_url = format!("https://localhost:{tls_port}");
     let (ca_cert, leaf_cert, leaf_key) = write_server_certificate(root.path());
+    let artifact_root = std::env::var_os("HOSTLINK_ARTIFACT_ROOT")
+        .map(PathBuf::from)
+        .expect("fixture script packages immutable Agent artifacts");
     let tls_config = root.path().join("Caddyfile");
-    write_caddyfile(&tls_config, tls_port, &leaf_cert, &leaf_key, hub_listener);
+    write_caddyfile(
+        &tls_config,
+        tls_port,
+        &leaf_cert,
+        &leaf_key,
+        hub_listener,
+        &artifact_root,
+    );
     let sshd_key_line = sshd_host_public.trim();
     let operator_public = public_key(&operator);
     let reverse_port = free_port();
@@ -444,6 +567,23 @@ async fn actual_https_hub_enrollment_openssh_projection_and_managed_russh_flow()
         gateway_identity: controller_key.clone(),
         preferred_gateway: None,
     };
+    let cli_config = root.path().join("controller-hub.json");
+    let mut configure = Command::new(&client_bin);
+    cli_env(&mut configure, &cli_config);
+    run_ok(
+        configure
+            .args(["hub", "configure", "--hub-url", &tls_url, "--hub-ca-cert"])
+            .arg(&ca_cert)
+            .args(["--token-file"])
+            .arg(&token_file)
+            .args(["--ssh-user"])
+            .arg(std::env::var("USER").unwrap())
+            .args(["--identity"])
+            .arg(&controller_key)
+            .args(["--gateway-identity"])
+            .arg(&controller_key),
+        "actual Hub controller configuration command",
+    );
     let hub_client =
         HubClient::from_config(&controller_config).expect("valid HTTPS with explicit local CA");
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -521,26 +661,318 @@ async fn actual_https_hub_enrollment_openssh_projection_and_managed_russh_flow()
         );
     }
 
-    let invite = hub_client
-        .invite(Some("managed-fixture".into()), 900)
-        .await
-        .expect("create one-use invite over HTTPS");
     let enrollment_token = root.path().join("enrollment.token");
-    private_write(&enrollment_token, invite.token.expose_secret());
-    let mut enroll = Command::new(&agent_bin);
-    enroll
-        .args(["enroll", "--hub-url", &tls_url, "--hub-ca-cert"])
-        .arg(&ca_cert)
-        .args(["--token-file"])
-        .arg(&enrollment_token)
-        .args(["--root"])
-        .arg(root.path().join("agent-root"))
-        .args(["--name", "managed-fixture", "--user"])
-        .arg(std::env::var("USER").unwrap());
-    run_ok(&mut enroll, "enroll actual Agent over trusted HTTPS");
-    let agent_root = root.path().join("agent-root/state");
+    let mut replay_token = None;
+    let agent_root = if installer_flow {
+        let version = "0.1.0";
+        let target = "x86_64-unknown-linux-gnu";
+        let installer = artifact_root
+            .join(version)
+            .join("install-hostlink-agent.sh");
+        let sidecar = artifact_root
+            .join(version)
+            .join(target)
+            .join("hostlink-agent");
+        let archive = artifact_root
+            .join(version)
+            .join(format!("hostlink-agent-{target}.zip"));
+        let installer_url = format!("{tls_url}/{version}/install-hostlink-agent.sh");
+        let agent_url = format!("{tls_url}/{version}/{target}/hostlink-agent");
+        let archive_url = format!("{tls_url}/{version}/hostlink-agent-{target}.zip");
+        let installer_sha = file_sha256(&installer);
+        let agent_sha = file_sha256(&sidecar);
+        let archive_sha = file_sha256(&archive);
+        let mut args = invite_args(
+            &installer_url,
+            &installer_sha,
+            &agent_url,
+            &agent_sha,
+            &archive_url,
+            &archive_sha,
+        );
+        args.extend([
+            "--bootstrap-hub-ca-cert".into(),
+            ca_cert.to_string_lossy().into_owned(),
+        ]);
+
+        let wrong_ca_config = root.path().join("wrong-ca-controller.json");
+        private_write(
+            &wrong_ca_config,
+            serde_json::to_vec_pretty(&HubConfig {
+                hub_ca_cert: Some(root.path().join("wrong-ca.pem")),
+                ..controller_config.clone()
+            })
+            .unwrap(),
+        );
+        let mut wrong_ca_invite = Command::new(&client_bin);
+        cli_env(&mut wrong_ca_invite, &wrong_ca_config);
+        assert!(
+            !wrong_ca_invite
+                .args(&args)
+                .status()
+                .expect("wrong artifact CA")
+                .success(),
+            "installer preflight must reject an untrusted HTTPS CA before invitation"
+        );
+
+        let mut wrong_installer_pin = args.clone();
+        let installer_pin_index = wrong_installer_pin
+            .iter()
+            .position(|value| value == "--installer-sha256")
+            .unwrap()
+            + 1;
+        wrong_installer_pin[installer_pin_index] = "0".repeat(64);
+        let mut bad_pin_invite = Command::new(&client_bin);
+        cli_env(&mut bad_pin_invite, &cli_config);
+        let bad_pin = bad_pin_invite
+            .args(&wrong_installer_pin)
+            .output()
+            .expect("wrong installer digest preflight");
+        assert!(!bad_pin.status.success());
+        assert!(!String::from_utf8_lossy(&bad_pin.stdout).contains("token:"));
+
+        let wrong_host_url = installer_url.replace("localhost", "127.0.0.1");
+        let mut wrong_host_args = args.clone();
+        let installer_url_index = wrong_host_args
+            .iter()
+            .position(|value| value == "--installer-url")
+            .unwrap()
+            + 1;
+        let sidecar_url_index = wrong_host_args
+            .iter()
+            .position(|value| value == "--agent-url")
+            .unwrap()
+            + 1;
+        let archive_url_index = wrong_host_args
+            .iter()
+            .position(|value| value == "--archive-url")
+            .unwrap()
+            + 1;
+        wrong_host_args[installer_url_index] = wrong_host_url.clone();
+        wrong_host_args[sidecar_url_index] = agent_url.replace("localhost", "127.0.0.1");
+        wrong_host_args[archive_url_index] = archive_url.replace("localhost", "127.0.0.1");
+        let mut wrong_host_invite = Command::new(&client_bin);
+        cli_env(&mut wrong_host_invite, &cli_config);
+        assert!(
+            !wrong_host_invite
+                .args(&wrong_host_args)
+                .status()
+                .expect("wrong artifact hostname")
+                .success(),
+            "installer preflight must reject a hostname mismatch before invitation"
+        );
+
+        let mut redirected_args = args.clone();
+        redirected_args[installer_url_index] = format!("{tls_url}/redirect");
+        let mut redirected_invite = Command::new(&client_bin);
+        cli_env(&mut redirected_invite, &cli_config);
+        assert!(
+            !redirected_invite
+                .args(&redirected_args)
+                .status()
+                .expect("redirected installer source")
+                .success(),
+            "installer preflight must refuse HTTPS redirects before invitation"
+        );
+
+        let mut invite = Command::new(&client_bin);
+        cli_env(&mut invite, &cli_config);
+        let invited = run_ok(
+            invite.args(&args),
+            "actual source-pinned hostlink invite command",
+        );
+        let invited = String::from_utf8(invited.stdout).expect("invite output is UTF-8");
+        let token = invited
+            .lines()
+            .find_map(|line| line.strip_prefix("token: "))
+            .expect("CLI prints separate one-use token")
+            .to_owned();
+        replay_token = Some(token.clone());
+        assert_eq!(token.len(), 64);
+        assert!(
+            token
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
+        assert!(invited.contains("artifact_binding: verified"));
+        let command = invited
+            .split_once("bootstrap_command:\n")
+            .expect("CLI renders the runnable bootstrap")
+            .1
+            .trim_end();
+        assert!(
+            !command.contains(&token),
+            "token stays outside copyable command"
+        );
+        assert!(!command.contains('\0'));
+
+        let xdg_data = root.path().join("target-data");
+        private_dir(&xdg_data);
+        let shell_command = format!("/bin/sh -c {}", sh_quote(command));
+        let wrong_ca_output = expect_bootstrap_rejection(
+            &mut children,
+            root.path(),
+            &xdg_data,
+            &root.path().join("wrong-ca.pem"),
+            command,
+            "bootstrap-wrong-ca",
+        );
+        assert!(!wrong_ca_output.contains(&token));
+
+        let sidecar_bytes = fs::read(&sidecar).unwrap();
+        let mut modified_sidecar = sidecar_bytes.clone();
+        modified_sidecar.push(0);
+        fs::write(&sidecar, modified_sidecar).unwrap();
+        let sidecar_output = expect_bootstrap_rejection(
+            &mut children,
+            root.path(),
+            &xdg_data,
+            &ca_cert,
+            command,
+            "bootstrap-wrong-sidecar-digest",
+        );
+        assert!(!sidecar_output.contains(&token));
+        fs::write(&sidecar, &sidecar_bytes).unwrap();
+
+        let archive_bytes = fs::read(&archive).unwrap();
+        let mut modified_archive = archive_bytes.clone();
+        modified_archive.push(0);
+        fs::write(&archive, modified_archive).unwrap();
+        let archive_output = expect_bootstrap_rejection(
+            &mut children,
+            root.path(),
+            &xdg_data,
+            &ca_cert,
+            command,
+            "bootstrap-wrong-archive-digest",
+        );
+        assert!(!archive_output.contains(&token));
+        fs::write(&archive, &archive_bytes).unwrap();
+
+        let install_log = root.path().join("installer-pty.log");
+        let mut terminal = Command::new("script");
+        terminal
+            .args(["-qefc", &shell_command, "/dev/null"])
+            .env("HOME", root.path())
+            .env("XDG_DATA_HOME", &xdg_data)
+            .env("CURL_CA_BUNDLE", &ca_cert)
+            .env("SSL_CERT_FILE", &ca_cert)
+            .stdin(Stdio::piped())
+            .stdout(private_log(&install_log))
+            .stderr(Stdio::null());
+        children.start(terminal);
+        let index = children.children.len() - 1;
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            let output = fs::read_to_string(&install_log).unwrap_or_default();
+            if output.contains("One-use HostLink invite token:") {
+                break;
+            }
+            if let Some(status) = children.children[index]
+                .try_wait()
+                .expect("inspect interactive installer")
+            {
+                panic!("installer exited before token prompt: {status}; log: {output}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "verified installer token prompt deadline"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let process_id = children.children[index].id();
+        let process_argv = fs::read(format!("/proc/{process_id}/cmdline")).unwrap_or_default();
+        let process_env = fs::read(format!("/proc/{process_id}/environ")).unwrap_or_default();
+        assert!(
+            !process_argv
+                .windows(token.len())
+                .any(|part| part == token.as_bytes())
+        );
+        assert!(
+            !process_env
+                .windows(token.len())
+                .any(|part| part == token.as_bytes())
+        );
+        let stdin = children.children[index]
+            .stdin
+            .as_mut()
+            .expect("interactive installer stdin remains open");
+        stdin.write_all(token.as_bytes()).unwrap();
+        stdin.write_all(b"\n").unwrap();
+        stdin.flush().unwrap();
+        loop {
+            let output = fs::read_to_string(&install_log).unwrap_or_default();
+            if output.contains("Enrollment complete. Starting the embedded Agent") {
+                assert!(
+                    !output.contains(&token),
+                    "PTY transcript must not echo the token"
+                );
+                break;
+            }
+            if let Some(status) = children.children[index]
+                .try_wait()
+                .expect("inspect Agent after installer")
+            {
+                panic!(
+                    "installer/Agent exited before enrollment completed: {status}; log: {output}"
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "verified installer enrollment deadline"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        println!(
+            "source-pinned installer receipt: source_sha={} target={} version={} installer_sha256={} agent_sha256={} archive_sha256={} token_separate=true token_argv_or_env=false",
+            std::env::var("HOSTLINK_SOURCE_SHA").unwrap_or_else(|_| "unrecorded".into()),
+            target,
+            version,
+            installer_sha,
+            agent_sha,
+            archive_sha,
+        );
+        let dirs = fs::read_dir(&xdg_data)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("Agent/state"))
+            .collect::<Vec<_>>();
+        dirs.into_iter()
+            .find(|path| path.join("agent.json").is_file())
+            .expect("installer created a new owner-private Agent root")
+    } else {
+        let invite = hub_client
+            .invite(Some("managed-fixture".into()), 900)
+            .await
+            .expect("create one-use invite over HTTPS");
+        private_write(&enrollment_token, invite.token.expose_secret());
+        let mut enroll = Command::new(&agent_bin);
+        enroll
+            .args(["enroll", "--hub-url", &tls_url, "--hub-ca-cert"])
+            .arg(&ca_cert)
+            .args(["--token-file"])
+            .arg(&enrollment_token)
+            .args(["--root"])
+            .arg(root.path().join("agent-root"))
+            .args(["--name", "managed-fixture", "--user"])
+            .arg(std::env::var("USER").unwrap());
+        run_ok(&mut enroll, "enroll actual Agent over trusted HTTPS");
+        root.path().join("agent-root/state")
+    };
+    if installer_flow {
+        use std::os::unix::fs::MetadataExt;
+        let installed_root = agent_root
+            .parent()
+            .expect("Agent state has a private parent");
+        let metadata = fs::metadata(installed_root).expect("inspect installed Agent root");
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    }
     let agent_config: serde_json::Value =
         serde_json::from_slice(&fs::read(agent_root.join("agent.json")).unwrap()).unwrap();
+    if let Some(token) = replay_token.as_deref() {
+        private_write(&enrollment_token, token);
+    }
     let replay = Command::new(&agent_bin)
         .args(["enroll", "--hub-url", &tls_url, "--hub-ca-cert"])
         .arg(&ca_cert)
@@ -554,25 +986,29 @@ async fn actual_https_hub_enrollment_openssh_projection_and_managed_russh_flow()
         .expect("attempt one-use token replay");
     assert!(!replay.success(), "an enrollment invite is one-use");
     let agent_listen: SocketAddr = agent_config["listen"].as_str().unwrap().parse().unwrap();
-    let mut agent_run = Command::new(&agent_bin);
-    agent_run
-        .args(["run", "--config"])
-        .arg(agent_root.join("agent.json"))
-        .stdout(private_log(&root.path().join("agent.stdout.log")))
-        .stderr(private_log(&root.path().join("agent.stderr.log")));
-    let agent_child = children.start(agent_run);
-    wait_port(agent_listen, Some(agent_child));
+    if !installer_flow {
+        let mut agent_run = Command::new(&agent_bin);
+        agent_run
+            .args(["run", "--config"])
+            .arg(agent_root.join("agent.json"))
+            .stdout(private_log(&root.path().join("agent.stdout.log")))
+            .stderr(private_log(&root.path().join("agent.stderr.log")));
+        children.start(agent_run);
+    }
+    wait_port(agent_listen, None);
 
     // Controller's normal config and CLI use the private CA field and name selector.
-    let cli_config = root.path().join("controller-hub.json");
-    private_write(
-        &cli_config,
-        serde_json::to_vec_pretty(&controller_config).unwrap(),
-    );
     let mut list = Command::new(&client_bin);
     cli_env(&mut list, &cli_config);
     let listed = run_ok(list.args(["list"]), "Hub-backed name inventory");
     assert!(String::from_utf8_lossy(&listed.stdout).contains("managed-fixture"));
+    let mut verify = Command::new(&client_bin);
+    cli_env(&mut verify, &cli_config);
+    let verified = run_ok(
+        verify.args(["verify", "managed-fixture"]),
+        "Hub-backed host verification through pinned SSH",
+    );
+    assert!(String::from_utf8_lossy(&verified.stdout).contains("verified managed-fixture"));
     let mut exec = Command::new(&client_bin);
     cli_env(&mut exec, &cli_config);
     let result = exec
@@ -645,6 +1081,34 @@ async fn actual_https_hub_enrollment_openssh_projection_and_managed_russh_flow()
             .expect("SFTP download through gateway"),
         artifact
     );
+    let local_upload = root.path().join("controller-upload.bin");
+    let local_download = root.path().join("controller-download.bin");
+    private_write(&local_upload, artifact);
+    let mut upload = Command::new(&client_bin);
+    cli_env(&mut upload, &cli_config);
+    run_ok(
+        upload
+            .args(["upload", "--host", "managed-fixture", "--local"])
+            .arg(&local_upload)
+            .args(["--remote", "controller-cli-roundtrip.bin"]),
+        "managed CLI SFTP upload",
+    );
+    let mut download = Command::new(&client_bin);
+    cli_env(&mut download, &cli_config);
+    run_ok(
+        download
+            .args([
+                "download",
+                "--host",
+                "managed-fixture",
+                "--remote",
+                "controller-cli-roundtrip.bin",
+                "--local",
+            ])
+            .arg(&local_download),
+        "managed CLI SFTP download",
+    );
+    assert_eq!(fs::read(local_download).unwrap(), artifact);
 
     // Durable JobStore only contains UUID-named job directories. Test-owned
     // executables live in a separate private sibling, not inside state/jobs.

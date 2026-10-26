@@ -32,6 +32,7 @@ fn invite_requires_source_pins_by_default_and_exposes_explicit_manual_mode() {
         "--archive-sha256",
         "--version",
         "--target",
+        "--bootstrap-hub-ca-cert",
     ] {
         assert!(
             help.contains(option),

@@ -124,7 +124,10 @@ Use [docs/ARTIFACTS_AND_INVITES.md](docs/ARTIFACTS_AND_INVITES.md) and
 `scripts/package-hostlink-agent.py` to create a deterministic, source-SHA-bound
 Agent ZIP, sidecar, installer pin, and invite-input hashes. Packaging is local
 only; operators select and verify their own immutable HTTPS artifact origin.
-Native Win7 PowerShell 2 acceptance remains separate from cross-build evidence.
+The `hostlink-managed-gateway-fixture.sh` opt-in HOME fixture also packages from
+its clean committed SHA and exercises the real CLI invite, HTTPS installer,
+one-use prompt, and managed Agent lifecycle against temporary Caddy/sshd
+instances. Native Windows 11 and Win7 PowerShell 2 acceptance remain separate.
 
 ## Agent lifecycle
 

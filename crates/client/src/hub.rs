@@ -314,7 +314,7 @@ impl HubClient {
     }
 }
 
-fn read_ca_certificate(path: &Path) -> Result<reqwest::Certificate, HubClientError> {
+pub(crate) fn read_ca_certificate(path: &Path) -> Result<reqwest::Certificate, HubClientError> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
