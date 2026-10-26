@@ -2234,8 +2234,9 @@ mod windows {
         Ok(format!("{:x}", hash.finalize()))
     }
     fn random_token() -> String {
+        use rand::RngExt;
         let mut bytes = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rng(), &mut bytes);
+        rand::rng().fill(&mut bytes);
         hex(&bytes)
     }
     fn hex(bytes: &[u8]) -> String {
