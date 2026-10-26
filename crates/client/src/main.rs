@@ -65,7 +65,7 @@ enum Command {
         #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(60..=86400))]
         ttl_seconds: u64,
         /// Create a manual invitation without selecting verified installer artifacts.
-        #[arg(long, conflicts_with_all = ["ssh_user", "installer_url", "installer_sha256", "agent_url", "agent_sha256", "archive_url", "archive_sha256", "version", "target"])]
+        #[arg(long, conflicts_with_all = ["ssh_user", "installer_url", "installer_sha256", "agent_url", "agent_sha256", "archive_url", "archive_sha256", "version", "target", "bootstrap_hub_ca_cert"])]
         token_only: bool,
         #[arg(long)]
         installer_url: Option<String>,
@@ -83,6 +83,9 @@ enum Command {
         version: Option<String>,
         #[arg(long)]
         target: Option<String>,
+        /// PEM CA path available on the target, passed only to the Linux bootstrap and enrollment.
+        #[arg(long)]
+        bootstrap_hub_ca_cert: Option<PathBuf>,
     },
     /// Change a host's display-only label.
     DisplayName { host: String, display_name: String },
@@ -592,6 +595,7 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
             archive_sha256,
             version,
             target,
+            bootstrap_hub_ca_cert,
         } => {
             let config_path = default_hub_config_path()?;
             let config = load_hub_config(&config_path)?;
@@ -610,6 +614,12 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
                     .clone()
                     .ok_or("--name is required for a runnable bootstrap")?;
                 let selected_target = Target::parse(&get(target, "--target")?)?;
+                if selected_target.windows() && bootstrap_hub_ca_cert.is_some() {
+                    return Err(
+                        "--bootstrap-hub-ca-cert is supported only by the POSIX Linux installer"
+                            .into(),
+                    );
+                }
                 let selection = ArtifactSelection {
                     installer_url: bootstrap::parse_artifact_url(&get(
                         installer_url,
@@ -628,13 +638,16 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
                     name: selected_name,
                     ssh_user: ssh_user.clone().unwrap_or_else(|| config.ssh_user.clone()),
                     hub_url: config.hub_url.clone(),
+                    bootstrap_hub_ca_cert: bootstrap_hub_ca_cert.clone(),
                 };
                 selection.validate()?;
                 Some(selection)
             };
             // Download, bound, hash, and inspect the exact installer before consuming an invite.
             let verified = match &selection {
-                Some(selection) => Some(bootstrap::verify_installer(selection).await?),
+                Some(selection) => Some(
+                    bootstrap::verify_installer(selection, config.hub_ca_cert.as_deref()).await?,
+                ),
                 None => None,
             };
             let client = HubClient::from_config(&config)?;

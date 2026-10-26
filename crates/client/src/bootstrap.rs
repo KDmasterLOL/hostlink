@@ -53,6 +53,7 @@ pub struct ArtifactSelection {
     pub name: String,
     pub ssh_user: String,
     pub hub_url: String,
+    pub bootstrap_hub_ca_cert: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -187,13 +188,24 @@ pub fn parse_artifact_url(value: &str) -> Result<Url, BootstrapError> {
 
 pub async fn verify_installer(
     selection: &ArtifactSelection,
+    hub_ca_cert: Option<&std::path::Path>,
 ) -> Result<VerifiedInstaller, BootstrapError> {
     selection.validate()?;
-    let client = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(INSTALLER_TIMEOUT)
+        .timeout(INSTALLER_TIMEOUT);
+    if let Some(path) = hub_ca_cert {
+        // Reuse HubClient's bounded no-follow CA loader. A caller-controlled
+        // path must not permit an unbounded read or an unexpected symlink
+        // when selecting an HTTPS trust root for installer preflight.
+        builder =
+            builder.add_root_certificate(crate::hub::read_ca_certificate(path).map_err(|_| {
+                BootstrapError::Source("configured Hub CA is unsafe or invalid".into())
+            })?);
+    }
+    let client = builder
         .build()
         .map_err(|_| BootstrapError::Source("could not create HTTPS client".into()))?;
     let bytes = fetch_bytes(&client, selection.installer_url.clone())
@@ -343,7 +355,7 @@ fn render_powershell(selection: &ArtifactSelection, installer: &VerifiedInstalle
 }
 
 fn render_posix(selection: &ArtifactSelection, installer: &VerifiedInstaller) -> String {
-    let args = [
+    let mut args = [
         ("--hub-url", selection.hub_url.as_str()),
         ("--name", selection.name.as_str()),
         ("--ssh-user", selection.ssh_user.as_str()),
@@ -357,11 +369,24 @@ fn render_posix(selection: &ArtifactSelection, installer: &VerifiedInstaller) ->
     .into_iter()
     .map(|(name, value)| format!(" {} {}", sh_quote(name), sh_quote(value)))
     .collect::<String>();
+    if let Some(path) = &selection.bootstrap_hub_ca_cert {
+        args.push_str(&format!(
+            " {} {}",
+            sh_quote("--hub-ca-cert"),
+            sh_quote(&path.to_string_lossy())
+        ));
+    }
+    let curl_ca = selection
+        .bootstrap_hub_ca_cert
+        .as_ref()
+        .map(|path| format!("--cacert {} ", sh_quote(&path.to_string_lossy())))
+        .unwrap_or_default();
     format!(
-        "set -eu\ninstaller=$(mktemp)\ntrap 'rm -f \"$installer\"' EXIT HUP INT TERM\ncurl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-filesize 1048576 --connect-timeout 10 --max-time 30 -o \"$installer\" {}\nprintf '%s  %s\\n' {} \"$installer\" | sha256sum -c -\n/bin/sh \"$installer\"{}\n",
+        "set -eu\ninstaller=$(mktemp)\ntrap 'rm -f \"$installer\"' EXIT HUP INT TERM\ncurl {curl_ca}--fail --silent --show-error --proto '=https' --tlsv1.2 --max-filesize 1048576 --connect-timeout 10 --max-time 30 -o \"$installer\" {}\nprintf '%s  %s\\n' {} \"$installer\" | sha256sum -c -\n/bin/sh \"$installer\"{}\n",
         sh_quote(installer.url.as_str()),
         sh_quote(&installer.sha256),
-        args
+        args,
+        curl_ca = curl_ca
     )
 }
 
@@ -520,6 +545,29 @@ fn sh_quote(value: &str) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn installer_preflight_rejects_unsafe_ca_path_without_network_access() {
+        let root = tempfile::tempdir().expect("private CA fixture");
+        let huge = root.path().join("oversized-ca.pem");
+        std::fs::write(&huge, vec![b'A'; 64 * 1024 + 1]).expect("oversized fixture");
+        let selected = selection(Target::LinuxX64);
+        let error = verify_installer(&selected, Some(&huge))
+            .await
+            .expect_err("oversized trust anchor must be rejected before HTTPS");
+        assert!(error.to_string().contains("unsafe or invalid"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let linked = root.path().join("linked-ca.pem");
+            symlink(&huge, &linked).expect("create hostile CA symlink");
+            assert!(
+                verify_installer(&selected, Some(&linked)).await.is_err(),
+                "HTTPS trust root symlinks must not be followed"
+            );
+        }
+    }
+
     fn selection(target: Target) -> ArtifactSelection {
         let agent = if target.windows() {
             "hostlink-agent.exe"
@@ -546,6 +594,7 @@ mod tests {
             name: "lab-host".into(),
             ssh_user: "hostlink".into(),
             hub_url: "https://hub.example".into(),
+            bootstrap_hub_ca_cert: None,
         }
     }
 
@@ -625,6 +674,7 @@ mod tests {
         let mut linux = selection(Target::LinuxX64);
         linux.installer_url =
             Url::parse("https://artifacts.example/i'$(touch%20/tmp/pwned).sh").unwrap();
+        linux.bootstrap_hub_ca_cert = Some("/private/fixture ca.pem".into());
         let command = render_command(
             &linux,
             &VerifiedInstaller {
@@ -634,6 +684,8 @@ mod tests {
         );
         assert!(command.contains("'--name' 'lab-host'"));
         assert!(command.contains("'https://artifacts.example/i'\\''$(touch%20/tmp/pwned).sh'"));
+        assert!(command.contains("--cacert '/private/fixture ca.pem'"));
+        assert!(command.contains("'--hub-ca-cert' '/private/fixture ca.pem'"));
         assert!(command.contains("sha256sum -c -"));
         assert!(!command.contains("token"));
     }

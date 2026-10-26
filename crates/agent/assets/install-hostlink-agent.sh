@@ -5,7 +5,8 @@ usage() {
     cat >&2 <<'EOF'
 Usage: install-hostlink-agent.sh --hub-url HTTPS_ORIGIN --name CANONICAL --ssh-user USER \
   --agent-url HTTPS_URL --agent-sha256 LOWERCASE_SHA256 --archive-url HTTPS_URL \
-  --archive-sha256 LOWERCASE_SHA256 --agent-version SEMVER --target x86_64-unknown-linux-gnu
+  --archive-sha256 LOWERCASE_SHA256 --agent-version SEMVER --target x86_64-unknown-linux-gnu \
+  [--hub-ca-cert PEM]
 EOF
     exit 2
 }
@@ -19,6 +20,7 @@ agent_version=
 archive_url=
 archive_sha256=
 target=
+hub_ca_cert=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --hub-url) [ "$#" -ge 2 ] || usage; hub_url=$2; shift 2 ;;
@@ -30,6 +32,7 @@ while [ "$#" -gt 0 ]; do
         --archive-url) [ "$#" -ge 2 ] || usage; archive_url=$2; shift 2 ;;
         --archive-sha256) [ "$#" -ge 2 ] || usage; archive_sha256=$2; shift 2 ;;
         --target) [ "$#" -ge 2 ] || usage; target=$2; shift 2 ;;
+        --hub-ca-cert) [ "$#" -ge 2 ] || usage; hub_ca_cert=$2; shift 2 ;;
         *) usage ;;
     esac
 done
@@ -67,6 +70,9 @@ case "$archive_sha256" in *[!0-9a-f]*|'') echo 'Archive SHA-256 must be lowercas
 printf '%s' "$agent_version" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$' || { echo 'Agent version must be exact semantic version.' >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo 'curl is required.' >&2; exit 1; }
 command -v sha256sum >/dev/null 2>&1 || { echo 'sha256sum is required.' >&2; exit 1; }
+if [ -n "$hub_ca_cert" ]; then
+    [ -f "$hub_ca_cert" ] && [ ! -L "$hub_ca_cert" ] && [ -r "$hub_ca_cert" ] || { echo 'Explicit Hub CA must be a readable regular file, not a symlink.' >&2; exit 1; }
+fi
 
 base=${XDG_DATA_HOME:-"$HOME/.local/share"}
 [ -d "$base" ] || mkdir -p "$base"
@@ -90,8 +96,13 @@ agent="$stage/hostlink-agent"
 archive="$stage/hostlink-agent.zip"
 verified="$stage/verified-package"
 # No redirect following; an HTTP 3xx is an error. Both the transfer and file size are bounded.
-curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-filesize 268435456 --connect-timeout 10 --max-time 120 -o "$agent" "$agent_url"
-curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-filesize 536870912 --connect-timeout 10 --max-time 180 -o "$archive" "$archive_url"
+if [ -n "$hub_ca_cert" ]; then
+    curl --cacert "$hub_ca_cert" --fail --silent --show-error --proto '=https' --tlsv1.2 --max-filesize 268435456 --connect-timeout 10 --max-time 120 -o "$agent" "$agent_url"
+    curl --cacert "$hub_ca_cert" --fail --silent --show-error --proto '=https' --tlsv1.2 --max-filesize 536870912 --connect-timeout 10 --max-time 180 -o "$archive" "$archive_url"
+else
+    curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-filesize 268435456 --connect-timeout 10 --max-time 120 -o "$agent" "$agent_url"
+    curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-filesize 536870912 --connect-timeout 10 --max-time 180 -o "$archive" "$archive_url"
+fi
 actual_sha=$(sha256sum "$agent" | awk '{print $1}')
 [ "$actual_sha" = "$agent_sha256" ] || { echo 'Agent executable SHA-256 mismatch.' >&2; exit 1; }
 chmod 700 "$agent"
@@ -115,7 +126,11 @@ unset token
 parent=$(mktemp -d "$base/hostlink-agent.XXXXXXXX")
 chmod 700 "$parent"
 root="$parent/Agent"
-"$agent" enroll --hub-url "$hub_url" --token-file "$token_file" --root "$root" --name "$name" --user "$ssh_user" --retain-pending
+if [ -n "$hub_ca_cert" ]; then
+    "$agent" enroll --hub-url "$hub_url" --hub-ca-cert "$hub_ca_cert" --token-file "$token_file" --root "$root" --name "$name" --user "$ssh_user" --retain-pending
+else
+    "$agent" enroll --hub-url "$hub_url" --token-file "$token_file" --root "$root" --name "$name" --user "$ssh_user" --retain-pending
+fi
 install -d -m 700 "$root/bin"
 [ ! -e "$root/bin/hostlink-agent" ] || { echo 'Agent executable already exists; refusing overwrite.' >&2; exit 1; }
 cp "$verified/hostlink-agent" "$root/bin/hostlink-agent"

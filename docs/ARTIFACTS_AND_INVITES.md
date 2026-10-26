@@ -40,6 +40,8 @@ https://ARTIFACT_ORIGIN/VERSION/TARGET/hostlink-agent.exe
 https://ARTIFACT_ORIGIN/VERSION/hostlink-agent-TARGET.zip
 ```
 
+The configured optional `--hub-ca-cert` is also added to the Client's normal TLS roots for the installer preflight. Certificate and hostname validation stay enabled. For a Linux target using a private CA, pass `--bootstrap-hub-ca-cert /path/on/target/hub-ca.pem` to `hostlink invite` and make that exact PEM available at that target path. The generated command uses it with curl for the installer; the installer uses it for the sidecar, ZIP, and Agent enrollment. The option does not bypass certificate or hostname validation. Windows targets use their normal trusted certificate store.
+
 For Linux use `install-hostlink-agent.sh` and `hostlink-agent`. Keep all three URLs on the same HTTPS origin. Do not use redirects, URL credentials, TLS bypasses, mutable aliases, or a URL that embeds an invite token. The invite command checks the installer bytes and its contract before asking the Hub to create an invite; the installer separately verifies the binary sidecar and ZIP before prompting for the one-use token.
 
 Example command template (replace every `ARTIFACT_ORIGIN`, `TARGET`, digest, and host-specific value with independently verified values):
@@ -56,6 +58,12 @@ hostlink invite --name lab-win7 --ssh-user hostlink --ttl-seconds 900 \
 ```
 
 Use `--help` for platform-specific output and shell quoting. `invite-inputs.json` intentionally has no URL fields: the packager cannot establish control of an HTTPS origin and never invents one. Keep the generated one-use token separate from the copyable installer command.
+
+## HOME end-to-end fixture
+
+Run `scripts/hostlink-managed-gateway-fixture.sh` from a clean, committed task revision. It packages the Linux release Agent from that exact `HEAD`, publishes the immutable package directory with Caddy on the fixture's HTTPS origin, and runs both ignored process-level tests. The installer scenario invokes the actual `hostlink hub configure` and source-pinned `hostlink invite` commands, executes the exact rendered POSIX command in a PTY, and enters the token only after the script, sidecar, and ZIP have passed their pins. It then checks the running enrolled Agent through Hub inventory, verify, exec (including exit 7), SFTP, durable jobs, replay denial, gateway authorization, and revocation. A disposable Caddy redirect, unrelated CA, hostname mismatch, wrong installer pin, modified sidecar, and modified ZIP are rejected before the token prompt; the same unconsumed token is used for the successful run.
+
+All fixture processes, keys, Hub state, Caddy data, SSH authorization projection, and package files live in fresh temporary roots and are removed on exit. This is Linux HOME evidence only; native Windows 11 and Windows 7 PowerShell 2 gates remain separate.
 
 ## Windows package scripts
 
