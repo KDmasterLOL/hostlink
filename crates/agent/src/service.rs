@@ -827,7 +827,6 @@ mod windows {
             RegSetValueExW,
         },
         System::{
-            Com::CoTaskMemFree,
             SystemInformation::GetSystemDirectoryW,
             Threading::{
                 OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -836,6 +835,16 @@ mod windows {
         },
         UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath},
     };
+
+    // The current Windows SDK imports windows-sys::CoTaskMemFree from
+    // combase.dll, which does not exist on Windows 7. Microsoft's documented
+    // OLE task allocator export is in ole32.dll on all supported targets.
+    // Keep the existing known-folder lookup and free its allocation through
+    // that Win7-compatible export instead of depending on the SDK import lib.
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn CoTaskMemFree(pv: *mut core::ffi::c_void);
+    }
 
     const MARKER: &str = ".hostlink-user-service.json";
     const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
