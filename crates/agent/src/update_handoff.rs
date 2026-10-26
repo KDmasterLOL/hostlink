@@ -92,6 +92,7 @@ impl UpdateJournal {
                 | (UpdatePhase::BackedUp, UpdatePhase::Published)
                 | (UpdatePhase::Published, UpdatePhase::Verified)
                 | (UpdatePhase::Verified, UpdatePhase::Restarted)
+                | (UpdatePhase::Restarted, UpdatePhase::RollingBack)
                 | (UpdatePhase::BackedUp, UpdatePhase::RollingBack)
                 | (UpdatePhase::Published, UpdatePhase::RollingBack)
                 | (UpdatePhase::Verified, UpdatePhase::RollingBack)
@@ -638,7 +639,9 @@ mod tests {
         ] {
             journal.advance(phase).expect("valid forward phase");
         }
-        assert!(journal.advance(UpdatePhase::RollingBack).is_err());
+        journal
+            .advance(UpdatePhase::RollingBack)
+            .expect("failed health or registration may roll back after restart");
     }
 
     #[test]
@@ -652,6 +655,22 @@ mod tests {
             .advance(UpdatePhase::RolledBack)
             .expect("rollback complete");
         assert!(journal.advance(UpdatePhase::BackedUp).is_err());
+
+        let mut restarted = UpdateJournal::new(identity()).expect("journal");
+        for phase in [
+            UpdatePhase::BackedUp,
+            UpdatePhase::Published,
+            UpdatePhase::Verified,
+            UpdatePhase::Restarted,
+        ] {
+            restarted.advance(phase).expect("advance to restarted");
+        }
+        restarted
+            .advance(UpdatePhase::RollingBack)
+            .expect("restart phase can enter rollback");
+        restarted
+            .advance(UpdatePhase::RolledBack)
+            .expect("rollback completes");
     }
 
     #[test]

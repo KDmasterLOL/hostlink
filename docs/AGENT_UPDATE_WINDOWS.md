@@ -2,12 +2,16 @@
 
 ## Current implementation status
 
-`update::apply` supports only an offline, stopped-Agent transaction launched by
-a separate updater executable. The caller must not be the installed EXE, the
-current-user lifecycle marker must be absent, and process enumeration must prove
-that no process is running the installed image. Active durable jobs defer before
-publication. No Agent restart is required or attempted in this unregistered
-case. This does not support updates from a live Agent or a registered service.
+`update::apply` composes offline and registered current-user updates. Both
+require a separate updater executable, exact package identity, clean durable-job
+state, and the shared update lock. The registered path writes the staged journal
+and verified old backups before entering owner maintenance, disables only its
+matching HKCU Run value, authenticates cooperative stop, and waits on the
+verified process handle. It keeps the maintenance marker and journal through
+publication and candidate health readback. `Installed` is returned only after
+the candidate's authenticated pipe reports its PID, the process SID/path/hash
+are checked, the `RESTARTED` phase is durable, and the exact Run registration is
+restored. The updater itself may not be the installed EXE.
 
 The offline transaction stages the verified executable and new metadata plus
 private old executable/metadata backups under `.updates` on the install volume.
@@ -29,14 +33,16 @@ The Windows transaction currently requires packaged PowerShell support files to
 match the installed copies byte-for-byte; packages that change them are rejected
 before publication.
 
-The user-scope lifecycle owner now exists in `service.rs`: its private marker
-binds the current SID, install root, executable digest, named pipe, and login
-registration. Its `stop` path authenticates the owner pipe, verifies the
-reported process SID, image path and SHA, requests cooperative stop, waits on
-the actual process handle, and rechecks durable jobs. That API has not yet been
-bound to an updater transaction or tested in an update-specific disposable
-Windows profile. The update path rejects a root while this lifecycle marker is
-present.
+The user-scope lifecycle owner in `service.rs` binds the current SID, install
+root, executable digest, named pipe, and login registration. Maintenance
+startup uses an owner-validated launch mode while the marker remains set and
+login startup remains disabled. On interruption, a maintenance marker plus
+validated journal is recovered conservatively: a running owner process is
+stopped through its authenticated pipe, exact old backups are restored, and
+only then is old registration restored. If registration was already restored,
+recovery commits only a `RESTARTED` journal whose registered candidate passes a
+fresh owner-bound health readback. An orphan marker, foreign Run value, unknown
+process, or mismatched journal is preserved and fails closed.
 
 `update_handoff.rs` adds a persisted transaction substrate: a deterministic
 transaction hash over old/new target, version, package, executable and metadata
@@ -46,11 +52,12 @@ recovery planner. Readback recomputes the transaction hash so edited journal
 identities are rejected. The journal parent must be a private, current-user-owned,
 non-reparse directory validated by its caller.
 
-Windows service start and managed login now refuse to launch when
-`.updates/handoff.json` exists or is malformed. Windows update preflight also
-refuses such a journal. This prevents login startup from bypassing maintenance
-after an interrupted transaction. The offline transaction itself creates,
-advances, reads back, and removes the journal around the actual file changes.
+Windows service start and ordinary managed login refuse to launch when
+`.updates/handoff.json` exists or is malformed. The narrow maintenance launch
+is allowed only while the durable owner marker is in maintenance, the exact Run
+value is absent, and the owner executable digest matches the installed file.
+The offline transaction creates, advances, reads back, and removes the journal
+around file publication; the registered path retains it through health proof.
 
 ## Current implementation boundary
 
@@ -65,22 +72,18 @@ process handle. No PID is accepted from an argument and no process is
 force-terminated.
 
 The opaque receipt supports updating only the marker executable digest after
-the coordinator has verified the new file, restoring the exact Run command
-after marker/file readback, and restoring the old marker and registration only
-when the old executable digest is present. The marker retains the prior digest
-across interruption, so a later coordinator can restore old registration only
-after observing those exact old bytes. These primitives do not launch or
-health-check an Agent; the coordinator must keep the update journal and lock
-authoritative, then use the existing authenticated `service::start` before
-reporting success. If restart fails, it must re-enter maintenance, restore and
-verify the old file inventory, then restore the old marker/Run entry. Foreign
-Run values and ambiguous marker states fail closed.
+the coordinator has verified the new file, starting a candidate under the
+maintenance fence, restoring the exact Run command after authenticated health
+readback, and restoring old marker/registration only after exact old inventory
+verification. The marker retains the prior digest across interruption. The
+shared update lock remains held throughout the update and rollback paths.
 
-This does not enable a registered-service `update::apply` path. The disposable
-Windows lifecycle test remains ignored and requires the documented separately
-verified standard-user profile harness. Marker checks and cross-target builds
-do not prove actual HKCU, process-handle, concurrent login, restart, or rollback
-behavior. No native maintenance transaction was run in the current profile.
+The managed path is implemented but not yet accepted as a Windows runtime
+feature. The disposable Windows lifecycle test remains ignored and requires
+the documented separately verified standard-user profile harness. Linux
+checks and cross-target builds do not prove actual HKCU, process-handle,
+concurrent login, restart, or rollback behavior. No native managed maintenance
+transaction was run in this profile.
 
 ## Required helper protocol
 
@@ -91,8 +94,8 @@ is Prepared, Running, Interrupted, corrupt, or unknown, and wait for the
 authenticated Agent process handle to signal before publication. Reconnect
 must never replay a started job.
 
-The managed-live helper must validate archive SHA, target, semantic version, complete
-manifest and old installed inventory before mutation. It must durably record
+The managed-live helper validates archive SHA, target, semantic version, complete
+manifest and old installed inventory before service mutation. It durably records
 `STAGED`, `BACKED_UP`, `PUBLISHED`, `VERIFIED`, and `RESTARTED`, with exact old
 and new package, executable and metadata identities. Every journal transition
 must be atomic and recoverable; transaction IDs must be recomputed from the

@@ -161,10 +161,73 @@ pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
         });
     }
     #[cfg(windows)]
-    {
-        crate::service::ensure_update_unregistered(&request.install_root)?;
+    let registered_service = crate::service::has_registration(&request.install_root)?;
+    #[cfg(windows)]
+    if registered_service {
+        let pending_journal = crate::update_handoff::read_journal(
+            &request.install_root.join(".updates/handoff.json"),
+        )?;
+        let pending = pending_journal.is_some();
+        if crate::service::is_in_maintenance(&request.install_root)? {
+            if !pending {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "service maintenance marker has no matching update journal; state preserved for manual recovery",
+                ));
+            }
+            crate::service::recover_maintenance_stop(&request.install_root)?;
+            recover_windows_handoff(&request.install_root, true, false)?;
+            crate::service::recover_maintenance_after_inventory(&request.install_root, |root| {
+                let metadata = read_install_metadata(&root.join(INSTALL_METADATA))?;
+                validate_installed(&root.join("bin"), &metadata, &metadata.target)
+            })?;
+        } else if pending {
+            let journal = pending_journal.expect("pending journal was checked");
+            match journal.phase {
+                crate::update_handoff::UpdatePhase::Staged
+                | crate::update_handoff::UpdatePhase::RolledBack => {
+                    crate::service::verify_registered_image(
+                        &request.install_root,
+                        &journal.identity.old_executable_sha256,
+                    )?;
+                    recover_windows_handoff(&request.install_root, false, false)?;
+                }
+                crate::update_handoff::UpdatePhase::Restarted => {
+                    if let Err(health_error) = crate::service::verify_registered_health(
+                        &request.install_root,
+                        &journal.identity.new_executable_sha256,
+                    ) {
+                        crate::service::begin_recovery_maintenance(
+                            &request.install_root,
+                            &journal.identity.old_executable_sha256,
+                            &journal.identity.new_executable_sha256,
+                        )?;
+                        crate::service::recover_maintenance_stop(&request.install_root)?;
+                        recover_windows_handoff(&request.install_root, true, false)?;
+                        crate::service::recover_maintenance_after_inventory(
+                            &request.install_root,
+                            |root| {
+                                let metadata = read_install_metadata(&root.join(INSTALL_METADATA))?;
+                                validate_installed(&root.join("bin"), &metadata, &metadata.target)
+                            },
+                        )?;
+                        return Err(io::Error::other(format!(
+                            "previous Agent candidate failed health readback ({health_error}); exact old inventory was restored and registered"
+                        )));
+                    }
+                    recover_windows_handoff(&request.install_root, false, true)?;
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "interrupted Windows update has no consistent owner maintenance state; journal preserved",
+                    ));
+                }
+            }
+        }
+    } else {
         ensure_windows_offline_caller(&request.install_root)?;
-        recover_windows_handoff(&request.install_root)?;
+        recover_windows_handoff(&request.install_root, false, false)?;
     }
     #[cfg(not(windows))]
     recover_interrupted_publication(&request.install_root)?;
@@ -203,6 +266,7 @@ pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
         manifest,
         old_metadata,
         staged_files,
+        registered_service,
     )?;
 
     #[cfg(windows)]
@@ -234,7 +298,11 @@ pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
 /// Complete or discard an interrupted offline publication before accepting a new archive.
 /// The caller holds the shared update lock and has already passed job, service, and process checks.
 #[cfg(windows)]
-fn recover_windows_handoff(root: &Path) -> io::Result<()> {
+fn recover_windows_handoff(
+    root: &Path,
+    force_rollback: bool,
+    restarted_new_healthy: bool,
+) -> io::Result<()> {
     use crate::update_handoff::{RecoveryAction, TransactionFiles, UpdatePhase};
     use std::os::windows::fs::MetadataExt;
 
@@ -323,7 +391,8 @@ fn recover_windows_handoff(root: &Path) -> io::Result<()> {
         backup_executable: &backup_executable,
         backup_metadata: &backup_metadata,
     };
-    let evidence = crate::update_handoff::inspect_files(&paths, &journal.identity)?;
+    let mut evidence = crate::update_handoff::inspect_files(&paths, &journal.identity)?;
+    evidence.restarted_new_healthy = restarted_new_healthy;
     if !(evidence.installed_old_valid || evidence.installed_new_valid)
         || !(evidence.installed_old_metadata_valid || evidence.installed_new_metadata_valid)
     {
@@ -421,6 +490,21 @@ fn recover_windows_handoff(root: &Path) -> io::Result<()> {
         RecoveryAction::VerifyPublished
         | RecoveryAction::StartVerified
         | RecoveryAction::CommitNew => {
+            if force_rollback {
+                rollback_windows(
+                    &installed_executable,
+                    &installed_metadata,
+                    &backup_executable,
+                    &backup_metadata,
+                    &journal_path,
+                    &mut journal,
+                )?;
+                return cleanup_windows_transaction(
+                    &journal_path,
+                    &transaction_dir,
+                    &journal.identity,
+                );
+            }
             let new_metadata = read_install_metadata(&installed_metadata)?;
             if new_metadata.format != 1
                 || new_metadata.target != journal.identity.target
@@ -1514,9 +1598,19 @@ fn publish_windows(
     manifest: PackageManifest,
     old_metadata: InstallMetadata,
     staged: tempfile::TempDir,
+    managed_service: bool,
 ) -> io::Result<()> {
     let installed_executable = bin_root.join("hostlink-agent.exe");
-    ensure_windows_offline_caller(root)?;
+    if managed_service {
+        if same_windows_file(&std::env::current_exe()?, &installed_executable)? {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "managed update must be invoked by a separate updater executable",
+            ));
+        }
+    } else {
+        ensure_windows_offline_caller(root)?;
+    }
 
     let updates = root.join(".updates");
     create_private_directory(&updates)?;
@@ -1615,10 +1709,20 @@ fn publish_windows(
     })();
     prepare?;
 
+    // The durable journal and both verified backups precede service quiescence. A crash from
+    // this point onward therefore leaves enough exact file evidence for conservative recovery.
+    let maintenance = if managed_service {
+        Some(crate::service::begin_maintenance(root)?)
+    } else {
+        None
+    };
+
     let mut journal = journal;
     let publish = (|| {
-        crate::service::ensure_update_unregistered(root)?;
-        ensure_windows_offline_caller(root)?;
+        if maintenance.is_none() {
+            crate::service::ensure_update_unregistered(root)?;
+            ensure_windows_offline_caller(root)?;
+        }
         journal.advance(crate::update_handoff::UpdatePhase::BackedUp)?;
         crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
         replace_file(&installed_executable, &staged_executable, None)?;
@@ -1656,10 +1760,31 @@ fn publish_windows(
         validate_installed(bin_root, &installed, &request.target)?;
         journal.advance(crate::update_handoff::UpdatePhase::Verified)?;
         crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
+        if let Some(receipt) = maintenance {
+            crate::service::update_maintenance_executable(
+                receipt,
+                &journal.identity.new_executable_sha256,
+            )?;
+            crate::service::start_maintenance_candidate(
+                receipt,
+                &journal.identity.new_executable_sha256,
+            )?;
+            journal.advance(crate::update_handoff::UpdatePhase::Restarted)?;
+            crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
+            crate::service::register_maintenance(receipt)?;
+        }
         cleanup_windows_transaction(&journal_path, &transaction_dir, &journal.identity)
     })();
 
     if let Err(error) = publish {
+        if let Some(receipt) = maintenance.as_ref() {
+            if let Err(stop_error) = crate::service::stop_for_maintenance_rollback(receipt) {
+                return Err(io::Error::other(format!(
+                    "Windows Agent update failed ({error}); candidate stop could not be proven ({stop_error}); journal and transaction at {} preserved",
+                    transaction_dir.display()
+                )));
+            }
+        }
         if let Err(rollback_error) = rollback_windows(
             &installed_executable,
             metadata_path,
@@ -1672,6 +1797,17 @@ fn publish_windows(
                 "Windows Agent publication failed ({error}); rollback failed ({rollback_error}); preserve transaction at {}",
                 transaction_dir.display()
             )));
+        }
+        if let Some(receipt) = maintenance.as_ref() {
+            if let Err(restore_error) = crate::service::restore_maintenance(receipt, |root| {
+                let old_metadata = read_install_metadata(&root.join(INSTALL_METADATA))?;
+                validate_installed(&root.join("bin"), &old_metadata, &request.target)
+            }) {
+                return Err(io::Error::other(format!(
+                    "Windows Agent update failed ({error}); old files are restored but owner registration recovery failed ({restore_error}); journal preserved at {}",
+                    journal_path.display()
+                )));
+            }
         }
         if let Err(cleanup_error) =
             cleanup_windows_transaction(&journal_path, &transaction_dir, &journal.identity)
@@ -2059,10 +2195,23 @@ mod windows_recovery_tests {
                     .advance(UpdatePhase::BackedUp)
                     .expect("backed up phase");
             }
-            if phase == UpdatePhase::Published {
+            if matches!(
+                phase,
+                UpdatePhase::Published | UpdatePhase::Verified | UpdatePhase::Restarted
+            ) {
                 journal
                     .advance(UpdatePhase::Published)
                     .expect("published phase");
+            }
+            if matches!(phase, UpdatePhase::Verified | UpdatePhase::Restarted) {
+                journal
+                    .advance(UpdatePhase::Verified)
+                    .expect("verified phase");
+            }
+            if phase == UpdatePhase::Restarted {
+                journal
+                    .advance(UpdatePhase::Restarted)
+                    .expect("restarted phase");
             }
             for (name, bytes) in [
                 ("staged-agent.exe", new_exe.as_slice()),
@@ -2114,7 +2263,7 @@ mod windows_recovery_tests {
     #[test]
     fn recovery_restores_backed_up_transaction_and_is_idempotent() {
         let fixture = Fixture::new(UpdatePhase::BackedUp, true, false);
-        recover_windows_handoff(&fixture.root).expect("restore old installation");
+        recover_windows_handoff(&fixture.root, false, false).expect("restore old installation");
         assert_eq!(
             fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
             fixture.old_exe
@@ -2125,13 +2274,14 @@ mod windows_recovery_tests {
         );
         assert!(!fixture.journal.exists());
         assert!(!fixture.transaction.exists());
-        recover_windows_handoff(&fixture.root).expect("second recovery is a no-op");
+        recover_windows_handoff(&fixture.root, false, false).expect("second recovery is a no-op");
     }
 
     #[test]
     fn recovery_commits_published_complete_manifest() {
         let fixture = Fixture::new(UpdatePhase::Published, true, true);
-        recover_windows_handoff(&fixture.root).expect("validate and commit new install");
+        recover_windows_handoff(&fixture.root, false, false)
+            .expect("validate and commit new install");
         assert_eq!(
             fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
             fixture.new_exe
@@ -2145,12 +2295,46 @@ mod windows_recovery_tests {
     }
 
     #[test]
+    fn managed_interrupted_verified_phase_restores_old_inventory() {
+        let fixture = Fixture::new(UpdatePhase::Verified, true, true);
+        recover_windows_handoff(&fixture.root, true, false)
+            .expect("managed crash before durable health proof rolls back");
+        assert_eq!(
+            fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
+            fixture.old_exe
+        );
+        assert_eq!(
+            fs::read(fixture.root.join(INSTALL_METADATA)).unwrap(),
+            fixture.old_metadata
+        );
+        assert!(!fixture.journal.exists());
+    }
+
+    #[test]
+    fn restarted_phase_commits_only_with_fresh_health_evidence() {
+        let fixture = Fixture::new(UpdatePhase::Restarted, true, true);
+        assert!(recover_windows_handoff(&fixture.root, false, false).is_err());
+        assert!(fixture.journal.exists());
+        recover_windows_handoff(&fixture.root, false, true)
+            .expect("fresh owner health evidence permits commit");
+        assert_eq!(
+            fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
+            fixture.new_exe
+        );
+        assert_eq!(
+            fs::read(fixture.root.join(INSTALL_METADATA)).unwrap(),
+            fixture.new_metadata
+        );
+        assert!(!fixture.journal.exists());
+    }
+
+    #[test]
     fn recovery_refuses_unknown_child_before_mutating_journal_or_install() {
         let fixture = Fixture::new(UpdatePhase::BackedUp, true, false);
         let exe = fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap();
         write_private_synced(&fixture.transaction.join("unexpected.bin"), b"unknown")
             .expect("extra test artifact");
-        assert!(recover_windows_handoff(&fixture.root).is_err());
+        assert!(recover_windows_handoff(&fixture.root, false, false).is_err());
         assert!(fixture.journal.exists());
         assert_eq!(
             fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
@@ -2169,7 +2353,7 @@ mod windows_recovery_tests {
         )
         .expect("tampered test backup");
         let exe = fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap();
-        assert!(recover_windows_handoff(&fixture.root).is_err());
+        assert!(recover_windows_handoff(&fixture.root, false, false).is_err());
         assert!(fixture.journal.exists());
         assert_eq!(
             fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
@@ -2185,7 +2369,7 @@ mod windows_recovery_tests {
         value["transaction_sha256"] = serde_json::Value::String("d".repeat(64));
         fs::write(&fixture.journal, serde_json::to_vec(&value).unwrap()).unwrap();
         let exe = fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap();
-        assert!(recover_windows_handoff(&fixture.root).is_err());
+        assert!(recover_windows_handoff(&fixture.root, false, false).is_err());
         assert!(fixture.journal.exists());
         assert_eq!(
             fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
