@@ -63,6 +63,63 @@ fn package(root: &Path, version: &str, executable: &[u8]) -> (PathBuf, String) {
     (path, digest)
 }
 
+fn duplicate_first_central_record(path: &Path, copies: usize, declared_count: u16) -> String {
+    let mut bytes = fs::read(path).expect("read package bytes");
+    let eocd = bytes.len().checked_sub(22).expect("EOCD in fixture");
+    let central_offset = usize::try_from(u32::from_le_bytes(
+        bytes[eocd + 16..eocd + 20]
+            .try_into()
+            .expect("central directory offset"),
+    ))
+    .expect("central directory offset fits usize");
+    let name_size = u16::from_le_bytes(
+        bytes[central_offset + 28..central_offset + 30]
+            .try_into()
+            .expect("central name length"),
+    );
+    let name_size = usize::from(name_size);
+    let extra_size = u16::from_le_bytes(
+        bytes[central_offset + 30..central_offset + 32]
+            .try_into()
+            .expect("central extra length"),
+    );
+    let extra_size = usize::from(extra_size);
+    let comment_size = u16::from_le_bytes(
+        bytes[central_offset + 32..central_offset + 34]
+            .try_into()
+            .expect("central comment length"),
+    );
+    let comment_size = usize::from(comment_size);
+    let first_record_size = 46 + name_size + extra_size + comment_size;
+    let record = bytes[central_offset..central_offset + first_record_size].to_vec();
+    let insertion = central_offset + first_record_size;
+    for _ in 0..copies {
+        bytes.splice(insertion..insertion, record.iter().copied());
+    }
+    let eocd = bytes
+        .len()
+        .checked_sub(22)
+        .expect("EOCD in mutated fixture");
+    bytes[eocd + 8..eocd + 10].copy_from_slice(&declared_count.to_le_bytes());
+    bytes[eocd + 10..eocd + 12].copy_from_slice(&declared_count.to_le_bytes());
+    let old_size = u32::from_le_bytes(
+        bytes[eocd + 12..eocd + 16]
+            .try_into()
+            .expect("central directory size"),
+    );
+    let added_size = record
+        .len()
+        .checked_mul(copies)
+        .and_then(|size| u32::try_from(size).ok())
+        .expect("mutated central directory size fits u32");
+    let new_size = old_size
+        .checked_add(added_size)
+        .expect("mutated central directory size does not overflow");
+    bytes[eocd + 12..eocd + 16].copy_from_slice(&new_size.to_le_bytes());
+    fs::write(path, &bytes).expect("write package with duplicated central record");
+    format!("{:x}", Sha256::digest(&bytes))
+}
+
 fn malicious_archive(root: &Path, member: &str, symlink_member: bool) -> (PathBuf, String) {
     let executable = b"new exact Agent binary";
     let manifest = json!({
@@ -373,6 +430,65 @@ fn fresh_package_verifier_extracts_exact_manifest_and_installed_metadata() {
     finalize_fresh_install(&root).expect("finalize exact package install");
     assert!(!root.join("enrollment.pending").exists());
     assert!(verify_fresh_package(&archive, &archive_sha256, TARGET, version, &output).is_err());
+}
+
+#[test]
+fn fresh_package_verifier_rejects_duplicate_central_record_before_output() {
+    let (temp, _root) = install_root();
+    let sidecar = fs::read(env!("CARGO_BIN_EXE_hostlink-agent")).expect("read Agent sidecar");
+    let version = env!("CARGO_PKG_VERSION");
+    let (archive, _) = package(temp.path(), version, &sidecar);
+    let archive_sha256 = duplicate_first_central_record(&archive, 1, 3);
+    let output = temp.path().join("duplicate-central-stage");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("private output parent");
+    }
+
+    assert!(verify_fresh_package(&archive, &archive_sha256, TARGET, version, &output).is_err());
+    assert!(!output.exists());
+}
+
+#[test]
+fn fresh_package_verifier_rejects_hidden_duplicate_after_declared_records() {
+    let (temp, _root) = install_root();
+    let sidecar = fs::read(env!("CARGO_BIN_EXE_hostlink-agent")).expect("read Agent sidecar");
+    let version = env!("CARGO_PKG_VERSION");
+    let (archive, _) = package(temp.path(), version, &sidecar);
+    // Keep the canonical count of two while the central directory physically contains three.
+    let archive_sha256 = duplicate_first_central_record(&archive, 1, 2);
+    let output = temp.path().join("hidden-duplicate-central-stage");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("private output parent");
+    }
+
+    assert!(verify_fresh_package(&archive, &archive_sha256, TARGET, version, &output).is_err());
+    assert!(!output.exists());
+}
+
+#[test]
+fn fresh_package_verifier_rejects_forged_central_record_count_before_output() {
+    let (temp, _root) = install_root();
+    let sidecar = fs::read(env!("CARGO_BIN_EXE_hostlink-agent")).expect("read Agent sidecar");
+    let version = env!("CARGO_PKG_VERSION");
+    let (archive, _) = package(temp.path(), version, &sidecar);
+    // The fixture has two records; add four duplicate physical records but declare only five.
+    let archive_sha256 = duplicate_first_central_record(&archive, 4, 5);
+    let output = temp.path().join("forged-central-count-stage");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("private output parent");
+    }
+
+    assert!(verify_fresh_package(&archive, &archive_sha256, TARGET, version, &output).is_err());
+    assert!(!output.exists());
 }
 
 #[test]
