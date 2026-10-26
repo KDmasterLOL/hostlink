@@ -627,6 +627,11 @@ pub fn verify_fresh_package(
     )?;
     receipt_file.sync_all()?;
     set_staged_file_permissions(&receipt_path, "bootstrap-receipt.json")?;
+    // Windows refuses renaming a directory containing still-open file handles
+    // (ERROR_ACCESS_DENIED), even after each file's sync_all has succeeded.
+    // Publish only after closing both verified metadata and receipt files.
+    drop(receipt_file);
+    drop(metadata_file);
     // Windows std::fs::File::open cannot open a directory for sync_all.
     // The member files and receipt have already been individually flushed;
     // the directory durability barrier is available on Unix only.
