@@ -842,7 +842,7 @@ mod windows {
     const MAX_MARKER: usize = 16 * 1024;
     const MAX_PIPE_MESSAGE: usize = 1024;
 
-    #[derive(Debug, serde::Serialize, serde::Deserialize)]
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct InstallRecord {
         format: u32,
@@ -857,6 +857,19 @@ mod windows {
         pipe_name: String,
         control_token: String,
         run_value: String,
+        #[serde(default)]
+        maintenance: bool,
+        #[serde(default)]
+        maintenance_previous_sha256: Option<String>,
+    }
+
+    /// Opaque, in-process evidence captured before the login registration is disabled.
+    /// The durable marker retains the prior executable digest for crash-safe rollback.
+    #[must_use = "retain the receipt through publication, registration, and any rollback"]
+    pub(crate) struct MaintenanceReceipt {
+        old_marker: Vec<u8>,
+        old_record: InstallRecord,
+        run_command: String,
     }
 
     pub fn install(root: &Path, config: &Path) -> io::Result<()> {
@@ -915,6 +928,7 @@ mod windows {
         ensure_user_scope()?;
         let record = owned_record(root)?;
         verify_record(&record)?;
+        refuse_maintenance(&record)?;
         crate::update::ensure_no_pending_windows_handoff(&record.root)?;
         verify_registration(&record)?;
         match pipe_request(&record, "STATUS") {
@@ -993,9 +1007,249 @@ mod windows {
         }
     }
 
+    /// Enter maintenance while the caller holds jobs::acquire_update_lock(root).
+    /// No Run value or marker is changed until owner, image, registration, and jobs verify.
+    pub(crate) fn begin_maintenance(root: &Path) -> io::Result<MaintenanceReceipt> {
+        ensure_user_scope()?;
+        let mut record = owned_record(root)?;
+        verify_record(&record)?;
+        verify_registration(&record)?;
+        if record.maintenance || record.maintenance_previous_sha256.is_some() {
+            return Err(invalid("service maintenance is already in progress"));
+        }
+        refuse_active_jobs(&record)?;
+
+        let old_marker = read_marker_bytes(&record.root)?;
+        let run_command = render_command(&record);
+        let pid = match pipe_request(&record, "STATUS")? {
+            reply => running_pid(&reply).ok_or_else(|| {
+                invalid("maintenance requires an authenticated running Agent process")
+            })?,
+        };
+        let process = open_owned_process(pid, &record)?;
+
+        if read_marker_bytes(&record.root)? != old_marker
+            || registry_value(&record.run_value)?.as_deref() != Some(run_command.as_str())
+        {
+            return Err(invalid(
+                "service ownership state changed before maintenance entry",
+            ));
+        }
+        refuse_active_jobs(&record)?;
+
+        let old_record = record.clone();
+        record.maintenance = true;
+        record.maintenance_previous_sha256 = Some(record.executable_sha256.clone());
+        replace_record_atomically(&record)?;
+        if let Err(error) = delete_registry_value(&record.run_value) {
+            let rollback = replace_marker_bytes(&record.root, &old_marker);
+            let registration = match registry_value(&record.run_value) {
+                Ok(None) => set_registry_value(&record.run_value, &run_command),
+                Ok(Some(value)) if value == run_command => Ok(()),
+                Ok(Some(_)) => Err(invalid(
+                    "current-user login value changed during maintenance entry",
+                )),
+                Err(error) => Err(error),
+            };
+            return Err(io::Error::other(format!(
+                "cannot disable the verified current-user login value: {error}; marker rollback: {rollback:?}; registration rollback: {registration:?}"
+            )));
+        }
+        if registry_value(&record.run_value)?.is_some() {
+            return Err(invalid(
+                "current-user login value remained after maintenance disable",
+            ));
+        }
+
+        let reply = pipe_request(&record, "STOP")?;
+        if reply != format!("STOPPING {pid}") {
+            return Err(invalid("authenticated Agent refused maintenance stop"));
+        }
+        // SAFETY: process.handle is a verified live handle opened with SYNCHRONIZE.
+        match unsafe { WaitForSingleObject(process.handle, 10_000) } {
+            WAIT_OBJECT_0 => {
+                refuse_active_jobs(&record)?;
+                Ok(MaintenanceReceipt {
+                    old_marker,
+                    old_record,
+                    run_command,
+                })
+            }
+            WAIT_TIMEOUT => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Agent did not stop within 10 seconds; maintenance remains disabled and no process was force-terminated",
+            )),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    /// Change only the owner marker's executable digest after the updater verified the file.
+    pub(crate) fn update_maintenance_executable(
+        receipt: &MaintenanceReceipt,
+        expected_sha256: &str,
+    ) -> io::Result<()> {
+        validate_sha256(expected_sha256)?;
+        let mut record = maintenance_record(receipt)?;
+        if registry_value(&record.run_value)?.is_some() {
+            return Err(invalid(
+                "login registration must remain disabled while the executable is replaced",
+            ));
+        }
+        if sha256_file(&record.executable)? != expected_sha256 {
+            return Err(invalid(
+                "replacement executable digest does not match verified bytes",
+            ));
+        }
+        record.executable_sha256 = expected_sha256.to_owned();
+        replace_record_atomically(&record)?;
+        verify_record(&record)
+    }
+
+    /// Re-enable only the source-derived Run value after the marker matches the installed EXE.
+    /// This does not launch the Agent or assert health.
+    pub(crate) fn register_maintenance(receipt: &MaintenanceReceipt) -> io::Result<()> {
+        let mut record = maintenance_record(receipt)?;
+        if sha256_file(&record.executable)? != record.executable_sha256 {
+            return Err(invalid(
+                "installed executable does not match maintenance marker",
+            ));
+        }
+        match registry_value(&record.run_value)? {
+            None => set_registry_value(&record.run_value, &receipt.run_command)?,
+            Some(value) if value == receipt.run_command => {}
+            Some(_) => {
+                return Err(invalid(
+                    "current-user login value changed during maintenance",
+                ));
+            }
+        }
+        record.maintenance = false;
+        record.maintenance_previous_sha256 = None;
+        replace_record_atomically(&record)?;
+        verify_record(&record)?;
+        verify_registration(&record)
+    }
+
+    /// Restore old ownership bytes and login registration only after the coordinator proves
+    /// the complete old file inventory from its validated transaction journal.
+    pub(crate) fn restore_maintenance(
+        receipt: &MaintenanceReceipt,
+        verify_old_inventory: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let record = maintenance_record(receipt)?;
+        if sha256_file(&record.executable)? != receipt.old_record.executable_sha256 {
+            return Err(invalid(
+                "old executable inventory is not restored; maintenance rollback refused",
+            ));
+        }
+        verify_old_inventory(&record.root)?;
+        restore_old_marker_and_registration(receipt)
+    }
+
+    /// Re-enter the same maintenance receipt after a candidate restart failed, before
+    /// the updater restores the old file inventory and calls restore_maintenance.
+    pub(crate) fn stop_for_maintenance_rollback(receipt: &MaintenanceReceipt) -> io::Result<()> {
+        let mut record = owned_record(&receipt.old_record.root)?;
+        if record.maintenance {
+            let _ = maintenance_record(receipt)?;
+            return Ok(());
+        }
+        verify_record(&record)?;
+        verify_registration(&record)?;
+        if record.owner_sid != receipt.old_record.owner_sid
+            || record.root != receipt.old_record.root
+            || record.executable != receipt.old_record.executable
+            || record.pipe_name != receipt.old_record.pipe_name
+            || record.control_token != receipt.old_record.control_token
+            || record.run_value != receipt.old_record.run_value
+        {
+            return Err(invalid(
+                "rollback service identity differs from the maintenance receipt",
+            ));
+        }
+        refuse_active_jobs(&record)?;
+        let pid = running_pid(&pipe_request(&record, "STATUS")?)
+            .ok_or_else(|| invalid("rollback requires authenticated running Agent status"))?;
+        let process = open_owned_process(pid, &record)?;
+        record.maintenance = true;
+        record.maintenance_previous_sha256 = Some(receipt.old_record.executable_sha256.clone());
+        replace_record_atomically(&record)?;
+        if let Err(error) = delete_registry_value(&record.run_value) {
+            return Err(io::Error::other(format!(
+                "cannot disable login startup for rollback: {error}"
+            )));
+        }
+        match registry_value(&record.run_value)? {
+            None => {}
+            _ => return Err(invalid("rollback login startup remained registered")),
+        }
+        if pipe_request(&record, "STOP")? != format!("STOPPING {pid}") {
+            return Err(invalid("authenticated Agent refused rollback stop"));
+        }
+        match unsafe { WaitForSingleObject(process.handle, 10_000) } {
+            WAIT_OBJECT_0 => refuse_active_jobs(&record),
+            WAIT_TIMEOUT => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "candidate Agent did not stop for rollback; no process was force-terminated",
+            )),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    /// Restore a durable maintenance marker only after the coordinator verifies the stopped
+    /// process and complete old file inventory from its validated update journal. The callback
+    /// must not mutate.
+    pub(crate) fn recover_maintenance_after_inventory(
+        root: &Path,
+        verify_old_inventory: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<()> {
+        ensure_user_scope()?;
+        let mut record = owned_record(root)?;
+        let old_sha256 = match (
+            record.maintenance,
+            record.maintenance_previous_sha256.clone(),
+        ) {
+            (true, Some(digest)) => digest,
+            (false, None) => record.executable_sha256.clone(),
+            _ => return Err(invalid("service maintenance marker is inconsistent")),
+        };
+        validate_sha256(&old_sha256)?;
+        if sha256_file(&record.executable)? != old_sha256 {
+            return Err(invalid(
+                "old executable digest does not match maintenance receipt",
+            ));
+        }
+        match registry_value(&record.run_value)? {
+            None => {}
+            Some(value) if value == render_command(&record) => {}
+            Some(_) => {
+                return Err(invalid(
+                    "current-user login value is occupied by another command",
+                ));
+            }
+        }
+        validate_record_paths(&record)?;
+        verify_old_inventory(&record.root)?;
+
+        if record.maintenance {
+            record.executable_sha256 = old_sha256;
+            record.maintenance = false;
+            record.maintenance_previous_sha256 = None;
+            replace_record_atomically(&record)?;
+        }
+        match registry_value(&record.run_value)? {
+            None => set_registry_value(&record.run_value, &render_command(&record))?,
+            Some(value) if value == render_command(&record) => {}
+            Some(_) => return Err(invalid("current-user login value changed during recovery")),
+        }
+        verify_record(&record)?;
+        verify_registration(&record)
+    }
+
     pub fn remove(root: &Path) -> io::Result<()> {
         ensure_user_scope()?;
         let record = owned_record(root)?;
+        refuse_maintenance(&record)?;
         verify_record(&record)?;
         crate::update::ensure_no_pending_windows_handoff(&record.root)?;
         verify_registration(&record)?;
@@ -1097,6 +1351,7 @@ mod windows {
             .and_then(Path::parent)
             .ok_or_else(|| invalid("managed Agent config is outside its install root"))?;
         let record = owned_record(root)?;
+        refuse_maintenance(&record)?;
         verify_record(&record)?;
         crate::update::ensure_no_pending_windows_handoff(&record.root)?;
         verify_registration(&record)?;
@@ -1255,6 +1510,8 @@ mod windows {
             pipe_name,
             control_token: token,
             run_value: String::new(),
+            maintenance: false,
+            maintenance_previous_sha256: None,
         };
         record.startup_script_sha256 =
             format!("{:x}", Sha256::digest(render_script(&record).as_bytes()));
@@ -1306,11 +1563,16 @@ mod windows {
             || !record.pipe_name.starts_with(r"\\.\pipe\hostlink-agent-")
             || record.control_token.len() != 64
             || !record.control_token.bytes().all(|b| b.is_ascii_hexdigit())
+            || record.maintenance != record.maintenance_previous_sha256.is_some()
         {
             return Err(invalid(
                 "service marker paths or current-user identity are inconsistent",
             ));
         }
+        if let Some(previous) = &record.maintenance_previous_sha256 {
+            validate_sha256(previous)?;
+        }
+        validate_sha256(&record.executable_sha256)?;
         if canonical_regular(&record.executable)? != record.executable
             || canonical_regular(&record.config)? != record.config
         {
@@ -1584,6 +1846,177 @@ mod windows {
             ))
         }
     }
+
+    fn refuse_maintenance(record: &InstallRecord) -> io::Result<()> {
+        if record.maintenance || record.maintenance_previous_sha256.is_some() {
+            Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "HostLink Agent is held in service maintenance; managed startup is disabled",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn read_marker_bytes(root: &Path) -> io::Result<Vec<u8>> {
+        let path = root.join(MARKER);
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || is_reparse(&metadata) || metadata.len() > MAX_MARKER as u64 {
+            return Err(invalid("service marker is unsafe or exceeds size limit"));
+        }
+        verify_private_acl(&path)?;
+        fs::read(path)
+    }
+
+    fn maintenance_record(receipt: &MaintenanceReceipt) -> io::Result<InstallRecord> {
+        let record = owned_record(&receipt.old_record.root)?;
+        let old = &receipt.old_record;
+        if !record.maintenance
+            || record.maintenance_previous_sha256.as_deref() != Some(old.executable_sha256.as_str())
+            || record.owner_sid != old.owner_sid
+            || record.root != old.root
+            || record.executable != old.executable
+            || record.config != old.config
+            || record.pipe_name != old.pipe_name
+            || record.control_token != old.control_token
+            || record.run_value != old.run_value
+            || render_command(&record) != receipt.run_command
+        {
+            return Err(invalid(
+                "service maintenance receipt no longer matches its owner marker",
+            ));
+        }
+        match registry_value(&record.run_value)? {
+            None => {}
+            Some(value) if value == receipt.run_command => {}
+            Some(_) => {
+                return Err(invalid(
+                    "current-user login value was occupied during maintenance",
+                ));
+            }
+        }
+        validate_record_paths(&record)?;
+        Ok(record)
+    }
+
+    fn restore_old_marker_and_registration(receipt: &MaintenanceReceipt) -> io::Result<()> {
+        let record = maintenance_record(receipt)?;
+        if sha256_file(&record.executable)? != receipt.old_record.executable_sha256 {
+            return Err(invalid(
+                "old executable inventory is not restored; marker rollback refused",
+            ));
+        }
+        replace_marker_bytes(&record.root, &receipt.old_marker)?;
+        match registry_value(&record.run_value)? {
+            None => set_registry_value(&record.run_value, &receipt.run_command)?,
+            Some(value) if value == receipt.run_command => {}
+            Some(_) => {
+                return Err(invalid(
+                    "current-user login value is occupied by another command",
+                ));
+            }
+        }
+        verify_record(&receipt.old_record)?;
+        verify_registration(&receipt.old_record)
+    }
+
+    fn replace_record_atomically(record: &InstallRecord) -> io::Result<()> {
+        let bytes = serde_json::to_vec(record).map_err(io::Error::other)?;
+        replace_marker_bytes(&record.root, &bytes)?;
+        let actual = owned_record(&record.root)?;
+        if actual.maintenance != record.maintenance
+            || actual.maintenance_previous_sha256 != record.maintenance_previous_sha256
+            || actual.executable_sha256 != record.executable_sha256
+        {
+            return Err(invalid(
+                "service marker atomic readback did not match requested state",
+            ));
+        }
+        Ok(())
+    }
+
+    fn replace_marker_bytes(root: &Path, bytes: &[u8]) -> io::Result<()> {
+        if bytes.len() > MAX_MARKER {
+            return Err(invalid("service marker exceeds size limit"));
+        }
+        let marker = root.join(MARKER);
+        let temporary = root.join(format!(".hostlink-service-marker-{}.tmp", random_token()));
+        write_private(&temporary, bytes)?;
+        let result = replace_file(&marker, &temporary);
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result?;
+        let metadata = fs::symlink_metadata(&marker)?;
+        if !metadata.is_file() || is_reparse(&metadata) {
+            return Err(invalid("replaced service marker is not a regular file"));
+        }
+        verify_private_acl(&marker)?;
+        if fs::read(&marker)? != bytes {
+            return Err(invalid("service marker replacement readback failed"));
+        }
+        Ok(())
+    }
+
+    fn replace_file(target: &Path, replacement: &Path) -> io::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+        let target = target
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let replacement = replacement
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        // SAFETY: paths are NUL-terminated and zero flags require ACL preservation to succeed.
+        if unsafe {
+            ReplaceFileW(
+                target.as_ptr(),
+                replacement.as_ptr(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        } == 0
+        {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn validate_record_paths(record: &InstallRecord) -> io::Result<()> {
+        if record.owner_sid != current_sid()?
+            || record.root != verify_install_root(&record.root)?
+            || record.run_value != run_value_name(&record.root)
+            || record.executable != agent_executable(&record.root)
+            || record.config != record.root.join("state/agent.json")
+            || record.launcher_executable != system_wscript()?
+            || record.startup_script != record.root.join(".hostlink-agent-start.vbs")
+        {
+            return Err(invalid("service maintenance owner paths are inconsistent"));
+        }
+        verify_enrollment_root(&record.root)?;
+        canonical_regular(&record.config)?;
+        canonical_regular(&record.startup_script)?;
+        Ok(())
+    }
+
+    fn validate_sha256(value: &str) -> io::Result<()> {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(invalid("executable digest must be lowercase SHA-256"));
+        }
+        Ok(())
+    }
+
     fn active_jobs(record: &InstallRecord) -> io::Result<Vec<String>> {
         jobs::active_ids(&load_config(&record.config)?.jobs_root)
     }
@@ -2307,10 +2740,64 @@ mod windows {
     fn invalid(message: &'static str) -> io::Error {
         io::Error::new(io::ErrorKind::InvalidInput, message)
     }
+
+    #[cfg(test)]
+    mod maintenance_tests {
+        use super::*;
+
+        fn record_fields() -> serde_json::Value {
+            serde_json::json!({
+                "format": 1,
+                "owner_sid": "S-1-5-21-1000",
+                "root": r"C:\Users\fixture\AppData\Local\HostLink\Agent",
+                "executable": r"C:\Users\fixture\AppData\Local\HostLink\Agent\bin\hostlink-agent.exe",
+                "executable_sha256": "a".repeat(64),
+                "config": r"C:\Users\fixture\AppData\Local\HostLink\Agent\state\agent.json",
+                "launcher_executable": r"C:\Windows\System32\wscript.exe",
+                "startup_script": r"C:\Users\fixture\AppData\Local\HostLink\Agent\.hostlink-agent-start.vbs",
+                "startup_script_sha256": "b".repeat(64),
+                "pipe_name": r"\\.\pipe\hostlink-agent-fixture",
+                "control_token": "c".repeat(64),
+                "run_value": "hostlink-agent-fixture"
+            })
+        }
+
+        #[test]
+        fn legacy_marker_defaults_to_normal_startup_and_maintenance_blocks_it() {
+            let legacy: InstallRecord = serde_json::from_value(record_fields()).unwrap();
+            assert!(!legacy.maintenance);
+            assert!(legacy.maintenance_previous_sha256.is_none());
+            assert!(refuse_maintenance(&legacy).is_ok());
+
+            let mut pending = record_fields();
+            pending["maintenance"] = serde_json::json!(true);
+            pending["maintenance_previous_sha256"] = serde_json::json!("d".repeat(64));
+            let pending: InstallRecord = serde_json::from_value(pending).unwrap();
+            assert_eq!(
+                refuse_maintenance(&pending).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+
+        #[test]
+        fn executable_digest_input_is_exact_lowercase_sha256() {
+            assert!(validate_sha256(&"0".repeat(64)).is_ok());
+            assert!(validate_sha256(&"A".repeat(64)).is_err());
+            assert!(validate_sha256("short").is_err());
+        }
+    }
 }
 
 #[cfg(windows)]
 pub use windows::{install, remove, start, status, stop};
+
+#[cfg(windows)]
+#[allow(dead_code)] // Consumed by the separately owned Windows updater integration.
+pub(crate) use windows::{
+    MaintenanceReceipt, begin_maintenance, recover_maintenance_after_inventory,
+    register_maintenance, restore_maintenance, stop_for_maintenance_rollback,
+    update_maintenance_executable,
+};
 
 #[cfg(not(any(target_os = "linux", windows)))]
 fn unsupported() -> io::Error {
