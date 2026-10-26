@@ -11,10 +11,27 @@ identity before opening a network connection. It connects to one route at a
 time and requests only `127.0.0.1:<assigned remote_port>`. A refused,
 disconnected, or timed-out connection advances to the next approved endpoint.
 After the last endpoint it returns to the primary. Retry delays grow from one
-second to a sixty-second ceiling. Shutdown interrupts both an attempt and its
-backoff. Host-key mismatch, rejected identity, rejected reverse-forward
-request, malformed pin, and configuration errors stop immediately without
-trying another edge.
+second to a sixty-second ceiling, with independently sampled 0–25% jitter in
+millisecond resolution and a hard sixty-second maximum. At the cap it uses a
+45–60 second randomized window rather than identical 60-second intervals
+across agents. A session resets the
+next delay to the initial one-second interval only after at least sixty seconds
+of authenticated, accepted reverse forwarding; short sessions and failures
+before forwarding do not reset it. Shutdown interrupts both an attempt and its
+backoff, and a connected session closes its bounded forward workers before
+returning.
+
+The Agent writes one bounded start/end diagnostic event per attempt to stderr.
+Events contain the one-based approved route index, route count, attempt number,
+sanitized phase and error category, whether forwarding was accepted, established
+uptime, and the next delay for transient failures. They never include route
+addresses, usernames, key material, fingerprints, file paths, or raw russh
+errors. These events report transport reachability only; Hub inventory status
+does not imply an SSH connection is currently reachable.
+
+Host-key mismatch, rejected identity, rejected reverse-forward request,
+malformed pin, and configuration errors stop immediately without trying
+another edge.
 
 All edges for one Agent must authorize the same Ed25519 reverse identity and
 the same assigned remote port. Each edge needs its own exact pinned SSH host
