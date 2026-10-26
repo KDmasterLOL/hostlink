@@ -301,6 +301,11 @@ impl russh_sftp::server::Handler for SftpSession {
             .await
             .map_err(status_from_io)?;
         f.file.write_all(&data).await.map_err(status_from_io)?;
+        // Tokio's filesystem writes may still be running on a blocking thread
+        // after write_all returns. SFTP WRITE success must mean the bytes are
+        // visible to a separately opened handle, including for pipelined
+        // out-of-order packet offsets. This is completion, not fsync durability.
+        f.file.flush().await.map_err(status_from_io)?;
         if let Some(ranges) = merged_ranges {
             f.write_ranges = ranges;
         }
