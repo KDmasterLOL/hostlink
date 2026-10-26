@@ -163,6 +163,8 @@ fn private_file(path: &std::path::Path, key: &PrivateKey) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .expect("private key mode");
     }
+    #[cfg(windows)]
+    protect_windows_fixture(path, false);
 }
 fn public_file(path: &std::path::Path, key: &PublicKey) {
     std::fs::write(path, key.to_openssh().expect("serialize public pin"))
@@ -173,11 +175,40 @@ fn public_file(path: &std::path::Path, key: &PublicKey) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .expect("private pin mode");
     }
+    #[cfg(windows)]
+    protect_windows_fixture(path, false);
+}
+
+#[cfg(windows)]
+fn protect_windows_fixture(path: &std::path::Path, directory: bool) {
+    use windows_permissions::constants::{SeObjectType, SecurityInformation};
+    use windows_permissions::wrappers::{ConvertSidToStringSid, SetNamedSecurityInfo};
+    use windows_permissions::{LocalBox, SecurityDescriptor};
+
+    let owner = windows_permissions::utilities::current_process_sid().expect("current user SID");
+    let sid = ConvertSidToStringSid(&owner).expect("format current SID");
+    let inheritance = if directory { "OICI" } else { "" };
+    let descriptor: LocalBox<SecurityDescriptor> =
+        format!("D:P(A;{inheritance};FA;;;{})", sid.to_string_lossy())
+            .parse()
+            .expect("construct owner-only test fixture ACL");
+    SetNamedSecurityInfo(
+        path.as_os_str(),
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Owner | SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        Some(owner.as_ref()),
+        None,
+        descriptor.dacl(),
+        None,
+    )
+    .expect("protect disposable gateway fixture path");
 }
 
 #[tokio::test]
 async fn reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins() {
     let root = tempfile::tempdir().expect("disposable fixture directory");
+    #[cfg(windows)]
+    protect_windows_fixture(root.path(), true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -241,6 +272,8 @@ async fn reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins() {
         format!("{} test\n", controller.public_key().to_openssh().unwrap()),
     )
     .expect("authorized controller");
+    #[cfg(windows)]
+    protect_windows_fixture(&authorized, false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -249,6 +282,8 @@ async fn reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins() {
     }
     let jobs = root.path().join("jobs");
     std::fs::create_dir(&jobs).expect("jobs root");
+    #[cfg(windows)]
+    protect_windows_fixture(&jobs, true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -292,6 +327,8 @@ async fn reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins() {
     // are tested separately by the Hub Client tests.
     let projection = root.path().join("managed-gateway");
     std::fs::create_dir(&projection).expect("managed gateway projection root");
+    #[cfg(windows)]
+    protect_windows_fixture(&projection, true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
