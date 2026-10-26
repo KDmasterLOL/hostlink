@@ -821,7 +821,7 @@ pub fn status(_: &Path) -> io::Result<ServiceStatus> {
     Err(unsupported())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     #[test]
