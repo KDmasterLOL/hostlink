@@ -427,7 +427,7 @@ def create_tls(root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.
     private_dir(tls)
     ca_key, ca_cert = tls / "ca.key", tls / "ca.pem"
     leaf_key, leaf_cert, csr, ext = tls / "server.key", tls / "server.pem", tls / "server.csr", tls / "server.ext"
-    run(["openssl", "req", "-x509", "-newkey", "ed25519", "-nodes", "-keyout", str(ca_key), "-out", str(ca_cert), "-days", "365", "-subj", "/CN=HostLink HOME Pilot Private CA"])
+    run(["openssl", "req", "-x509", "-newkey", "ed25519", "-nodes", "-keyout", str(ca_key), "-out", str(ca_cert), "-days", "365", "-subj", "/CN=HostLink HOME Pilot Private CA", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign"])
     os.chmod(ca_key, 0o600)
     run(["openssl", "req", "-new", "-newkey", "ed25519", "-nodes", "-keyout", str(leaf_key), "-out", str(csr), "-subj", "/CN=localhost"])
     os.chmod(leaf_key, 0o600)

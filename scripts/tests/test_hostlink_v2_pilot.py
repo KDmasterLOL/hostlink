@@ -182,6 +182,21 @@ class PilotLifecycleTests(unittest.TestCase):
         self.assertIn("create_default_context(cafile=str(ca))", source)
         self.assertNotIn("_create_unverified_context", source)
 
+    def test_generated_private_ca_is_accepted_by_strict_python_tls_verifier(self):
+        import ssl
+        spec = importlib.util.spec_from_file_location("pilot_tls", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        root = self.base / "private CA"
+        root.mkdir(mode=0o700)
+        ca, cert, _ = helper.create_tls(root)
+        ssl.create_default_context(cafile=str(ca))
+        extensions = subprocess.check_output(["openssl", "x509", "-in", str(ca), "-noout", "-text"], text=True)
+        self.assertIn("Certificate Sign", extensions)
+        self.assertIn("CA:TRUE", extensions)
+        valid = subprocess.run(["openssl", "verify", "-x509_strict", "-CAfile", str(ca), str(cert)], capture_output=True, text=True)
+        self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+
     def test_artifact_receipt_archive_layout_matches_packager(self):
         source = HELPER.read_text()
         self.assertIn("archive = artifacts.joinpath(VERSION, *archive_rel.parts)", source)
