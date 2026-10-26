@@ -175,7 +175,7 @@ fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root(
         ])
         .output()
         .expect("invoke service install");
-    let mut cleanup = CleanupService {
+    let _cleanup = CleanupService {
         executable: executable.clone(),
         root: root.clone(),
     };
