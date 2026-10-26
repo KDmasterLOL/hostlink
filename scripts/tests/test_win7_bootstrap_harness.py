@@ -42,6 +42,14 @@ class BootstrapHarnessContractTests(unittest.TestCase):
         self.assertIn("Assert-OutputReceipt", self.script)
         self.assertIn("token|secret|credential|public.?key|invite|auth", self.script)
         self.assertIn("native bootstrap receipt does not match", self.script)
+        self.assertIn("preserved package ZIP digest mismatch", self.script)
+        self.assertIn("preserved manifest member digest or size mismatch", self.script)
+        self.assertIn("installed metadata member inventory mismatch", self.script)
+        self.assertIn("$Artifact.Files.Count + 4", self.script)
+
+    def test_nt61_server_is_not_mislabeled_as_desktop_windows7(self):
+        self.assertIn("Get-WmiObject -Class Win32_OperatingSystem", self.script)
+        self.assertIn("this host is not desktop Windows 7", self.script)
 
     def test_source_stays_powershell_2_compatible(self):
         for unsupported in ("ConvertFrom-Json", "ConvertTo-Json", "ReadToEndAsync", "Start-Process -Verb RunAs"):

@@ -284,8 +284,31 @@ function Assert-OutputReceipt([string]$Output, $Artifact, [Security.Principal.Se
             Stop-Harness 'extracted package member does not match the verified receipt'
         }
     }
-    Assert-RegularOwnedFile ([IO.Path]::Combine($Output, 'install.json')) $Sid | Out-Null
-    $expectedCount = $Artifact.Files.Count + 2
+    $metadataPath = Assert-RegularOwnedFile ([IO.Path]::Combine($Output, 'install.json')) $Sid
+    $metadata = Read-JsonFile $metadataPath
+    Assert-ReceiptKeys $metadata @('format','target','installed_version','installed_package_sha256','installed_files')
+    if ([int](Get-JsonValue $metadata 'format') -ne 1 -or (Get-JsonValue $metadata 'target') -cne $Artifact.Target -or (Get-JsonValue $metadata 'installed_version') -cne $Version -or (Get-JsonValue $metadata 'installed_package_sha256') -cne $Artifact.ArchiveSha256) { Stop-Harness 'installed metadata does not bind exact package version and digest' }
+    $installed = Get-JsonValue $metadata 'installed_files'
+    if ($installed.Count -ne $Artifact.Files.Count) { Stop-Harness 'installed metadata inventory count mismatch' }
+    foreach ($name in $Artifact.Files.Keys) {
+        if (-not $installed.ContainsKey($name) -or $installed[$name].sha256 -cne $Artifact.Files[$name].sha256 -or [long]$installed[$name].size -ne [long]$Artifact.Files[$name].size) { Stop-Harness 'installed metadata member inventory mismatch' }
+    }
+    # validate_and_stage_archive intentionally preserves the exact package.zip
+    # and manifest.json alongside extracted files and the two receipts. Both
+    # must be verified; simply increasing the allowed file count would hide
+    # an unauthorized or modified output member.
+    $archivePath = Assert-RegularOwnedFile ([IO.Path]::Combine($Output, 'package.zip')) $Sid
+    if ((Get-Sha256 $archivePath) -cne $Artifact.ArchiveSha256) { Stop-Harness 'preserved package ZIP digest mismatch' }
+    $manifestPath = Assert-RegularOwnedFile ([IO.Path]::Combine($Output, 'manifest.json')) $Sid
+    $manifest = Read-JsonFile $manifestPath
+    Assert-ReceiptKeys $manifest @('format','component','target','version','files')
+    if ([int](Get-JsonValue $manifest 'format') -ne 1 -or (Get-JsonValue $manifest 'component') -cne 'agent' -or (Get-JsonValue $manifest 'target') -cne $Artifact.Target -or (Get-JsonValue $manifest 'version') -cne $Version) { Stop-Harness 'preserved manifest identity mismatch' }
+    $manifestFiles = Get-JsonValue $manifest 'files'
+    if ($manifestFiles.Count -ne $Artifact.Files.Count) { Stop-Harness 'preserved manifest member count mismatch' }
+    foreach ($name in $Artifact.Files.Keys) {
+        if (-not $manifestFiles.ContainsKey($name) -or $manifestFiles[$name].sha256 -cne $Artifact.Files[$name].sha256 -or [long]$manifestFiles[$name].size -ne [long]$Artifact.Files[$name].size) { Stop-Harness 'preserved manifest member digest or size mismatch' }
+    }
+    $expectedCount = $Artifact.Files.Count + 4
     $actualFiles = @(Get-ChildItem -LiteralPath $Output -Force | Where-Object { -not $_.PSIsContainer })
     if ($actualFiles.Count -ne $expectedCount) { Stop-Harness 'native output contains unexpected files' }
     if ((Get-ChildItem -LiteralPath $Output -Force | Where-Object { $_.PSIsContainer }).Count -ne 0) { Stop-Harness 'native output contains unexpected directories' }
@@ -347,10 +370,11 @@ $stage = [IO.Path]::Combine($disposable, ('hostlink-bootstrap-' + [Guid]::NewGui
 Set-PrivateDirectory $stage $sid
 Invoke-TargetHarness $x64 'i686-win7-windows-msvc' $stage $sid
 Invoke-TargetHarness $x86 'x86_64-win7-windows-msvc' $stage $sid
-$osVersion = [Environment]::OSVersion.Version.ToString()
-Write-Output ('PASS: x64 and x86 Win7-targeted bootstrap-verify ran on Windows ' + $osVersion + ' x64; source_sha=' + $SourceSha)
+$os = Get-WmiObject -Class Win32_OperatingSystem
+$osVersion = [string]$os.Version
+Write-Output ('PASS: x64 and x86 Win7-targeted bootstrap-verify ran on ' + [string]$os.Caption + ' ' + $osVersion + ' x64; source_sha=' + $SourceSha)
 Write-Output ('ENVIRONMENT: Windows PowerShell ' + $PSVersionTable.PSVersion.ToString())
 Write-Output 'SCOPE: x86 execution occurred under WoW64 on the reported 64-bit OS.'
 Write-Output 'PASS: exact ZIP digest/target, ZIP manifest, output receipts, wrong-digest, wrong-target, and overwrite rejection'
 Write-Output ('EVIDENCE: private output receipts and extracted files retained at ' + $stage)
-if ($osVersion -notlike '6.1.*') { Write-Output 'LIMIT: execution was not on Windows NT 6.1; this run is not native Win7 acceptance.' }
+if ([string]$os.Caption -notmatch 'Windows 7') { Write-Output 'LIMIT: this host is not desktop Windows 7; NT6.1 server or newer OS execution does not fulfill Win7 desktop acceptance.' }
