@@ -627,7 +627,11 @@ pub fn verify_fresh_package(
     )?;
     receipt_file.sync_all()?;
     set_staged_file_permissions(&receipt_path, "bootstrap-receipt.json")?;
-    File::open(staged.path())?.sync_all()?;
+    // Windows std::fs::File::open cannot open a directory for sync_all.
+    // The member files and receipt have already been individually flushed;
+    // the directory durability barrier is available on Unix only.
+    #[cfg(not(windows))]
+    sync_directory(staged.path())?;
     fs::rename(staged.path(), output)?;
     #[cfg(not(windows))]
     sync_directory(parent)?;
