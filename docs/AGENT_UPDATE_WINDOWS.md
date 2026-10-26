@@ -2,36 +2,43 @@
 
 ## Current implementation status
 
-`update::apply` composes offline and registered current-user updates. Both
-require a separate updater executable, exact package identity, clean durable-job
-state, and the shared update lock. The registered path writes the staged journal
-and verified old backups before entering owner maintenance, disables only its
-matching HKCU Run value, authenticates cooperative stop, and waits on the
-verified process handle. It keeps the maintenance marker and journal through
-publication and candidate health readback. `Installed` is returned only after
-the candidate's authenticated pipe reports its PID, the process SID/path/hash
-are checked, the `RESTARTED` phase is durable, and the exact Run registration is
-restored. The updater itself may not be the installed EXE.
+`update::apply` keeps exact local archive SHA, target/version, strict raw ZIP
+central-directory and duplicate-entry validation, manifest/content digests,
+private-root checks, the shared job update lock, and active/unknown job
+deferral. After the complete archive inventory and bounded member contents have
+been checked, `self_update::Extract` performs extraction into a private
+same-volume staging directory. The extracted file set, normalized ACL or mode,
+sizes, and digests are read back before publication. No HTTP release selection
+or download API is called; the source remains the exact local archive supplied
+to `AgentUpdateRequest`.
 
-The offline transaction stages the verified executable and new metadata plus
-private old executable/metadata backups under `.updates` on the install volume.
-It flushes the journal file and commits each journal rename with
-`MoveFileExW(MOVEFILE_WRITE_THROUGH)` before publication, uses `ReplaceFileW` with zero
-flags so ACL merging must succeed, advances the journal after each replacement,
-and verifies the installed metadata and complete inventory hashes before
-returning `Installed`. On an in-process publication or readback error it restores
-the verified backups and verifies the old bytes. Before a subsequent update stages
-a new archive, it runs bounded recovery under the shared update lock after job,
-service, and caller preflight. An unpublished transaction is discarded only when
-installed files and both backups match the recorded old identities. A partially
-published or rolling-back transaction is restored from verified backups. A fully
-published transaction is committed only after exact metadata and the complete
-installed manifest are revalidated. Unknown or damaged state preserves the
-journal and candidates and returns an error. Startup still refuses an unresolved
-journal; recovery is performed only by a separately invoked offline updater.
-The Windows transaction currently requires packaged PowerShell support files to
-match the installed copies byte-for-byte; packages that change them are rejected
-before publication.
+Windows publication now uses `self_update::MoveAll` for the executable and
+`install.json` as one ordered move transaction. Its stash is the private
+transaction directory on the install volume. HostLink retains verified old-file
+copies and its identity journal for startup fencing, service coordination,
+interruption recovery, and post-error inventory checks because `MoveAll` only
+offers best-effort rollback for an in-process move failure; it does not promise
+power-loss recovery. HostLink checks both installed digests and the full package
+manifest after a library error and fails closed if the old or new inventory is
+not exactly proven. It never publishes package support files, jobs, enrollment
+state, keys, configuration, or Hub state.
+
+The registered current-user path composes the existing `service.rs` maintenance
+receipt and health APIs. It keeps the owner marker and journal through
+cooperative stop, publication, candidate health readback, and restoration of the
+exact login registration. `Installed` is returned only after those APIs report
+the authenticated new executable healthy. The updater must be a separate
+verified executable beneath the same install root; a loaded Agent image is not
+replaced. On Linux, the existing publication and recovery path remains in
+place.
+
+Dependency tradeoff: `self_update 1.3.1` fails to compile with only
+`archive-zip` and `compression-zip-deflate`, because its library has a compile
+error unless an HTTP client feature is selected. This crate enables `ureq` plus
+its TLS support solely to satisfy that dependency build; HostLink does not call
+the network client. This is additional dependency surface and must be reconsidered
+if a later maintained release exposes the local archive primitives without an
+HTTP backend.
 
 The user-scope lifecycle owner in `service.rs` binds the current SID, install
 root, executable digest, named pipe, and login registration. Maintenance
@@ -44,20 +51,28 @@ recovery commits only a `RESTARTED` journal whose registered candidate passes a
 fresh owner-bound health readback. An orphan marker, foreign Run value, unknown
 process, or mismatched journal is preserved and fails closed.
 
-`update_handoff.rs` adds a persisted transaction substrate: a deterministic
-transaction hash over old/new target, version, package, executable and metadata
-digests; atomic bounded journal writes; strict readback; exact file-hash evidence
-for staged, installed and backup executable plus metadata; and a side-effect-free
-recovery planner. Readback recomputes the transaction hash so edited journal
-identities are rejected. The journal parent must be a private, current-user-owned,
-non-reparse directory validated by its caller.
+`update_handoff.rs` remains the HostLink-specific bounded identity journal and
+recovery model. Its deterministic ID covers old/new target, version, package,
+executable and metadata digests; readback recomputes the ID. It is not a second
+file publication engine.
 
 Windows service start and ordinary managed login refuse to launch when
 `.updates/handoff.json` exists or is malformed. The narrow maintenance launch
-is allowed only while the durable owner marker is in maintenance, the exact Run
-value is absent, and the owner executable digest matches the installed file.
-The offline transaction creates, advances, reads back, and removes the journal
-around file publication; the registered path retains it through health proof.
+is coordinated only through the existing service owner API. Native Windows
+runtime acceptance remains separate from Linux checks and source inspection.
+
+## Slice A change size
+
+Baseline at `0d4ab7d597c111c6c4ab87273cd5ef6d1fbfe56c`: 2,151 production lines
+in `update.rs` and 588 in `update_handoff.rs` (2,739 combined), with 51 function
+definitions. Slice A has 2,189 and 588 (2,777 combined), with 50 function
+definitions. This adds 38 lines of production validation/orchestration while
+removing one generic helper and the custom `ReplaceFileW` publish/rollback path.
+The journal's `MoveFileExW` write-through persistence remains because the
+library does not provide crash-durable journal phases. The dependency adds one
+direct crate and 62 new package entries to `Cargo.lock`; most of that lockfile
+delta is optional platform/feature metadata, while the selected local build
+also compiles the required `ureq` backend and `self-replace` dependency.
 
 ## Current implementation boundary
 
@@ -116,18 +131,17 @@ held across the full operation and startup must not race login registration.
 
 ## Windows filesystem and wait constraints
 
-Microsoft documents that [`ReplaceFile`](https://learn.microsoft.com/en-us/windows/win32/fileio/moving-and-replacing-files)
-can create a backup and preserve original attributes including ACLs, and that
-the source file must be closed before copy or move. `WaitForSingleObject` can
+`self_update::MoveAll` uses same-volume filesystem renames and retains displaced
+files in its private stash. HostLink sets and verifies the current-user-only ACL
+on extracted, staged, installed, backup, and journal files because rename does
+not merge the destination ACL. The source file must be closed before moving.
+`WaitForSingleObject` can
 wait on a process handle with `SYNCHRONIZE` and is supported by Windows 7
 ([Microsoft API reference](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject)).
-Do not infer process exit from a missing pipe. A plain new-file rename inherits
-security from the destination directory only when creating a new file, so
-preserving the installed executable's ACL must be explicit; see Microsoft's
-[file security guidance](https://learn.microsoft.com/en-us/windows/win32/fileio/file-security-and-access-rights).
-Reject reparse points in the root, stage, backup, metadata, and journal paths.
-The staged executable and backup must be on the same volume as the installed
-binary. Reboot-delayed replacement, admin/SYSTEM elevation, guessed PID
+Do not infer process exit from a missing pipe. Reject reparse points in the
+root, stage, backup, metadata, and journal paths. The staged executable and
+stash must be on the same volume as the installed binary. Reboot-delayed
+replacement, admin/SYSTEM elevation, guessed PID
 termination, and a second execution transport are forbidden.
 
 ## Acceptance still required

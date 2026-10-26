@@ -85,8 +85,8 @@ fn file_hash_evidence_selects_recovery_and_rejects_wrong_installed_digest() {
         RecoveryAction::VerifyPublished
     );
 
-    // ReplaceFileW can publish the EXE before the caller advances STAGED to BACKED_UP.
-    // The persisted evidence must still direct recovery to the verified old backup.
+    // MoveAll can be interrupted after its executable move and before the metadata move.
+    // BACKED_UP is durable before either move, so recovery restores the verified old pair.
     fs::write(&installed, b"new executable").expect("simulate swap before journal advance");
     fs::write(&installed_metadata, b"old install metadata").expect("metadata not swapped yet");
     let evidence = inspect_files(&paths, &identity).expect("observe interrupted first swap");
@@ -179,7 +179,7 @@ fn offline_publish_failure_after_executable_swap_restores_exact_old_files() {
     fs::rename(&staged, &installed).expect("atomic executable swap");
     let interrupted = inspect_files(&files, &identity).expect("observe interrupted transaction");
     assert_eq!(
-        recovery_action(UpdatePhase::Staged, interrupted),
+        recovery_action(UpdatePhase::BackedUp, interrupted),
         RecoveryAction::RestoreBackup
     );
 
@@ -196,13 +196,11 @@ fn offline_publish_failure_after_executable_swap_restores_exact_old_files() {
 
 #[cfg(windows)]
 #[test]
-fn native_replacefile_publish_and_rollback_preserve_acl_and_exact_bytes() {
-    use std::os::windows::ffi::OsStrExt;
+fn native_self_update_move_all_publishes_rolls_back_and_verifies_acl() {
     use windows_permissions::constants::{SeObjectType, SecurityInformation};
     use windows_permissions::wrappers::{
         ConvertSecurityDescriptorToStringSecurityDescriptor, GetNamedSecurityInfo,
     };
-    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
 
     fn sddl(path: &std::path::Path) -> String {
         let descriptor = GetNamedSecurityInfo(
@@ -220,81 +218,72 @@ fn native_replacefile_publish_and_rollback_preserve_acl_and_exact_bytes() {
         .into_owned()
     }
 
-    fn replace(
-        target: &std::path::Path,
-        replacement: &std::path::Path,
-        backup: Option<&std::path::Path>,
-    ) {
-        let target = target
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>();
-        let replacement = replacement
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>();
-        let backup = backup.map(|path| {
-            path.as_os_str()
-                .encode_wide()
-                .chain(Some(0))
-                .collect::<Vec<_>>()
-        });
-        // SAFETY: paths are NUL-terminated UTF-16 and no ACL-ignoring flags are supplied.
-        let replaced = unsafe {
-            ReplaceFileW(
-                target.as_ptr(),
-                replacement.as_ptr(),
-                backup
-                    .as_ref()
-                    .map_or(std::ptr::null(), |path| path.as_ptr()),
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        };
-        assert_ne!(
-            replaced,
-            0,
-            "ReplaceFileW: {}",
-            std::io::Error::last_os_error()
-        );
-    }
-
     let temp = TempDir::new().expect("disposable Windows update directory");
+    let stash = temp.path().join("stash");
+    fs::create_dir(&stash).expect("create same-volume stash");
     let installed = temp.path().join("hostlink-agent.exe");
+    let installed_metadata = temp.path().join("install.json");
     let staged = temp.path().join("staged-agent.exe");
-    let backup = temp.path().join("backup-agent.exe");
-    let failed_new = temp.path().join("failed-new-agent.exe");
+    let staged_metadata = temp.path().join("staged-install.json");
+    let restore = temp.path().join("restore-agent.exe");
+    let restore_metadata = temp.path().join("restore-install.json");
     fs::write(&installed, b"old executable").expect("write installed executable");
+    fs::write(&installed_metadata, b"old metadata").expect("write installed metadata");
     fs::write(&staged, b"new executable").expect("write staged executable");
-    fs::copy(&installed, &backup).expect("write verified old backup");
-    let installed_acl = sddl(&installed);
+    fs::write(&staged_metadata, b"new metadata").expect("write staged metadata");
+    let staged_acl = sddl(&staged);
 
-    replace(&installed, &staged, None);
+    let mut publish = self_update::MoveAll::from_temp(&stash);
+    publish
+        .add(&staged, &installed)
+        .add(&staged_metadata, &installed_metadata);
+    publish.commit().expect("publish exact file pair");
     assert_eq!(
         fs::read(&installed).expect("read published image"),
         b"new executable"
     );
     assert_eq!(
         sddl(&installed),
-        installed_acl,
-        "publication preserves target DACL"
+        staged_acl,
+        "published image retains the normalized private staging ACL"
     );
 
-    replace(&installed, &backup, Some(&failed_new));
+    fs::write(&restore, b"old executable").expect("write verified restore image");
+    fs::write(&restore_metadata, b"old metadata").expect("write verified restore metadata");
+    let rollback_stash = temp.path().join("rollback-stash");
+    fs::create_dir(&rollback_stash).expect("create rollback stash");
+    let mut rollback = self_update::MoveAll::from_temp(&rollback_stash);
+    rollback
+        .add(&restore, &installed)
+        .add(&restore_metadata, &installed_metadata);
+    rollback.commit().expect("restore exact prior file pair");
     assert_eq!(
         fs::read(&installed).expect("read restored image"),
         b"old executable"
     );
     assert_eq!(
-        fs::read(&failed_new).expect("preserved failed new image"),
-        b"new executable"
+        fs::read(&installed_metadata).expect("restored metadata"),
+        b"old metadata"
+    );
+
+    let failed_first = temp.path().join("failed-first.exe");
+    let failed_second = temp.path().join("missing-second.json");
+    let failed_dest_first = temp.path().join("failed-dest-first.exe");
+    let failed_dest_second = temp.path().join("failed-dest-second.json");
+    fs::write(&failed_first, b"new first").expect("new first");
+    fs::write(&failed_dest_first, b"old first").expect("old first");
+    fs::write(&failed_dest_second, b"old second").expect("old second");
+    let mut failing = self_update::MoveAll::from_temp(&stash);
+    failing
+        .add(&failed_first, &failed_dest_first)
+        .add(&failed_second, &failed_dest_second);
+    assert!(failing.commit().is_err(), "second source is absent");
+    assert_eq!(
+        fs::read(failed_dest_first).expect("first rollback"),
+        b"old first"
     );
     assert_eq!(
-        sddl(&installed),
-        installed_acl,
-        "rollback preserves target DACL"
+        fs::read(failed_dest_second).expect("second rollback"),
+        b"old second"
     );
 }

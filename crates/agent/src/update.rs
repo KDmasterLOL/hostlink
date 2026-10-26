@@ -829,12 +829,6 @@ fn validate_and_stage_archive(
                 "Agent ZIP exceeds its total uncompressed size limit",
             ));
         }
-        let destination = stage.path().join(relative);
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)?;
-        set_staged_file_permissions(&destination, relative)?;
         let mut hasher = Sha256::new();
         let mut written = 0_u64;
         let mut manifest_capture = (relative == PACKAGE_MANIFEST).then(Vec::new);
@@ -849,7 +843,6 @@ fn validate_and_stage_archive(
             if written > declared || written > MAX_ENTRY_BYTES {
                 return Err(invalid("Agent ZIP member exceeds its declared size"));
             }
-            output.write_all(&buffer[..count])?;
             hasher.update(&buffer[..count]);
             if let Some(capture) = &mut manifest_capture {
                 if written > MAX_MANIFEST_BYTES {
@@ -863,8 +856,6 @@ fn validate_and_stage_archive(
                 "Agent ZIP member size does not match its declaration",
             ));
         }
-        output.sync_all()?;
-        set_staged_file_permissions(&destination, relative)?;
         if relative == PACKAGE_MANIFEST {
             manifest_bytes = manifest_capture;
         } else {
@@ -900,6 +891,66 @@ fn validate_and_stage_archive(
             "Agent package manifest file identities do not match the archive",
         ));
     }
+
+    // The raw central directory, complete member inventory, bounded expanded sizes, member
+    // types, and content digests are validated above before the library is allowed to extract.
+    // Extraction is confined to this private directory; its output is independently checked
+    // against those exact identities before publication.
+    let extraction_root = stage.path().join("extracted");
+    create_private_directory(&extraction_root)?;
+    self_update::Extract::from_source(&staged_archive)
+        .archive(self_update::ArchiveKind::Zip)
+        .extract_into(&extraction_root)
+        .map_err(|error| invalid_owned(format!("Agent ZIP extraction failed: {error}")))?;
+    let package_root = extraction_root.join(format!("hostlink-agent-{target}"));
+    let package_metadata = fs::symlink_metadata(&package_root)?;
+    if !package_metadata.is_dir() || is_reparse_point(&package_metadata) {
+        return Err(invalid(
+            "Agent ZIP extraction produced an unsafe package root",
+        ));
+    }
+    set_private_directory(&package_root)?;
+    let package_metadata = fs::symlink_metadata(&package_root)?;
+    #[cfg(windows)]
+    validate_windows_private_acl(&package_root, &package_metadata)?;
+    #[cfg(not(windows))]
+    validate_private_directory(&package_root, &package_metadata)?;
+    let actual_names = fs::read_dir(&package_root)?
+        .map(|entry| {
+            let entry = entry?;
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if !metadata.is_file() || is_reparse_point(&metadata) {
+                return Err(invalid("Agent ZIP extraction produced a non-regular file"));
+            }
+            entry
+                .file_name()
+                .into_string()
+                .map_err(|_| invalid("Agent ZIP extraction produced a non-UTF-8 file name"))
+        })
+        .collect::<io::Result<BTreeSet<_>>>()?;
+    if actual_names != expected {
+        return Err(invalid(
+            "Agent ZIP extraction inventory differs from its validated index",
+        ));
+    }
+    for (name, identity) in &manifest.files {
+        let path = package_root.join(name);
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.len() != identity.size || hash_file(&path, MAX_ENTRY_BYTES)? != identity.sha256
+        {
+            return Err(invalid(
+                "Agent ZIP extracted file differs from its verified digest",
+            ));
+        }
+        set_staged_file_permissions(&path, name)?;
+    }
+    let extracted_manifest = fs::read(package_root.join(PACKAGE_MANIFEST))?;
+    if extracted_manifest != bytes {
+        return Err(invalid(
+            "Agent ZIP extracted manifest differs from its verified bytes",
+        ));
+    }
+    set_staged_file_permissions(&package_root.join(PACKAGE_MANIFEST), PACKAGE_MANIFEST)?;
     Ok((manifest, stage))
 }
 
@@ -1130,6 +1181,10 @@ pub fn verify_fresh_package(
     let canonical_archive = fs::canonicalize(archive_path)?;
     let (manifest, staged) =
         validate_and_stage_archive(&canonical_archive, archive_sha256, target, version, parent)?;
+    let staged_package = staged
+        .path()
+        .join("extracted")
+        .join(format!("hostlink-agent-{target}"));
     let executable = package_files(target)
         .into_iter()
         .find(|name| name == "hostlink-agent" || name == "hostlink-agent.exe")
@@ -1151,7 +1206,7 @@ pub fn verify_fresh_package(
         installed_package_sha256: archive_sha256.to_owned(),
         installed_files: manifest.files.clone(),
     };
-    let metadata_path = staged.path().join(INSTALL_METADATA);
+    let metadata_path = staged_package.join(INSTALL_METADATA);
     let mut metadata_file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1160,7 +1215,7 @@ pub fn verify_fresh_package(
         .write_all(&serde_json::to_vec_pretty(&install_metadata).map_err(io::Error::other)?)?;
     metadata_file.sync_all()?;
     set_staged_file_permissions(&metadata_path, INSTALL_METADATA)?;
-    let receipt_path = staged.path().join("bootstrap-receipt.json");
+    let receipt_path = staged_package.join("bootstrap-receipt.json");
     let mut receipt_file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1179,6 +1234,7 @@ pub fn verify_fresh_package(
     )?;
     receipt_file.sync_all()?;
     set_staged_file_permissions(&receipt_path, "bootstrap-receipt.json")?;
+    fs::remove_file(staged_package.join(PACKAGE_MANIFEST))?;
     // Windows refuses renaming a directory containing still-open file handles
     // (ERROR_ACCESS_DENIED), even after each file's sync_all has succeeded.
     // Publish only after closing both verified metadata and receipt files.
@@ -1188,8 +1244,8 @@ pub fn verify_fresh_package(
     // The member files and receipt have already been individually flushed;
     // the directory durability barrier is available on Unix only.
     #[cfg(not(windows))]
-    sync_directory(staged.path())?;
-    fs::rename(staged.path(), output)?;
+    sync_directory(&staged_package)?;
+    fs::rename(&staged_package, output)?;
     #[cfg(not(windows))]
     sync_directory(parent)?;
     println!(
@@ -1469,11 +1525,15 @@ fn publish_linux(
         ));
     }
     let journal_path = updates.join("publication.json");
+    let staged_package = staged
+        .path()
+        .join("extracted")
+        .join(format!("hostlink-agent-{}", request.target));
     let staged_bin = staged.path().join("bin");
     fs::create_dir(&staged_bin)?;
     set_private_directory(&staged_bin)?;
     for name in package_files(&request.target) {
-        let source = staged.path().join(&name);
+        let source = staged_package.join(&name);
         let dest = staged_bin.join(&name);
         fs::rename(source, dest)?;
     }
@@ -1640,7 +1700,11 @@ fn publish_windows(
             continue;
         }
         let installed_path = bin_root.join(name);
-        let staged_path = staged.path().join(name);
+        let staged_path = staged
+            .path()
+            .join("extracted")
+            .join(format!("hostlink-agent-{}", request.target))
+            .join(name);
         if hash_file(&installed_path, MAX_ENTRY_BYTES)? != expected.sha256
             || hash_file(&staged_path, MAX_ENTRY_BYTES)? != expected.sha256
         {
@@ -1681,7 +1745,11 @@ fn publish_windows(
     let backup_executable = transaction_dir.join("backup-agent.exe");
     let backup_metadata = transaction_dir.join("backup-install.json");
     let journal_path = updates.join("handoff.json");
-    let archive_executable = staged.path().join("hostlink-agent.exe");
+    let archive_executable = staged
+        .path()
+        .join("extracted")
+        .join(format!("hostlink-agent-{}", request.target))
+        .join("hostlink-agent.exe");
 
     let prepare = (|| {
         copy_private_synced(&archive_executable, &staged_executable)?;
@@ -1739,10 +1807,14 @@ fn publish_windows(
         }
         journal.advance(crate::update_handoff::UpdatePhase::BackedUp)?;
         crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
-        replace_file(&installed_executable, &staged_executable, None)?;
+        let mut moves = self_update::MoveAll::from_temp(&transaction_dir);
+        moves
+            .add(&staged_executable, &installed_executable)
+            .add(&staged_metadata, metadata_path);
+        moves
+            .commit()
+            .map_err(|error| invalid_owned(format!("Agent package publication failed: {error}")))?;
         verify_windows_private_file(&installed_executable)?;
-
-        replace_file(metadata_path, &staged_metadata, None)?;
         verify_windows_private_file(metadata_path)?;
         journal.advance(crate::update_handoff::UpdatePhase::Published)?;
         crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
@@ -1907,11 +1979,13 @@ fn rollback_windows(
         return Err(invalid("Windows rollback backup digest mismatch"));
     }
     // Preserve whatever new image is currently installed while restoring the verified old copy.
-    let failed_executable = backup_executable.with_extension("failed-new.exe");
-    let failed_metadata = backup_metadata.with_extension("failed-new.json");
     let restore_executable = backup_executable.with_extension("restore.exe");
     let restore_metadata = backup_metadata.with_extension("restore.json");
-    if hash_file(installed_executable, MAX_ENTRY_BYTES)? != identity.old_executable_sha256 {
+    let restore_executable_needed =
+        hash_file(installed_executable, MAX_ENTRY_BYTES)? != identity.old_executable_sha256;
+    let restore_metadata_needed =
+        hash_file(installed_metadata, MAX_MANIFEST_BYTES)? != identity.old_metadata_sha256;
+    if restore_executable_needed {
         if restore_executable.exists() {
             if hash_file(&restore_executable, MAX_ENTRY_BYTES)? != identity.old_executable_sha256 {
                 return Err(invalid(
@@ -1921,25 +1995,8 @@ fn rollback_windows(
             fs::remove_file(&restore_executable)?;
         }
         copy_private_synced(backup_executable, &restore_executable)?;
-        let preserve_executable = if failed_executable.exists() {
-            let digest = hash_file(&failed_executable, MAX_ENTRY_BYTES)?;
-            if digest != identity.old_executable_sha256 && digest != identity.new_executable_sha256
-            {
-                return Err(invalid(
-                    "Windows failed executable candidate has an unknown digest",
-                ));
-            }
-            None
-        } else {
-            Some(failed_executable.as_path())
-        };
-        replace_file(
-            installed_executable,
-            &restore_executable,
-            preserve_executable,
-        )?;
     }
-    if hash_file(installed_metadata, MAX_MANIFEST_BYTES)? != identity.old_metadata_sha256 {
+    if restore_metadata_needed {
         if restore_metadata.exists() {
             if hash_file(&restore_metadata, MAX_MANIFEST_BYTES)? != identity.old_metadata_sha256 {
                 return Err(invalid(
@@ -1949,25 +2006,46 @@ fn rollback_windows(
             fs::remove_file(&restore_metadata)?;
         }
         copy_private_synced(backup_metadata, &restore_metadata)?;
-        let preserve_metadata = if failed_metadata.exists() {
-            let digest = hash_file(&failed_metadata, MAX_MANIFEST_BYTES)?;
-            if digest != identity.old_metadata_sha256 && digest != identity.new_metadata_sha256 {
-                return Err(invalid(
-                    "Windows failed metadata candidate has an unknown digest",
-                ));
-            }
-            None
-        } else {
-            Some(failed_metadata.as_path())
-        };
-        replace_file(installed_metadata, &restore_metadata, preserve_metadata)?;
     }
-    if hash_file(installed_executable, MAX_ENTRY_BYTES)? != identity.old_executable_sha256
-        || hash_file(installed_metadata, MAX_MANIFEST_BYTES)? != identity.old_metadata_sha256
-    {
-        return Err(invalid(
-            "Windows rollback readback did not match the old inventory",
-        ));
+    let rollback_stash = tempfile::Builder::new()
+        .prefix("rollback-stash-")
+        .tempdir_in(
+            backup_executable
+                .parent()
+                .ok_or_else(|| invalid("Windows rollback backup has no parent"))?,
+        )?;
+    set_private_directory(rollback_stash.path())?;
+    let rollback_stash_metadata = fs::symlink_metadata(rollback_stash.path())?;
+    validate_windows_private_acl(rollback_stash.path(), &rollback_stash_metadata)?;
+    let mut moves = self_update::MoveAll::from_temp(rollback_stash.path());
+    if restore_executable_needed {
+        moves.add(&restore_executable, installed_executable);
+    }
+    if restore_metadata_needed {
+        moves.add(&restore_metadata, installed_metadata);
+    }
+    let move_result = if restore_executable_needed || restore_metadata_needed {
+        moves.commit().map_err(|error| error.to_string())
+    } else {
+        Ok(())
+    };
+    let inventory_result = (|| {
+        if hash_file(installed_executable, MAX_ENTRY_BYTES)? != identity.old_executable_sha256
+            || hash_file(installed_metadata, MAX_MANIFEST_BYTES)? != identity.old_metadata_sha256
+        {
+            return Err(invalid(
+                "Windows rollback readback did not match the old inventory",
+            ));
+        }
+        Ok(())
+    })();
+    if let Err(inventory_error) = inventory_result {
+        return Err(io::Error::other(match move_result {
+            Ok(()) => inventory_error.to_string(),
+            Err(move_error) => format!(
+                "self_update rollback returned an error ({move_error}); old inventory verification failed ({inventory_error})"
+            ),
+        }));
     }
     journal.advance(UpdatePhase::RolledBack)?;
     crate::update_handoff::write_journal_atomic(journal_path, journal)?;
@@ -1981,10 +2059,10 @@ fn windows_transaction_candidates() -> [&'static str; 8] {
         "staged-install.json",
         "backup-agent.exe",
         "backup-install.json",
-        "backup-agent.failed-new.exe",
-        "backup-install.failed-new.json",
         "backup-agent.restore.exe",
         "backup-install.restore.json",
+        "self_update-stash-0",
+        "self_update-stash-1",
     ]
 }
 
@@ -2024,11 +2102,11 @@ fn validate_windows_transaction_children(
             "backup-install.json" | "backup-install.restore.json" => {
                 &[identity.old_metadata_sha256.as_str()][..]
             }
-            "backup-agent.failed-new.exe" => &[
+            "self_update-stash-0" => &[
                 identity.old_executable_sha256.as_str(),
                 identity.new_executable_sha256.as_str(),
             ][..],
-            "backup-install.failed-new.json" => &[
+            "self_update-stash-1" => &[
                 identity.old_metadata_sha256.as_str(),
                 identity.new_metadata_sha256.as_str(),
             ][..],
@@ -2107,46 +2185,6 @@ fn cleanup_windows_transaction(
     validate_windows_private_acl(directory, &current_directory)?;
     fs::remove_file(journal_path)?;
     fs::remove_dir(directory)
-}
-
-#[cfg(windows)]
-fn replace_file(target: &Path, replacement: &Path, backup: Option<&Path>) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
-    let target_wide = target
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let replacement_wide = replacement
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let backup_wide = backup.map(|path| {
-        path.as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>()
-    });
-    // SAFETY: all paths are NUL-terminated UTF-16 buffers; zero flags require ACL merge to succeed.
-    let result = unsafe {
-        ReplaceFileW(
-            target_wide.as_ptr(),
-            replacement_wide.as_ptr(),
-            backup_wide
-                .as_ref()
-                .map_or(std::ptr::null(), |path| path.as_ptr()),
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-        )
-    };
-    if result == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
 }
 
 #[cfg(all(test, windows))]
