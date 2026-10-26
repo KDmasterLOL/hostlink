@@ -813,12 +813,24 @@ async fn run_managed_https_gateway_fixture(installer_flow: bool) {
         let xdg_data = root.path().join("target-data");
         private_dir(&xdg_data);
         let shell_command = format!("/bin/sh -c {}", sh_quote(command));
+        // The rendered command explicitly pins its CA via --cacert. An
+        // unrelated CURL_CA_BUNDLE value must not override it: replace the
+        // explicitly trusted certificate for this negative test instead.
+        let wrong_ca_path = root.path().join("wrong-ca.pem");
+        let rejected_ca_command = command.replace(
+            &ca_cert.to_string_lossy().to_string(),
+            &wrong_ca_path.to_string_lossy(),
+        );
+        assert_ne!(
+            rejected_ca_command, command,
+            "expected pinned CA in rendered command"
+        );
         let wrong_ca_output = expect_bootstrap_rejection(
             &mut children,
             root.path(),
             &xdg_data,
-            &root.path().join("wrong-ca.pem"),
-            command,
+            &wrong_ca_path,
+            &rejected_ca_command,
             "bootstrap-wrong-ca",
         );
         assert!(!wrong_ca_output.contains(&token));
@@ -1088,14 +1100,16 @@ async fn run_managed_https_gateway_fixture(installer_flow: bool) {
     );
     let local_upload = root.path().join("controller-upload.bin");
     let local_download = root.path().join("controller-download.bin");
-    private_write(&local_upload, artifact);
+    let cli_artifact = b"managed-cli-upload\0\xff";
+    let cli_remote = format!("{:x}.upload", Sha256::digest(cli_artifact));
+    private_write(&local_upload, cli_artifact);
     let mut upload = Command::new(&client_bin);
     cli_env(&mut upload, &cli_config);
     run_ok(
         upload
             .args(["upload", "--host", "managed-fixture", "--local"])
             .arg(&local_upload)
-            .args(["--remote", "controller-cli-roundtrip.bin"]),
+            .args(["--remote", cli_remote.as_str()]),
         "managed CLI SFTP upload",
     );
     let mut download = Command::new(&client_bin);
@@ -1107,13 +1121,13 @@ async fn run_managed_https_gateway_fixture(installer_flow: bool) {
                 "--host",
                 "managed-fixture",
                 "--remote",
-                "controller-cli-roundtrip.bin",
+                cli_remote.as_str(),
                 "--local",
             ])
             .arg(&local_download),
         "managed CLI SFTP download",
     );
-    assert_eq!(fs::read(local_download).unwrap(), artifact);
+    assert_eq!(fs::read(local_download).unwrap(), cli_artifact);
 
     // Durable JobStore only contains UUID-named job directories. Test-owned
     // executables live in a separate private sibling, not inside state/jobs.
