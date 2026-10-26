@@ -1614,6 +1614,8 @@ fn validate_windows_transaction_children(
     directory: &Path,
     identity: &crate::update_handoff::UpdateIdentity,
 ) -> io::Result<Vec<(PathBuf, u32, u64)>> {
+    use std::os::windows::fs::MetadataExt;
+
     let allowed = windows_transaction_candidates();
     let mut observed = Vec::new();
     for entry in fs::read_dir(directory)? {
@@ -1669,6 +1671,8 @@ fn cleanup_windows_transaction(
     directory: &Path,
     identity: &crate::update_handoff::UpdateIdentity,
 ) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
     let directory_metadata = fs::symlink_metadata(directory)?;
     if !directory_metadata.is_dir()
         || directory_metadata.file_type().is_symlink()
