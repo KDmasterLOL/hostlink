@@ -447,13 +447,20 @@ def create_tls(root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.
     os.chmod(leaf_key, 0o600)
     private_write(ext, b"subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n")
     run(["openssl", "x509", "-req", "-in", str(csr), "-CA", str(ca_cert), "-CAkey", str(ca_key), "-CAcreateserial", "-out", str(leaf_cert), "-days", "365", "-extfile", str(ext)])
+    # OpenSSL normally creates certificates with mode 0644. Keep every file
+    # below the private pilot root consistently owner-only across restarts.
+    os.chmod(ca_cert, 0o600)
+    os.chmod(leaf_cert, 0o600)
     csr.unlink(); ext.unlink()
     return ca_cert, leaf_cert, leaf_key
 
 
-def private_text(path: pathlib.Path) -> str:
+def private_text(path: pathlib.Path, *, public_certificate=False) -> str:
     info = os.lstat(path)
-    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != UID or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 65536:
+    allowed_modes = (0o600, 0o644) if public_certificate else (0o600,)
+    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != UID or stat.S_IMODE(info.st_mode) not in allowed_modes
+            or info.st_size > 65536):
         fail("pilot configuration or credential is not a bounded private regular file")
     return path.read_text(encoding="utf-8")
 
@@ -495,7 +502,9 @@ def restart_existing(root: pathlib.Path, marker: dict, artifacts: dict) -> None:
     for filename in ("hub.json", "Caddyfile", "gateway/sshd_config", "operator.token", "gateway.token", "tls/ca.pem", "tls/server.pem", "tls/server.key", "gateway/host_key", "gateway/controller_authorized_keys", "controller/identity"):
         path = root / filename
         private_path_below(root, path)
-        private_text(path)
+        # Existing private pilots have legitimate 0644 PUBLIC certificates,
+        # not private keys; preserve their identity without relaxing secrets.
+        private_text(path, public_certificate=filename in ("tls/ca.pem", "tls/server.pem"))
     ca = root / "tls/ca.pem"
     env = os.environ.copy()
     for name in ("BASH_ENV", "ENV", "HOSTLINK_HUB_OPERATOR_TOKEN", "HOSTLINK_HUB_GATEWAY_LOOKUP_TOKEN"):

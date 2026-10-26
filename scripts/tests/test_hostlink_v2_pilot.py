@@ -204,12 +204,25 @@ class PilotLifecycleTests(unittest.TestCase):
         root = self.base / "private CA"
         root.mkdir(mode=0o700)
         ca, cert, _ = helper.create_tls(root)
+        self.assertEqual(ca.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(cert.stat().st_mode & 0o777, 0o600)
         ssl.create_default_context(cafile=str(ca))
         extensions = subprocess.check_output(["openssl", "x509", "-in", str(ca), "-noout", "-text"], text=True)
         self.assertIn("Certificate Sign", extensions)
         self.assertIn("CA:TRUE", extensions)
         valid = subprocess.run(["openssl", "verify", "-x509_strict", "-CAfile", str(ca), str(cert)], capture_output=True, text=True)
         self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+
+    def test_only_public_tls_certificates_can_reuse_legacy_owner_readable_mode(self):
+        spec = importlib.util.spec_from_file_location("pilot_legacy_certificate", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        path = self.base / "old-public-ca.pem"
+        path.write_text("PUBLIC CERTIFICATE\n", encoding="utf-8")
+        path.chmod(0o644)
+        self.assertEqual(helper.private_text(path, public_certificate=True), "PUBLIC CERTIFICATE\n")
+        with self.assertRaises(helper.PilotError):
+            helper.private_text(path)
 
     def test_artifact_receipt_archive_layout_matches_packager(self):
         source = HELPER.read_text()
