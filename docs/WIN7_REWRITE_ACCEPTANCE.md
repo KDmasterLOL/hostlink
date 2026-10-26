@@ -10,7 +10,7 @@ Rust lists `x86_64-win7-windows-msvc` and `i686-win7-windows-msvc` as Tier 3,
 and does not ship precompiled standard-library artifacts for them. Building
 therefore requires a nightly compiler with `rust-src` and `build-std`. The
 workflow pins `nightly-2026-08-22`, `cargo-xwin` 0.23.1, xwin SDK
-10.0.22621.0, MSVC CRT package 14.44.17.14, and `clang-cl`; it does not fall
+10.0.26100.0, MSVC CRT package 14.44.17.14, and `clang-cl`; it does not fall
 back to `x86_64-pc-windows-msvc` or `i686-pc-windows-msvc`. Rust's [target
 support page](https://doc.rust-lang.org/nightly/rustc/platform-support/win7-windows-msvc.html)
 describes the target and cross-compilation prerequisites.
@@ -22,6 +22,8 @@ after committing the exact source to be built. Select a new path below the ignor
 `target/` directory each time:
 
 ```sh
+export XWIN_CACHE_DIR="$HOME/.cache/hostlink/msvc-sdk-v17/mount"
+export XWIN_ARCH="x86,x86_64"
 SOURCE_SHA="$(git rev-parse HEAD)"
 scripts/build-win7-candidate.sh \
   --source-sha "$SOURCE_SHA" \
@@ -40,7 +42,7 @@ equivalent of:
 RUSTFLAGS='-C target-feature=+crt-static' \
 cargo +nightly-2026-08-22 xwin build \
   --cross-compiler clang-cl --xwin-version 17 \
-  --xwin-sdk-version 10.0.22621.0 \
+  --xwin-sdk-version 10.0.26100.0 \
   --xwin-crt-version 14.44.17.14 \
   --locked --release --target TARGET \
   -Z build-std=std,panic_abort \
@@ -111,6 +113,15 @@ or incompatible subsystem fails before publication. Do not infer a two-arch
 build from a one-arch directory: both target entries and all four executable
 hashes must be present in the receipt. `bash -n` checks script syntax; `git diff
 --check` checks patch whitespace. Neither is a build or runtime test.
+
+The live Visual Studio 17 component catalog does not currently expose SDK
+10.0.22621.0 to `cargo-xwin`; the installer command fails before compilation.
+The independently cached SDK 10.0.26100.0 includes both `x86` and `x86_64`
+platform libraries and matching CRT. The builder now requires that exact
+private cache and both target architectures rather than silently fetching a
+newer SDK or falling back to a generic Windows target. Its newer SDK version
+does not imply runtime support on Windows 7: only exact Win7 Rust target PE
+inspection followed by native NT6.1 execution can establish that.
 
 ## Separate NT6.1 native acceptance gate
 

@@ -3,7 +3,11 @@ set -Eeuo pipefail
 
 readonly TOOLCHAIN="nightly-2026-08-22"
 readonly XWIN_VERSION="17"
-readonly XWIN_SDK_VERSION="10.0.22621.0"
+# The active VS 17 catalog no longer exposes 10.0.22621.0. HOME has the
+# explicitly source-checked Windows 11 SDK 10.0.26100.0 with x86 and x64 CRT
+# 14.44.17.14. Win7 compatibility is determined by the Rust Win7 target and
+# PE/native NT6.1 acceptance, NOT by the nominal SDK release version.
+readonly XWIN_SDK_VERSION="10.0.26100.0"
 readonly XWIN_CRT_VERSION="14.44.17.14"
 readonly XWIN_CROSS_COMPILER="clang-cl"
 readonly BUILD_STD="std,panic_abort"
@@ -16,6 +20,8 @@ usage() {
 Usage: scripts/build-win7-candidate.sh --source-sha FULL_SHA --output-dir target/PATH
 
 Build and inspect the Agent and Client for both Win7 MSVC target triples.
+Use the pre-provisioned xwin SDK 10.0.26100.0 + CRT 14.44.17.14 in XWIN_CACHE_DIR.
+Requires both x86 and x86_64 xwin components; set XWIN_ARCH=x86,x86_64.
 The output directory must be new and inside this checkout's ignored target/.
 USAGE
 }
@@ -90,6 +96,16 @@ rg -q "^${TOOLCHAIN}-" <<<"$installed_toolchains" || fail "pinned toolchain is m
 rust_src_present="$(rustup component list --toolchain "$TOOLCHAIN" --installed)"
 rg -q '^rust-src$' <<<"$rust_src_present" || fail "rust-src is missing from $TOOLCHAIN; install that component explicitly"
 rustc_version="$(rustc "+$TOOLCHAIN" --version --verbose)" || fail "cannot run pinned rustc $TOOLCHAIN"
+[[ -n "${XWIN_CACHE_DIR:-}" ]] || fail "set XWIN_CACHE_DIR to an owned pre-provisioned xwin SDK cache"
+[[ -f "$XWIN_CACHE_DIR/xwin/DONE" ]] || fail "XWIN_CACHE_DIR is missing verified xwin/DONE; provision the pinned 26100 SDK before compiling"
+[[ "${XWIN_ARCH:-}" == "x86,x86_64" || "${XWIN_ARCH:-}" == "x86_64,x86" ]] ||
+  fail "set XWIN_ARCH=x86,x86_64 for true i686 and x86_64 Win7 builds"
+if ! rg -q 'Win11SDK_10\.0\.26100' "$XWIN_CACHE_DIR/xwin/DONE"; then
+  fail "xwin cache is not sourced from the required Windows SDK 10.0.26100.0"
+fi
+if ! rg -q 'Microsoft\.VC\.14\.44\.17\.14\.CRT\.x86' "$XWIN_CACHE_DIR/xwin/DONE"; then
+  fail "xwin cache lacks required CRT 14.44.17.14 x86 components"
+fi
 cargo_version="$(cargo "+$TOOLCHAIN" --version)" || fail "cannot run pinned Cargo $TOOLCHAIN"
 xwin_version="$(cargo "+$TOOLCHAIN" xwin --version)" || fail "cargo-xwin is missing or unusable for $TOOLCHAIN"
 [[ "$xwin_version" == "cargo-xwin-xwin 0.23.1" ]] || fail "expected cargo-xwin 0.23.1, got: $xwin_version"
