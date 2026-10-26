@@ -186,7 +186,7 @@ where
             )));
         }
     };
-    let gateway = validate_response(
+    let gateways = validate_response(
         &response,
         &machine_id,
         &options.name,
@@ -206,6 +206,20 @@ where
     let jobs_root = options.install_root.join("jobs");
     fs::create_dir(&jobs_root)?;
     jobs::restrict_private_path(&jobs_root, true)?;
+    let gateway = gateways[0].clone();
+    let alternates = gateways
+        .iter()
+        .skip(1)
+        .enumerate()
+        .map(|(index, endpoint)| ReverseGateway {
+            host: endpoint.host.clone(),
+            port: endpoint.port,
+            user: endpoint.user.clone(),
+            identity: PathBuf::from("gateway_identity"),
+            host_public_key: PathBuf::from(format!("gateway_host_key_{}", index + 1)),
+            remote_port: response.host.remote_port,
+        })
+        .collect::<Vec<_>>();
     let config = AgentConfig {
         listen: available_loopback_addr()?,
         user: options.user.clone(),
@@ -220,12 +234,19 @@ where
             host_public_key: PathBuf::from("gateway_host_key"),
             remote_port: response.host.remote_port,
         }),
+        gateway_alternates: alternates,
     };
     config.validate()?;
     write_private_new(
         &stage.join("gateway_host_key"),
         format!("{}\n", gateway.host_public_key).as_bytes(),
     )?;
+    for (index, endpoint) in gateways.iter().skip(1).enumerate() {
+        write_private_new(
+            &stage.join(format!("gateway_host_key_{}", index + 1)),
+            format!("{}\n", endpoint.host_public_key).as_bytes(),
+        )?;
+    }
     write_private_new(
         &stage.join("agent.json"),
         &serde_json::to_vec(&config).map_err(io::Error::other)?,
@@ -244,27 +265,29 @@ where
         &serde_json::to_vec(&identity).map_err(io::Error::other)?,
     )?;
     fs::remove_file(stage.join("enrollment-attempt.json"))?;
-    let files = [
-        "agent.json",
-        "authorized_keys",
-        "gateway_host_key",
-        "gateway_identity",
-        "host_key",
-        "machine.json",
-    ]
-    .into_iter()
-    .map(|name| {
-        let path = stage.join(name);
-        let bytes = fs::read(&path)?;
-        Ok((
-            name.to_owned(),
-            FileDigest {
-                size: bytes.len() as u64,
-                sha256: format!("{:x}", Sha256::digest(&bytes)),
-            },
-        ))
-    })
-    .collect::<io::Result<std::collections::BTreeMap<_, _>>>()?;
+    let mut files = vec![
+        "agent.json".to_owned(),
+        "authorized_keys".to_owned(),
+        "gateway_host_key".to_owned(),
+        "gateway_identity".to_owned(),
+        "host_key".to_owned(),
+        "machine.json".to_owned(),
+    ];
+    files.extend((1..gateways.len()).map(|index| format!("gateway_host_key_{index}")));
+    let files = files
+        .into_iter()
+        .map(|name| {
+            let path = stage.join(&name);
+            let bytes = fs::read(&path)?;
+            Ok((
+                name.to_owned(),
+                FileDigest {
+                    size: bytes.len() as u64,
+                    sha256: format!("{:x}", Sha256::digest(&bytes)),
+                },
+            ))
+        })
+        .collect::<io::Result<std::collections::BTreeMap<_, _>>>()?;
     write_private_new(
         &stage.join("manifest.json"),
         &serde_json::to_vec(&EnrollmentManifest {
@@ -373,7 +396,7 @@ fn validate_response(
     reverse_public: &str,
     host_public: &str,
     gateway_index: Option<usize>,
-) -> io::Result<GatewayEndpoint> {
+) -> io::Result<Vec<GatewayEndpoint>> {
     if &response.host.machine_id != machine_id
         || response.host.name != name
         || response.host.remote_port == 0
@@ -417,18 +440,27 @@ fn validate_response(
             return Err(invalid("Hub returned duplicate gateway routes"));
         }
     }
-    let selected = match (response.gateways.as_slice(), gateway_index) {
-        ([only], None) => only,
-        (routes, Some(index)) => routes
-            .get(index)
-            .ok_or_else(|| invalid("selected gateway index is not in Hub response"))?,
+    let selected_index = match (response.gateways.as_slice(), gateway_index) {
+        ([_], None) => 0,
+        (routes, Some(index)) if index < routes.len() => index,
         (_, None) => {
             return Err(invalid(
                 "Hub approved multiple gateways; rerun with an explicit --gateway-index",
             ));
         }
+        (_, Some(_)) => return Err(invalid("selected gateway index is not in Hub response")),
     };
-    Ok(selected.clone())
+    let mut selected = Vec::with_capacity(response.gateways.len());
+    selected.push(response.gateways[selected_index].clone());
+    selected.extend(
+        response
+            .gateways
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != selected_index)
+            .map(|(_, endpoint)| endpoint.clone()),
+    );
+    Ok(selected)
 }
 
 fn validate_inputs(options: &EnrollmentOptions) -> io::Result<()> {
@@ -733,7 +765,10 @@ mod tests {
             host_public_key: second_gateway_pin,
         });
         assert!(validate_response(&ambiguous, &id, "test-host", &reverse, &host, None).is_err());
-        assert!(validate_response(&ambiguous, &id, "test-host", &reverse, &host, Some(1)).is_ok());
+        let selected =
+            validate_response(&ambiguous, &id, "test-host", &reverse, &host, Some(1)).unwrap();
+        assert_eq!(selected[0].host, "other-gateway.invalid");
+        assert_eq!(selected[1].host, "gw.invalid");
         let mut duplicate_keys = response.clone();
         duplicate_keys
             .operator_ssh_public_keys
@@ -766,6 +801,7 @@ mod tests {
         fs::create_dir(&projection).unwrap();
         jobs::restrict_private_path(&projection, true).unwrap();
         let gateway_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let alternate_gateway_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
         let controller_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
         let gateway = GatewayEndpoint {
             host: "127.0.0.1".into(),
@@ -773,12 +809,18 @@ mod tests {
             port: 22,
             host_public_key: gateway_key.public_key().to_openssh().unwrap(),
         };
+        let alternate_gateway = GatewayEndpoint {
+            host: "127.0.0.2".into(),
+            user: "hostlink".into(),
+            port: 2222,
+            host_public_key: alternate_gateway_key.public_key().to_openssh().unwrap(),
+        };
         let service = HubService::new(HubConfig {
             listen: "127.0.0.1:43210".parse().unwrap(),
             public_url: "https://hub.invalid".into(),
             state_root: fixture.path().join("hostlink-hub-v2"),
             authorized_keys: projection.join("hostlink-v2-authorized_keys"),
-            gateways: vec![gateway],
+            gateways: vec![gateway, alternate_gateway],
             operator_ssh_public_keys: vec![controller_key.public_key().to_openssh().unwrap()],
             operator_token: SecretString::from(operator.to_owned()),
             gateway_lookup_token: SecretString::from(gateway_lookup.to_owned()),
@@ -821,7 +863,7 @@ mod tests {
             install_root: install_root.clone(),
             name: "enroll-test".into(),
             user: "agent-user".into(),
-            gateway_index: None,
+            gateway_index: Some(1),
             retain_pending: true,
         };
         let inventory_app = app.clone();
@@ -882,6 +924,9 @@ mod tests {
         let config: AgentConfig =
             serde_json::from_slice(&fs::read(&published.config_path).unwrap()).unwrap();
         assert!((32000..=32020).contains(&config.gateway.as_ref().unwrap().remote_port));
+        assert_eq!(config.gateway.as_ref().unwrap().host, "127.0.0.2");
+        assert_eq!(config.gateway_alternates.len(), 1);
+        assert_eq!(config.gateway_alternates[0].host, "127.0.0.1");
         assert!(config.validate().is_ok());
         assert_eq!(config.jobs_root, install_root.join("jobs"));
         assert!(config.jobs_root.is_dir());
@@ -903,6 +948,7 @@ mod tests {
             serde_json::from_slice(&fs::read(state.join("machine.json")).unwrap()).unwrap();
         assert_eq!(identity.machine_id.to_string(), published.machine_id);
         assert!(state.join("manifest.json").is_file());
+        assert!(state.join("gateway_host_key_1").is_file());
         assert!(install_root.join("enrollment.pending").is_file());
         #[cfg(unix)]
         {

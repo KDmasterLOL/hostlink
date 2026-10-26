@@ -98,6 +98,13 @@ mapping and target-side TCP probes through `russh` direct-tcpip. See
 [docs/TCP_FORWARDING.md](docs/TCP_FORWARDING.md) for commands, deadlines,
 concurrency limits and security behavior.
 
+Fresh Agent enrollment can retain an explicitly selected Hub-approved primary
+gateway and ordered, independently pinned alternates. Transient transport
+failure rotates through those routes with bounded backoff; pin, authentication
+and reverse-port authorization failures stop without fallback. See
+[docs/MULTI_GATEWAY.md](docs/MULTI_GATEWAY.md) for the route and gateway
+authorization contract.
+
 A real Linux HOME Agent↔Client SSH test verifies accepted-once execution,
 disconnect/reconnect, binary stdout/stderr and exit code `7`. Native Win7
 x64/x86 and Windows Agent-owned durable execution/updater handoff remain

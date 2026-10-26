@@ -66,6 +66,7 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
         authorized_keys,
         jobs_root: jobs,
         gateway: None,
+        gateway_alternates: Vec::new(),
     };
     let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(async move {

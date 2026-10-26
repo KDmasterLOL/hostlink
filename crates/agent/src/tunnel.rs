@@ -128,15 +128,28 @@ async fn run_with_backoff(
     max_backoff: Duration,
 ) -> io::Result<()> {
     config.validate()?;
-    let Some(gateway) = config.gateway.as_ref() else {
+    let Some(primary) = config.gateway.as_ref() else {
         return Ok(());
     };
-    let host_key = load_gateway_key(&gateway.host_public_key)?;
-    let identity = load_identity(&gateway.identity)?;
+    let routes: Vec<&ReverseGateway> = std::iter::once(primary)
+        .chain(config.gateway_alternates.iter())
+        .collect();
+    // Load and validate every approved pin before opening any network connection.
+    let host_keys = routes
+        .iter()
+        .map(|route| load_gateway_key(&route.host_public_key))
+        .collect::<io::Result<Vec<_>>>()?;
+    let identity = load_identity(&primary.identity)?;
     tokio::pin!(shutdown);
     let mut backoff = initial_backoff.min(max_backoff);
+    let mut route_index = 0;
     loop {
-        let attempt = tunnel_once(gateway, &host_key, identity.clone(), config.listen);
+        let attempt = tunnel_once(
+            routes[route_index],
+            &host_keys[route_index],
+            identity.clone(),
+            config.listen,
+        );
         let result = tokio::select! {
             _ = &mut shutdown => return Ok(()),
             result = attempt => result,
@@ -144,7 +157,9 @@ async fn run_with_backoff(
         match result {
             Ok(()) => return Ok(()),
             Err(failure) if !failure.transient => return Err(failure.error),
-            Err(_) => {}
+            Err(_) => {
+                route_index = (route_index + 1) % routes.len();
+            }
         }
         tokio::select! {
             _ = &mut shutdown => return Ok(()),
@@ -410,6 +425,7 @@ mod tests {
                 host_public_key: pin_path,
                 remote_port: 40222,
             }),
+            gateway_alternates: Vec::new(),
         };
 
         let result = tokio::time::timeout(
