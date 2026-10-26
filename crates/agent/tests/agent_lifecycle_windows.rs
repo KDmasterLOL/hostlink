@@ -525,10 +525,9 @@ fn assert_disposable_context() {
         Some(profile.to_string_lossy().as_ref()),
         "current profile differs from the harness-verified disposable profile"
     );
-    assert_eq!(
+    assert!(
         std::env::var("HOSTLINK_WINDOWS_LIFECYCLE_PROTECTED_WORK_SID").as_deref()
-            == Ok(current_sid.as_str()),
-        false,
+            != Ok(current_sid.as_str()),
         "refusing to run in the protected WORK SID"
     );
 }
