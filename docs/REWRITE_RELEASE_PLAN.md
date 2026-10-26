@@ -1,10 +1,34 @@
 # HostLink russh execution rewrite: staged integration and managed-fleet migration
 
-Status date: 2026-10-25. Parent Huly: 1C-987.
-Verified baseline: rewrite/russh-minimal@4b34e31f7e007c4f17e700f7b22cef41dbd1c508.
+Status date: 2026-10-26. Parent Huly: 1C-987.
+Latest cross-platform runtime evidence baseline: `rewrite/russh-minimal@4bc0ef681ce23cc9fb20cd7cd668afc3879ae26c`.
 Experimental development only. No changes to installed agents, HostLink dev/main/tags, legacy OneC Toolkit, gateways or 1C databases without a separate explicit cutover decision.
 
-## Evidence already established
+## Current implementation and verified acceptance (2026-10-26)
+
+This is the current status; the A/B/C sections below document the *original*
+implementation contracts, not the current missing-feature list. Do not assign
+work based on their historical "current issue" wording without checking code.
+
+| Functional gate / owner | Verified source and evidence | Remaining acceptance |
+| --- | --- | --- |
+| russh Agent + Client, SFTP, source-bound Seal/run, durable jobs/cancel | Present in experimental rewrite; Linux workspace fmt/check/strict Clippy/full tests PASS; real pinned SSH loopback E2E | Exact immutable final-candidate retest, Win7 native |
+| Authoritative Hub v2 registry/invite/enroll/list/revoke | Hub 1C-1019 + Controller 1C-1020 + Agent bootstrap 1C-1021 integrated; actual Hub-issued identity used for nested russh gateway SSH and binary exec/SFTP; one-use invite replay rejected (1C-1011) | Real HTTPS-to-Hub/installer workflow, safe side-by-side fleet cutover/revoke, Win7 PS2 |
+| Source-pinned Windows/Linux Agent installer | Verified ZIP, manifest, target/version and independent executable sidecar, private fresh root; 18 Linux update lifecycle checks PASS | Native install on Windows11/Win7 x64 and true Win7 x86 |
+| User-facing TCP forwarding/RDP/probe | Current named/unmanaged CLI integrated, 4/4 Linux and 4/4 native Win11 GNU tests PASS | Win7 and exact MSVC/Win7 target acceptance |
+| Agent-approved multiple reverse gateway routes | Exact pinned Agent alternate routes and fail-closed errors; 3/3 Linux and 3/3 native Win11 GNU tests PASS on 4bc0ef6 | Controller Hub multiple-gateway selector/initial-connection retry: 1C-1025 follow-up; Win7 native |
+| Windows11 native GNU | 4bc0ef6: Agent russh E2E, reverse gateway, TCP forwarding and 3 multi-edge tests PASS with Rust 1.99.1 GNU | Full workspace Windows11 test receipt and native MSVC source-exact candidate |
+| Windows self-update (1C-1004) | Linux package/active-jobs/rollback 18+ tests PASS; Windows staging integrity exists in task worktree | Cooperative same-owner stopped-runtime handoff, bounded restart/rollback, native verification; do NOT claim Installed while Unsupported |
+| Win7 x64 + x86 (1C-1008) | Source-locked Tier 3 builder script, both PE inspections specified; bash -n and ShellCheck PASS | **No verified cross-built PE hashes or NT6.1 native smoke yet**. Never transfer prior old-dev evidence |
+| Final migration/replacement (1C-1011) | Explicit side-by-side runbook and read-only legacy preflight implemented | Complete final-source acceptance, source receipts and separate release/cutover authorization |
+
+On HOME Linux and WORK Windows the tests above used only disposable owned
+fixtures. Windows GNU tests are **not** proof of the Win7/MSVC target. On the
+current Agent update code, unsupported Windows publication is an intentional
+safety gate, not a successful completed update. Original `dev`, `main`,
+production services, releases and tags remain separate and unchanged.
+
+## Historical evidence and original task contracts
 
 - Verified initial rewrite is a two-crate russh Agent+Client execution milestone without legacy Agent JSONL RPC, external OpenSSH subprocess or Nextest attestation engine; a focused **Hub management crate is REQUIRED** for final fleet inventory/invite/enrollment/revocation (1C-1019/1020/1021).
 - HOME Linux actual pinned Agent-to-Client TCP/SSH: short exec, binary stdin/stdout/stderr, exit 7, SFTP, authenticated durable start once, drop SSH, reattach, binary output offsets, unchanged effects, wrong-key rejection. Fmt/check/strict Clippy/tests PASS.
