@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    net::SocketAddr,
+    net::{SocketAddr, TcpListener},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -22,6 +22,10 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const ENROLLMENT_PATH: &str = "/v2/enroll";
+// This range avoids the commonly used dynamic client-port ranges on Linux and Windows,
+// but operating-system port-range configuration is not universal.
+const AGENT_LISTENER_PORTS: std::ops::RangeInclusive<u16> = 20_000..=29_999;
+const LISTENER_PORT_ATTEMPTS: usize = 32;
 
 /// Inputs that must be supplied intentionally by the user or the installer.
 #[derive(Clone, Debug)]
@@ -767,11 +771,37 @@ fn local_hostname() -> String {
 }
 
 fn available_loopback_addr() -> io::Result<SocketAddr> {
-    // The user can already have other Agent versions on this machine. Allocate a distinct
-    // high port without probing/binding any listener during enrollment; run fails closed if
-    // another local process wins this port before startup.
-    let port = rng().random_range(49_152..=65_535);
-    Ok(SocketAddr::from(([127, 0, 0, 1], port)))
+    available_loopback_addr_from(std::iter::repeat_with(|| {
+        rng().random_range(AGENT_LISTENER_PORTS.clone())
+    }))
+}
+
+fn available_loopback_addr_from(candidates: impl Iterator<Item = u16>) -> io::Result<SocketAddr> {
+    for port in candidates.take(LISTENER_PORT_ATTEMPTS) {
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
+        match TcpListener::bind(address) {
+            Ok(listener) => {
+                let address = listener.local_addr()?;
+                // Enrollment publishes the address before a separate Agent process starts.
+                // Releasing this probe leaves an unavoidable TOCTOU window in which another
+                // process can claim the port; Agent startup still fails closed if that happens.
+                drop(listener);
+                return Ok(address);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AddrNotAvailable,
+        format!(
+            "could not find an available loopback port in {}-{} after {} attempts; retry enrollment",
+            AGENT_LISTENER_PORTS.start(),
+            AGENT_LISTENER_PORTS.end(),
+            LISTENER_PORT_ATTEMPTS
+        ),
+    ))
 }
 
 fn sync_directory(path: &Path) -> io::Result<()> {
@@ -799,6 +829,68 @@ mod tests {
     use hostlink_hub::{HubConfig, HubService, InviteRequest};
     use secrecy::ExposeSecret;
     use tower::ServiceExt;
+
+    fn reserve_listener_candidates(count: usize) -> Vec<TcpListener> {
+        let listeners = AGENT_LISTENER_PORTS
+            .clone()
+            .filter_map(|port| TcpListener::bind(("127.0.0.1", port)).ok())
+            .take(count)
+            .collect::<Vec<_>>();
+        assert_eq!(listeners.len(), count, "could not reserve test candidates");
+        listeners
+    }
+
+    #[test]
+    fn listener_address_binds_a_nonzero_loopback_port_in_the_selected_range() {
+        let address = available_loopback_addr().expect("available loopback listener port");
+
+        assert!(address.ip().is_loopback());
+        assert_ne!(address.port(), 0);
+        assert!(AGENT_LISTENER_PORTS.contains(&address.port()));
+        TcpListener::bind(address).expect("probe listener is released before returning");
+    }
+
+    #[test]
+    fn listener_address_retries_an_occupied_candidate() {
+        let mut listeners = reserve_listener_candidates(2);
+        let occupied_port = listeners[0].local_addr().unwrap().port();
+        let available_port = listeners[1].local_addr().unwrap().port();
+        drop(listeners.remove(1));
+
+        let address = available_loopback_addr_from([occupied_port, available_port].into_iter())
+            .expect("retry should select the next free candidate");
+
+        assert_eq!(address.port(), available_port);
+        assert!(address.ip().is_loopback());
+    }
+
+    #[test]
+    fn listener_address_allocations_avoid_ports_still_held_by_prior_probes() {
+        let mut listeners = Vec::new();
+        let mut ports = std::collections::BTreeSet::new();
+
+        for _ in 0..8 {
+            let address = available_loopback_addr().expect("available loopback listener port");
+            assert!(ports.insert(address.port()), "port was reused while held");
+            listeners.push(TcpListener::bind(address).expect("reserve selected port"));
+        }
+    }
+
+    #[test]
+    fn listener_address_fails_after_bounded_candidates_are_occupied() {
+        let listeners = reserve_listener_candidates(LISTENER_PORT_ATTEMPTS);
+        let ports = listeners
+            .iter()
+            .map(|listener| listener.local_addr().unwrap().port())
+            .collect::<Vec<_>>();
+
+        let error = available_loopback_addr_from(ports.into_iter())
+            .expect_err("all bounded candidates are occupied");
+
+        assert_eq!(error.kind(), io::ErrorKind::AddrNotAvailable);
+        assert!(error.to_string().contains("after 32 attempts"));
+        drop(listeners);
+    }
 
     fn key() -> (PrivateKey, String) {
         let key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
