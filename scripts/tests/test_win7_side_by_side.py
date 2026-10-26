@@ -50,6 +50,8 @@ class Win7SideBySideContractTests(unittest.TestCase):
         for unsupported in ("ConvertFrom-Json", "ReadToEndAsync", "Start-Process -Verb RunAs"):
             self.assertNotIn(unsupported, self.script)
         self.assertIn("System.Web.Script.Serialization.JavaScriptSerializer", self.script)
+        self.assertNotIn("::Combine($X64PackageRoot, $x64Version,", self.script)
+        self.assertNotIn("::Combine($X86PackageRoot, $x86Version,", self.script)
 
     def test_documentation_uses_exact_invocation_and_distinguishes_wow64(self):
         self.assertIn("verify-win7-side-by-side.ps1", self.doc)

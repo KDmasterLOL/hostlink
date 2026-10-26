@@ -122,8 +122,8 @@ try {
     $x64Version = Read-PackageVersion $X64PackageRoot
     $x86Version = Read-PackageVersion $X86PackageRoot
     if ($x64Version -cne $x86Version) { Stop-Harness 'x64 and x86 package versions differ' }
-    $x64Agent = [IO.Path]::Combine($X64PackageRoot, $x64Version, 'x86_64-win7-windows-msvc', 'hostlink-agent.exe')
-    $x86Agent = [IO.Path]::Combine($X86PackageRoot, $x86Version, 'i686-win7-windows-msvc', 'hostlink-agent.exe')
+    $x64Agent = [IO.Path]::Combine([IO.Path]::Combine([IO.Path]::Combine($X64PackageRoot, $x64Version), 'x86_64-win7-windows-msvc'), 'hostlink-agent.exe')
+    $x86Agent = [IO.Path]::Combine([IO.Path]::Combine([IO.Path]::Combine($X86PackageRoot, $x86Version), 'i686-win7-windows-msvc'), 'hostlink-agent.exe')
     if (-not [IO.File]::Exists($x64Agent) -or -not [IO.File]::Exists($x86Agent)) { Stop-Harness 'target-specific Agent sidecar is missing' }
     $harnessPath = [IO.Path]::Combine([IO.Path]::GetDirectoryName($MyInvocation.MyCommand.Path), 'verify-win7-bootstrap-native.ps1')
     if (-not [IO.File]::Exists($harnessPath)) { Stop-Harness 'bootstrap verification helper is missing' }
@@ -137,8 +137,8 @@ try {
         @{Name='build-receipt';Path=[IO.Path]::Combine($BuildRoot, 'receipt.json')},
         @{Name='x64-package-receipt';Path=[IO.Path]::Combine($X64PackageRoot, 'artifact-receipt.json')},
         @{Name='x86-package-receipt';Path=[IO.Path]::Combine($X86PackageRoot, 'artifact-receipt.json')},
-        @{Name='x64-archive';Path=[IO.Path]::Combine($X64PackageRoot, $x64Version, 'hostlink-agent-x86_64-win7-windows-msvc.zip')},
-        @{Name='x86-archive';Path=[IO.Path]::Combine($X86PackageRoot, $x86Version, 'hostlink-agent-i686-win7-windows-msvc.zip')},
+        @{Name='x64-archive';Path=[IO.Path]::Combine([IO.Path]::Combine($X64PackageRoot, $x64Version), 'hostlink-agent-x86_64-win7-windows-msvc.zip')},
+        @{Name='x86-archive';Path=[IO.Path]::Combine([IO.Path]::Combine($X86PackageRoot, $x86Version), 'hostlink-agent-i686-win7-windows-msvc.zip')},
         @{Name='x64-agent';Path=$x64Agent},
         @{Name='x86-agent';Path=$x86Agent}
     )) {
