@@ -14,8 +14,14 @@ Target packages:
   [crates/hub/README.md](crates/hub/README.md) for server configuration/API.
 
 Updates must pin the exact Agent artifact SHA-256/version/target, defer active
-jobs and reject unsafe roots. Source-exact Windows stopped-process handoff and
-rollback are required gates, not currently working features.
+jobs and reject unsafe roots. Managed-live Windows handoff and restart remain
+required gates, not currently supported. Windows supports
+offline publication only when a separate updater invokes it with no active Agent
+process, service marker, or durable jobs. It stages and hashes the exact old/new
+inventory, records a journal, atomically replaces files with ACL preservation,
+and rolls back in-process failures. Registered/live Agent handoff and automatic
+recovery after interruption remain unsupported. See
+[docs/AGENT_UPDATE_WINDOWS.md](docs/AGENT_UPDATE_WINDOWS.md).
 
 The original HostLink `dev` tree remains unchanged. This experimental branch
 has runnable CLI binaries; it is **not ready for deployment or fleet migration**.
