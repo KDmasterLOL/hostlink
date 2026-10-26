@@ -176,6 +176,12 @@ for target in "${TARGETS[@]}"; do
     if rg -qi '(^|/)(api-ms-win-crt[^/]*|ucrtbase\.dll|msvcrt\.dll|vcruntime[^/]*\.dll|msvcp[^/]*\.dll|concrt[^/]*\.dll)$' <<<"$imports_text"; then
       fail "$target/$exe imports a dynamic CRT DLL despite +crt-static: $(tr '\n' ' ' <<<"$imports_text")"
     fi
+    # Win7 has the documented CoTaskMemFree export in ole32.dll, but no
+    # combase.dll. Static CRT and PE subsystem checks alone cannot catch an
+    # unconditional loader dependency on a Windows 8+ DLL.
+    if rg -qi '^combase\.dll$' <<<"$imports_text"; then
+      fail "$target/$exe imports combase.dll, which is absent on Windows 7; bind Win7-compatible OLE APIs to ole32.dll"
+    fi
     import_json="$(jq -Rn '[inputs | select(length > 0)]' <<<"$imports_text")"
     binary_sha="$(sha256sum "$binary" | awk '{print $1}')"
     json_binaries="$(jq -c --arg exe "$exe" --arg sha "$binary_sha" --arg machine "$machine" \
