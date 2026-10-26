@@ -916,6 +916,7 @@ mod windows {
         ensure_user_scope()?;
         let record = owned_record(root)?;
         verify_record(&record)?;
+        crate::update::ensure_no_pending_windows_handoff(&record.root)?;
         verify_registration(&record)?;
         match pipe_request(&record, "STATUS") {
             Ok(reply) if running_pid(&reply).is_some() => {
@@ -997,6 +998,7 @@ mod windows {
         ensure_user_scope()?;
         let record = owned_record(root)?;
         verify_record(&record)?;
+        crate::update::ensure_no_pending_windows_handoff(&record.root)?;
         verify_registration(&record)?;
         refuse_active_jobs(&record)?;
         match pipe_request(&record, "STATUS") {
@@ -1097,6 +1099,7 @@ mod windows {
             .ok_or_else(|| invalid("managed Agent config is outside its install root"))?;
         let record = owned_record(root)?;
         verify_record(&record)?;
+        crate::update::ensure_no_pending_windows_handoff(&record.root)?;
         verify_registration(&record)?;
         if config != record.config || std::env::current_exe()?.canonicalize()? != record.executable
         {
@@ -1117,6 +1120,17 @@ mod windows {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
         }
+    }
+
+    pub fn validate_update_root(root: &Path) -> io::Result<()> {
+        let root = verify_install_root(root)?;
+        let expected = local_app_data_path()?.join("HostLink").join("Agent");
+        if fs::canonicalize(expected)? != root {
+            return Err(invalid(
+                "Agent updater root must be the exact OS-owned LocalAppData/HostLink/Agent directory",
+            ));
+        }
+        Ok(())
     }
 
     pub async fn control_loop(
@@ -2341,6 +2355,11 @@ pub fn validate_managed_run(config: &Path) -> io::Result<(String, String)> {
 #[cfg(windows)]
 pub fn ensure_update_unregistered(root: &Path) -> io::Result<()> {
     windows::ensure_update_unregistered(root)
+}
+
+#[cfg(windows)]
+pub(crate) fn validate_windows_update_root(root: &Path) -> io::Result<()> {
+    windows::validate_update_root(root)
 }
 
 #[cfg(all(test, target_os = "linux"))]
