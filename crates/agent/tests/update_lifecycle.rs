@@ -853,6 +853,77 @@ fn exact_package_updates_files_and_repeat_is_idempotent() {
     );
 }
 
+#[test]
+fn extracted_package_root_is_the_source_for_linux_publication() {
+    let (_temp, root) = install_root();
+    let executable = b"binary from self_update extracted package root";
+    let (archive, digest) = package(&root, "2.1.0", executable);
+
+    assert_eq!(
+        apply_empty_jobs(&request(&root, &archive, "2.1.0", digest.clone()))
+            .expect("publish validated extracted package"),
+        AgentUpdateOutcome::Installed {
+            version: "2.1.0".to_owned(),
+            archive_sha256: digest.clone(),
+        }
+    );
+
+    assert_eq!(
+        fs::read(root.join("bin/hostlink-agent")).expect("published executable"),
+        executable,
+        "the publisher must consume the member extracted beneath the package root"
+    );
+    let metadata: serde_json::Value = serde_json::from_slice(
+        &fs::read(root.join("install.json")).expect("published install metadata"),
+    )
+    .expect("valid install metadata");
+    assert_eq!(metadata["target"], TARGET);
+    assert_eq!(metadata["installed_version"], "2.1.0");
+    assert_eq!(metadata["installed_package_sha256"], digest);
+    assert_eq!(
+        metadata["installed_files"]["hostlink-agent"],
+        identity(executable)
+    );
+}
+
+#[test]
+fn self_update_move_all_restores_first_file_when_second_move_fails() {
+    let temp = TempDir::new().expect("temporary publication fixture");
+    let stash = temp.path().join("stash");
+    fs::create_dir(&stash).expect("private same-volume stash");
+    let first_source = temp.path().join("new-agent.exe");
+    let missing_second_source = temp.path().join("missing-install.json");
+    let first_destination = temp.path().join("hostlink-agent.exe");
+    let second_destination = temp.path().join("install.json");
+    fs::write(&first_source, b"new executable").expect("new executable");
+    fs::write(&first_destination, b"old executable").expect("old executable");
+    fs::write(&second_destination, b"old metadata").expect("old metadata");
+
+    let mut moves = self_update::MoveAll::from_temp(&stash);
+    moves
+        .add(&first_source, &first_destination)
+        .add(&missing_second_source, &second_destination);
+    assert!(
+        moves.commit().is_err(),
+        "the missing second source must fail"
+    );
+    assert_eq!(
+        fs::read(&first_destination).expect("first destination after rollback"),
+        b"old executable"
+    );
+    assert_eq!(
+        fs::read(&second_destination).expect("second destination after rollback"),
+        b"old metadata"
+    );
+    assert!(
+        fs::read_dir(&stash)
+            .expect("stash inventory")
+            .next()
+            .is_none(),
+        "library rollback must not leave displaced files behind"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn unsafe_executable_permissions_block_update() {

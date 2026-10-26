@@ -38,6 +38,9 @@ enum Command {
         /// Load and verify lifecycle configuration from the private root marker.
         #[arg(long, hide = true)]
         managed_service: bool,
+        /// Internal owner-bound startup while a verified update keeps login fenced.
+        #[arg(long, hide = true)]
+        maintenance_start: bool,
     },
     /// Apply a digest-pinned Agent-only package; refuses active jobs and unsafe targets.
     Update {
@@ -147,15 +150,19 @@ async fn run(cli: Cli) -> io::Result<()> {
         Command::Run {
             config,
             managed_service,
+            maintenance_start,
         } => {
             #[cfg(windows)]
-            let managed_control = if managed_service {
-                Some(hostlink_agent::service::validate_managed_run(&config)?)
+            let managed_control = if managed_service || maintenance_start {
+                Some(hostlink_agent::service::validate_managed_run(
+                    &config,
+                    maintenance_start,
+                )?)
             } else {
                 None
             };
             #[cfg(not(windows))]
-            if managed_service {
+            if managed_service || maintenance_start {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "managed lifecycle mode is available only on Windows",
@@ -215,8 +222,6 @@ async fn run(cli: Cli) -> io::Result<()> {
             target,
             version,
         } => {
-            #[cfg(windows)]
-            hostlink_agent::service::ensure_update_unregistered(&root)?;
             let update = AgentUpdateRequest {
                 install_root: root,
                 archive_file: archive,
