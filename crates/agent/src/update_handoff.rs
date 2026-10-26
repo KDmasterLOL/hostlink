@@ -390,7 +390,7 @@ fn sync_parent(parent: &Path) -> io::Result<()> {
     File::open(parent)?.sync_all()
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn sync_parent(_parent: &Path) -> io::Result<()> {
     Ok(())
 }
