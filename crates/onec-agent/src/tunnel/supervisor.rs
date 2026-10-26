@@ -5,6 +5,64 @@ use crate::environment::AgentEnvironmentPolicy;
 use tokio::task::JoinSet;
 
 const SUPERVISOR_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const RECONNECT_BASE_CAP_SECONDS: u64 = 120;
+const STABLE_TUNNEL_SECONDS: u64 = 60;
+// 0..25% of the base in milliseconds. Whole-second jitter barely staggers
+// multiple Agents when the usual minimum is five seconds.
+const RECONNECT_JITTER_MILLIS_PER_SECOND: u64 = 250;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReconnectPolicy {
+    minimum_seconds: u64,
+    failures: u32,
+}
+
+impl ReconnectPolicy {
+    fn new(configured_seconds: u64) -> Self {
+        Self {
+            // Legacy configurations may intentionally specify a delay above
+            // the new default cap. Never shorten an operator's existing
+            // retry floor while enabling bounded exponential backoff.
+            minimum_seconds: configured_seconds.max(1),
+            failures: 0,
+        }
+    }
+
+    fn base_seconds(&self) -> u64 {
+        let exponent = self.failures.min(63);
+        self.minimum_seconds
+            .saturating_mul(1_u64.checked_shl(exponent).unwrap_or(u64::MAX))
+            .min(RECONNECT_BASE_CAP_SECONDS.max(self.minimum_seconds))
+    }
+
+    fn delay_with_jitter(&self, jitter_millis: u64) -> Duration {
+        let base = self.base_seconds();
+        let jitter_limit = base.saturating_mul(RECONNECT_JITTER_MILLIS_PER_SECOND);
+        Duration::from_secs(base)
+            .saturating_add(Duration::from_millis(jitter_millis.min(jitter_limit)))
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        let jitter_limit = self
+            .base_seconds()
+            .saturating_mul(RECONNECT_JITTER_MILLIS_PER_SECOND);
+        let jitter = if jitter_limit == 0 {
+            0
+        } else {
+            use rand::RngExt as _;
+            rand::rng().random_range(0..=jitter_limit)
+        };
+        let delay = self.delay_with_jitter(jitter);
+        self.failures = self.failures.saturating_add(1);
+        delay
+    }
+
+    fn mark_stable(&mut self, uptime: Duration) {
+        if uptime >= Duration::from_secs(STABLE_TUNNEL_SECONDS) {
+            self.failures = 0;
+        }
+    }
+}
 
 enum TargetSshServer {
     External(TunnelChild),
@@ -193,6 +251,12 @@ async fn supervise_gateway(
     environment: AgentEnvironmentPolicy,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
+    let edge_index = config
+        .gateways
+        .iter()
+        .position(|candidate| candidate == &gateway)
+        .unwrap_or(0);
+    let mut retry = ReconnectPolicy::new(config.reconnect_seconds);
     loop {
         if *shutdown.borrow() {
             return;
@@ -217,17 +281,26 @@ async fn supervise_gateway(
                 tunnel
             }
             Err(error) => {
+                let failure = super::client::classify_tunnel_failure(&error);
                 eprintln!(
-                    "onec-agent failed to establish SSH tunnel to {}:{}: {error}; reconnecting in {}s",
-                    gateway.host, gateway.port, config.reconnect_seconds
+                    "onec-agent tunnel retry edge={edge_index} category={} attempt={} stable_uptime_s=0",
+                    failure.category,
+                    retry.failures.saturating_add(1)
                 );
-                if wait_edge_reconnect(&mut shutdown, config.reconnect_seconds).await {
+                if !failure.retryable {
+                    eprintln!(
+                        "onec-agent tunnel stopped edge={edge_index} category={}",
+                        failure.category
+                    );
+                    return;
+                }
+                let delay = retry.next_delay();
+                if wait_edge_reconnect(&mut shutdown, delay).await {
                     return;
                 }
                 continue;
             }
         };
-
         let ended = tokio::select! {
             result = tunnel.wait() => Some(result),
             changed = shutdown.changed() => {
@@ -239,15 +312,34 @@ async fn supervise_gateway(
             }
         };
         if let Some(result) = ended {
+            let uptime = tunnel.session_uptime();
+            retry.mark_stable(uptime);
             agent_event("tunnel.exited", "warn", AgentEventFields::default());
             if let Err(error) = result {
+                let failure = super::client::classify_tunnel_failure(&error);
                 eprintln!(
-                    "onec-agent SSH tunnel to {}:{} ended: {error}",
-                    gateway.host, gateway.port
+                    "onec-agent tunnel ended edge={edge_index} category={} stable_uptime_s={}",
+                    failure.category,
+                    uptime.as_secs()
+                );
+                if !failure.retryable {
+                    eprintln!(
+                        "onec-agent tunnel stopped edge={edge_index} category={}",
+                        failure.category
+                    );
+                    return;
+                }
+            } else {
+                eprintln!(
+                    "onec-agent tunnel ended edge={edge_index} category=closed stable_uptime_s={}",
+                    uptime.as_secs()
                 );
             }
-        }
-        if wait_edge_reconnect(&mut shutdown, config.reconnect_seconds).await {
+            let delay = retry.next_delay();
+            if wait_edge_reconnect(&mut shutdown, delay).await {
+                return;
+            }
+        } else {
             return;
         }
     }
@@ -255,10 +347,10 @@ async fn supervise_gateway(
 
 async fn wait_edge_reconnect(
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
-    reconnect_seconds: u64,
+    delay: Duration,
 ) -> bool {
     tokio::select! {
-        () = tokio::time::sleep(Duration::from_secs(reconnect_seconds.max(1))) => false,
+        () = tokio::time::sleep(delay) => false,
         changed = shutdown.changed() => changed.is_err() || *shutdown.borrow(),
     }
 }
@@ -430,6 +522,71 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn reconnect_policy_is_bounded_jittered_and_resets_only_after_stability() {
+        let mut policy = ReconnectPolicy::new(5);
+        let deterministic = (0..7)
+            .map(|_| {
+                let delay = policy.delay_with_jitter(0).as_secs();
+                policy.failures = policy.failures.saturating_add(1);
+                delay
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(deterministic, [5, 10, 20, 40, 80, 120, 120]);
+
+        let mut jittered = ReconnectPolicy::new(5);
+        assert_eq!(
+            jittered.delay_with_jitter(u64::MAX),
+            Duration::from_millis(6_250)
+        );
+        assert_eq!(
+            jittered.delay_with_jitter(625),
+            Duration::from_millis(5_625)
+        );
+        jittered.failures = 5;
+        assert_eq!(jittered.delay_with_jitter(u64::MAX).as_secs(), 150);
+        assert_eq!(jittered.delay_with_jitter(0).as_secs(), 120);
+
+        jittered.failures = 4;
+        jittered.mark_stable(Duration::from_secs(59));
+        assert_eq!(jittered.failures, 4);
+        jittered.mark_stable(Duration::from_secs(60));
+        assert_eq!(jittered.failures, 0);
+    }
+
+    #[test]
+    fn reconnect_policy_handles_zero_and_overflow_and_stays_under_thirty_minute_budget() {
+        let mut zero = ReconnectPolicy::new(0);
+        assert_eq!(zero.delay_with_jitter(0), Duration::from_secs(1));
+        zero.failures = u32::MAX;
+        assert_eq!(zero.delay_with_jitter(u64::MAX), Duration::from_secs(150));
+
+        let explicit_long_interval = ReconnectPolicy::new(300);
+        assert_eq!(
+            explicit_long_interval.delay_with_jitter(0),
+            Duration::from_secs(300),
+            "operator-configured retry floor must not be shortened"
+        );
+        assert_eq!(
+            explicit_long_interval.delay_with_jitter(u64::MAX),
+            Duration::from_secs(375)
+        );
+
+        // Zero jitter yields the shortest gaps and therefore the largest
+        // possible number of retry attempts in a bounded observation window.
+        let mut policy = ReconnectPolicy::new(1);
+        let mut total = Duration::ZERO;
+        let mut attempts = 1;
+        while total < Duration::from_secs(30 * 60) {
+            total += policy.delay_with_jitter(0);
+            policy.failures = policy.failures.saturating_add(1);
+            if total < Duration::from_secs(30 * 60) {
+                attempts += 1;
+            }
+        }
+        assert_eq!(attempts, 21, "maximum attempts in 30 minutes");
+    }
 
     async fn wait_for_attempts(attempts: &std::sync::atomic::AtomicUsize, expected: usize) {
         tokio::time::timeout(Duration::from_secs(5), async {
