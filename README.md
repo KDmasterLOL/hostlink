@@ -129,11 +129,15 @@ Native Win7 PowerShell 2 acceptance remains separate from cross-build evidence.
 ## Agent lifecycle
 
 The Hub registry and local Agent process are managed separately. `hostlink remove`
-revokes Hub access; it does not uninstall the local Agent. Linux can
-install a root-bound `systemd --user` unit with
-`hostlink-agent service install/start/stop/status/remove`. The service is
-current-user scoped and never enables login lingering. `service remove` removes
-the owned unit, marker and executable, preserving enrollment data, keys and
-jobs. See [docs/AGENT_LIFECYCLE.md](docs/AGENT_LIFECYCLE.md) for
-commands and safety behavior. Windows persistent service management is not
-implemented; use an explicit foreground Agent session there.
+revokes Hub access; it does not uninstall the local Agent. Linux uses a
+root-bound `systemd --user` unit; Windows 7 and Windows 11 use a current-user
+HKCU login-startup entry with an authenticated local control pipe. Both expose
+`hostlink-agent service install/start/stop/status/remove`, preserve enrollment
+data, keys and jobs, and refuse shutdown while durable jobs are unresolved.
+Linux does not enable login lingering. Windows startup requires the interactive
+user to sign in and rejects HKCU Run commands over the 260-character limit.
+Windows roots must be protected descendants of the current user's OS-resolved
+LocalAppData folder. Every intermediate directory must have a protected
+owner-only ACL; the control token remains out of launcher arguments.
+See [docs/AGENT_LIFECYCLE.md](docs/AGENT_LIFECYCLE.md) for commands, platform
+limits and safety behavior. Windows native acceptance remains unrun.
