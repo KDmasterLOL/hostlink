@@ -246,6 +246,35 @@ class PilotLifecycleTests(unittest.TestCase):
         first.wait(timeout=3)
         self.assertNotEqual(first.returncode, 0)
 
+    def test_owned_process_log_reopens_for_append_without_following_symlinks(self):
+        spec = importlib.util.spec_from_file_location("pilot_log_restart", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        self.prepare()
+        log = self.root / "logs" / "reusable.log"
+        for value in ("first", "second"):
+            child, record = helper.launch(
+                [os.sys.executable, "-c", "import sys,time; print(sys.argv[1],flush=True);time.sleep(60)", value], log
+            )
+            import time
+            for _ in range(50):
+                if value.encode() in log.read_bytes():
+                    break
+                time.sleep(.01)
+            helper.write_ledger(self.root, [record], True)
+            helper.stop_items(self.root, [record])
+            child.wait(timeout=5)
+        self.assertIn(b"first", log.read_bytes())
+        self.assertIn(b"second", log.read_bytes())
+        self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+        log.unlink()
+        outside = self.base / "unowned-log-target"
+        outside.write_text("must not append")
+        log.symlink_to(outside)
+        with self.assertRaises((OSError, helper.PilotError)):
+            helper.launch([os.sys.executable, "-c", "pass"], log)
+        self.assertEqual(outside.read_text(), "must not append")
+
     def test_partial_start_rollback_reaps_already_exited_owned_child(self):
         spec = importlib.util.spec_from_file_location("pilot_exited_process", HELPER)
         helper = importlib.util.module_from_spec(spec)

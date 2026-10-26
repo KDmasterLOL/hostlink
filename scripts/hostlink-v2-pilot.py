@@ -259,15 +259,35 @@ def snapshot_process(process: subprocess.Popen) -> dict:
 
 
 def launch(args: list[str], log: pathlib.Path, *, env=None) -> tuple[subprocess.Popen, dict]:
-    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    stream = os.fdopen(fd, "wb")
+    # Preserve logs across down/up. A private regular, singly linked file may
+    # be reopened for append; never follow a replaced log symlink or overwrite
+    # an existing file with unverified ownership/permissions.
+    fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != UID
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+        os.close(fd)
+        fail("owned service log is not a private singly linked regular file")
+    stream = os.fdopen(fd, "ab")
     try:
         child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT,
                                  env=env, close_fds=True, start_new_session=True)
     finally:
         stream.close()
+    try:
+        identity = snapshot_process(child)
+    except BaseException:
+        # We still own the newly returned child handle, even if its /proc
+        # identity became unreadable before we could write the durable ledger.
+        # Never leave an untracked service running after failed admission.
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                fail("untracked newly spawned service did not stop; manual reconciliation required")
+        raise
     CHILDREN[child.pid] = child
-    identity = snapshot_process(child)
     identity["role"] = pathlib.Path(args[0]).name
     return child, identity
 
