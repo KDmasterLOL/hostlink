@@ -38,7 +38,7 @@ enum Command {
         /// Load and verify lifecycle configuration from the private root marker.
         #[arg(long, hide = true)]
         managed_service: bool,
-        /// Internal owner-bound startup while a verified update keeps login fenced.
+        /// Internal owner-bound startup; one-use admission arrives through inherited stdin.
         #[arg(long, hide = true)]
         maintenance_start: bool,
     },

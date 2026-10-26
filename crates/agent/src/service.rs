@@ -841,6 +841,8 @@ mod windows {
     const MARKER_FORMAT: u32 = 1;
     const MAX_MARKER: usize = 16 * 1024;
     const MAX_PIPE_MESSAGE: usize = 1024;
+    const MAINTENANCE_ADMISSION: &str = ".hostlink-maintenance-admission.json";
+    const MAX_MAINTENANCE_ADMISSION: usize = 4096;
 
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -863,6 +865,17 @@ mod windows {
         maintenance_previous_sha256: Option<String>,
     }
 
+    #[derive(serde::Serialize, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct MaintenanceAdmission {
+        format: u32,
+        transaction_id: String,
+        root: PathBuf,
+        owner_sid: String,
+        executable_sha256: String,
+        capability_sha256: String,
+    }
+
     /// Opaque, in-process evidence captured before the login registration is disabled.
     /// The durable marker retains the prior executable digest for crash-safe rollback.
     #[must_use = "retain the receipt through publication, registration, and any rollback"]
@@ -870,6 +883,7 @@ mod windows {
         old_marker: Vec<u8>,
         old_record: InstallRecord,
         run_command: String,
+        transaction_id: String,
     }
 
     pub fn install(root: &Path, config: &Path) -> io::Result<()> {
@@ -1090,6 +1104,7 @@ mod windows {
             old_marker,
             old_record,
             run_command,
+            transaction_id: random_token(),
         })
     }
 
@@ -1307,40 +1322,69 @@ mod windows {
         if sha256_file(&record.executable)? != expected_sha256 {
             return Err(invalid("maintenance candidate executable digest changed"));
         }
-        let process = spawn(&record, true)?;
-        for _ in 0..40 {
-            match pipe_request(&record, "STATUS") {
-                Ok(reply) if running_pid(&reply) == Some(process.pid) => {
-                    let verified = open_owned_process(process.pid, &record)?;
-                    if verified.pid != process.pid
-                        || sha256_file(&record.executable)? != expected_sha256
-                    {
-                        return Err(invalid("maintenance candidate health identity changed"));
-                    }
-                    if ssh_banner(load_config(&record.config)?.listen)? {
-                        // SAFETY: process.handle remains open and is the exact spawned process.
-                        if unsafe { WaitForSingleObject(process.handle, 0) } == WAIT_TIMEOUT {
-                            return Ok(());
+        crate::update::reject_running_agent(&record.executable)?;
+        let capability = format!("{}{}", receipt.transaction_id, random_token());
+        let admission = MaintenanceAdmission {
+            format: 1,
+            transaction_id: receipt.transaction_id.clone(),
+            root: record.root.clone(),
+            owner_sid: record.owner_sid.clone(),
+            executable_sha256: expected_sha256.to_owned(),
+            capability_sha256: format!("{:x}", Sha256::digest(&capability[64..])),
+        };
+        let admission_path = record.root.join(MAINTENANCE_ADMISSION);
+        let admission_bytes = serde_json::to_vec(&admission).map_err(io::Error::other)?;
+        if admission_bytes.len() > MAX_MAINTENANCE_ADMISSION {
+            return Err(invalid("maintenance admission record exceeds size limit"));
+        }
+        write_maintenance_admission(&admission_path, &admission_bytes)?;
+        let result = (|| {
+            let process = spawn(&record, true, Some(&capability))?;
+            for _ in 0..40 {
+                match pipe_request(&record, "STATUS") {
+                    Ok(reply) if running_pid(&reply) == Some(process.pid) => {
+                        let verified = open_owned_process(process.pid, &record)?;
+                        if verified.pid != process.pid
+                            || sha256_file(&record.executable)? != expected_sha256
+                        {
+                            return Err(invalid("maintenance candidate health identity changed"));
                         }
+                        if ssh_banner(load_config(&record.config)?.listen)? {
+                            // SAFETY: process.handle remains open and is the exact spawned process.
+                            if unsafe { WaitForSingleObject(process.handle, 0) } == WAIT_TIMEOUT {
+                                return Ok(());
+                            }
+                            return Err(invalid(
+                                "maintenance candidate exited during health readback",
+                            ));
+                        }
+                    }
+                    Ok(_) => {
                         return Err(invalid(
-                            "maintenance candidate exited during health readback",
+                            "maintenance candidate pipe returned an unexpected PID",
                         ));
                     }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
                 }
-                Ok(_) => {
-                    return Err(invalid(
-                        "maintenance candidate pipe returned an unexpected PID",
-                    ));
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
+                std::thread::sleep(Duration::from_millis(100));
             }
-            std::thread::sleep(Duration::from_millis(100));
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "maintenance candidate did not establish authenticated health",
+            ))
+        })();
+        let cleanup = remove_maintenance_admission(&admission_path, &admission_bytes);
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(cleanup_error)) => Err(io::Error::other(format!(
+                "maintenance candidate started but admission cleanup failed: {cleanup_error}"
+            ))),
+            (Err(error), Err(cleanup_error)) => Err(io::Error::other(format!(
+                "maintenance candidate failed ({error}); admission cleanup failed: {cleanup_error}"
+            ))),
         }
-        Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "maintenance candidate did not establish authenticated health",
-        ))
     }
 
     /// Re-enable only the source-derived Run value after the marker matches the installed EXE.
@@ -1629,15 +1673,7 @@ mod windows {
             refuse_maintenance(&record)?;
         }
         verify_record(&record)?;
-        if maintenance_start {
-            if crate::update_handoff::read_journal(&record.root.join(".updates/handoff.json"))?
-                .is_none()
-            {
-                return Err(invalid(
-                    "maintenance startup requires its durable update journal",
-                ));
-            }
-        } else {
+        if !maintenance_start {
             crate::update::ensure_no_pending_windows_handoff(&record.root)?;
         }
         if !maintenance_start {
@@ -1648,6 +1684,9 @@ mod windows {
             return Err(invalid(
                 "managed Agent startup identity or source executable does not match its private record",
             ));
+        }
+        if maintenance_start {
+            consume_maintenance_admission(&record)?;
         }
         load_config(&record.config)?;
         Ok((record.pipe_name, record.control_token))
@@ -1896,9 +1935,14 @@ mod windows {
         Ok(())
     }
 
-    fn spawn(record: &InstallRecord, maintenance_start: bool) -> io::Result<OwnedProcess> {
+    fn spawn(
+        record: &InstallRecord,
+        maintenance_start: bool,
+        capability: Option<&str>,
+    ) -> io::Result<OwnedProcess> {
         use std::os::windows::process::CommandExt;
-        let child = Command::new(&record.executable)
+        let mut command = Command::new(&record.executable);
+        command
             .arg("run")
             .arg(format!("--config={}", record.config.display()))
             .arg("--managed-service")
@@ -1906,19 +1950,235 @@ mod windows {
                 Some("--maintenance-start")
             } else {
                 None
+            });
+        command
+            .stdin(if maintenance_start {
+                Stdio::piped()
+            } else {
+                Stdio::null()
             })
-            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-            .spawn()?;
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        let mut child = command.spawn()?;
+        if let Some(capability) = capability {
+            let mut input = child.stdin.take().ok_or_else(|| {
+                invalid("maintenance candidate stdin capability pipe was not created")
+            })?;
+            input.write_all(capability.as_bytes())?;
+            input.flush()?;
+        }
         let process = open_owned_process(child.id(), record)?;
         drop(child); // Detach without terminating; keep the synchronized handle.
         Ok(process)
     }
 
+    fn consume_maintenance_admission(record: &InstallRecord) -> io::Result<()> {
+        let mut capability = [0u8; 128];
+        read_private_child_capability(&mut capability)?;
+        if !capability.iter().all(u8::is_ascii_hexdigit) {
+            return Err(invalid("maintenance candidate capability is malformed"));
+        }
+
+        let path = record.root.join(MAINTENANCE_ADMISSION);
+        let mut file = open_maintenance_admission(&path)?;
+        let metadata = file.metadata()?;
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        (&mut file)
+            .take((MAX_MAINTENANCE_ADMISSION + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_MAINTENANCE_ADMISSION {
+            return Err(invalid("maintenance admission file exceeds size limit"));
+        }
+        let admission: MaintenanceAdmission = serde_json::from_slice(&bytes)
+            .map_err(|_| invalid("maintenance admission file is malformed"))?;
+        if !admission_matches(
+            &admission,
+            record,
+            std::str::from_utf8(&capability)
+                .map_err(|_| invalid("maintenance capability is not UTF-8"))?,
+        ) || registry_value(&record.run_value)?.is_some()
+            || std::env::current_exe()?.canonicalize()? != record.executable
+            || sha256_file(&record.executable)? != admission.executable_sha256
+        {
+            return Err(invalid(
+                "maintenance candidate admission identity does not match",
+            ));
+        }
+
+        // The open handle denies all competing reads. Delete while holding it so exactly one
+        // claimant can consume this ticket; a failed identity check leaves it available for recovery.
+        fs::remove_file(&path)?;
+        Ok(())
+    }
+
+    fn open_maintenance_admission(path: &Path) -> io::Result<File> {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        fs::symlink_metadata(path)?;
+        verify_private_acl(path)?;
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .share_mode(0x00000004) // FILE_SHARE_DELETE only; serializes claimants.
+            .custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT.
+        let mut file = options.open(&path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || is_reparse(&metadata)
+            || metadata.len() > MAX_MAINTENANCE_ADMISSION as u64
+        {
+            return Err(invalid("maintenance admission file is unsafe or oversized"));
+        }
+        Ok(file)
+    }
+
+    /// Create an admission record without replacing existing state, and report cleanup
+    /// failures if ACL setup or the durable write fails after the file was created.
+    fn write_maintenance_admission(path: &Path, bytes: &[u8]) -> io::Result<()> {
+        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        let result = (|| {
+            set_private_acl(path)?;
+            verify_private_acl(path)?;
+            file.write_all(bytes)?;
+            file.sync_all()
+        })();
+        drop(file);
+        match result {
+            Ok(()) => Ok(()),
+            Err(write_error) => match fs::remove_file(path) {
+                Ok(()) => Err(write_error),
+                Err(remove_error) if remove_error.kind() == io::ErrorKind::NotFound => {
+                    Err(write_error)
+                }
+                Err(remove_error) => Err(io::Error::other(format!(
+                    "maintenance admission write failed ({write_error}); partial record cleanup failed: {remove_error}"
+                ))),
+            },
+        }
+    }
+
+    /// Remove only the record this coordinator issued. If the path now names different or
+    /// unsafe state, preserve it and return an error for the caller's rollback path.
+    fn remove_maintenance_admission(path: &Path, expected: &[u8]) -> io::Result<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        match fs::symlink_metadata(path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        if let Err(error) = verify_private_acl(path) {
+            return if matches!(fs::symlink_metadata(path), Err(ref missing) if missing.kind() == io::ErrorKind::NotFound)
+            {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .share_mode(0x00000004) // FILE_SHARE_DELETE only; serializes claimants.
+            .custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT.
+        let mut file = match options.open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || is_reparse(&metadata)
+            || metadata.len() > MAX_MAINTENANCE_ADMISSION as u64
+        {
+            return Err(invalid("maintenance admission cleanup found unsafe state"));
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        (&mut file)
+            .take((MAX_MAINTENANCE_ADMISSION + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes != expected {
+            return Err(invalid(
+                "maintenance admission cleanup found a different record; state preserved",
+            ));
+        }
+        fs::remove_file(path)
+    }
+
+    fn admission_matches(
+        admission: &MaintenanceAdmission,
+        record: &InstallRecord,
+        capability: &str,
+    ) -> bool {
+        admission.format == 1
+            && admission.transaction_id.len() == 64
+            && admission
+                .transaction_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            && capability.len() == 128
+            && capability[..64] == admission.transaction_id
+            && admission.root == record.root
+            && admission.owner_sid == record.owner_sid
+            && admission.executable_sha256 == record.executable_sha256
+            && admission.capability_sha256
+                == format!("{:x}", Sha256::digest(&capability.as_bytes()[64..]))
+            && record.maintenance
+            && record.maintenance_previous_sha256.is_some()
+    }
+
+    fn read_private_child_capability(capability: &mut [u8; 128]) -> io::Result<()> {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetStdHandle(n_std_handle: i32) -> *mut std::ffi::c_void;
+            fn PeekNamedPipe(
+                pipe: *mut std::ffi::c_void,
+                buffer: *mut std::ffi::c_void,
+                buffer_size: u32,
+                bytes_read: *mut u32,
+                total_bytes_available: *mut u32,
+                bytes_left_this_message: *mut u32,
+            ) -> i32;
+        }
+        // SAFETY: -10 is the documented STD_INPUT_HANDLE selector and the call reads no pointers.
+        let handle = unsafe { GetStdHandle(-10) };
+        if handle.is_null() {
+            return Err(invalid(
+                "maintenance candidate has no inherited capability pipe",
+            ));
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let mut available = 0u32;
+            // SAFETY: only the byte-count output is used; the supplied pipe handle is inherited stdin.
+            let peeked = unsafe {
+                PeekNamedPipe(
+                    handle,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut available,
+                    std::ptr::null_mut(),
+                )
+            };
+            if peeked == 0 {
+                return Err(invalid("maintenance candidate stdin is not a private pipe"));
+            }
+            if available >= capability.len() as u32 {
+                return io::stdin().read_exact(capability);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "maintenance candidate capability was not supplied",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn launch_and_wait(record: &InstallRecord) -> io::Result<()> {
-        let process = spawn(record, false)?;
+        let process = spawn(record, false, None)?;
         for _ in 0..40 {
             match pipe_request(record, "STATUS") {
                 Ok(reply) if running_pid(&reply) == Some(process.pid) => return Ok(()),
@@ -3077,6 +3337,145 @@ mod windows {
             assert!(validate_sha256(&"0".repeat(64)).is_ok());
             assert!(validate_sha256(&"A".repeat(64)).is_err());
             assert!(validate_sha256("short").is_err());
+        }
+
+        #[test]
+        fn maintenance_admission_is_bound_to_transaction_owner_root_and_candidate() {
+            let mut fields = record_fields();
+            fields["maintenance"] = serde_json::json!(true);
+            fields["maintenance_previous_sha256"] = serde_json::json!("d".repeat(64));
+            let record: InstallRecord = serde_json::from_value(fields).unwrap();
+            let transaction = "e".repeat(64);
+            let nonce = "f".repeat(64);
+            let capability = format!("{transaction}{nonce}");
+            let admission = MaintenanceAdmission {
+                format: 1,
+                transaction_id: transaction.clone(),
+                root: record.root.clone(),
+                owner_sid: record.owner_sid.clone(),
+                executable_sha256: record.executable_sha256.clone(),
+                capability_sha256: format!("{:x}", Sha256::digest(nonce.as_bytes())),
+            };
+            assert!(admission_matches(&admission, &record, &capability));
+            assert!(!admission_matches(&admission, &record, ""));
+
+            let stale_transaction = format!("{}{}", "a".repeat(64), nonce);
+            assert!(!admission_matches(&admission, &record, &stale_transaction));
+            assert!(!admission_matches(
+                &admission,
+                &record,
+                &format!("{transaction}{}", "0".repeat(64))
+            ));
+
+            let mut wrong_root = record.clone();
+            wrong_root.root.push("other");
+            assert!(!admission_matches(&admission, &wrong_root, &capability));
+            let mut wrong_sid = record.clone();
+            wrong_sid.owner_sid.push_str("-2");
+            assert!(!admission_matches(&admission, &wrong_sid, &capability));
+            let mut wrong_executable = record.clone();
+            wrong_executable.executable_sha256 = "9".repeat(64);
+            assert!(!admission_matches(
+                &admission,
+                &wrong_executable,
+                &capability
+            ));
+
+            let mut non_maintenance = record;
+            non_maintenance.maintenance = false;
+            assert!(!admission_matches(
+                &admission,
+                &non_maintenance,
+                &capability
+            ));
+        }
+
+        #[test]
+        fn concurrent_maintenance_admission_claims_have_one_winner() {
+            use std::sync::{Arc, Barrier};
+
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(MAINTENANCE_ADMISSION);
+            write_private(&path, b"admission fixture").unwrap();
+            let barrier = Arc::new(Barrier::new(2));
+            let claims: Vec<_> = (0..2)
+                .map(|_| {
+                    let barrier = Arc::clone(&barrier);
+                    let path = path.clone();
+                    std::thread::spawn(move || {
+                        let claim = open_maintenance_admission(&path);
+                        barrier.wait();
+                        claim.is_ok()
+                    })
+                })
+                .collect();
+            assert_eq!(
+                claims
+                    .into_iter()
+                    .map(|claim| claim.join().unwrap())
+                    .filter(|won| *won)
+                    .count(),
+                1
+            );
+        }
+
+        #[test]
+        fn consumed_maintenance_admission_cannot_be_reopened() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(MAINTENANCE_ADMISSION);
+            write_private(&path, b"admission fixture").unwrap();
+            let claim = open_maintenance_admission(&path).unwrap();
+            fs::remove_file(&path).unwrap();
+            drop(claim);
+            assert_eq!(
+                open_maintenance_admission(&path).unwrap_err().kind(),
+                io::ErrorKind::NotFound
+            );
+        }
+
+        #[test]
+        fn maintenance_admission_writer_does_not_replace_existing_state() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(MAINTENANCE_ADMISSION);
+            fs::write(&path, b"existing admission state").unwrap();
+            let error = write_maintenance_admission(&path, b"new admission state").unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(fs::read(path).unwrap(), b"existing admission state");
+        }
+
+        #[test]
+        fn maintenance_admission_cleanup_preserves_a_different_record() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(MAINTENANCE_ADMISSION);
+            write_private(&path, b"different admission state").unwrap();
+            assert!(remove_maintenance_admission(&path, b"issued admission state").is_err());
+            assert_eq!(fs::read(path).unwrap(), b"different admission state");
+        }
+
+        #[test]
+        fn maintenance_admission_rejects_a_foreign_acl_entry() {
+            use windows_permissions::constants::{SeObjectType, SecurityInformation};
+            use windows_permissions::wrappers::SetNamedSecurityInfo;
+            use windows_permissions::{LocalBox, SecurityDescriptor};
+
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(MAINTENANCE_ADMISSION);
+            write_private(&path, b"admission fixture").unwrap();
+            let descriptor: LocalBox<SecurityDescriptor> = "D:P(A;;FA;;;WD)".parse().unwrap();
+            SetNamedSecurityInfo(
+                path.as_os_str(),
+                SeObjectType::SE_FILE_OBJECT,
+                SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+                None,
+                None,
+                Some(descriptor.dacl().unwrap()),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                open_maintenance_admission(&path).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
         }
     }
 }
