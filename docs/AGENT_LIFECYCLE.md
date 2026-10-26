@@ -65,15 +65,98 @@ Agent-only update workflow and install the updated executable before registering
 the service again. Hub revocation and local service removal are independent
 operations.
 
-## Windows
+## Windows 7 and Windows 11 current-user startup
 
-`hostlink-agent service` currently returns `Unsupported` outside Linux. No
-PowerShell 2 compatible, owner-bound Windows login startup and process control
-implementation is included yet. In particular, a scheduled task is not assumed
-to be available without administrator credentials. Windows 11 and Windows 7
-must remain explicit foreground `hostlink-agent run --config ...` sessions
-until a separately verified current-user startup owner is implemented. Do not
-use SYSTEM, a machine-wide service, or the legacy Agent service.
+Windows uses only the current interactive user's
+`HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run` entry. It does not
+create a Windows service, scheduled task, SYSTEM process, machine-wide
+registration, or legacy Agent integration. Login startup runs only after that
+user signs in; no process is claimed to be running while the user is logged
+out. Windows does not restart the Agent after a crash during that login
+session; status reports it inactive and an explicit `start` is required. The
+Run command is capped at 260 UTF-16 characters, so install fails
+before writing either marker or registry value when the selected root cannot
+fit safely.
 
-This work has no native Windows acceptance result. Linux unit-fixture tests do
-not establish Windows 11 or Windows 7 / PowerShell 2 behavior.
+```powershell
+hostlink-agent.exe check --config ROOT\state\agent.json
+hostlink-agent.exe service install --root ROOT --config ROOT\state\agent.json
+hostlink-agent.exe service start --root ROOT
+hostlink-agent.exe service status --root ROOT
+hostlink-agent.exe service stop --root ROOT
+hostlink-agent.exe service remove --root ROOT
+```
+
+`ROOT` must be a bounded private descendant of the current user's OS-resolved
+`FOLDERID_LocalAppData` directory, including the official installer layout
+`LocalAppData\HostLink\Agent`. The resolver uses `SHGetKnownFolderPath`,
+not `%LOCALAPPDATA%` or another environment variable. The profile boundary
+must be owned by the current SID and its DACL may grant access only to that SID,
+SYSTEM, and local Administrators; every intermediate directory and the install
+root itself require protected current-user-only DACLs. Both profile and
+installed-root paths are canonicalized to avoid ordinary DOS vs verbatim aliases.
+The path chain rejects reparse points. Shared roots such
+as `C:\Temp` are refused even if the final directory appears private.
+
+`install` requires a non-elevated, non-SYSTEM user, the exact executable at
+`ROOT\\bin\\hostlink-agent.exe`, the fresh enrollment config and matching
+manifest, a LocalAppData-contained root with current-user-owned protected ACLs,
+and non-reparse input paths. It stores a private marker with the current SID,
+root, config, binary SHA-256, a
+root-specific named-pipe endpoint, and a random 256-bit control token. It also
+writes a private, source-derived VBScript launcher under `ROOT` so the Run
+entry stays below the registry's command limit even when the executable and
+config paths are long. The launcher is pinned by its content hash and invokes
+the system Windows Script Host with hidden-window settings. The matching
+startup value is written only if the HKCU value is vacant; reinstall or
+collision never overwrites another value. The launcher command line contains
+only `--config` and `--managed-service`; the 256-bit control token stays in the
+private marker and is loaded by the Agent after it verifies its executable,
+marker, root, and config. `install` registers login startup
+but does not start the Agent. `start` verifies the marker, enrollment and exact
+binary hash, then starts one detached current-user process and waits for its
+authenticated pipe handshake. The handshake reports the real process PID;
+status also checks the configured loopback SSH banner and does not claim Hub
+reachability.
+
+The named-pipe listener creates its next protected instance before serving a
+connected client, so it remains available across requests with at most two
+instances. `stop` authenticates to that root's local named pipe, opens a
+synchronized process handle for the reported PID, and verifies its owner SID,
+image path, and executable SHA-256 before requesting shutdown. It waits on that
+handle with the Windows 7-compatible `WaitForSingleObject`; a missing pipe alone
+never proves process exit. Unknown PID, identity mismatch, or failed handle open
+leaves the registration in place. If the pipe is already absent, `stop` and
+`remove` fail closed because no authenticated live PID is available; start the
+owned Agent and invoke `remove` while its lifecycle endpoint is available.
+It refuses any durable job
+that is Prepared, Running, Interrupted or unreadable, and asks the Agent to
+shut down through its normal cancellation path. It waits at most ten seconds
+and never terminates a PID or process tree by guesswork. It rechecks durable
+jobs after shutdown and restarts the Agent if a job was admitted in the narrow
+shutdown race. `remove` performs the same stop/interlock, then removes only the
+exact HKCU value and ownership marker after process exit is proven. Windows
+keeps the executable, config, credentials, enrollment record and jobs in place
+for recovery; Hub revocation remains independent. Remove the lifecycle registration before applying an
+Agent update; the Windows update command refuses to replace a binary while its
+service marker is present. A changed binary, marker, registry value, SID, ACL, or
+reparse path fails closed.
+
+This implementation has not yet passed native Windows 11 disposable-user
+acceptance or Windows 7 NT6.1 x64/x86 acceptance. Linux tests and a Windows
+cross-check do not establish those runtime results. PowerShell 2 is not used
+by the lifecycle implementation. A native Windows test is present but ignored
+by default because it creates a current-user startup entry. Run it only from a
+disposable, non-elevated Windows profile:
+
+```powershell
+$env:HOSTLINK_WINDOWS_LIFECYCLE_DISPOSABLE = '1'
+cargo test --locked -p hostlink-agent --test agent_lifecycle_windows -- --ignored
+```
+
+The test creates a private LocalAppData Agent root with spaces in its path, checks
+idempotent install and update refusal, rejects a changed binary and launcher,
+checks active-job stop/remove refusal, then starts the real copied Agent,
+verifies its PID-bound lifecycle response and SSH banner, gracefully stops it,
+checks that the listener is closed, removes the startup entry, and retains the
+Agent files. It is not a Windows 7 test and is not run from this Linux worktree.

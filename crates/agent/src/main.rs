@@ -35,6 +35,9 @@ enum Command {
     Run {
         #[arg(long)]
         config: PathBuf,
+        /// Load and verify lifecycle configuration from the private root marker.
+        #[arg(long, hide = true)]
+        managed_service: bool,
     },
     /// Apply a digest-pinned Agent-only package; refuses active jobs and unsafe targets.
     Update {
@@ -141,17 +144,67 @@ async fn run(cli: Cli) -> io::Result<()> {
             println!("Agent configuration: valid");
             Ok(())
         }
-        Command::Run { config } => {
+        Command::Run {
+            config,
+            managed_service,
+        } => {
+            #[cfg(windows)]
+            let managed_control = if managed_service {
+                Some(hostlink_agent::service::validate_managed_run(&config)?)
+            } else {
+                None
+            };
+            #[cfg(not(windows))]
+            if managed_service {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "managed lifecycle mode is available only on Windows",
+                ));
+            }
             let config = load_config(&config)?;
             let shutdown = tokio_util::sync::CancellationToken::new();
             let signal_shutdown = shutdown.clone();
             tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
-                signal_shutdown.cancel();
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    signal_shutdown.cancel();
+                }
             });
             // ssh::serve owns the outbound tunnel when the config contains
             // gateway routes. Starting tunnel::run here as well would race
             // the same Agent identity for its uniquely assigned remote port.
+            #[cfg(windows)]
+            if let Some((pipe, token)) = managed_control {
+                let control_config = config.clone();
+                let control_shutdown = shutdown.clone();
+                let control_finished = tokio_util::sync::CancellationToken::new();
+                let server_shutdown = shutdown.clone();
+                let mut server = Box::pin(ssh::serve(&config, server_shutdown.cancelled_owned()));
+                let control = Box::pin(hostlink_agent::service::control_loop(
+                    &control_config,
+                    pipe,
+                    token,
+                    control_shutdown,
+                    control_finished.clone(),
+                ));
+                tokio::select! {
+                    result = &mut server => {
+                        control_finished.cancel();
+                        result?;
+                    },
+                    result = control => {
+                        shutdown.cancel();
+                        control_finished.cancel();
+                        if let Err(error) = result {
+                            let _ = server.await;
+                            return Err(error);
+                        }
+                        server.await?;
+                    }
+                }
+            } else {
+                ssh::serve(&config, shutdown.cancelled_owned()).await?;
+            }
+            #[cfg(not(windows))]
             ssh::serve(&config, shutdown.cancelled_owned()).await?;
             Ok(())
         }
@@ -162,6 +215,8 @@ async fn run(cli: Cli) -> io::Result<()> {
             target,
             version,
         } => {
+            #[cfg(windows)]
+            hostlink_agent::service::ensure_update_unregistered(&root)?;
             let update = AgentUpdateRequest {
                 install_root: root,
                 archive_file: archive,
@@ -238,12 +293,13 @@ async fn run(cli: Cli) -> io::Result<()> {
                 let status = hostlink_agent::service::status(&root)?;
                 println!("{}", status.detail);
                 println!(
-                    "installed={} active={} owner_uid={} pid={} executable_sha256={} ssh_banner={} local_enrollment_metadata={} hub_reachability=not_checked",
+                    "installed={} active={} owner_uid={} owner_sid={} pid={} executable_sha256={} ssh_banner={} local_enrollment_metadata={} hub_reachability=not_checked",
                     status.installed,
                     status.active,
                     status
                         .owner_uid
                         .map_or_else(|| "-".into(), |uid| uid.to_string()),
+                    status.owner_sid.as_deref().unwrap_or("-"),
                     status.pid.map_or_else(|| "-".into(), |p| p.to_string()),
                     status.executable_sha256.as_deref().unwrap_or("-"),
                     status.ssh_banner,
