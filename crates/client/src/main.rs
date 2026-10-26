@@ -266,6 +266,9 @@ enum HubCommand {
     Configure {
         #[arg(long)]
         hub_url: String,
+        /// Additional private Hub CA in PEM format; certificate validation remains enabled.
+        #[arg(long)]
+        hub_ca_cert: Option<PathBuf>,
         #[arg(long)]
         token_file: PathBuf,
         #[arg(long)]
@@ -326,6 +329,7 @@ async fn hub_command(command: &HubCommand) -> Result<i32, Box<dyn Error>> {
     match command {
         HubCommand::Configure {
             hub_url,
+            hub_ca_cert,
             token_file,
             ssh_user,
             identity,
@@ -334,6 +338,7 @@ async fn hub_command(command: &HubCommand) -> Result<i32, Box<dyn Error>> {
         } => {
             let config = HubConfig {
                 hub_url: hub_url.clone(),
+                hub_ca_cert: hub_ca_cert.clone(),
                 token_file: token_file.clone(),
                 ssh_user: ssh_user.clone(),
                 identity: identity.clone(),

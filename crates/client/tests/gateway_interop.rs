@@ -426,6 +426,7 @@ async fn reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins() {
         &enrolled.gateways[0],
         &ControllerHubConfig {
             hub_url: "https://hub.fixture.test".into(),
+            hub_ca_cert: None,
             token_file: root.path().join("no-network-token"),
             ssh_user: "agent".into(),
             identity: controller_file.clone(),

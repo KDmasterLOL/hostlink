@@ -90,10 +90,21 @@ pub struct EnrollmentResult {
 /// A transport failure after the request is sent is reported as reconciliation required. This
 /// function never retries the one-use invite token.
 pub async fn prepare_enrollment(options: &EnrollmentOptions) -> io::Result<EnrollmentResult> {
+    prepare_enrollment_with_ca(options, None).await
+}
+
+/// Enroll using the normal TLS validation plus one explicitly supplied CA certificate.
+/// This supports private Hub PKI without an insecure TLS mode or HTTP fallback.
+pub async fn prepare_enrollment_with_ca(
+    options: &EnrollmentOptions,
+    ca_certificate: Option<&Path>,
+) -> io::Result<EnrollmentResult> {
     let hub_url = options.hub_url.clone();
+    let ca_certificate = ca_certificate.map(Path::to_path_buf);
     let result = prepare_enrollment_using(options, move |_, request| {
         let hub_url = hub_url.clone();
-        async move { enroll_once(&hub_url, request).await }
+        let ca_certificate = ca_certificate.clone();
+        async move { enroll_once(&hub_url, request, ca_certificate.as_deref()).await }
     })
     .await;
     if let Err(error) = result {
@@ -317,15 +328,53 @@ where
     })
 }
 
-async fn enroll_once(hub_url: &str, request: EnrollRequest) -> io::Result<EnrollResponse> {
+async fn enroll_once(
+    hub_url: &str,
+    request: EnrollRequest,
+    ca_certificate: Option<&Path>,
+) -> io::Result<EnrollResponse> {
     let mut url = parse_hub_url(hub_url)?;
     url.set_path(ENROLLMENT_PATH);
-    let client = Client::builder()
+    let mut builder = Client::builder()
         .use_rustls_tls()
         .https_only(true)
         .redirect(Policy::none())
         .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT);
+    if let Some(path) = ca_certificate {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(0x0020_0000);
+        }
+        let file = options
+            .open(path)
+            .map_err(|_| invalid("Hub CA certificate is unavailable"))?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| invalid("Hub CA certificate is unavailable"))?;
+        if !metadata.is_file() || metadata.len() > 64 * 1024 {
+            return Err(invalid("Hub CA certificate is unsafe or oversized"));
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take(64 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| invalid("Hub CA certificate is unavailable"))?;
+        if bytes.len() > 64 * 1024 {
+            return Err(invalid("Hub CA certificate is unsafe or oversized"));
+        }
+        let certificate = reqwest::Certificate::from_pem(&bytes)
+            .map_err(|_| invalid("Hub CA certificate is invalid"))?;
+        builder = builder.add_root_certificate(certificate);
+    }
+    let client = builder
         .build()
         .map_err(|_| invalid("cannot initialize HTTPS client"))?;
     let response = client

@@ -14,6 +14,7 @@ fn hub_client_loads_owner_only_token_without_network_io() {
     fs::set_permissions(&token_file, fs::Permissions::from_mode(0o600)).unwrap();
     let config = HubConfig {
         hub_url: "https://hub.invalid".into(),
+        hub_ca_cert: None,
         token_file,
         ssh_user: "hostlink".into(),
         identity: PathBuf::from("controller_ed25519"),
@@ -45,6 +46,7 @@ fn hub_client_rejects_shared_or_linked_token_files() {
     fs::write(&token_file, "fixture-secret").unwrap();
     let config = HubConfig {
         hub_url: "https://hub.invalid".into(),
+        hub_ca_cert: None,
         token_file: token_file.clone(),
         ssh_user: "hostlink".into(),
         identity: PathBuf::from("controller_ed25519"),
