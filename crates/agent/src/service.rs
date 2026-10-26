@@ -2022,7 +2022,7 @@ mod windows {
             .read(true)
             .share_mode(0x00000004) // FILE_SHARE_DELETE only; serializes claimants.
             .custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT.
-        let file = options.open(&path)?;
+        let file = options.open(path)?;
         let metadata = file.metadata()?;
         if !metadata.is_file()
             || is_reparse(&metadata)
