@@ -88,6 +88,42 @@ enum Command {
         #[arg(long)]
         root: PathBuf,
     },
+    /// Manage the new Agent in the current user's service manager.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Register a private user service; the first start is explicit.
+    Install {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Start only the service owned by this exact install root.
+    Start {
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// Stop only the service owned by this exact install root.
+    Stop {
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// Report service state, owned process identity and SSH loopback banner.
+    Status {
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// Uninstall the owned executable and service integration; retain enrollment data and jobs.
+    Remove {
+        #[arg(long)]
+        root: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -191,6 +227,34 @@ async fn run(cli: Cli) -> io::Result<()> {
         Command::BootstrapFinalize { root } => {
             hostlink_agent::update::finalize_fresh_install(&root)
         }
+        Command::Service { command } => match command {
+            ServiceCommand::Install { root, config } => {
+                hostlink_agent::service::install(&root, &config)
+            }
+            ServiceCommand::Start { root } => hostlink_agent::service::start(&root),
+            ServiceCommand::Stop { root } => hostlink_agent::service::stop(&root),
+            ServiceCommand::Remove { root } => hostlink_agent::service::remove(&root),
+            ServiceCommand::Status { root } => {
+                let status = hostlink_agent::service::status(&root)?;
+                println!("{}", status.detail);
+                println!(
+                    "installed={} active={} owner_uid={} pid={} executable_sha256={} ssh_banner={} local_enrollment_metadata={} hub_reachability=not_checked",
+                    status.installed,
+                    status.active,
+                    status
+                        .owner_uid
+                        .map_or_else(|| "-".into(), |uid| uid.to_string()),
+                    status.pid.map_or_else(|| "-".into(), |p| p.to_string()),
+                    status.executable_sha256.as_deref().unwrap_or("-"),
+                    status.ssh_banner,
+                    status.local_enrollment
+                );
+                if !status.installed || !status.active || !status.ssh_banner {
+                    return Err(io::Error::other("Agent service is not healthy"));
+                }
+                Ok(())
+            }
+        },
     }
 }
 

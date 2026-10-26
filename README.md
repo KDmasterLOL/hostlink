@@ -125,3 +125,15 @@ Use [docs/ARTIFACTS_AND_INVITES.md](docs/ARTIFACTS_AND_INVITES.md) and
 Agent ZIP, sidecar, installer pin, and invite-input hashes. Packaging is local
 only; operators select and verify their own immutable HTTPS artifact origin.
 Native Win7 PowerShell 2 acceptance remains separate from cross-build evidence.
+
+## Agent lifecycle
+
+The Hub registry and local Agent process are managed separately. `hostlink remove`
+revokes Hub access; it does not uninstall the local Agent. Linux can
+install a root-bound `systemd --user` unit with
+`hostlink-agent service install/start/stop/status/remove`. The service is
+current-user scoped and never enables login lingering. `service remove` removes
+the owned unit, marker and executable, preserving enrollment data, keys and
+jobs. See [docs/AGENT_LIFECYCLE.md](docs/AGENT_LIFECYCLE.md) for
+commands and safety behavior. Windows persistent service management is not
+implemented; use an explicit foreground Agent session there.
