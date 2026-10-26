@@ -53,6 +53,9 @@ enum Command {
     Enroll {
         #[arg(long)]
         hub_url: String,
+        /// Additional private Hub CA in PEM format; certificate verification remains enabled.
+        #[arg(long)]
+        hub_ca_cert: Option<PathBuf>,
         #[arg(long)]
         token_file: PathBuf,
         #[arg(long)]
@@ -147,6 +150,7 @@ async fn run(cli: Cli) -> io::Result<()> {
         }
         Command::Enroll {
             hub_url,
+            hub_ca_cert,
             token_file,
             root,
             name,
@@ -154,15 +158,18 @@ async fn run(cli: Cli) -> io::Result<()> {
             gateway_index,
             retain_pending,
         } => {
-            let result = hostlink_agent::enrollment::prepare_enrollment(&EnrollmentOptions {
-                hub_url,
-                token_file,
-                install_root: root,
-                name,
-                user,
-                gateway_index,
-                retain_pending,
-            })
+            let result = hostlink_agent::enrollment::prepare_enrollment_with_ca(
+                &EnrollmentOptions {
+                    hub_url,
+                    token_file,
+                    install_root: root,
+                    name,
+                    user,
+                    gateway_index,
+                    retain_pending,
+                },
+                hub_ca_cert.as_deref(),
+            )
             .await?;
             println!("Agent enrolled: {}", result.machine_id);
             println!("Configuration: {}", result.config_path.display());

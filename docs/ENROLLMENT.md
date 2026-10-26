@@ -4,6 +4,9 @@
 installation root. It does not adopt an existing Agent root. The enrollment
 module sends the shared `hostlink-hub` v2 DTO to `POST /v2/enroll` using HTTPS
 with rustls, redirects disabled, bounded timeouts, and a bounded JSON response.
+For an operator-managed private CA, pass `--hub-ca-cert /private/hub-ca.pem`.
+This adds that PEM certificate to the normal trust roots while preserving
+certificate and hostname verification; there is no HTTP or insecure TLS mode.
 
 ## Direct CLI
 

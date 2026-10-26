@@ -9,6 +9,7 @@ Create an operator bearer token file with owner-only permissions, and keep the c
 ```sh
 hostlink hub configure \
   --hub-url https://hub.example \
+  --hub-ca-cert /private/hub-ca.pem \
   --token-file ~/.config/hostlink/operator.token \
   --ssh-user hostlink \
   --identity ~/.ssh/hostlink_ed25519 \
@@ -17,7 +18,7 @@ hostlink hub show
 hostlink hub check
 ```
 
-The configuration is written to `~/.config/hostlink/hub.json` (Windows: `%APPDATA%\HostLink\hub.json`). The Hub URL must be an HTTPS origin. `hub check` checks operator API access and does not probe an Agent.
+The configuration is written to `~/.config/hostlink/hub.json` (Windows: `%APPDATA%\HostLink\hub.json`). The Hub URL must be an HTTPS origin. `hub check` checks operator API access and does not probe an Agent. `--hub-ca-cert` is optional and adds one PEM CA to normal TLS trust; certificate and hostname validation remain enabled.
 
 ## Inventory and host operations
 

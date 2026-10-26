@@ -26,6 +26,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct HubConfig {
     /// HTTPS origin of the Hub, without a path, query, or credentials.
     pub hub_url: String,
+    /// Optional additional PEM CA for a privately operated Hub TLS endpoint.
+    #[serde(default)]
+    pub hub_ca_cert: Option<PathBuf>,
     /// Owner-only file containing the operator bearer token.
     pub token_file: PathBuf,
     /// Explicit SSH account accepted by the Agent; never inferred from host metadata.
@@ -105,6 +108,15 @@ impl HubClient {
 
     /// Loads the owner-only token and creates a strict HTTPS client without proxies or redirects.
     pub fn from_config(config: &HubConfig) -> Result<Self, HubClientError> {
+        Self::from_config_with_ca(config, config.hub_ca_cert.as_deref())
+    }
+
+    /// Loads the normal HTTPS client with an additional explicitly supplied CA certificate.
+    /// The system/web PKI roots remain enabled; this never disables certificate validation.
+    pub fn from_config_with_ca(
+        config: &HubConfig,
+        ca_certificate: Option<&Path>,
+    ) -> Result<Self, HubClientError> {
         let base = parse_origin(&config.hub_url)?;
         if config.ssh_user.is_empty()
             || config.ssh_user.len() > 128
@@ -116,13 +128,15 @@ impl HubClient {
         if token.is_empty() || token.len() > 4096 || token.contains(['\r', '\n']) {
             return Err(HubClientError::Credential);
         }
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .connect_timeout(Duration::from_secs(5))
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map_err(|_| HubClientError::Request)?;
+            .timeout(REQUEST_TIMEOUT);
+        if let Some(path) = ca_certificate {
+            builder = builder.add_root_certificate(read_ca_certificate(path)?);
+        }
+        let client = builder.build().map_err(|_| HubClientError::Request)?;
         Ok(Self {
             base,
             token: SecretString::from(token),
@@ -298,6 +312,34 @@ impl HubClient {
         }
         serde_json::from_slice(&bytes).map_err(|_| HubClientError::Response)
     }
+}
+
+fn read_ca_certificate(path: &Path) -> Result<reqwest::Certificate, HubClientError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options.open(path).map_err(|_| HubClientError::Credential)?;
+    let metadata = file.metadata().map_err(|_| HubClientError::Credential)?;
+    if !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return Err(HubClientError::Credential);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(64 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| HubClientError::Credential)?;
+    if bytes.len() > 64 * 1024 {
+        return Err(HubClientError::Credential);
+    }
+    reqwest::Certificate::from_pem(&bytes).map_err(|_| HubClientError::Credential)
 }
 
 fn parse_origin(value: &str) -> Result<Url, HubClientError> {
@@ -798,6 +840,7 @@ mod tests {
                 "machine-001",
                 &HubConfig {
                     hub_url: "https://hub.fixture".into(),
+                    hub_ca_cert: None,
                     token_file: PathBuf::from("unused-in-fixture"),
                     ssh_user: "agent-user".into(),
                     identity: PathBuf::from("controller_ed25519"),

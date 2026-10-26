@@ -98,6 +98,14 @@ mapping and target-side TCP probes through `russh` direct-tcpip. See
 [docs/TCP_FORWARDING.md](docs/TCP_FORWARDING.md) for commands, deadlines,
 concurrency limits and security behavior.
 
+The opt-in process-level managed gateway fixture runs a real child Hub over
+trusted local HTTPS, enrolls an Agent, and uses a temporary OpenSSH gateway
+whose `AuthorizedKeysFile` includes the Hub-owned v2 projection. It exercises
+managed exec, SFTP, durable jobs, forwarding and revocation without touching
+user SSH configuration or system services. See
+[docs/ISOLATED_GATEWAY.md](docs/ISOLATED_GATEWAY.md) for prerequisites and
+limits.
+
 Fresh Agent enrollment can retain an explicitly selected Hub-approved primary
 gateway and ordered, independently pinned alternates. Transient transport
 failure rotates through those routes with bounded backoff; pin, authentication
