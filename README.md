@@ -109,3 +109,11 @@ A real Linux HOME Agent↔Client SSH test verifies accepted-once execution,
 disconnect/reconnect, binary stdout/stderr and exit code `7`. Native Win7
 x64/x86 and Windows Agent-owned durable execution/updater handoff remain
 explicit acceptance gates. The Agent-only updater is not removed.
+
+## Local Agent artifact packages
+
+Use [docs/ARTIFACTS_AND_INVITES.md](docs/ARTIFACTS_AND_INVITES.md) and
+`scripts/package-hostlink-agent.py` to create a deterministic, source-SHA-bound
+Agent ZIP, sidecar, installer pin, and invite-input hashes. Packaging is local
+only; operators select and verify their own immutable HTTPS artifact origin.
+Native Win7 PowerShell 2 acceptance remains separate from cross-build evidence.
