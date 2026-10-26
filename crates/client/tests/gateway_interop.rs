@@ -430,6 +430,7 @@ async fn reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins() {
             ssh_user: "agent".into(),
             identity: controller_file.clone(),
             gateway_identity: gateway_user_file.clone(),
+            preferred_gateway: None,
         },
     )
     .await

@@ -104,16 +104,23 @@ impl HostConnection {
         let identity = load_identity(&spec.identity)?;
 
         if let Some(gateway) = &spec.gateway {
-            validate_gateway(gateway)?;
-            let gateway_key = parse_pin(&gateway.host_public_key)?;
-            let gateway_identity = load_identity(&gateway.identity)?;
-            let gateway_session = connect_authenticated(
-                gateway.address,
-                &gateway.user,
-                gateway_identity,
-                gateway_key,
-            )
-            .await?;
+            let routes = validate_gateway_routes(gateway)?;
+            let mut connected = None;
+            for (index, (address, user, identity, key)) in routes.into_iter().enumerate() {
+                match connect_authenticated(address, &user, identity, key).await {
+                    Ok(session) => {
+                        connected = Some(session);
+                        break;
+                    }
+                    Err(error)
+                        if index + 1 < 1 + gateway.alternates.len()
+                            && is_transient_gateway_connect_error(&error) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            let gateway_session = connected.ok_or_else(|| {
+                SshClientError::Invalid("no approved gateway route connected".into())
+            })?;
 
             // The gateway's configured reverse listener is explicitly loopback-only.
             let channel = match tokio::time::timeout(
@@ -478,6 +485,81 @@ fn validate_gateway(gateway: &GatewayHop) -> Result<(), SshClientError> {
         ));
     }
     Ok(())
+}
+
+fn validate_gateway_routes(
+    primary: &GatewayHop,
+) -> Result<Vec<(SocketAddr, String, russh::keys::PrivateKey, PublicKey)>, SshClientError> {
+    if primary.alternates.len() > 15 {
+        return Err(SshClientError::Invalid(
+            "at most 16 approved gateway routes are allowed".into(),
+        ));
+    }
+    let mut routes = Vec::with_capacity(primary.alternates.len() + 1);
+    let mut identities = std::collections::BTreeSet::new();
+    let mut pins = std::collections::BTreeSet::new();
+    let mut append =
+        |address: SocketAddr, user: &str, identity_path: &std::path::Path, pin: &str| {
+            validate_user(user)?;
+            if !identities.insert((address, user.to_owned())) || !pins.insert(pin.to_owned()) {
+                return Err(SshClientError::Invalid(
+                    "duplicate approved gateway route or host pin".into(),
+                ));
+            }
+            let key = parse_pin(pin)?;
+            let identity = load_identity(identity_path)?;
+            if key.algorithm().to_string() != "ssh-ed25519" {
+                return Err(SshClientError::Invalid(
+                    "gateway pin must be Ed25519".into(),
+                ));
+            }
+            routes.push((address, user.to_owned(), identity, key));
+            Ok(())
+        };
+    validate_gateway(primary)?;
+    append(
+        primary.address,
+        &primary.user,
+        &primary.identity,
+        &primary.host_public_key,
+    )?;
+    for alternate in &primary.alternates {
+        append(
+            alternate.address,
+            &alternate.user,
+            &alternate.identity,
+            &alternate.host_public_key,
+        )?;
+    }
+    Ok(routes)
+}
+
+fn is_transient_gateway_connect_error(error: &SshClientError) -> bool {
+    match error {
+        SshClientError::Timeout => true,
+        SshClientError::Io(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::UnexpectedEof
+        ),
+        SshClientError::Russh(
+            russh::Error::ConnectionTimeout | russh::Error::HUP | russh::Error::Disconnect,
+        ) => true,
+        SshClientError::Russh(russh::Error::IO(error)) => matches!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::UnexpectedEof
+        ),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

@@ -33,4 +33,17 @@ pub struct GatewayHop {
     pub identity: PathBuf,
     pub host_public_key: String,
     pub reverse_port: u16,
+    /// Additional Hub-approved pinned routes, attempted only after transient connect errors.
+    #[serde(default)]
+    pub alternates: Vec<GatewayRoute>,
+}
+
+/// One explicitly approved alternative gateway route.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayRoute {
+    pub address: SocketAddr,
+    pub user: String,
+    pub identity: PathBuf,
+    pub host_public_key: String,
 }
