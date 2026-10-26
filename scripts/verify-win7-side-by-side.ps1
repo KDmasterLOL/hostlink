@@ -56,7 +56,7 @@ function Invoke-Captured([string]$Executable, [string[]]$Arguments, [string]$Wor
         [IO.File]::WriteAllText($StdoutPath, $stdout, (New-Object Text.UTF8Encoding($false)))
         [IO.File]::WriteAllText($StderrPath, $stderr, (New-Object Text.UTF8Encoding($false)))
         return $process.ExitCode
-    } finally { $process.Dispose() }
+    } finally { $process.Close() }
 }
 
 function Read-PackageVersion([string]$PackageRoot) {
