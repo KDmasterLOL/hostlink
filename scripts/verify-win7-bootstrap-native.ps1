@@ -155,13 +155,13 @@ function Assert-BuildArtifact([string]$BuildRoot, [string]$Target, [string]$Pack
     if ((Get-JsonValue (Get-JsonValue $artifact 'build_receipt') 'sha256') -cne (Get-Sha256 $receiptPath)) { Stop-Harness 'package receipt does not bind to this exact build receipt' }
     $archiveName = 'hostlink-agent-' + $Target + '.zip'
     if ((Get-JsonValue $artifact 'archive') -cne $archiveName) { Stop-Harness 'package archive name does not match the exact target' }
-    $archivePath = Assert-RegularOwnedFile ([IO.Path]::Combine($package, $Version, $archiveName)) $Sid
+    $archivePath = Assert-RegularOwnedFile ([IO.Path]::Combine([IO.Path]::Combine($package, $Version), $archiveName)) $Sid
     $archiveHash = Get-Sha256 $archivePath
     if ($archiveHash -cnotmatch '^[0-9a-f]{64}$' -or $archiveHash -cne (Get-JsonValue $artifact 'archive_sha256')) { Stop-Harness 'archive digest does not match its package receipt' }
     $archiveSidecar = Assert-RegularOwnedFile ($archivePath + '.sha256') $Sid
     $sidecarLine = [IO.File]::ReadAllText($archiveSidecar, [Text.Encoding]::ASCII)
     if ($sidecarLine -cne ($archiveHash + '  ' + $archiveName + "`n") -and $sidecarLine -cne ($archiveHash + '  ' + $archiveName + "`r`n")) { Stop-Harness 'ZIP SHA-256 sidecar is malformed or mismatched' }
-    $agentPath = Assert-RegularOwnedFile ([IO.Path]::Combine($package, $Version, $Target, 'hostlink-agent.exe')) $Sid
+    $agentPath = Assert-RegularOwnedFile ([IO.Path]::Combine([IO.Path]::Combine([IO.Path]::Combine($package, $Version), $Target), 'hostlink-agent.exe')) $Sid
     $agentHash = Get-Sha256 $agentPath
     if ($agentHash -cne (Get-JsonValue $artifact 'sidecar_sha256') -or $agentHash -cne $binaryRows[0].sha256) { Stop-Harness 'target verifier sidecar does not match build/package receipts' }
     $agentSidecar = Assert-RegularOwnedFile ($agentPath + '.sha256') $Sid

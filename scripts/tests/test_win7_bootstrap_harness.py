@@ -47,6 +47,9 @@ class BootstrapHarnessContractTests(unittest.TestCase):
         for unsupported in ("ConvertFrom-Json", "ConvertTo-Json", "ReadToEndAsync", "Start-Process -Verb RunAs"):
             self.assertNotIn(unsupported, self.script)
         self.assertIn("System.Web.Script.Serialization.JavaScriptSerializer", self.script)
+        # .NET 3.5 lacks the Path.Combine(string,string,string) overload.
+        self.assertNotIn("::Combine($package, $Version,", self.script)
+        self.assertIn("::Combine([IO.Path]::Combine($package, $Version), $archiveName)", self.script)
 
     def test_docs_label_host_os_and_show_invocation(self):
         self.assertIn("verify-win7-bootstrap-native.ps1", self.doc)
