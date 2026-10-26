@@ -9,7 +9,8 @@ pub mod sftp;
 pub mod ssh;
 pub mod tunnel;
 pub mod update;
-pub mod update_handoff;
+#[cfg(any(windows, test))]
+mod update_handoff;
 
 use serde::{Deserialize, Serialize};
 use std::io;

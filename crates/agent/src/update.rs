@@ -541,7 +541,7 @@ fn recover_windows_handoff(
             crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
             cleanup_windows_transaction(&journal_path, &transaction_dir, &journal.identity)
         }
-        RecoveryAction::PreserveAndError | RecoveryAction::PublishStaged => Err(io::Error::new(
+        RecoveryAction::PreserveAndError => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Windows update transaction is ambiguous; journal and candidates preserved",
         )),
