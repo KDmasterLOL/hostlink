@@ -2,8 +2,8 @@
 //!
 //! Updates are serialized with an OS file lock, staged under the user-owned install root,
 //! and published only after the selected archive, target, version, and file manifest agree.
-//! Windows publication is deliberately refused until the stopped-process launcher handoff is
-//! integrated; replacing a running Windows executable is never attempted here.
+//! Windows publication is limited to a separately invoked updater with no running or registered
+//! Agent. Live-service handoff remains unsupported.
 
 use serde::{
     Deserialize, Serialize,
@@ -157,6 +157,12 @@ pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
             job_ids: active_ids,
         });
     }
+    #[cfg(windows)]
+    {
+        ensure_no_pending_windows_handoff(&request.install_root)?;
+        crate::service::ensure_update_unregistered(&request.install_root)?;
+        ensure_windows_offline_caller(&request.install_root)?;
+    }
     #[cfg(not(windows))]
     recover_interrupted_publication(&request.install_root)?;
 
@@ -186,12 +192,22 @@ pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
     }
 
     #[cfg(windows)]
+    publish_windows(
+        &request.install_root,
+        &bin_root,
+        &metadata_path,
+        request,
+        manifest,
+        old_metadata,
+        staged_files,
+    )?;
+
+    #[cfg(windows)]
     {
-        let _ = (manifest, staged_files);
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Windows Agent update requires the stopped-runtime launcher handoff",
-        ))
+        Ok(AgentUpdateOutcome::Installed {
+            version: request.version.clone(),
+            archive_sha256: request.archive_sha256.clone(),
+        })
     }
 
     #[cfg(not(windows))]
@@ -210,6 +226,37 @@ pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
             archive_sha256: request.archive_sha256.clone(),
         })
     }
+}
+
+/// Prevent a login/start command from launching an Agent while a stopped-runtime transaction
+/// needs recovery. The caller must already have verified the current user's install root.
+#[cfg(windows)]
+pub(crate) fn ensure_no_pending_windows_handoff(root: &Path) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    let updates = root.join(".updates");
+    let metadata = match fs::symlink_metadata(&updates) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.file_attributes() & 0x400 != 0
+    {
+        return Err(invalid(
+            "Windows updater directory is not a private real directory",
+        ));
+    }
+    validate_windows_private_acl(&updates, &metadata)?;
+    let journal = crate::update_handoff::read_journal(&updates.join("handoff.json"))?;
+    if journal.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Windows Agent update journal requires verified recovery before startup",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_request(request: &AgentUpdateRequest) -> io::Result<()> {
@@ -297,14 +344,7 @@ fn validate_user_owned_root(root: &Path) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
-        let local_app_data = std::env::var_os("LOCALAPPDATA")
-            .ok_or_else(|| invalid("LOCALAPPDATA is required for user-scoped Agent updates"))?;
-        let expected = Path::new(&local_app_data).join("HostLink").join("Agent");
-        if fs::canonicalize(root)? != fs::canonicalize(expected)? {
-            return Err(invalid(
-                "Agent install root is outside this user's HostLink directory",
-            ));
-        }
+        crate::service::validate_windows_update_root(root)?;
         validate_windows_private_acl(root, &metadata)?;
     }
     Ok(())
@@ -1040,6 +1080,466 @@ fn publish_linux(
     fs::remove_file(journal_path)?;
     File::open(&updates)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn publish_windows(
+    root: &Path,
+    bin_root: &Path,
+    metadata_path: &Path,
+    request: &AgentUpdateRequest,
+    manifest: PackageManifest,
+    old_metadata: InstallMetadata,
+    staged: tempfile::TempDir,
+) -> io::Result<()> {
+    let installed_executable = bin_root.join("hostlink-agent.exe");
+    ensure_windows_offline_caller(root)?;
+
+    let updates = root.join(".updates");
+    create_private_directory(&updates)?;
+    let new_metadata = InstallMetadata {
+        format: 1,
+        target: request.target.clone(),
+        installed_version: request.version.clone(),
+        installed_package_sha256: request.archive_sha256.clone(),
+        installed_files: manifest.files.clone(),
+    };
+    for (name, expected) in &manifest.files {
+        if name == "hostlink-agent.exe" {
+            continue;
+        }
+        let installed_path = bin_root.join(name);
+        let staged_path = staged.path().join(name);
+        if hash_file(&installed_path, MAX_ENTRY_BYTES)? != expected.sha256
+            || hash_file(&staged_path, MAX_ENTRY_BYTES)? != expected.sha256
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "offline Windows update cannot change package support files in this transaction",
+            ));
+        }
+    }
+    let new_metadata_bytes = serde_json::to_vec_pretty(&new_metadata).map_err(io::Error::other)?;
+    let old_metadata_bytes = fs::read(metadata_path)?;
+    let old_executable_sha256 = hash_file(&installed_executable, MAX_ENTRY_BYTES)?;
+    let new_executable_sha256 = manifest
+        .files
+        .get("hostlink-agent.exe")
+        .ok_or_else(|| invalid("Windows Agent manifest has no executable identity"))?
+        .sha256
+        .clone();
+    let identity = crate::update_handoff::UpdateIdentity {
+        target: request.target.clone(),
+        old_version: old_metadata.installed_version.clone(),
+        old_archive_sha256: old_metadata.installed_package_sha256.clone(),
+        old_executable_sha256,
+        old_metadata_sha256: sha256_hex(&old_metadata_bytes),
+        new_version: request.version.clone(),
+        new_archive_sha256: request.archive_sha256.clone(),
+        new_executable_sha256,
+        new_metadata_sha256: sha256_hex(&new_metadata_bytes),
+    };
+    let journal = crate::update_handoff::UpdateJournal::new(identity)?;
+    let transaction = journal.transaction_id();
+    let transaction_dir = updates.join(format!("transaction-{transaction}"));
+    fs::create_dir(&transaction_dir)?;
+    set_private_directory(&transaction_dir)?;
+
+    let staged_executable = transaction_dir.join("staged-agent.exe");
+    let staged_metadata = transaction_dir.join("staged-install.json");
+    let backup_executable = transaction_dir.join("backup-agent.exe");
+    let backup_metadata = transaction_dir.join("backup-install.json");
+    let journal_path = updates.join("handoff.json");
+    let archive_executable = staged.path().join("hostlink-agent.exe");
+
+    let prepare = (|| {
+        copy_private_synced(&archive_executable, &staged_executable)?;
+        write_private_synced(&staged_metadata, &new_metadata_bytes)?;
+        copy_private_synced(&installed_executable, &backup_executable)?;
+        copy_private_synced(metadata_path, &backup_metadata)?;
+        if hash_file(&staged_executable, MAX_ENTRY_BYTES)? != journal.identity.new_executable_sha256
+            || hash_file(&staged_metadata, MAX_MANIFEST_BYTES)?
+                != journal.identity.new_metadata_sha256
+            || hash_file(&backup_executable, MAX_ENTRY_BYTES)?
+                != journal.identity.old_executable_sha256
+            || hash_file(&backup_metadata, MAX_MANIFEST_BYTES)?
+                != journal.identity.old_metadata_sha256
+        {
+            return Err(invalid("Windows updater staged or backup digest mismatch"));
+        }
+        let files = crate::update_handoff::TransactionFiles {
+            staged_executable: &staged_executable,
+            staged_metadata: &staged_metadata,
+            installed_executable: &installed_executable,
+            installed_metadata: metadata_path,
+            backup_executable: &backup_executable,
+            backup_metadata: &backup_metadata,
+        };
+        let evidence = crate::update_handoff::inspect_files(&files, &journal.identity)?;
+        if !evidence.staged_new_valid
+            || !evidence.staged_new_metadata_valid
+            || !evidence.installed_old_valid
+            || !evidence.installed_old_metadata_valid
+            || !evidence.backup_old_valid
+            || !evidence.backup_old_metadata_valid
+        {
+            return Err(invalid(
+                "Windows updater pre-publication evidence is incomplete",
+            ));
+        }
+        crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
+        Ok(())
+    })();
+    if let Err(error) = prepare {
+        return Err(error);
+    }
+
+    let mut journal = journal;
+    let publish = (|| {
+        crate::service::ensure_update_unregistered(root)?;
+        ensure_windows_offline_caller(root)?;
+        replace_file(&installed_executable, &staged_executable, None)?;
+        verify_windows_private_file(&installed_executable)?;
+        journal.advance(crate::update_handoff::UpdatePhase::BackedUp)?;
+        crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
+
+        replace_file(metadata_path, &staged_metadata, None)?;
+        verify_windows_private_file(metadata_path)?;
+        journal.advance(crate::update_handoff::UpdatePhase::Published)?;
+        crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
+
+        let files = crate::update_handoff::TransactionFiles {
+            staged_executable: &staged_executable,
+            staged_metadata: &staged_metadata,
+            installed_executable: &installed_executable,
+            installed_metadata: metadata_path,
+            backup_executable: &backup_executable,
+            backup_metadata: &backup_metadata,
+        };
+        let evidence = crate::update_handoff::inspect_files(&files, &journal.identity)?;
+        if !evidence.installed_new_valid
+            || !evidence.installed_new_metadata_valid
+            || !evidence.backup_old_valid
+            || !evidence.backup_old_metadata_valid
+        {
+            return Err(invalid(
+                "Windows installed inventory readback did not match the package",
+            ));
+        }
+        let installed = read_install_metadata(metadata_path)?;
+        if installed != new_metadata {
+            return Err(invalid(
+                "Windows installed metadata readback differs from the package",
+            ));
+        }
+        validate_installed(bin_root, &installed, &request.target)?;
+        journal.advance(crate::update_handoff::UpdatePhase::Verified)?;
+        crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
+        fs::remove_file(&journal_path)?;
+        Ok(())
+    })();
+
+    if let Err(error) = publish {
+        if let Err(rollback_error) = rollback_windows(
+            &installed_executable,
+            metadata_path,
+            &backup_executable,
+            &backup_metadata,
+            &journal_path,
+            &mut journal,
+        ) {
+            return Err(io::Error::other(format!(
+                "Windows Agent publication failed ({error}); rollback failed ({rollback_error}); preserve transaction at {}",
+                transaction_dir.display()
+            )));
+        }
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn ensure_windows_offline_caller(root: &Path) -> io::Result<()> {
+    let installed_executable = root.join("bin").join("hostlink-agent.exe");
+    if same_windows_file(&std::env::current_exe()?, &installed_executable)? {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Windows offline update must be invoked by a separate updater executable",
+        ));
+    }
+    reject_running_agent(&installed_executable)
+}
+
+#[cfg(windows)]
+fn rollback_windows(
+    installed_executable: &Path,
+    installed_metadata: &Path,
+    backup_executable: &Path,
+    backup_metadata: &Path,
+    journal_path: &Path,
+    journal: &mut crate::update_handoff::UpdateJournal,
+) -> io::Result<()> {
+    use crate::update_handoff::UpdatePhase;
+    if !matches!(
+        journal.phase,
+        UpdatePhase::RollingBack | UpdatePhase::RolledBack
+    ) {
+        journal.advance(UpdatePhase::RollingBack)?;
+        crate::update_handoff::write_journal_atomic(journal_path, journal)?;
+    }
+    let identity = &journal.identity;
+    if hash_file(backup_executable, MAX_ENTRY_BYTES)? != identity.old_executable_sha256
+        || hash_file(backup_metadata, MAX_MANIFEST_BYTES)? != identity.old_metadata_sha256
+    {
+        return Err(invalid("Windows rollback backup digest mismatch"));
+    }
+    // Preserve whatever new image is currently installed while restoring the verified old copy.
+    let failed_executable = backup_executable.with_extension("failed-new.exe");
+    let failed_metadata = backup_metadata.with_extension("failed-new.json");
+    replace_file(
+        installed_executable,
+        backup_executable,
+        Some(&failed_executable),
+    )?;
+    replace_file(installed_metadata, backup_metadata, Some(&failed_metadata))?;
+    if hash_file(installed_executable, MAX_ENTRY_BYTES)? != identity.old_executable_sha256
+        || hash_file(installed_metadata, MAX_MANIFEST_BYTES)? != identity.old_metadata_sha256
+    {
+        return Err(invalid(
+            "Windows rollback readback did not match the old inventory",
+        ));
+    }
+    journal.advance(UpdatePhase::RolledBack)?;
+    crate::update_handoff::write_journal_atomic(journal_path, journal)?;
+    fs::remove_file(journal_path)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_file(target: &Path, replacement: &Path, backup: Option<&Path>) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+    let target_wide = target
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let replacement_wide = replacement
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let backup_wide = backup.map(|path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>()
+    });
+    // SAFETY: all paths are NUL-terminated UTF-16 buffers; zero flags require ACL merge to succeed.
+    let result = unsafe {
+        ReplaceFileW(
+            target_wide.as_ptr(),
+            replacement_wide.as_ptr(),
+            backup_wide
+                .as_ref()
+                .map_or(std::ptr::null(), |path| path.as_ptr()),
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn reject_running_agent(installed_executable: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::{
+        Foundation::{
+            CloseHandle, ERROR_NO_MORE_FILES, GetLastError, INVALID_HANDLE_VALUE, SetLastError,
+        },
+        System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+                TH32CS_SNAPPROCESS,
+            },
+            Threading::{
+                OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+            },
+        },
+    };
+    let current_pid = std::process::id();
+    // SAFETY: snapshot creation has no pointer arguments and the returned handle is checked.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(io::Error::other(format!(
+            "cannot enumerate Windows processes before Agent update: {}",
+            io::Error::last_os_error()
+        )));
+    }
+    struct Snapshot(windows_sys::Win32::Foundation::HANDLE);
+    impl Drop for Snapshot {
+        fn drop(&mut self) {
+            // SAFETY: this wrapper uniquely owns the valid snapshot handle.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+    let snapshot = Snapshot(snapshot);
+    let mut entry = PROCESSENTRY32W::default();
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    // SAFETY: entry is initialized and writable, and snapshot is a valid process snapshot.
+    if unsafe { Process32FirstW(snapshot.0, &mut entry) } == 0 {
+        return Err(io::Error::other(format!(
+            "cannot read Windows process snapshot: {}",
+            io::Error::last_os_error()
+        )));
+    }
+    loop {
+        let image_name = String::from_utf16_lossy(&entry.szExeFile);
+        let image_name = image_name.trim_end_matches('\0');
+        if entry.th32ProcessID != current_pid
+            && image_name.eq_ignore_ascii_case("hostlink-agent.exe")
+        {
+            // SAFETY: PID comes from the system process snapshot; handle is closed below.
+            let process =
+                unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.th32ProcessID) };
+            if process.is_null() {
+                return Err(io::Error::other(format!(
+                    "cannot establish whether PID {} is the installed Agent",
+                    entry.th32ProcessID
+                )));
+            }
+            let mut image = vec![0u16; 32_768];
+            let mut length = image.len() as u32;
+            // SAFETY: process is valid; image is writable and length gives its UTF-16 capacity.
+            let queried =
+                unsafe { QueryFullProcessImageNameW(process, 0, image.as_mut_ptr(), &mut length) };
+            // SAFETY: process is uniquely owned by this scope.
+            unsafe { CloseHandle(process) };
+            if queried == 0 {
+                return Err(io::Error::other(format!(
+                    "cannot establish image path for PID {}",
+                    entry.th32ProcessID
+                )));
+            }
+            let image = PathBuf::from(std::ffi::OsString::from_wide(&image[..length as usize]));
+            if same_windows_file(&image, installed_executable)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "installed Agent process is still active",
+                ));
+            }
+        }
+        // SAFETY: entry remains writable and snapshot remains valid.
+        unsafe { SetLastError(0) };
+        if unsafe { Process32NextW(snapshot.0, &mut entry) } == 0 {
+            let error = unsafe { GetLastError() };
+            if error != ERROR_NO_MORE_FILES {
+                return Err(io::Error::other(format!(
+                    "Windows process enumeration ended unexpectedly ({error})"
+                )));
+            }
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn same_windows_file(left: &Path, right: &Path) -> io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    fn identity(path: &Path) -> io::Result<(u32, u64)> {
+        let file = File::open(path)?;
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: file owns a valid handle and information is a writable output struct.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut information) } == 0
+        {
+            return Err(io::Error::other(format!(
+                "cannot read Windows file identity for {}: {}",
+                path.display(),
+                io::Error::last_os_error()
+            )));
+        }
+        let index =
+            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+        Ok((information.dwVolumeSerialNumber, index))
+    }
+    Ok(identity(left)? == identity(right)?)
+}
+
+#[cfg(windows)]
+fn copy_private_synced(source: &Path, destination: &Path) -> io::Result<()> {
+    let source_metadata = fs::symlink_metadata(source)?;
+    if !source_metadata.is_file() || is_reparse_point(&source_metadata) {
+        return Err(invalid("Windows update copy source is not a regular file"));
+    }
+    let mut input = File::open(source)?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    set_staged_file_permissions(
+        destination,
+        destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(""),
+    )?;
+    io::copy(&mut input, &mut output)?;
+    output.sync_all()?;
+    drop(output);
+    verify_windows_private_file(destination)
+}
+
+#[cfg(windows)]
+fn write_private_synced(destination: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    set_staged_file_permissions(destination, "install.json")?;
+    output.write_all(bytes)?;
+    output.sync_all()?;
+    drop(output);
+    verify_windows_private_file(destination)
+}
+
+#[cfg(windows)]
+fn verify_windows_private_file(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || is_reparse_point(&metadata) {
+        return Err(invalid(
+            "Windows update transaction contains a non-regular file",
+        ));
+    }
+    validate_windows_private_acl(path, &metadata)
+}
+
+#[cfg(windows)]
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(windows)]
+fn create_private_directory(path: &Path) -> io::Result<()> {
+    match fs::create_dir(path) {
+        Ok(()) => set_private_directory(path)?,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || is_reparse_point(&metadata) {
+        return Err(invalid("Windows Agent update directory is unsafe"));
+    }
+    validate_windows_private_acl(path, &metadata)
 }
 
 #[cfg(not(windows))]
