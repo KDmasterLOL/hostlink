@@ -311,7 +311,9 @@ function Assert-OutputReceipt([string]$Output, $Artifact, [Security.Principal.Se
     $expectedCount = $Artifact.Files.Count + 4
     $actualFiles = @(Get-ChildItem -LiteralPath $Output -Force | Where-Object { -not $_.PSIsContainer })
     if ($actualFiles.Count -ne $expectedCount) { Stop-Harness 'native output contains unexpected files' }
-    if ((Get-ChildItem -LiteralPath $Output -Force | Where-Object { $_.PSIsContainer }).Count -ne 0) { Stop-Harness 'native output contains unexpected directories' }
+    # Windows PowerShell 2 does not provide modern scalar/null .Count semantics.
+    # Force an array so an empty directory result is exactly zero.
+    if (@(Get-ChildItem -LiteralPath $Output -Force | Where-Object { $_.PSIsContainer }).Count -ne 0) { Stop-Harness 'native output contains unexpected directories' }
 }
 
 function Invoke-TargetHarness($Artifact, [string]$OtherTarget, [string]$Stage, [Security.Principal.SecurityIdentifier]$Sid) {
