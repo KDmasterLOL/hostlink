@@ -233,6 +233,19 @@ class PilotLifecycleTests(unittest.TestCase):
         first.wait(timeout=3)
         self.assertNotEqual(first.returncode, 0)
 
+    def test_partial_start_rollback_reaps_already_exited_owned_child(self):
+        spec = importlib.util.spec_from_file_location("pilot_exited_process", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        self.prepare()
+        first, first_record = helper.launch([os.sys.executable, "-c", "import time; time.sleep(60)"], self.root / "logs" / "running.log")
+        second, second_record = helper.launch([os.sys.executable, "-c", "import sys; sys.exit(43)"], self.root / "logs" / "exited.log")
+        self.assertEqual(second.wait(timeout=5), 43)
+        helper.write_ledger(self.root, [first_record, second_record], True)
+        helper.stop_items(self.root, [first_record, second_record])
+        first.wait(timeout=5)
+        self.assertEqual(helper.ledger_read(self.root)["state"], "stopped")
+
     def test_down_preserves_terminal_job_history(self):
         self.prepare()
         jobs = self.root / "agent" / "instance" / "jobs"

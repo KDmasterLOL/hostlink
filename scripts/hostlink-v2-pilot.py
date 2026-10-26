@@ -186,6 +186,8 @@ def ledger_read(root: pathlib.Path) -> dict:
     if state not in ("stopped", "starting", "running") or (state == "stopped" and items) or (state == "running" and not items):
         fail("process ledger state conflicts with its owned process set")
     for item in items:
+        if process_stopped(item):
+            continue
         if not identity_matches(item):
             fail("owned process identity is missing, reused, or changed")
         if not re.fullmatch(r"[0-9a-f]{64}", str(item.get("exe_sha256", ""))) or digest(pathlib.Path("/proc") / str(item["pid"]) / "exe") != item["exe_sha256"]:
@@ -272,10 +274,14 @@ def launch(args: list[str], log: pathlib.Path, *, env=None) -> tuple[subprocess.
 
 def stop_items(root: pathlib.Path, items: list[dict]) -> None:
     # Validate the complete set before sending any signal, then checkpoint each stopped PID.
-    if any(not identity_matches(item) for item in items):
+    if any(not identity_matches(item) and not process_stopped(item) for item in items):
         fail("process ownership changed before stop; remaining state preserved")
     remaining = items[:]
     for item in reversed(items):
+        if process_stopped(item):
+            remaining = [candidate for candidate in remaining if candidate["pid"] != item["pid"]]
+            write_ledger(root, remaining, True)
+            continue
         if not identity_matches(item):
             fail("process ownership changed during stop; remaining state preserved")
         if item.get("role") == "sshd":
@@ -542,6 +548,8 @@ def up(root: pathlib.Path, repo: pathlib.Path, marker: dict) -> None:
     if os.path.lexists(root / "processes.json"):
         ledger = ledger_read(root)
         if ledger.get("state") == "running" and ledger.get("items"):
+            if any(process_stopped(item) for item in ledger["items"]):
+                fail("pilot is partially stopped; run down before attempting another up")
             print("ALREADY-UP")
             return
         if ledger.get("state") == "starting":
@@ -697,7 +705,9 @@ def action(command: str, root: pathlib.Path, repo: pathlib.Path, expected_sha: s
         ledger = ledger_read(root)
         if ledger.get("state") == "running":
             processes = ",".join(f"{item.get('role', 'unknown')}:{item['pid']}" for item in ledger["items"])
-            print(f"OWNED-PROCESSES-ALIVE source_sha={marker['source_sha']} pids={processes}")
+            state = ("OWNED-PROCESSES-DEGRADED" if any(process_stopped(item) for item in ledger["items"])
+                     else "OWNED-PROCESSES-ALIVE")
+            print(f"{state} source_sha={marker['source_sha']} pids={processes}")
         elif ledger.get("state") == "starting":
             print(f"STARTUP-OR-SHUTDOWN-UNCERTAIN source_sha={marker['source_sha']}")
         else:
@@ -706,6 +716,8 @@ def action(command: str, root: pathlib.Path, repo: pathlib.Path, expected_sha: s
     if command == "check":
         ledger = ledger_read(root)
         if ledger.get("state") != "running" or not ledger.get("items"): fail("pilot is stopped")
+        if any(process_stopped(item) for item in ledger["items"]):
+            fail("pilot has stopped an owned process; check is not proof of health")
         data = json.loads((root / "pilot.json").read_text())
         env = os.environ.copy(); env["HOME"] = str(root / "controller"); env["HOSTLINK_HUB_CONFIG"] = str(root / "controller" / "hub.json")
         hub = run([str(root / "bin/hostlink"), "hub", "check"], env=env)
