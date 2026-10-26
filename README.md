@@ -23,6 +23,10 @@ The managed-fleet target and acceptance gates are in
 [docs/MANAGED_FLEET_ARCHITECTURE.md](docs/MANAGED_FLEET_ARCHITECTURE.md)
 and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+The isolated Linux HOME pilot lifecycle (private Hub v2, HTTPS, OpenSSH
+gateway, enrollment, health checks and reversible stop/restart) is documented
+in [docs/PARALLEL_PILOT_OPERATIONS.md](docs/PARALLEL_PILOT_OPERATIONS.md).
+
 ## Rust compiler policy
 
 The rewrite follows the installed Rust stable toolchain (currently 1.99.1)

@@ -46,3 +46,6 @@ The inspector compares the old Hub, Controller, and Agent gateway route where th
 3. Preserve new Agent logs and any unresolved job state for review. Remove the new root only after the owner confirms there are no active jobs and artifacts are disposable. Record rollback result and retain both configs privately.
 
 There is no automatic rollback or fleet wave operation in this tool. Proceed host by host only after the separate native gateway, Windows 7, Windows ownership, updater, and release gates have their required evidence and a separate cutover authorization exists.
+
+For the source-pinned, current-user HOME pilot lifecycle foundation and its
+current limits, see [PARALLEL_PILOT_OPERATIONS.md](PARALLEL_PILOT_OPERATIONS.md).
