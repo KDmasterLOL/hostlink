@@ -438,15 +438,13 @@ pub fn recovery_action(phase: UpdatePhase, evidence: RecoveryEvidence) -> Recove
     use RecoveryAction as Action;
     use UpdatePhase as Phase;
 
+    if !(evidence.installed_old_valid || evidence.installed_new_valid)
+        || !(evidence.installed_old_metadata_valid || evidence.installed_new_metadata_valid)
+    {
+        return Action::PreserveAndError;
+    }
+
     match phase {
-        Phase::Staged
-            if evidence.installed_old_valid
-                && evidence.installed_old_metadata_valid
-                && evidence.staged_new_valid
-                && evidence.staged_new_metadata_valid =>
-        {
-            Action::PublishStaged
-        }
         Phase::Staged if evidence.installed_old_valid && evidence.installed_old_metadata_valid => {
             Action::CancelUnpublished
         }
@@ -459,6 +457,14 @@ pub fn recovery_action(phase: UpdatePhase, evidence: RecoveryEvidence) -> Recove
             Action::RestoreBackup
         }
         Phase::BackedUp
+            if evidence.installed_new_valid
+                && evidence.installed_new_metadata_valid
+                && evidence.backup_old_valid
+                && evidence.backup_old_metadata_valid =>
+        {
+            Action::VerifyPublished
+        }
+        Phase::BackedUp
             if evidence.installed_old_valid
                 && evidence.installed_old_metadata_valid
                 && evidence.backup_old_valid
@@ -466,7 +472,7 @@ pub fn recovery_action(phase: UpdatePhase, evidence: RecoveryEvidence) -> Recove
                 && evidence.staged_new_valid
                 && evidence.staged_new_metadata_valid =>
         {
-            Action::PublishStaged
+            Action::CancelUnpublished
         }
         Phase::BackedUp
             if evidence.installed_old_valid
@@ -497,6 +503,11 @@ pub fn recovery_action(phase: UpdatePhase, evidence: RecoveryEvidence) -> Recove
                 && evidence.backup_old_metadata_valid =>
         {
             Action::StartVerified
+        }
+        Phase::Verified
+            if evidence.installed_new_valid && evidence.installed_new_metadata_valid =>
+        {
+            Action::CommitNew
         }
         Phase::Verified if evidence.backup_old_valid && evidence.backup_old_metadata_valid => {
             Action::RestoreBackup

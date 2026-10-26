@@ -101,7 +101,7 @@ fn file_hash_evidence_selects_recovery_and_rejects_wrong_installed_digest() {
     assert!(!evidence.installed_new_valid);
     assert_eq!(
         recovery_action(UpdatePhase::Published, evidence),
-        RecoveryAction::RestoreBackup
+        RecoveryAction::PreserveAndError
     );
 
     fs::write(&backup, b"wrong backup").expect("corrupt backup");
@@ -172,7 +172,7 @@ fn offline_publish_failure_after_executable_swap_restores_exact_old_files() {
     let before = inspect_files(&files, &identity).expect("verify staged and backup evidence");
     assert_eq!(
         recovery_action(UpdatePhase::Staged, before),
-        RecoveryAction::PublishStaged
+        RecoveryAction::CancelUnpublished
     );
 
     // Inject a failure after the EXE replacement, before metadata publication or journal advance.

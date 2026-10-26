@@ -16,9 +16,15 @@ It flushes the journal file and commits each journal rename with
 flags so ACL merging must succeed, advances the journal after each replacement,
 and verifies the installed metadata and complete inventory hashes before
 returning `Installed`. On an in-process publication or readback error it restores
-the verified backups and verifies the old bytes. A journal left by a process or
-machine interruption is fail-closed: startup and another update refuse it for
-manual recovery. Automatic crash recovery is not yet implemented.
+the verified backups and verifies the old bytes. Before a subsequent update stages
+a new archive, it runs bounded recovery under the shared update lock after job,
+service, and caller preflight. An unpublished transaction is discarded only when
+installed files and both backups match the recorded old identities. A partially
+published or rolling-back transaction is restored from verified backups. A fully
+published transaction is committed only after exact metadata and the complete
+installed manifest are revalidated. Unknown or damaged state preserves the
+journal and candidates and returns an error. Startup still refuses an unresolved
+journal; recovery is performed only by a separately invoked offline updater.
 The Windows transaction currently requires packaged PowerShell support files to
 match the installed copies byte-for-byte; packages that change them are rejected
 before publication.
