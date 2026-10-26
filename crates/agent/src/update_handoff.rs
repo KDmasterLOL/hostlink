@@ -665,7 +665,7 @@ mod tests {
         };
         assert_eq!(
             recovery_action(UpdatePhase::Staged, old_and_stage),
-            RecoveryAction::PublishStaged
+            RecoveryAction::CancelUnpublished
         );
         assert_eq!(
             recovery_action(UpdatePhase::Staged, RecoveryEvidence::default()),
@@ -691,7 +691,7 @@ mod tests {
                     ..RecoveryEvidence::default()
                 }
             ),
-            RecoveryAction::RestoreBackup
+            RecoveryAction::PreserveAndError
         );
         assert_eq!(
             recovery_action(

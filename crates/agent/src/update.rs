@@ -1614,8 +1614,6 @@ fn validate_windows_transaction_children(
     directory: &Path,
     identity: &crate::update_handoff::UpdateIdentity,
 ) -> io::Result<Vec<(PathBuf, u32, u64)>> {
-    use std::os::windows::fs::MetadataExt;
-
     let allowed = windows_transaction_candidates();
     let mut observed = Vec::new();
     for entry in fs::read_dir(directory)? {
@@ -1659,15 +1657,8 @@ fn validate_windows_transaction_children(
         if !expected.contains(&actual.as_str()) {
             return Err(invalid("Windows transaction child digest is unknown"));
         }
-        observed.push((
-            path,
-            metadata
-                .volume_serial_number()
-                .ok_or_else(|| invalid("Windows transaction volume identity is unavailable"))?,
-            metadata
-                .file_index()
-                .ok_or_else(|| invalid("Windows transaction file identity is unavailable"))?,
-        ));
+        let (volume, file_index) = windows_file_identity(&path, false)?;
+        observed.push((path, volume, file_index));
     }
     Ok(observed)
 }
@@ -1678,8 +1669,6 @@ fn cleanup_windows_transaction(
     directory: &Path,
     identity: &crate::update_handoff::UpdateIdentity,
 ) -> io::Result<()> {
-    use std::os::windows::fs::MetadataExt;
-
     let directory_metadata = fs::symlink_metadata(directory)?;
     if !directory_metadata.is_dir()
         || directory_metadata.file_type().is_symlink()
@@ -1690,12 +1679,7 @@ fn cleanup_windows_transaction(
         ));
     }
     validate_windows_private_acl(directory, &directory_metadata)?;
-    let directory_volume = directory_metadata
-        .volume_serial_number()
-        .ok_or_else(|| invalid("Windows transaction volume identity is unavailable"))?;
-    let directory_index = directory_metadata
-        .file_index()
-        .ok_or_else(|| invalid("Windows transaction directory identity is unavailable"))?;
+    let (directory_volume, directory_index) = windows_file_identity(directory, true)?;
     let observed = validate_windows_transaction_children(directory, identity)?;
     let backup_names = ["backup-agent.exe", "backup-install.json"];
     let mut ordered = observed;
@@ -1713,8 +1697,7 @@ fn cleanup_windows_transaction(
         if !metadata.is_file()
             || metadata.file_type().is_symlink()
             || metadata.file_attributes() & 0x400 != 0
-            || metadata.volume_serial_number() != Some(volume)
-            || metadata.file_index() != Some(file_index)
+            || windows_file_identity(&path, false)? != (volume, file_index)
         {
             return Err(invalid(
                 "Windows transaction child identity changed during cleanup",
@@ -1732,8 +1715,7 @@ fn cleanup_windows_transaction(
     if !current_directory.is_dir()
         || current_directory.file_type().is_symlink()
         || current_directory.file_attributes() & 0x400 != 0
-        || current_directory.volume_serial_number() != Some(directory_volume)
-        || current_directory.file_index() != Some(directory_index)
+        || windows_file_identity(directory, true)? != (directory_volume, directory_index)
     {
         return Err(invalid(
             "Windows transaction directory identity changed during cleanup",
@@ -1920,7 +1902,7 @@ mod windows_recovery_tests {
         );
         for (name, bytes) in support {
             files.insert(
-                name.into(),
+                (*name).to_owned(),
                 FileIdentity {
                     size: bytes.len() as u64,
                     sha256: digest(bytes),
@@ -2110,17 +2092,24 @@ fn reject_running_agent(installed_executable: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn same_windows_file(left: &Path, right: &Path) -> io::Result<bool> {
+fn windows_file_identity(path: &Path, directory: bool) -> io::Result<(u32, u64)> {
+    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING, SYNCHRONIZE,
     };
-    fn identity(path: &Path) -> io::Result<(u32, u64)> {
-        let file = File::open(path)?;
+
+    fn query(
+        handle: windows_sys::Win32::Foundation::HANDLE,
+        path: &Path,
+    ) -> io::Result<(u32, u64)> {
         let mut information = BY_HANDLE_FILE_INFORMATION::default();
-        // SAFETY: file owns a valid handle and information is a writable output struct.
-        if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut information) } == 0
-        {
+        // SAFETY: the handle is open and `information` is the writable output structure required
+        // by GetFileInformationByHandle.
+        if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
             return Err(io::Error::other(format!(
                 "cannot read Windows file identity for {}: {}",
                 path.display(),
@@ -2129,9 +2118,63 @@ fn same_windows_file(left: &Path, right: &Path) -> io::Result<bool> {
         }
         let index =
             (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+        if index == 0 {
+            return Err(invalid("Windows file identity is invalid"));
+        }
         Ok((information.dwVolumeSerialNumber, index))
     }
-    Ok(identity(left)? == identity(right)?)
+
+    if !directory {
+        let file = File::open(path).map_err(|error| {
+            io::Error::other(format!(
+                "cannot open Windows file for identity {}: {error}",
+                path.display()
+            ))
+        })?;
+        return query(file.as_raw_handle(), path);
+    }
+
+    struct OwnedHandle(windows_sys::Win32::Foundation::HANDLE);
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            // SAFETY: this wrapper is created only for a successful CreateFileW result and owns
+            // that handle until Drop.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    let mut path_wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if path_wide.contains(&0) {
+        return Err(invalid("Windows identity path contains a null character"));
+    }
+    path_wide.push(0);
+    // OPEN_REPARSE_POINT exposes a raced-in reparse point's own identity. BACKUP_SEMANTICS permits
+    // opening a directory for attributes; shared access avoids blocking cleanup operations.
+    let handle = unsafe {
+        CreateFileW(
+            path_wide.as_ptr(),
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::other(format!(
+            "cannot open Windows directory for identity {}: {}",
+            path.display(),
+            io::Error::last_os_error()
+        )));
+    }
+    let handle = OwnedHandle(handle);
+    query(handle.0, path)
+}
+
+#[cfg(windows)]
+fn same_windows_file(left: &Path, right: &Path) -> io::Result<bool> {
+    Ok(windows_file_identity(left, false)? == windows_file_identity(right, false)?)
 }
 
 #[cfg(windows)]
