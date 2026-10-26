@@ -110,14 +110,10 @@ async fn run(cli: Cli) -> io::Result<()> {
                 let _ = tokio::signal::ctrl_c().await;
                 signal_shutdown.cancel();
             });
-            if config.gateway.is_some() {
-                tokio::try_join!(
-                    ssh::serve(&config, shutdown.clone().cancelled_owned()),
-                    hostlink_agent::tunnel::run(&config, shutdown.cancelled_owned()),
-                )?;
-            } else {
-                ssh::serve(&config, shutdown.cancelled_owned()).await?;
-            }
+            // ssh::serve owns the outbound tunnel when the config contains
+            // gateway routes. Starting tunnel::run here as well would race
+            // the same Agent identity for its uniquely assigned remote port.
+            ssh::serve(&config, shutdown.cancelled_owned()).await?;
             Ok(())
         }
         Command::Update {
