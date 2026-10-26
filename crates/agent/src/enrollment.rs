@@ -873,6 +873,9 @@ mod tests {
     async fn fresh_enrollment_publishes_private_config_once_against_local_hub_v2() {
         let fixture = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))
             .expect("isolated disposable fixture under Agent crate");
+        #[cfg(windows)]
+        jobs::restrict_private_path(fixture.path(), true)
+            .expect("fresh enrollment fixture must have a protected current-user ACL");
         let operator = "operator-test-secret-000000000000000000000000000000000000";
         let gateway_lookup = "gateway-test-secret-000000000000000000000000000000";
         let projection = fixture.path().join("projection");
