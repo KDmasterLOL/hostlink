@@ -559,12 +559,21 @@ fn ensure_fresh_root_parent(root: &Path) -> io::Result<()> {
     let parent = root
         .parent()
         .ok_or_else(|| invalid("Agent install root has no parent"))?;
-    let canonical = fs::canonicalize(parent)?;
-    if canonical != parent {
-        return Err(invalid(
-            "Agent install root parent path contains a symlink or traversal alias",
-        ));
+    #[cfg(not(windows))]
+    {
+        let canonical = fs::canonicalize(parent)?;
+        if canonical != parent {
+            return Err(invalid(
+                "Agent install root parent path contains a symlink or traversal alias",
+            ));
+        }
     }
+    // On Windows canonicalize() rewrites ordinary C:\ paths into \\?\C:\
+    // extended-length paths. Their PathBuf values differ even in the absence
+    // of a junction. Inspect each ancestor without following reparse points
+    // rather than treating that benign prefix conversion as an alias.
+    #[cfg(windows)]
+    reject_windows_parent_reparse_components(parent)?;
     let metadata = fs::symlink_metadata(parent)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(invalid("Agent install root parent is not a real directory"));
@@ -588,6 +597,46 @@ fn ensure_fresh_root_parent(root: &Path) -> io::Result<()> {
     }
     #[cfg(windows)]
     jobs::validate_private_path(parent, true)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn reject_windows_parent_reparse_components(parent: &Path) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use std::path::{Component, Prefix};
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    if !parent.is_absolute() {
+        return Err(invalid("Agent install root parent must be absolute"));
+    }
+    let mut ancestor = PathBuf::new();
+    for component in parent.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                if !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) {
+                    return Err(invalid(
+                        "Agent install root must be on a local Windows drive",
+                    ));
+                }
+                ancestor.push(component.as_os_str());
+            }
+            Component::RootDir => ancestor.push(component.as_os_str()),
+            Component::CurDir | Component::ParentDir => {
+                return Err(invalid("Agent install root parent contains path traversal"));
+            }
+            Component::Normal(_) => {
+                ancestor.push(component.as_os_str());
+                let metadata = fs::symlink_metadata(&ancestor)?;
+                if metadata.file_type().is_symlink()
+                    || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                {
+                    return Err(invalid(
+                        "Agent install root parent contains a symlink or reparse point",
+                    ));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -704,6 +753,37 @@ mod tests {
         let key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
         let public = key.public_key().to_openssh().unwrap();
         (key, public)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fresh_root_accepts_dos_drive_path_without_allowing_alias_or_network_root() {
+        let fixture = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))
+            .expect("fresh current-user Windows fixture");
+        jobs::restrict_private_path(fixture.path(), true)
+            .expect("protect current-user fixture with explicit ACL");
+        let canonical = fs::canonicalize(fixture.path()).expect("canonical Windows path");
+        assert_ne!(
+            canonical,
+            fixture.path(),
+            "Windows canonicalize must be allowed to return extended-length syntax"
+        );
+        ensure_fresh_root_parent(&fixture.path().join("fresh-agent"))
+            .expect("ordinary private DOS-drive directory is safe for fresh enrollment");
+
+        let inner = fixture.path().join("inner");
+        fs::create_dir(&inner).expect("create traversal fixture");
+        assert!(
+            ensure_fresh_root_parent(&inner.join("..").join("fresh-agent")).is_err(),
+            "parent traversal is still rejected"
+        );
+        assert!(
+            reject_windows_parent_reparse_components(Path::new(
+                r"\\untrusted.example\share\new-agent"
+            ))
+            .is_err(),
+            "a network share cannot be adopted as a local Agent install root"
+        );
     }
 
     #[test]
