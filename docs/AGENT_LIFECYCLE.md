@@ -142,6 +142,19 @@ Agent update; the Windows update command refuses to replace a binary while its
 service marker is present. A changed binary, marker, registry value, SID, ACL, or
 reparse path fails closed.
 
+During the separately owned Windows Agent update, maintenance startup is admitted
+only by a one-use capability issued after the old authenticated process handle
+has signaled exit and the published candidate digest has been verified. The
+capability is delivered over the spawned candidate's inherited private stdin
+pipe; it is never placed in the command line, output, or a listener. The
+candidate atomically consumes a current-user-private admission record bound to
+its exact root, SID, executable SHA-256, and unique maintenance transaction.
+Missing, early, stale, replayed, or competing claims fail closed. Normal login
+startup remains disabled by the owner maintenance marker and absent exact HKCU
+Run value; ordinary `service start` continues to refuse maintenance. This
+admission is independent of updater journal formats and does not authorize
+process termination.
+
 ## Native Windows 11 acceptance gate
 
 Native lifecycle acceptance has **not** passed yet. The integration test is
