@@ -843,7 +843,7 @@ mod windows {
     const MAX_MARKER: usize = 16 * 1024;
     const MAX_PIPE_MESSAGE: usize = 1024;
 
-    #[derive(Debug, serde::Serialize, serde::Deserialize)]
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct InstallRecord {
         format: u32,
@@ -1038,6 +1038,7 @@ mod windows {
         }
         refuse_active_jobs(&record)?;
 
+        let old_record = record.clone();
         record.maintenance = true;
         record.maintenance_previous_sha256 = Some(record.executable_sha256.clone());
         replace_record_atomically(&record)?;
@@ -1071,7 +1072,7 @@ mod windows {
                 refuse_active_jobs(&record)?;
                 Ok(MaintenanceReceipt {
                     old_marker,
-                    old_record: record_with_maintenance_cleared(record),
+                    old_record,
                     run_command,
                 })
             }
