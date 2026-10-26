@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "hostlink-v2-pilot.sh"
+HELPER = SCRIPT.with_name("hostlink-v2-pilot.py")
 
 
 class PilotLifecycleTests(unittest.TestCase):
@@ -18,6 +20,7 @@ class PilotLifecycleTests(unittest.TestCase):
         self.repo = self.base / "source repo"
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(SCRIPT, self.repo / "scripts" / SCRIPT.name)
+        shutil.copy2(HELPER, self.repo / "scripts" / HELPER.name)
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
         subprocess.run(["git", "-C", str(self.repo), "config", "user.name", "Pilot Test"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "config", "user.email", "pilot-test@example.invalid"], check=True)
@@ -43,7 +46,7 @@ class PilotLifecycleTests(unittest.TestCase):
         self.assertIn("PREPARED", result.stdout)
         self.assertEqual(self.root.stat().st_mode & 0o777, 0o700)
         marker = json.loads((self.root / ".hostlink-v2-pilot.json").read_text())
-        self.assertEqual(marker, {"schema": 1, "uid": os.getuid(), "source_sha": self.sha})
+        self.assertEqual(marker, {"schema": 2, "uid": os.getuid(), "source_sha": self.sha})
         self.assertEqual((self.root / ".hostlink-v2-pilot.json").stat().st_mode & 0o777, 0o600)
         self.prepare()
         self.prepare(sha="0" * 40, expected=2)
@@ -59,7 +62,7 @@ class PilotLifecycleTests(unittest.TestCase):
     def test_status_and_down_preserve_stopped_data(self):
         self.prepare()
         (self.root / "logs" / "pilot.log").write_text("owned log\n")
-        self.assertIn("PREPARED", self.run_cli("status", "--root", str(self.root)).stdout)
+        self.assertIn("STOPPED", self.run_cli("status", "--root", str(self.root)).stdout)
         self.assertIn("owned log", self.run_cli("logs", "--root", str(self.root)).stdout)
         self.assertIn("already stopped", self.run_cli("down", "--root", str(self.root)).stdout)
         self.assertTrue((self.root / ".hostlink-v2-pilot.json").exists())
@@ -82,12 +85,15 @@ class PilotLifecycleTests(unittest.TestCase):
         self.prepare()
         foreign = os.getpid()
         (self.root / "processes.json").write_text(json.dumps({"state": "running", "items": [foreign]}))
-        self.assertIn("OWNED-PROCESS-UNKNOWN", self.run_cli("status", "--root", str(self.root)).stdout)
+        os.chmod(self.root / "processes.json", 0o600)
+        self.run_cli("status", "--root", str(self.root), expected=2)
         self.run_cli("down", "--root", str(self.root), expected=2)
         self.run_cli("purge", "--root", str(self.root), expected=2)
         os.kill(foreign, 0)
         (self.root / "processes.json").unlink()
-        (self.root / "jobs.json").write_text(json.dumps({"state": "unknown", "items": ["job"]}))
+        jobs = self.root / "agent" / "instance" / "jobs"
+        jobs.mkdir(parents=True, mode=0o700)
+        (jobs / "bad-entry").write_text("unknown")
         self.run_cli("purge", "--root", str(self.root), expected=2)
         self.assertTrue(self.root.exists())
 
@@ -101,6 +107,131 @@ class PilotLifecycleTests(unittest.TestCase):
         (self.root / "link").unlink()
         self.run_cli("purge", "--root", str(self.root))
         self.assertFalse(self.root.exists())
+
+    def test_up_and_check_require_exact_prepared_source_and_real_processes(self):
+        self.prepare()
+        # This controlled fake Git worktree is not the actual repository source and cannot
+        # manufacture binaries or report online from an empty state.
+        self.run_cli("up", "--root", str(self.root), expected=2)
+        self.run_cli("check", "--root", str(self.root), expected=2)
+
+    def test_pid_reuse_fails_closed_without_signalling_current_process(self):
+        self.prepare()
+        current = os.getpid()
+        entry = {"pid": current, "start": -1, "exe": "/bin/false", "dev": 1, "ino": 1, "cmd": [], "hub_config": []}
+        (self.root / "processes.json").write_text(json.dumps({"schema": 1, "state": "running", "items": [entry]}))
+        os.chmod(self.root / "processes.json", 0o600)
+        self.run_cli("status", "--root", str(self.root), expected=2)
+        self.run_cli("down", "--root", str(self.root), expected=2)
+        os.kill(current, 0)
+
+    def test_duplicate_pid_ledger_is_rejected_before_signalling(self):
+        self.prepare()
+        current = os.getpid()
+        entry = {"pid": current, "start": -1, "exe": "/bin/false", "dev": 1, "ino": 1, "cmd": [], "hub_config": []}
+        (self.root / "processes.json").write_text(json.dumps({"schema": 1, "state": "running", "items": [entry, entry]}))
+        os.chmod(self.root / "processes.json", 0o600)
+        result = self.run_cli("down", "--root", str(self.root), expected=2)
+        self.assertIn("duplicate PIDs", result.stderr)
+        os.kill(current, 0)
+
+    def test_malicious_env_is_not_sourced(self):
+        self.prepare()
+        marker = self.root / ".hostlink-v2-pilot.json"
+        original = marker.read_bytes()
+        malicious = self.base / "do-not-run"
+        env_file = self.root / ".env"
+        env_file.write_text(f"touch {malicious}\n")
+        self.run_cli("status", "--root", str(self.root))
+        self.assertFalse(malicious.exists())
+        marker.write_bytes(original)
+
+    def test_occupied_loopback_listener_is_detected_without_reconfiguration(self):
+        import socket
+        try:
+            listener = socket.socket()
+        except PermissionError as error:
+            self.skipTest(f"loopback sockets are denied by this sandbox: {error}")
+        try:
+            listener.bind(("127.0.0.1", 0)); listener.listen()
+        except PermissionError as error:
+            listener.close()
+            self.skipTest(f"loopback sockets are denied by this sandbox: {error}")
+        occupied = listener.getsockname()[1]
+        self.assertTrue(listener.getsockname()[0].startswith("127."))
+        spec = importlib.util.spec_from_file_location("pilot_port_helper", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        self.assertFalse(helper.port_free(occupied))
+        self.assertTrue(listener.fileno() >= 0)
+        listener.close()
+
+    def test_down_refuses_active_or_unknown_job_state_and_preserves_root(self):
+        self.prepare()
+        jobs = self.root / "agent" / "instance" / "jobs"
+        jobs.mkdir(parents=True, mode=0o700)
+        (jobs / "00000000-0000-0000-0000-000000000000").mkdir(mode=0o700)
+        self.run_cli("down", "--root", str(self.root), expected=2)
+        self.run_cli("purge", "--root", str(self.root), expected=2)
+        self.assertTrue(self.root.exists())
+
+    def test_wrong_tls_trust_cannot_be_treated_as_healthy(self):
+        self.prepare()
+        # The helper's health gate requires an explicit private CA; no insecure bypass exists.
+        source = HELPER.read_text()
+        self.assertIn("create_default_context(cafile=str(ca))", source)
+        self.assertNotIn("_create_unverified_context", source)
+
+    def test_artifact_receipt_archive_layout_matches_packager(self):
+        source = HELPER.read_text()
+        self.assertIn("archive = artifacts.joinpath(VERSION, *archive_rel.parts)", source)
+        self.assertIn("sidecar = artifacts.joinpath(*sidecar_rel.parts)", source)
+        self.assertIn("installer = artifacts.joinpath(VERSION, *installer_rel.parts)", source)
+
+    def test_partial_start_rollback_stops_only_ledger_owned_child(self):
+        spec = importlib.util.spec_from_file_location("pilot_helper", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        self.prepare()
+        first, first_record = helper.launch([os.sys.executable, "-c", "import time; time.sleep(60)"], self.root / "logs" / "first.log")
+        second, second_record = helper.launch([os.sys.executable, "-c", "import time; time.sleep(60)"], self.root / "logs" / "second.log")
+        helper.write_ledger(self.root, [first_record, second_record], True)
+        helper.stop_items(self.root, [second_record])
+        second.wait(timeout=3)
+        self.assertNotEqual(second.returncode, 0)
+        os.kill(first.pid, 0)
+        helper.stop_items(self.root, [first_record])
+        first.wait(timeout=3)
+        self.assertNotEqual(first.returncode, 0)
+
+    def test_down_preserves_terminal_job_history(self):
+        self.prepare()
+        jobs = self.root / "agent" / "instance" / "jobs"
+        job = jobs / "00000000-0000-0000-0000-000000000000"
+        job.mkdir(parents=True, mode=0o700)
+        os.chmod(self.root / "agent", 0o700)
+        os.chmod(self.root / "agent" / "instance", 0o700)
+        os.chmod(jobs, 0o700)
+        record = job / "record.json"
+        record.write_text(json.dumps({"state": {"state": "exited", "code": 7}}))
+        os.chmod(record, 0o600)
+        self.assertIn("preserved", self.run_cli("down", "--root", str(self.root)).stdout)
+        self.assertTrue(record.exists())
+
+    def test_down_refuses_prepared_running_and_interrupted_jobs(self):
+        self.prepare()
+        jobs = self.root / "agent" / "instance" / "jobs"
+        job = jobs / "00000000-0000-0000-0000-000000000000"
+        job.mkdir(parents=True, mode=0o700)
+        os.chmod(self.root / "agent", 0o700)
+        os.chmod(self.root / "agent" / "instance", 0o700)
+        os.chmod(jobs, 0o700)
+        record = job / "record.json"
+        for state in ("prepared", "running", "interrupted"):
+            record.write_text(json.dumps({"state": {"state": state}}))
+            os.chmod(record, 0o600)
+            self.run_cli("down", "--root", str(self.root), expected=2)
+        self.assertTrue(self.root.exists())
 
 
 if __name__ == "__main__":
