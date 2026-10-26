@@ -178,7 +178,6 @@ fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root(
     let mut cleanup = CleanupService {
         executable: executable.clone(),
         root: root.clone(),
-        job: None,
     };
     assert!(
         install.status.success(),
