@@ -36,6 +36,14 @@ targets with the separately pinned `nightly-2026-08-22`, `cargo-xwin`, and
 source-exact build and PE evidence workflow is documented in
 [docs/WIN7_REWRITE_ACCEPTANCE.md](docs/WIN7_REWRITE_ACCEPTANCE.md).
 
+For disposable Windows bootstrap checks, `scripts/verify-win7-bootstrap-native.ps1`
+validates the matching x64/x86 build and package receipts, runs the actual
+`bootstrap-verify` binaries, checks their output receipts, and exercises digest,
+target, and overwrite rejection. It requires Windows PowerShell 2, an
+unelevated interactive user, and an explicitly supplied empty private staging
+root. Windows 11 x86 execution is WoW64 evidence only, not native NT6.1
+acceptance. See the acceptance document for package preparation and invocation.
+
 ## Development commands
 
 ```sh

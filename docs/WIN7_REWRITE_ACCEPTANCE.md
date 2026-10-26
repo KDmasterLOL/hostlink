@@ -71,6 +71,71 @@ target triples, binary hashes, PE machine/subsystem, and imported DLL sets. Its
 `NOT_RUN`. The receipt is evidence for the source-bound build and static PE
 inspection only. It does not claim runtime compatibility.
 
+## Run the source-bound bootstrap verifier on disposable Windows
+
+After building one source SHA, package each exact Agent target separately with
+the matching target binary and the build `receipt.json`. Keep both build
+directories and package directories intact; each package directory contains
+`artifact-receipt.json`, the target Agent sidecar and its `.sha256`, and the ZIP
+with its `.zip.sha256` file.
+
+```sh
+SOURCE_SHA="$(git rev-parse HEAD)"
+VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("crates/agent/Cargo.toml", "rb"))["package"]["version"])')"
+for TARGET in x86_64-win7-windows-msvc i686-win7-windows-msvc; do
+  scripts/package-hostlink-agent.py \
+    --source-sha "$SOURCE_SHA" \
+    --target "$TARGET" \
+    --version "$VERSION" \
+    --binary "target/win7-candidate-$SOURCE_SHA/$TARGET/hostlink-agent.exe" \
+    --build-receipt "target/win7-candidate-$SOURCE_SHA/receipt.json" \
+    --output-dir "target/win7-package-$SOURCE_SHA-$TARGET"
+done
+```
+
+Copy the shared build output directory, both package output directories, and
+the harness script to a Windows test machine through the approved operator
+channel. Create a new, empty disposable directory owned by the
+interactive test user with a protected ACL granting access only to that user.
+Run Windows PowerShell 2 unelevated and pass the exact paths and source SHA:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\verify-win7-bootstrap-native.ps1 `
+  -SourceSha 0123456789abcdef0123456789abcdef01234567 `
+  -Version 1.2.3 `
+  -BuildRoot C:\HostLinkEvidence\build `
+  -X64PackageRoot C:\HostLinkEvidence\package-x64 `
+  -X86PackageRoot C:\HostLinkEvidence\package-x86 `
+  -DisposableRoot C:\HostLinkEvidence\empty-private-root
+```
+
+The harness rejects elevated/service identities, nonempty or unsafe disposable
+roots, inherited or foreign ACL grants, reparse paths, foreign-owned inputs,
+malformed or mismatched build/package receipts and SHA-256 sidecars, wrong
+source/target/version, and pre-existing output. It then executes each actual
+target `hostlink-agent.exe bootstrap-verify --archive ... --sha256 ... --target
+... --version ... --output ...`, checks the published `bootstrap-receipt.json`
+and extracted file identities, and runs negative checks for a wrong archive
+digest, wrong target, and output overwrite. The Agent's strict ZIP validator
+rejects duplicate, missing, malformed, unexpected, and unsafe archive entries
+before publication. For each target the harness also creates a disposable ZIP
+with a duplicated central-directory entry, recomputes its digest, and verifies
+that the actual target binary rejects it without publishing output. The harness
+accepts a candidate only when the real binary successfully validates the
+packaged ZIP and its embedded manifest.
+
+The disposable root must be empty and on a local filesystem. The harness retains
+its unique private run directory and verified output receipts under that root;
+use a new empty disposable root for each run. Preserve the builder receipt,
+both package receipts, both `.zip.sha256` and executable `.sha256` files, exact
+source SHA, Windows version/architecture, PowerShell version, exit status and
+the verified bootstrap receipts as follow-up evidence. Do not copy token,
+credential, enrollment, or public-key material into the evidence bundle. A
+Windows 11 x86 run is **WoW64 evidence only**; it does not prove a 32-bit
+Windows 7 OS or native NT6.1 acceptance. This bootstrap verification procedure
+does not install or start the Agent and does not cover the broader NT6.1
+acceptance matrix below.
+
 ## Builder guard cases
 
 These deterministic negative checks can be run without compiling a candidate:
