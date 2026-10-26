@@ -298,7 +298,9 @@ where
         })
         .map_err(io::Error::other)?,
     )?;
-    File::open(&stage)?.sync_all()?;
+    // Files are already flushed by write_private_new. Windows cannot open a
+    // directory with File::open for sync_all; use the platform-aware barrier.
+    sync_directory(&stage)?;
 
     // Publish the complete set with one same-filesystem directory rename.
     let state = options.install_root.join("state");
