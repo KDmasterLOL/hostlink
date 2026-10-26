@@ -580,10 +580,8 @@ mod windows_elevation {
     use std::{io, mem::size_of};
     use windows_sys::Win32::{
         Foundation::{CloseHandle, GetLastError, HANDLE},
-        Security::{
-            GetTokenInformation, OpenProcessToken, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
-        },
-        System::Threading::GetCurrentProcess,
+        Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
 
     pub fn reject_elevated_user() -> io::Result<()> {
