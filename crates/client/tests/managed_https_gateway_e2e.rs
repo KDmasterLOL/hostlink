@@ -370,6 +370,10 @@ fn expect_bootstrap_rejection(
     let mut terminal = Command::new("script");
     terminal
         .args(["-qefc", &shell_command, "/dev/null"])
+        // util-linux script uses $SHELL to evaluate -c. The HOME operator's
+        // login shell is Nushell, but this is a POSIX /bin/sh bootstrap;
+        // otherwise Nushell reparses quoting and breaks the trap directive.
+        .env("SHELL", "/bin/sh")
         .env("HOME", root)
         .env("XDG_DATA_HOME", xdg_data)
         .env("CURL_CA_BUNDLE", ca_bundle)
@@ -853,6 +857,7 @@ async fn run_managed_https_gateway_fixture(installer_flow: bool) {
         let mut terminal = Command::new("script");
         terminal
             .args(["-qefc", &shell_command, "/dev/null"])
+            .env("SHELL", "/bin/sh")
             .env("HOME", root.path())
             .env("XDG_DATA_HOME", &xdg_data)
             .env("CURL_CA_BUNDLE", &ca_cert)

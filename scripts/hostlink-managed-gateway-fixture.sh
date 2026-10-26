@@ -44,4 +44,7 @@ for binary in "$HOSTLINK_HUB_BIN" "$HOSTLINK_AGENT_BIN" "$HOSTLINK_CLIENT_BIN"; 
   [[ -x "$binary" ]] || { echo "Built fixture binary is missing: $binary" >&2; exit 2; }
 done
 
-cargo test --offline --locked -p hostlink --test managed_https_gateway_e2e -- --ignored --nocapture
+# Both tests create independent sshd/Caddy servers, but each snapshots the
+# preexisting sshd PID set; serialize them to avoid counting the other
+# fixture as a preexisting service and to keep ownership receipts meaningful.
+cargo test --offline --locked -p hostlink --test managed_https_gateway_e2e -- --ignored --nocapture --test-threads=1
