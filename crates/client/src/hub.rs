@@ -463,11 +463,36 @@ pub async fn host_spec_from_approved_routes(
         }
         (_, selected) => select_primary_gateway(gateways, selected)?,
     };
-    let resolved_routes = tokio::time::timeout(Duration::from_secs(15), async {
-        let mut routes = Vec::with_capacity(gateways.len());
-        let mut resolved = std::collections::BTreeSet::new();
-        for gateway in gateways {
-            let address = resolve_gateway(gateway).await?;
+    // A healthy explicitly selected gateway must not become unusable merely
+    // because an optional Hub-approved alternate is temporarily missing in DNS.
+    // Resolve alternates concurrently so many offline edges do not multiply
+    // the controller's discovery deadline. All pins were validated above.
+    let mut addresses = vec![None; gateways.len()];
+    addresses[primary_index] = Some(resolve_gateway(&gateways[primary_index]).await?);
+    let mut optional = tokio::task::JoinSet::new();
+    for (index, gateway) in gateways.iter().enumerate() {
+        if index != primary_index {
+            let gateway = gateway.clone();
+            optional.spawn(async move { (index, resolve_gateway(&gateway).await) });
+        }
+    }
+    while let Some(result) = optional.join_next().await {
+        let (index, address) = result.map_err(|_| HubClientError::GatewayDns)?;
+        if let Ok(address) = address {
+            addresses[index] = Some(address);
+        }
+    }
+
+    let primary_address = addresses[primary_index].expect("selected primary was resolved");
+    let mut routes = Vec::with_capacity(gateways.len());
+    routes.push((&gateways[primary_index], primary_address));
+    let mut resolved = std::collections::BTreeSet::new();
+    resolved.insert((primary_address, gateways[primary_index].user.as_str()));
+    for (index, (gateway, address)) in gateways.iter().zip(addresses).enumerate() {
+        if index == primary_index {
+            continue;
+        }
+        if let Some(address) = address {
             if !resolved.insert((address, gateway.user.as_str())) {
                 return Err(HubClientError::Invalid(
                     "Hub routes resolve to duplicate gateway endpoints".into(),
@@ -475,11 +500,8 @@ pub async fn host_spec_from_approved_routes(
             }
             routes.push((gateway, address));
         }
-        Ok::<_, HubClientError>(routes)
-    })
-    .await
-    .map_err(|_| HubClientError::GatewayDns)??;
-    host_spec_from_routes(host, &resolved_routes, primary_index, config)
+    }
+    host_spec_from_routes(host, &routes, 0, config)
 }
 
 /// Resolves one registry record and an already-selected approved route into the existing SSH type.
@@ -537,6 +559,7 @@ fn validate_gateway_list(gateways: &[GatewayEndpoint]) -> Result<(), HubClientEr
     let mut identities = std::collections::BTreeSet::new();
     let mut pins = std::collections::BTreeSet::new();
     for gateway in gateways {
+        gateway.validate().map_err(HubClientError::Invalid)?;
         if gateway.user.is_empty()
             || gateway.user.len() > 64
             || !gateway
@@ -696,6 +719,109 @@ mod tests {
             })
             .collect();
         assert!(validate_gateway_list(&many).is_err());
+    }
+
+    #[tokio::test]
+    async fn optional_gateway_dns_outage_does_not_disable_selected_primary() {
+        let primary = GatewayEndpoint {
+            host: "127.0.0.1".into(),
+            user: "gateway".into(),
+            port: 2222,
+            host_public_key: public_key(),
+        };
+        let inaccessible = GatewayEndpoint {
+            host: "unresolvable-hostlink-test.invalid".into(),
+            user: "gateway".into(),
+            port: 2223,
+            host_public_key: public_key(),
+        };
+        let reachable = GatewayEndpoint {
+            host: "127.0.0.2".into(),
+            user: "gateway".into(),
+            port: 2224,
+            host_public_key: public_key(),
+        };
+        let config = HubConfig {
+            hub_url: "https://hub.fixture".into(),
+            hub_ca_cert: None,
+            token_file: "unused-token".into(),
+            ssh_user: "agent".into(),
+            identity: "controller.key".into(),
+            gateway_identity: "gateway.key".into(),
+            preferred_gateway: Some("127.0.0.1:2222".into()),
+        };
+        let mut registered = host("machine-001", "fixture-host", None);
+        registered.ssh_host_public_key = public_key();
+        let spec = host_spec_from_approved_routes(
+            registered.clone(),
+            &[primary.clone(), inaccessible.clone(), reachable.clone()],
+            &config,
+        )
+        .await
+        .expect("unreachable approved secondary must not block a valid primary");
+        let gateway = spec.gateway.expect("pinned gateway");
+        assert_eq!(gateway.address, "127.0.0.1:2222".parse().unwrap());
+        assert_eq!(gateway.alternates.len(), 1);
+        assert_eq!(
+            gateway.alternates[0].address,
+            "127.0.0.2:2224".parse().unwrap()
+        );
+        assert_eq!(
+            gateway.alternates[0].host_public_key,
+            reachable.host_public_key
+        );
+
+        let selected_second = HubConfig {
+            preferred_gateway: Some("127.0.0.2:2224".into()),
+            ..config.clone()
+        };
+        let spec = host_spec_from_approved_routes(
+            registered.clone(),
+            &[primary.clone(), reachable.clone(), inaccessible.clone()],
+            &selected_second,
+        )
+        .await
+        .expect("explicitly selected second gateway must remain primary");
+        let gateway = spec.gateway.expect("pinned selected gateway");
+        assert_eq!(gateway.address, "127.0.0.2:2224".parse().unwrap());
+        assert_eq!(gateway.alternates.len(), 1);
+        assert_eq!(
+            gateway.alternates[0].address,
+            "127.0.0.1:2222".parse().unwrap()
+        );
+
+        let mut invalid_secondary = inaccessible.clone();
+        invalid_secondary.host_public_key = "ssh-ed25519 invalid".into();
+        assert!(matches!(
+            host_spec_from_approved_routes(
+                registered.clone(),
+                &[primary.clone(), invalid_secondary],
+                &config,
+            )
+            .await,
+            Err(HubClientError::Invalid(_))
+        ));
+
+        let mut invalid_host = inaccessible.clone();
+        invalid_host.host = "invalid alternate hostname".into();
+        assert!(matches!(
+            host_spec_from_approved_routes(
+                registered.clone(),
+                &[primary.clone(), invalid_host],
+                &config
+            )
+            .await,
+            Err(HubClientError::Invalid(_))
+        ));
+
+        let bad_config = HubConfig {
+            preferred_gateway: Some("unresolvable-hostlink-test.invalid:2223".into()),
+            ..config
+        };
+        assert!(matches!(
+            host_spec_from_approved_routes(registered, &[primary, inaccessible], &bad_config).await,
+            Err(HubClientError::GatewayDns)
+        ));
     }
 
     fn local_client(base: &str, token: &str, timeout: Duration) -> HubClient {
