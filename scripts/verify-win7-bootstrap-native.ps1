@@ -234,10 +234,12 @@ function New-DuplicateZipFixture([string]$Source, [string]$Destination) {
         $writer.Write([UInt16]($entriesTotal + 1))
         $writer.Write([UInt32]($centralSize + $duplicateEntry.Length))
         $writer.Flush()
-        $writer.Dispose()
+        # BinaryWriter.Dispose is not exposed as a public callable member on
+        # the .NET 3.5 runtime that ships with this PowerShell 2 host.
+        $writer.Close()
     } finally {
-        if ($null -ne $output) { $output.Dispose() }
-        $input.Dispose()
+        if ($null -ne $output) { $output.Close() }
+        $input.Close()
     }
 }
 
@@ -260,7 +262,7 @@ function Invoke-Agent([string]$Agent, [string[]]$Arguments, [string]$LogPrefix, 
         }
         return @{ ExitCode=$process.ExitCode }
     } finally {
-        $process.Dispose()
+        $process.Close()
     }
 }
 

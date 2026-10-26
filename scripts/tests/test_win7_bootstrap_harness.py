@@ -55,6 +55,8 @@ class BootstrapHarnessContractTests(unittest.TestCase):
         for unsupported in ("ConvertFrom-Json", "ConvertTo-Json", "ReadToEndAsync", "Start-Process -Verb RunAs"):
             self.assertNotIn(unsupported, self.script)
         self.assertIn("System.Web.Script.Serialization.JavaScriptSerializer", self.script)
+        self.assertNotIn(".Dispose()", self.script)
+        self.assertIn("$writer.Close()", self.script)
         self.assertIn("@(Get-ChildItem -LiteralPath $Output -Force | Where-Object { $_.PSIsContainer }).Count", self.script)
         # .NET 3.5 lacks the Path.Combine(string,string,string) overload.
         self.assertNotIn("::Combine($package, $Version,", self.script)
