@@ -275,7 +275,6 @@ pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
     #[cfg(windows)]
     publish_windows(
         &request.install_root,
-        &bin_root,
         &metadata_path,
         request,
         manifest,
@@ -1607,7 +1606,6 @@ fn publish_linux(
 #[cfg(windows)]
 fn publish_windows(
     root: &Path,
-    bin_root: &Path,
     metadata_path: &Path,
     request: &AgentUpdateRequest,
     manifest: PackageManifest,
@@ -1615,6 +1613,7 @@ fn publish_windows(
     staged: tempfile::TempDir,
     managed_service: bool,
 ) -> io::Result<()> {
+    let bin_root = root.join("bin");
     let installed_executable = bin_root.join("hostlink-agent.exe");
     if managed_service {
         if same_windows_file(&std::env::current_exe()?, &installed_executable)? {
@@ -1772,7 +1771,7 @@ fn publish_windows(
                 "Windows installed metadata readback differs from the package",
             ));
         }
-        validate_installed(bin_root, &installed, &request.target)?;
+        validate_installed(&bin_root, &installed, &request.target)?;
         journal.advance(crate::update_handoff::UpdatePhase::Verified)?;
         crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
         if let Some(receipt) = maintenance.as_ref() {
@@ -1792,13 +1791,13 @@ fn publish_windows(
     })();
 
     if let Err(error) = publish {
-        if let Some(receipt) = maintenance.as_ref() {
-            if let Err(stop_error) = crate::service::stop_for_maintenance_rollback(receipt) {
-                return Err(io::Error::other(format!(
-                    "Windows Agent update failed ({error}); candidate stop could not be proven ({stop_error}); journal and transaction at {} preserved",
-                    transaction_dir.display()
-                )));
-            }
+        if let Some(receipt) = maintenance.as_ref()
+            && let Err(stop_error) = crate::service::stop_for_maintenance_rollback(receipt)
+        {
+            return Err(io::Error::other(format!(
+                "Windows Agent update failed ({error}); candidate stop could not be proven ({stop_error}); journal and transaction at {} preserved",
+                transaction_dir.display()
+            )));
         }
         if let Err(rollback_error) = rollback_windows(
             &installed_executable,
@@ -1813,16 +1812,16 @@ fn publish_windows(
                 transaction_dir.display()
             )));
         }
-        if let Some(receipt) = maintenance.as_ref() {
-            if let Err(restore_error) = crate::service::restore_maintenance(receipt, |root| {
+        if let Some(receipt) = maintenance.as_ref()
+            && let Err(restore_error) = crate::service::restore_maintenance(receipt, |root| {
                 let old_metadata = read_install_metadata(&root.join(INSTALL_METADATA))?;
                 validate_installed(&root.join("bin"), &old_metadata, &request.target)
-            }) {
-                return Err(io::Error::other(format!(
-                    "Windows Agent update failed ({error}); old files are restored but owner registration recovery failed ({restore_error}); journal preserved at {}",
-                    journal_path.display()
-                )));
-            }
+            })
+        {
+            return Err(io::Error::other(format!(
+                "Windows Agent update failed ({error}); old files are restored but owner registration recovery failed ({restore_error}); journal preserved at {}",
+                journal_path.display()
+            )));
         }
         if let Err(cleanup_error) =
             cleanup_windows_transaction(&journal_path, &transaction_dir, &journal.identity)
