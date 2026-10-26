@@ -1026,7 +1026,7 @@ mod windows {
                 invalid("maintenance lifecycle endpoint did not prove a running Agent process")
             })?),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                reject_running_agent(&record.executable)?;
+                crate::update::reject_running_agent(&record.executable)?;
                 None
             }
             Err(error) => return Err(error),
@@ -1184,7 +1184,7 @@ mod windows {
                     .ok_or_else(|| invalid("recovery health endpoint returned an invalid PID"))?,
             ),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                reject_running_agent(&record.executable)?;
+                crate::update::reject_running_agent(&record.executable)?;
                 None
             }
             Err(error) => return Err(error),
@@ -1243,7 +1243,7 @@ mod windows {
         let reply = match pipe_request(&record, "STATUS") {
             Ok(reply) => reply,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return reject_running_agent(&record.executable);
+                return crate::update::reject_running_agent(&record.executable);
             }
             Err(error) => return Err(error),
         };
@@ -1401,7 +1401,7 @@ mod windows {
                 Err(error) => return Err(error),
             };
             let Some(pid) = pid else {
-                return reject_running_agent(&record.executable);
+                return crate::update::reject_running_agent(&record.executable);
             };
             let process = open_owned_process(pid, &record)?;
             if pipe_request(&record, "STOP")? != format!("STOPPING {pid}") {
@@ -3087,11 +3087,10 @@ pub use windows::{install, remove, start, status, stop};
 #[cfg(windows)]
 #[allow(dead_code)] // Consumed by the separately owned Windows updater integration.
 pub(crate) use windows::{
-    MaintenanceReceipt, begin_maintenance, begin_recovery_maintenance, has_registration,
-    is_in_maintenance, recover_maintenance_after_inventory, recover_maintenance_stop,
-    register_maintenance, restore_maintenance, start_maintenance_candidate,
-    stop_for_maintenance_rollback, update_maintenance_executable, verify_registered_health,
-    verify_registered_image,
+    begin_maintenance, begin_recovery_maintenance, has_registration, is_in_maintenance,
+    recover_maintenance_after_inventory, recover_maintenance_stop, register_maintenance,
+    restore_maintenance, start_maintenance_candidate, stop_for_maintenance_rollback,
+    update_maintenance_executable, verify_registered_health, verify_registered_image,
 };
 
 #[cfg(not(any(target_os = "linux", windows)))]

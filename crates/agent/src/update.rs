@@ -2,8 +2,8 @@
 //!
 //! Updates are serialized with an OS file lock, staged under the user-owned install root,
 //! and published only after the selected archive, target, version, and file manifest agree.
-//! Windows publication is limited to a separately invoked updater with no running or registered
-//! Agent. Live-service handoff remains unsupported.
+//! Windows publication is limited to a separately invoked, current-user-private updater. A
+//! registered Agent is updated through its authenticated maintenance and health-check handoff.
 
 use serde::{
     Deserialize, Serialize,
@@ -1775,7 +1775,7 @@ fn publish_windows(
         validate_installed(bin_root, &installed, &request.target)?;
         journal.advance(crate::update_handoff::UpdatePhase::Verified)?;
         crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
-        if let Some(receipt) = maintenance {
+        if let Some(receipt) = maintenance.as_ref() {
             crate::service::update_maintenance_executable(
                 receipt,
                 &journal.identity.new_executable_sha256,
@@ -1846,8 +1846,36 @@ fn ensure_windows_offline_caller(root: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn ensure_windows_separate_updater(root: &Path) -> io::Result<()> {
+    let updater = std::env::current_exe()?;
+    let updater_metadata = fs::symlink_metadata(&updater)?;
+    if !updater_metadata.is_file()
+        || updater_metadata.file_type().is_symlink()
+        || is_reparse_point(&updater_metadata)
+    {
+        return Err(invalid("Windows updater is not a regular executable file"));
+    }
+    validate_path_has_no_reparse_components(&updater)?;
+    validate_windows_private_acl(&updater, &updater_metadata)?;
+
+    let canonical_root = fs::canonicalize(root)?;
+    let canonical_updater = fs::canonicalize(&updater)?;
+    if !canonical_updater.starts_with(&canonical_root) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Windows updater must be a private executable beneath the Agent install root",
+        ));
+    }
+    if windows_file_identity(&canonical_updater, false)?.0
+        != windows_file_identity(&canonical_root, true)?.0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Windows updater must be on the Agent install volume",
+        ));
+    }
+
     let installed_executable = root.join("bin").join("hostlink-agent.exe");
-    if same_windows_file(&std::env::current_exe()?, &installed_executable)? {
+    if same_windows_file(&canonical_updater, &installed_executable)? {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "Windows Agent update must be invoked by a separate updater executable",
@@ -2400,7 +2428,7 @@ mod windows_recovery_tests {
 }
 
 #[cfg(windows)]
-fn reject_running_agent(installed_executable: &Path) -> io::Result<()> {
+pub(crate) fn reject_running_agent(installed_executable: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::{
         Foundation::{
