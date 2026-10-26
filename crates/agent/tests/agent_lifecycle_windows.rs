@@ -16,12 +16,24 @@ fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root(
         Ok("1"),
         "refusing to write HKCU Run without an explicit disposable-profile guard"
     );
+    assert_disposable_context();
+    let source_agent = Path::new(env!("CARGO_BIN_EXE_hostlink-agent"));
+    let expected_hash = std::env::var("HOSTLINK_WINDOWS_LIFECYCLE_AGENT_SHA256")
+        .expect("harness supplies the source Agent SHA-256 after build");
+    assert_eq!(
+        sha256_file(source_agent),
+        expected_hash,
+        "test Agent hash changed"
+    );
 
     let temp = tempfile::tempdir().expect("disposable test scratch root");
     let local_app_data = known_local_app_data();
-    let private_parent =
-        local_app_data.join(format!("HostLink Lifecycle Test {}", uuid::Uuid::new_v4()));
+    let private_parent = local_app_data.join(format!(
+        "HostLink Lifecycle Test & (fixture) {}",
+        uuid::Uuid::new_v4()
+    ));
     fs::create_dir(&private_parent).expect("private test install parent");
+    let _fixture_cleanup = ProfileFixture(private_parent.clone());
     private_windows_path(&private_parent, true);
     // Match the real installer, which creates LocalAppData/HostLink/Agent,
     // without modifying or adopting any real HostLink directory.
@@ -108,8 +120,24 @@ fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root(
     private_windows_path(&state.join("manifest.json"), false);
 
     let executable = root.join("bin/hostlink-agent.exe");
-    fs::copy(env!("CARGO_BIN_EXE_hostlink-agent"), &executable).expect("copy exact test Agent");
+    fs::copy(source_agent, &executable).expect("copy exact test Agent");
     private_windows_path(&executable, false);
+    assert_eq!(
+        sha256_file(&executable),
+        expected_hash,
+        "installed Agent differs from source binary"
+    );
+
+    let wrong_root = private_parent.join("Wrong Root");
+    fs::create_dir(&wrong_root).expect("create unrelated private root");
+    private_windows_path(&wrong_root, true);
+    let wrong_root_status = Command::new(source_agent)
+        .args(["service", "status", "--root"])
+        .arg(&wrong_root)
+        .output()
+        .expect("query unrelated private root");
+    assert!(wrong_root_status.status.success());
+    assert!(String::from_utf8_lossy(&wrong_root_status.stdout).contains("installed=false"));
 
     // A private final root does not make a shared or replaceable parent safe.
     // The lifecycle must reject this disposable world-writable ancestor path.
@@ -119,7 +147,7 @@ fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root(
     let unsafe_root = shared_parent.join("private-looking-root");
     fs::create_dir(&unsafe_root).expect("create private-looking child");
     private_windows_path(&unsafe_root, true);
-    let refused = Command::new(env!("CARGO_BIN_EXE_hostlink-agent"))
+    let refused = Command::new(source_agent)
         .args([
             "service",
             "install",
@@ -165,6 +193,10 @@ fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root(
     let control_token = marker["control_token"]
         .as_str()
         .expect("marker control token");
+    let run_value = marker["run_value"]
+        .as_str()
+        .expect("root-derived HKCU Run value")
+        .to_owned();
     let startup_script =
         fs::read_to_string(root.join(".hostlink-agent-start.vbs")).expect("read startup script");
     assert!(!startup_script.contains(control_token));
@@ -218,7 +250,7 @@ fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root(
     fs::write(&executable, &changed_binary).expect("tamper disposable binary");
     // Invoke the CLI from the original test binary: the deliberately
     // corrupted installed PE cannot itself be launched by Windows.
-    let refused = Command::new(env!("CARGO_BIN_EXE_hostlink-agent"))
+    let refused = Command::new(source_agent)
         .args(["service", "start", "--root", root.to_str().unwrap()])
         .output()
         .expect("invoke start with tampered binary");
@@ -241,35 +273,90 @@ fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root(
     assert!(String::from_utf8_lossy(&refused.stderr).contains("startup launcher differs"));
     fs::write(&launcher, original_launcher).expect("restore exact private startup launcher");
 
+    // Model a stale owner record whose old PID has since been reused by this
+    // unrelated test process. Its authenticated-looking pipe response must not
+    // make stop signal or accept that PID as the installed Agent.
+    let marker_path = root.join(".hostlink-user-service.json");
+    let original_marker =
+        fs::read(&marker_path).expect("read owned marker before PID-reuse fixture");
+    let mut reused_marker: serde_json::Value =
+        serde_json::from_slice(&original_marker).expect("parse owned marker for PID-reuse fixture");
+    let fake_pipe = format!(r"\\.\pipe\hostlink-agent-reused-{}", uuid::Uuid::new_v4());
+    reused_marker["pipe_name"] = json!(fake_pipe);
+    fs::write(
+        &marker_path,
+        serde_json::to_vec(&reused_marker).expect("serialize disposable PID-reuse marker"),
+    )
+    .expect("write disposable PID-reuse marker");
+    let fake_pipe_server = spawn_reused_pid_pipe(fake_pipe, std::process::id());
+    let refused = Command::new(&executable)
+        .args(["service", "stop", "--root", root.to_str().unwrap()])
+        .output()
+        .expect("refuse stale PID reused by an unrelated process");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("image does not match"));
+    assert!(marker_path.is_file());
+    fake_pipe_server.join().expect("finish fake PID-reuse pipe");
+    fs::write(&marker_path, original_marker).expect("restore exact disposable ownership marker");
+    private_windows_path(&marker_path, false);
+
     let store = JobStore::open(root.join("jobs")).expect("open durable job store");
-    let job_id = JobId::new();
-    let owner = "a".repeat(64);
-    cleanup.job = Some((job_id, owner.clone()));
-    let admission = store
-        .admit(
-            job_id,
-            &owner,
-            &JobSpec {
-                program: "disposable lifecycle interlock".into(),
-                args: Vec::new(),
-                cwd: None,
-                source_sha256: "b".repeat(64),
-            },
-        )
-        .expect("admit real durable job fixture");
-    assert!(matches!(admission, Admission::Created(_)));
+    for target_state in [JobState::Prepared, JobState::Running, JobState::Interrupted] {
+        let job_id = JobId::new();
+        let owner = "a".repeat(64);
+        let admission = store
+            .admit(
+                job_id,
+                &owner,
+                &JobSpec {
+                    program: "disposable lifecycle interlock".into(),
+                    args: Vec::new(),
+                    cwd: None,
+                    source_sha256: "b".repeat(64),
+                },
+            )
+            .expect("admit real durable job fixture");
+        assert!(matches!(admission, Admission::Created(_)));
+        if target_state != JobState::Prepared {
+            store
+                .transition(job_id, &owner, JobState::Prepared, JobState::Running)
+                .expect("mark disposable fixture running");
+        }
+        if target_state == JobState::Interrupted {
+            store
+                .transition(job_id, &owner, JobState::Running, JobState::Interrupted)
+                .expect("mark disposable fixture interrupted");
+        }
+        for action in ["stop", "remove"] {
+            let refused = Command::new(&executable)
+                .args(["service", action, "--root", root.to_str().unwrap()])
+                .output()
+                .expect("invoke lifecycle action with nonterminal job");
+            assert!(
+                !refused.status.success(),
+                "{action} accepted {target_state:?}"
+            );
+            assert!(String::from_utf8_lossy(&refused.stderr).contains("durable jobs"));
+            assert!(root.join(".hostlink-user-service.json").is_file());
+        }
+        // Remove only this explicitly disposable fixture record before testing
+        // the next fail-closed state; Interrupted is never made runnable again.
+        fs::remove_dir_all(root.join("jobs").join(job_id.to_string()))
+            .expect("remove exact disposable job fixture");
+    }
+
+    let unknown_job = root.join("jobs/unknown-fixture-entry");
+    fs::create_dir(&unknown_job).expect("create unknown disposable job entry");
+    private_windows_path(&unknown_job, true);
     for action in ["stop", "remove"] {
         let refused = Command::new(&executable)
             .args(["service", action, "--root", root.to_str().unwrap()])
             .output()
-            .expect("invoke lifecycle action with active job");
+            .expect("invoke lifecycle action with unknown job entry");
         assert!(!refused.status.success());
-        assert!(String::from_utf8_lossy(&refused.stderr).contains("durable jobs"));
         assert!(root.join(".hostlink-user-service.json").is_file());
     }
-    store
-        .transition(job_id, &owner, JobState::Prepared, JobState::Failed)
-        .expect("finish durable fixture job");
+    fs::remove_dir_all(&unknown_job).expect("remove exact unknown disposable job fixture");
 
     for action in ["stop", "remove"] {
         let refused = Command::new(&executable)
@@ -346,6 +433,7 @@ fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root(
         String::from_utf8_lossy(&remove.stderr)
     );
     assert!(!root.join(".hostlink-user-service.json").exists());
+    assert_no_run_registration(&run_value);
     assert!(
         executable.is_file(),
         "Windows removal preserves the executable and enrollment for recovery"
@@ -357,19 +445,13 @@ fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root(
 struct CleanupService {
     executable: std::path::PathBuf,
     root: std::path::PathBuf,
-    job: Option<(JobId, String)>,
 }
 
 impl Drop for CleanupService {
     fn drop(&mut self) {
-        if let Some((job_id, owner)) = &self.job
-            && let Ok(store) = JobStore::open(self.root.join("jobs"))
-            && let Ok(record) = store.lookup(*job_id, owner)
-            && record.state == JobState::Prepared
-        {
-            let _ = store.transition(*job_id, owner, JobState::Prepared, JobState::Failed);
-        }
         if self.root.join(".hostlink-user-service.json").exists() {
+            // Never start a process during a failing test's cleanup. Removal
+            // may proceed only through the normal authenticated owner checks.
             let _ = Command::new(&self.executable)
                 .args(["service", "remove", "--root"])
                 .arg(&self.root)
@@ -379,6 +461,121 @@ impl Drop for CleanupService {
             let _ = fs::remove_dir_all(&self.root);
         }
     }
+}
+
+struct ProfileFixture(std::path::PathBuf);
+
+impl Drop for ProfileFixture {
+    fn drop(&mut self) {
+        // A failed test may leave an installed service marker or live Agent.
+        // Never recursively erase such a root and strand its HKCU Run entry.
+        // Successful acceptance explicitly removes the owned root after stop.
+        let _ = fs::remove_dir(&self.0);
+    }
+}
+
+fn spawn_reused_pid_pipe(pipe_name: String, reused_pid: u32) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create fake PID-reuse pipe runtime");
+        runtime.block_on(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::net::windows::named_pipe::ServerOptions;
+            let mut pipe = ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&pipe_name)
+                .expect("create disposable PID-reuse pipe");
+            tokio::time::timeout(std::time::Duration::from_secs(5), pipe.connect())
+                .await
+                .expect("lifecycle probe must connect within 5 seconds")
+                .expect("accept lifecycle probe");
+            let mut request = [0u8; 1024];
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(5), pipe.read(&mut request))
+                    .await
+                    .expect("lifecycle probe must send within 5 seconds")
+                    .expect("read lifecycle probe");
+            pipe.write_all(format!("RUNNING {reused_pid}\n").as_bytes())
+                .await
+                .expect("respond with reused PID");
+            pipe.flush().await.expect("flush PID-reuse response");
+        });
+    })
+}
+
+fn assert_disposable_context() {
+    let current = windows_permissions::utilities::current_process_sid().expect("current SID");
+    use windows_permissions::wrappers::ConvertSidToStringSid;
+    let current_sid = ConvertSidToStringSid(&current)
+        .expect("format current SID")
+        .to_string_lossy()
+        .into_owned();
+    assert_ne!(current_sid, "S-1-5-18", "SYSTEM profile is forbidden");
+    assert_eq!(
+        std::env::var("HOSTLINK_WINDOWS_LIFECYCLE_EXPECTED_SID").as_deref(),
+        Ok(current_sid.as_str()),
+        "current SID differs from the harness-verified disposable SID"
+    );
+    let profile = known_user_profile();
+    assert_eq!(
+        std::env::var("HOSTLINK_WINDOWS_LIFECYCLE_EXPECTED_PROFILE")
+            .ok()
+            .as_deref(),
+        Some(profile.to_string_lossy().as_ref()),
+        "current profile differs from the harness-verified disposable profile"
+    );
+    assert_eq!(
+        std::env::var("HOSTLINK_WINDOWS_LIFECYCLE_PROTECTED_WORK_SID").as_deref()
+            == Ok(current_sid.as_str()),
+        false,
+        "refusing to run in the protected WORK SID"
+    );
+}
+
+fn sha256_file(path: &Path) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(fs::read(path).expect("read exact Agent binary"))
+    )
+}
+
+fn assert_no_run_registration(run_value: &str) {
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+    };
+    let key_name: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0"
+        .encode_utf16()
+        .collect();
+    let value_name: Vec<u16> = format!("{run_value}\0").encode_utf16().collect();
+    let mut key: HKEY = std::ptr::null_mut();
+    // SAFETY: key_name is NUL-terminated and key points to writable storage.
+    let open = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            key_name.as_ptr(),
+            0,
+            KEY_QUERY_VALUE,
+            &mut key,
+        )
+    };
+    assert_eq!(open, 0, "cannot verify current-user Run key after teardown");
+    let mut size = 0u32;
+    // SAFETY: value_name is NUL-terminated; a null data pointer requests only its size.
+    let query = unsafe {
+        RegQueryValueExW(
+            key,
+            value_name.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    };
+    // SAFETY: key was opened successfully above and is closed exactly once.
+    unsafe { RegCloseKey(key) };
+    assert_eq!(query, 2, "owned HKCU Run value survived lifecycle teardown");
 }
 
 fn private_windows_path(path: &Path, directory: bool) {
@@ -438,6 +635,34 @@ fn known_local_app_data() -> std::path::PathBuf {
     assert!(
         result >= 0 && !path.is_null(),
         "resolve disposable LocalAppData"
+    );
+    // SAFETY: SHGetKnownFolderPath returns a NUL-terminated CoTaskMem allocation.
+    unsafe {
+        let mut length = 0usize;
+        while *path.add(length) != 0 {
+            length += 1;
+        }
+        let value = std::path::PathBuf::from(std::ffi::OsString::from_wide(
+            std::slice::from_raw_parts(path, length),
+        ));
+        CoTaskMemFree(path.cast());
+        value
+    }
+}
+
+fn known_user_profile() -> std::path::PathBuf {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::{
+        System::Com::CoTaskMemFree,
+        UI::Shell::{FOLDERID_Profile, SHGetKnownFolderPath},
+    };
+    let mut path = std::ptr::null_mut();
+    // SAFETY: the known-folder GUID is static and the output pointer is writable.
+    let result =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_Profile, 0, std::ptr::null_mut(), &mut path) };
+    assert!(
+        result >= 0 && !path.is_null(),
+        "resolve current user profile"
     );
     // SAFETY: SHGetKnownFolderPath returns a NUL-terminated CoTaskMem allocation.
     unsafe {
