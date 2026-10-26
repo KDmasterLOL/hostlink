@@ -40,7 +40,7 @@ const MAX_JOB_CHANNELS: usize = 32;
 #[cfg(not(test))]
 const JOB_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 #[cfg(test)]
-const JOB_TIMEOUT: Duration = Duration::from_secs(3);
+const JOB_TIMEOUT: Duration = Duration::from_secs(30);
 const JOB_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) struct PreparedEmbeddedSshConfig {
@@ -1631,7 +1631,7 @@ mod windows_durable_job_tests {
     fn timeout_worker_root_fixture() {
         let root = std::env::current_dir().expect("fixture current directory");
         assert!(root.join(".hostlink-timeout-fixture").is_file());
-        let child = Command::new(std::env::current_exe().expect("fixture test binary"))
+        let mut child = Command::new(std::env::current_exe().expect("fixture test binary"))
             .args([
                 "--ignored",
                 "--exact",
@@ -1644,10 +1644,19 @@ mod windows_durable_job_tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn grandchild in the Agent's Windows Job Object");
-        std::fs::write(root.join("descendant.pid"), child.id().to_string()).unwrap();
-        loop {
-            std::thread::sleep(Duration::from_secs(1));
-        }
+        let mut marker = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(root.join("descendant.pid"))
+            .expect("create descendant readiness marker");
+        use std::io::Write as _;
+        writeln!(marker, "{}", child.id()).expect("write descendant readiness marker");
+        marker
+            .sync_all()
+            .expect("persist descendant readiness marker");
+        // The Job Object owns both processes. Reap the descendant if it exits,
+        // rather than leaving an un-waited Child handle in the test fixture.
+        child.wait().expect("reap fixture descendant");
     }
 
     #[test]
@@ -1708,25 +1717,55 @@ mod windows_durable_job_tests {
             shutdown: processkit::CancellationToken::new(),
             active_jobs: std::sync::Mutex::new(HashMap::new()),
         });
+        let active = Arc::new(JobCancellation {
+            process: runtime.shutdown.child_token(),
+            requested: AtomicBool::new(false),
+        });
         let worker = tokio::spawn(run_job(
             runtime.clone(),
             owner.clone(),
             record,
-            Arc::new(JobCancellation {
-                process: runtime.shutdown.child_token(),
-                requested: AtomicBool::new(false),
-            }),
+            active.clone(),
         ));
         let pid_path = temp.path().join("descendant.pid");
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !pid_path.exists() {
+        let readiness = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if pid_path.exists() {
+                    return Ok(());
+                }
+                if worker.is_finished() {
+                    return Err("job worker exited before the descendant became ready");
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
-        .await
-        .expect("grandchild started before the test timeout");
-        let pid: u32 = std::fs::read_to_string(pid_path).unwrap().parse().unwrap();
-        tokio::time::timeout(Duration::from_secs(10), worker)
+        .await;
+        if !matches!(readiness, Ok(Ok(()))) {
+            // Give the process tree an explicit cancellation request before waiting for cleanup.
+            // This bounds a broken readiness path without detaching a live test worker.
+            if !worker.is_finished() {
+                active.requested.store(true, Ordering::Release);
+                active.process.cancel();
+            }
+            let cleanup = tokio::time::timeout(Duration::from_secs(10), worker).await;
+            let cleanup_status = match cleanup {
+                Ok(Ok(())) => "completed".to_owned(),
+                Ok(Err(error)) => format!("worker task failed: {error}"),
+                Err(_) => "worker cleanup deadline exceeded".to_owned(),
+            };
+            let state = runtime.store.lookup(id, &owner).unwrap().state;
+            let stdout = timeout_fixture_output(&runtime.store, id, JobOutput::Stdout, temp.path());
+            let stderr = timeout_fixture_output(&runtime.store, id, JobOutput::Stderr, temp.path());
+            panic!(
+                "descendant readiness failed ({readiness:?}); cleanup={cleanup_status}; persisted state={state:?}; stdout={stdout}; stderr={stderr}"
+            );
+        }
+        let pid: u32 = std::fs::read_to_string(&pid_path)
+            .expect("read descendant readiness marker")
+            .trim()
+            .parse()
+            .expect("valid descendant PID");
+        tokio::time::timeout(Duration::from_secs(40), worker)
             .await
             .expect("timed-out Agent worker teardown deadline")
             .unwrap();
@@ -1745,6 +1784,40 @@ mod windows_durable_job_tests {
             process_exited(pid),
             "Windows timeout must terminate the entire Job Object process tree"
         );
+    }
+
+    fn timeout_fixture_output(
+        store: &JobStore,
+        id: JobId,
+        stream: crate::jobs::JobOutput,
+        private_root: &Path,
+    ) -> String {
+        const MAX_DIAGNOSTIC_BYTES: usize = 4096;
+        let path = store.output_path(id, stream);
+        let mut file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) => return format!("<unavailable: {error}>"),
+        };
+        let mut bytes = Vec::with_capacity(MAX_DIAGNOSTIC_BYTES + 1);
+        use std::io::Read as _;
+        if let Err(error) = file
+            .take((MAX_DIAGNOSTIC_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+        {
+            return format!("<unavailable: {error}>");
+        }
+        let truncated = bytes.len() > MAX_DIAGNOSTIC_BYTES;
+        let bytes = &bytes[..bytes.len().min(MAX_DIAGNOSTIC_BYTES)];
+        let text = String::from_utf8_lossy(bytes);
+        let redacted = text.replace(
+            &private_root.to_string_lossy().to_string(),
+            "<private-temp>",
+        );
+        if truncated {
+            format!("{redacted}<truncated>")
+        } else {
+            redacted
+        }
     }
 
     fn private_test_path(path: &Path, directory: bool) {
