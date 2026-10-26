@@ -505,9 +505,11 @@ fn process_exited(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, WAIT_OBJECT_0,
     };
-    use windows_sys::Win32::System::Threading::{OpenProcess, SYNCHRONIZE, WaitForSingleObject};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
     // SAFETY: OpenProcess receives a PID read from this fixture's child process.
-    let process = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
     if process.is_null() {
         // SAFETY: GetLastError reads this thread's status from the failed OpenProcess call.
         return unsafe { GetLastError() } == ERROR_INVALID_PARAMETER;
