@@ -37,7 +37,10 @@ const JOB_SUBSYSTEM: &str = "hostlink-jobs-v1";
 const JOB_FRAME_MAX_BYTES: usize = 64 * 1024;
 const MAX_ACTIVE_JOBS: usize = 16;
 const MAX_JOB_CHANNELS: usize = 32;
+#[cfg(not(test))]
 const JOB_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+#[cfg(test)]
+const JOB_TIMEOUT: Duration = Duration::from_secs(3);
 const JOB_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) struct PreparedEmbeddedSshConfig {
@@ -1614,5 +1617,180 @@ mod durable_job_tests {
             "an over-limit stream cannot be reported as successful"
         );
         drop(temp_root);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_durable_job_tests {
+    use super::*;
+    use crate::jobs::{Admission, JobId, JobSpec, JobState, JobStore};
+    use std::process::{Command, Stdio};
+
+    #[test]
+    #[ignore = "spawned inside a Windows Agent Job Object by timeout_cancels_descendants"]
+    fn timeout_worker_root_fixture() {
+        let root = std::env::current_dir().expect("fixture current directory");
+        assert!(root.join(".hostlink-timeout-fixture").is_file());
+        let child = Command::new(std::env::current_exe().expect("fixture test binary"))
+            .args([
+                "--ignored",
+                "--exact",
+                "ssh::windows_durable_job_tests::timeout_worker_descendant_fixture",
+                "--nocapture",
+            ])
+            .current_dir(&root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn grandchild in the Agent's Windows Job Object");
+        std::fs::write(root.join("descendant.pid"), child.id().to_string()).unwrap();
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    #[ignore = "spawned inside a Windows Agent Job Object by timeout_cancels_descendants"]
+    fn timeout_worker_descendant_fixture() {
+        let root = std::env::current_dir().expect("fixture current directory");
+        assert!(root.join(".hostlink-timeout-fixture").is_file());
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_cancels_descendants_and_records_failure() {
+        let temp = tempfile::tempdir().expect("disposable Windows test root");
+        private_test_path(temp.path(), true);
+        let marker = temp.path().join(".hostlink-timeout-fixture");
+        std::fs::write(&marker, b"private Agent worker fixture").unwrap();
+        private_test_path(&marker, false);
+
+        let executable = temp.path().join("agent-test.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &executable)
+            .expect("stage source-owned test executable");
+        private_test_path(&executable, false);
+        let source_sha256 = format!(
+            "{:x}",
+            Sha256::digest(std::fs::read(&executable).expect("read staged executable"))
+        );
+        let jobs_root = temp.path().join("jobs");
+        std::fs::create_dir(&jobs_root).unwrap();
+        private_test_path(&jobs_root, true);
+        let store = JobStore::open(jobs_root).expect("open private job store");
+        let owner = "e".repeat(64);
+        let id = JobId::new();
+        let spec = JobSpec {
+            program: executable.to_string_lossy().into_owned(),
+            args: vec![
+                "--ignored".into(),
+                "--exact".into(),
+                "ssh::windows_durable_job_tests::timeout_worker_root_fixture".into(),
+                "--nocapture".into(),
+            ],
+            cwd: Some(temp.path().to_path_buf()),
+            source_sha256,
+        };
+        let Admission::Created(_) = store.admit(id, &owner, &spec).unwrap() else {
+            panic!("new test job ID must be created");
+        };
+        let record = store
+            .transition(id, &owner, JobState::Prepared, JobState::Running)
+            .unwrap();
+        let runtime = Arc::new(JobRuntime {
+            store,
+            start_lock: Mutex::new(()),
+            slots: Arc::new(Semaphore::new(MAX_ACTIVE_JOBS)),
+            channel_slots: Arc::new(Semaphore::new(MAX_JOB_CHANNELS)),
+            accepting: AtomicBool::new(true),
+            shutdown: processkit::CancellationToken::new(),
+            active_jobs: std::sync::Mutex::new(HashMap::new()),
+        });
+        let worker = tokio::spawn(run_job(
+            runtime.clone(),
+            owner.clone(),
+            record,
+            Arc::new(JobCancellation {
+                process: runtime.shutdown.child_token(),
+                requested: AtomicBool::new(false),
+            }),
+        ));
+        let pid_path = temp.path().join("descendant.pid");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !pid_path.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("grandchild started before the test timeout");
+        let pid: u32 = std::fs::read_to_string(pid_path).unwrap().parse().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), worker)
+            .await
+            .expect("timed-out Agent worker teardown deadline")
+            .unwrap();
+        assert_eq!(
+            runtime.store.lookup(id, &owner).unwrap().state,
+            JobState::Failed,
+            "a timed-out durable job cannot be recorded as successful"
+        );
+        for _ in 0..100 {
+            if process_exited(pid) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            process_exited(pid),
+            "Windows timeout must terminate the entire Job Object process tree"
+        );
+    }
+
+    fn private_test_path(path: &Path, directory: bool) {
+        use windows_permissions::constants::{SeObjectType, SecurityInformation};
+        use windows_permissions::wrappers::{ConvertSidToStringSid, SetNamedSecurityInfo};
+        use windows_permissions::{LocalBox, SecurityDescriptor};
+        let sid = windows_permissions::utilities::current_process_sid().unwrap();
+        let sid = ConvertSidToStringSid(&sid).unwrap();
+        let flags = if directory { "OICI" } else { "" };
+        let sddl = format!("D:P(A;{flags};FA;;;{})", sid.to_string_lossy());
+        let descriptor: LocalBox<SecurityDescriptor> = sddl.parse().unwrap();
+        SetNamedSecurityInfo(
+            path.as_os_str(),
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Owner
+                | SecurityInformation::Dacl
+                | SecurityInformation::ProtectedDacl,
+            Some(
+                windows_permissions::utilities::current_process_sid()
+                    .unwrap()
+                    .as_ref(),
+            ),
+            None,
+            Some(descriptor.dacl().unwrap()),
+            None,
+        )
+        .expect("apply protected current-user-only fixture ACL");
+    }
+
+    fn process_exited(pid: u32) -> bool {
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, WAIT_OBJECT_0,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, SYNCHRONIZE, WaitForSingleObject,
+        };
+        // SAFETY: PID came from the fixture's child process.
+        let process = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+        if process.is_null() {
+            // SAFETY: GetLastError reads this thread's status from the failed OpenProcess call.
+            return unsafe { GetLastError() } == ERROR_INVALID_PARAMETER;
+        }
+        // SAFETY: process is an owned handle returned by OpenProcess.
+        let exited = unsafe { WaitForSingleObject(process, 0) } == WAIT_OBJECT_0;
+        // SAFETY: close the owned handle exactly once.
+        unsafe { CloseHandle(process) };
+        exited
     }
 }
