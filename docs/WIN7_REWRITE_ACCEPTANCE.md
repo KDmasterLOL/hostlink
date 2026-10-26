@@ -210,3 +210,43 @@ Until those independent runs exist, report native NT6.1 acceptance as **NOT
 RUN** or **BLOCKED** with the missing machine/criterion. Old `dev@5a1f80b`
 receipts and previous rewrite binaries such as `c64619e` do not prove this
 candidate.
+
+## SERVER-1C side-by-side bootstrap acceptance
+
+The focused Huly 1C-1008 harness proves only execution of source-bound x64 and
+x86 Agent test CLIs plus their packaged bootstrap ZIPs. It does not enroll,
+install, start, stop, update, or configure an Agent, service, Hub, SSH server,
+registry key, or 1C database. Keep the existing old Agent and all production
+configuration untouched. The coordinator must independently verify the
+disposable host/user scope and transfer these files; this script has no remote
+access or upload behavior.
+
+Run the script from unelevated Windows PowerShell 2 on Windows 7 SP1
+NT6.1.7601 x64. The caller creates a new, empty, current-user-owned TEMP root
+with a protected DACL. The harness rejects a non-Win7 OS, a non-x64 OS,
+SYSTEM/service/elevated sessions, reparse paths and a nonempty root. It validates
+both package versions against their receipts, runs each actual target-specific
+`hostlink-agent.exe --version`, then delegates exact build/package/sidecar/ZIP
+receipt validation and wrong-hash, wrong-target, duplicate-entry, malformed-ZIP
+and overwrite negatives to the existing bootstrap verifier. Output and error
+streams, their hashes, source/artifact identities, OS/PowerShell identity,
+process exit and evidence retention outcome are recorded below the new private
+run directory.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\verify-win7-side-by-side.ps1 `
+  -SourceSha f60ea697d614cee841b2ac36d6b00b5ff6ca14f0 `
+  -BuildRoot C:\HostLinkEvidence\build `
+  -X64PackageRoot C:\HostLinkEvidence\package-x64 `
+  -X86PackageRoot C:\HostLinkEvidence\package-x86 `
+  -DisposableRoot $env:TEMP\hostlink-1c-1008-f60ea697d614cee841b2ac36d6b00b5ff6ca14f0
+```
+
+The x64 target executes natively; the i686 target executes under WOW64 on this
+x64 OS. Report that as **WOW64 execution on Windows 7 x64**. A true 32-bit
+Windows 7 OS remains unproven and requires its own independent native run. This
+focused run does not cover SSH, SFTP, durable jobs, gateway operations, updater
+handoff, or the broader acceptance matrix above. Preserve the generated
+`native-acceptance-receipt.json`, all stream files, bootstrap receipts, and
+extracted output as evidence. Do not claim native acceptance until the
+coordinator retrieves and reviews those actual Windows 7 receipts.
