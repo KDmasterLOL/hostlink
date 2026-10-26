@@ -1794,7 +1794,7 @@ mod windows_durable_job_tests {
     ) -> String {
         const MAX_DIAGNOSTIC_BYTES: usize = 4096;
         let path = store.output_path(id, stream);
-        let mut file = match std::fs::File::open(path) {
+        let file = match std::fs::File::open(path) {
             Ok(file) => file,
             Err(error) => return format!("<unavailable: {error}>"),
         };
