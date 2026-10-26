@@ -158,6 +158,7 @@ async fn controller_scoped_upload_seal_and_durable_exit_seven() {
         authorized_keys: auth_path,
         jobs_root: jobs_root.clone(),
         gateway: None,
+        gateway_alternates: Vec::new(),
     };
     let (stop, shutdown) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {

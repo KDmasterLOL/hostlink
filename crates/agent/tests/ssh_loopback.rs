@@ -180,6 +180,7 @@ async fn loopback_auth_and_exec_keep_binary_streams_and_exit_status() {
         authorized_keys: auth_path,
         jobs_root: jobs.clone(),
         gateway: None,
+        gateway_alternates: Vec::new(),
     };
     let (stop, shutdown) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
@@ -340,6 +341,7 @@ async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
         authorized_keys: auth_path,
         jobs_root: jobs.clone(),
         gateway: None,
+        gateway_alternates: Vec::new(),
     };
     let (stop, shutdown) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {

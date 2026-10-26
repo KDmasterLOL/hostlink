@@ -24,6 +24,9 @@ pub struct AgentConfig {
     pub authorized_keys: PathBuf,
     pub jobs_root: PathBuf,
     pub gateway: Option<ReverseGateway>,
+    /// Hub-approved fallback routes, ordered after the explicitly selected primary.
+    #[serde(default)]
+    pub gateway_alternates: Vec<ReverseGateway>,
 }
 
 /// Optional pinned reverse-SSH gateway.
@@ -56,18 +59,70 @@ impl AgentConfig {
                 "Agent user, host key, authorized keys and jobs root are required",
             ));
         }
-        if let Some(g) = &self.gateway
-            && (g.host.trim().is_empty()
+        if self.gateway.is_none() && !self.gateway_alternates.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "approved gateway alternates require an explicit primary gateway",
+            ));
+        }
+        let routes: Vec<_> = self
+            .gateway
+            .iter()
+            .chain(self.gateway_alternates.iter())
+            .collect();
+        if routes.len() > 16 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "at most 16 approved gateway routes are allowed",
+            ));
+        }
+        let mut route_ids = std::collections::BTreeSet::new();
+        let mut pin_paths = std::collections::BTreeSet::new();
+        let mut remote_port = None;
+        for g in routes {
+            if g.host.trim().is_empty()
                 || g.user.trim().is_empty()
                 || g.port == 0
                 || g.remote_port == 0
                 || g.identity.as_os_str().is_empty()
-                || g.host_public_key.as_os_str().is_empty())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Gateway needs exact endpoint, credentials and reverse port",
-            ));
+                || g.host_public_key.as_os_str().is_empty()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Gateway needs exact endpoint, credentials and reverse port",
+                ));
+            }
+            if remote_port
+                .replace(g.remote_port)
+                .is_some_and(|port| port != g.remote_port)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "approved gateway routes must use the same assigned reverse port",
+                ));
+            }
+            if !route_ids.insert((g.host.to_ascii_lowercase(), g.port, g.user.clone())) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "duplicate approved gateway identity",
+                ));
+            }
+            if !pin_paths.insert(g.host_public_key.clone()) || g.identity == g.host_public_key {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "approved gateway routes have conflicting key file paths",
+                ));
+            }
+            if self
+                .gateway
+                .as_ref()
+                .is_some_and(|primary| primary.identity != g.identity)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "approved gateway routes must use the same Agent identity file",
+                ));
+            }
         }
         Ok(())
     }
@@ -84,7 +139,18 @@ mod tests {
             authorized_keys: "keys".into(),
             jobs_root: "jobs".into(),
             gateway: None,
+            gateway_alternates: Vec::new(),
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn old_single_gateway_json_deserializes_without_alternates() {
+        let config: AgentConfig = serde_json::from_str(
+            r#"{"listen":"127.0.0.1:2200","user":"agent","host_key":"host","authorized_keys":"authorized","jobs_root":"jobs","gateway":null}"#,
+        )
+        .expect("legacy single-gateway configuration");
+        assert!(config.gateway.is_none());
+        assert!(config.gateway_alternates.is_empty());
     }
 }

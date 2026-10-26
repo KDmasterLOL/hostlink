@@ -51,6 +51,7 @@ async fn run_cli_seals_binary_and_idempotently_returns_exact_nonzero_exit() {
         authorized_keys: authorized,
         jobs_root: jobs,
         gateway: None,
+        gateway_alternates: Vec::new(),
     };
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(async move {

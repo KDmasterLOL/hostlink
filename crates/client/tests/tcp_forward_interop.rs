@@ -132,6 +132,7 @@ impl Fixture {
             authorized_keys,
             jobs_root,
             gateway: None,
+            gateway_alternates: Vec::new(),
         };
         let (stop_agent, stop_agent_rx) = tokio::sync::oneshot::channel();
         let agent_task = tokio::spawn(async move {

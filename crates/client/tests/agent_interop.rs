@@ -94,6 +94,7 @@ async fn agent_and_controller_authenticate_stream_execute_and_transfer() {
         authorized_keys,
         jobs_root,
         gateway: None,
+        gateway_alternates: Vec::new(),
     };
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(async move {

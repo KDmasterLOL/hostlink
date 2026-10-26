@@ -268,6 +268,7 @@ async fn reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins() {
             host_public_key: gateway_pin_file,
             remote_port: reverse_port,
         }),
+        gateway_alternates: Vec::new(),
     };
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let serving_config = agent_config.clone();
