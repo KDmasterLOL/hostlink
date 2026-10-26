@@ -48,16 +48,33 @@ advances, reads back, and removes the journal around the actual file changes.
 
 ## Current implementation boundary
 
-The lifecycle process identity is available in `service.rs`, but it is not yet
-an updater-owned managed-live handoff contract. The service marker binds the installed EXE
-SHA-256, and its HKCU Run value binds the exact launcher command. Updating only
-the executable makes `verify_record` reject the owner record; updating the
-marker without coordinating the exact Run registration allows login startup to
-race the transaction. There is no API yet that atomically enters maintenance,
-removes and later restores only the validated current-user Run value, updates
-the marker's executable identity, and provides a healthy authenticated restart
-proof under the same update lock. Until that API and its native failure tests
-exist, service-registered updates remain unsupported.
+`service.rs` now owns a crate-private maintenance receipt and coordinator
+primitives. The caller must hold the existing `jobs::acquire_update_lock` for
+the full transaction. Entry verifies the current SID/root, marker, exact Run
+command, executable digest, and durable job state, then records maintenance in
+the owner marker. Managed login startup refuses that marker before it can start
+a listener. The exact current-user Run value is removed, the Agent is asked to
+stop over its owner-authenticated pipe, and the updater waits on the verified
+process handle. No PID is accepted from an argument and no process is
+force-terminated.
+
+The opaque receipt supports updating only the marker executable digest after
+the coordinator has verified the new file, restoring the exact Run command
+after marker/file readback, and restoring the old marker and registration only
+when the old executable digest is present. The marker retains the prior digest
+across interruption, so a later coordinator can restore old registration only
+after observing those exact old bytes. These primitives do not launch or
+health-check an Agent; the coordinator must keep the update journal and lock
+authoritative, then use the existing authenticated `service::start` before
+reporting success. If restart fails, it must re-enter maintenance, restore and
+verify the old file inventory, then restore the old marker/Run entry. Foreign
+Run values and ambiguous marker states fail closed.
+
+This does not enable a registered-service `update::apply` path. The disposable
+Windows lifecycle test remains ignored and requires the documented separately
+verified standard-user profile harness. Marker checks and cross-target builds
+do not prove actual HKCU, process-handle, concurrent login, restart, or rollback
+behavior. No native maintenance transaction was run in the current profile.
 
 ## Required helper protocol
 
