@@ -3,6 +3,7 @@
 use clap::{Parser, Subcommand};
 use hostlink::{
     HostSpec,
+    bootstrap::{self, ArtifactSelection, Target},
     connect::{HostConnection, SshClientError},
     forward::{self, ForwardServer},
     hub::{self, HubClient, HubConfig},
@@ -55,12 +56,33 @@ enum Command {
     Info { host: String },
     /// Verify a registered host using its current Hub pins and SSH identity.
     Verify { host: String },
-    /// Create an invitation. The one-use token is printed only by this explicit command.
+    /// Create an invitation and a source-pinned bootstrap command.
     Invite {
         #[arg(long)]
         name: Option<String>,
+        #[arg(long)]
+        ssh_user: Option<String>,
         #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(60..=86400))]
         ttl_seconds: u64,
+        /// Create a manual invitation without selecting verified installer artifacts.
+        #[arg(long, conflicts_with_all = ["ssh_user", "installer_url", "installer_sha256", "agent_url", "agent_sha256", "archive_url", "archive_sha256", "version", "target"])]
+        token_only: bool,
+        #[arg(long)]
+        installer_url: Option<String>,
+        #[arg(long)]
+        installer_sha256: Option<String>,
+        #[arg(long)]
+        agent_url: Option<String>,
+        #[arg(long)]
+        agent_sha256: Option<String>,
+        #[arg(long)]
+        archive_url: Option<String>,
+        #[arg(long)]
+        archive_sha256: Option<String>,
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long)]
+        target: Option<String>,
     },
     /// Change a host's display-only label.
     DisplayName { host: String, display_name: String },
@@ -544,16 +566,90 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
             println!("verified {} using pinned russh identity", host);
             return Ok(0);
         }
-        Command::Invite { name, ttl_seconds } => {
-            let (client, _) = configured_hub_client()?;
+        Command::Invite {
+            name,
+            ssh_user,
+            ttl_seconds,
+            token_only,
+            installer_url,
+            installer_sha256,
+            agent_url,
+            agent_sha256,
+            archive_url,
+            archive_sha256,
+            version,
+            target,
+        } => {
+            let config_path = default_hub_config_path()?;
+            let config = load_hub_config(&config_path)?;
+            let selection = if *token_only {
+                if name.is_some() && name.as_deref().is_some_and(|value| value.trim().is_empty()) {
+                    return Err("invitation name cannot be empty".into());
+                }
+                None
+            } else {
+                let get = |value: &Option<String>, flag: &str| -> Result<String, Box<dyn Error>> {
+                    value.clone().ok_or_else(|| {
+                        format!("{flag} is required unless --token-only is used").into()
+                    })
+                };
+                let selected_name = name
+                    .clone()
+                    .ok_or("--name is required for a runnable bootstrap")?;
+                let selected_target = Target::parse(&get(target, "--target")?)?;
+                let selection = ArtifactSelection {
+                    installer_url: bootstrap::parse_artifact_url(&get(
+                        installer_url,
+                        "--installer-url",
+                    )?)?,
+                    installer_sha256: get(installer_sha256, "--installer-sha256")?,
+                    agent_url: bootstrap::parse_artifact_url(&get(agent_url, "--agent-url")?)?,
+                    agent_sha256: get(agent_sha256, "--agent-sha256")?,
+                    archive_url: bootstrap::parse_artifact_url(&get(
+                        archive_url,
+                        "--archive-url",
+                    )?)?,
+                    archive_sha256: get(archive_sha256, "--archive-sha256")?,
+                    version: get(version, "--version")?,
+                    target: selected_target,
+                    name: selected_name,
+                    ssh_user: ssh_user.clone().unwrap_or_else(|| config.ssh_user.clone()),
+                    hub_url: config.hub_url.clone(),
+                };
+                selection.validate()?;
+                Some(selection)
+            };
+            // Download, bound, hash, and inspect the exact installer before consuming an invite.
+            let verified = match &selection {
+                Some(selection) => Some(bootstrap::verify_installer(selection).await?),
+                None => None,
+            };
+            let client = HubClient::from_config(&config)?;
             let invite = client.invite(name.clone(), *ttl_seconds).await?;
-            // This is the explicit bootstrap boundary requested by the operator.
             use secrecy::ExposeSecret;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs() as i64;
+            if !bootstrap::invitation_is_unexpired(invite.expires_at, now) {
+                return Err(
+                    "Hub returned an already expired invitation; no bootstrap command was rendered"
+                        .into(),
+                );
+            }
             println!(
-                "token: {}\nexpires_at: {}\nartifact_binding: missing",
+                "token: {}\nexpires_at: {}",
                 invite.token.expose_secret(),
                 invite.expires_at
             );
+            if let (Some(selection), Some(verified)) = (&selection, &verified) {
+                println!(
+                    "artifact_binding: verified\ninstaller_sha256: {}\nbootstrap_command:\n{}",
+                    verified.sha256,
+                    bootstrap::render_command(selection, verified)
+                );
+            } else {
+                println!("artifact_binding: token-only; no bootstrap command");
+            }
             return Ok(0);
         }
         Command::DisplayName { host, display_name } => {
