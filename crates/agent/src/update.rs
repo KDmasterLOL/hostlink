@@ -1190,9 +1190,7 @@ fn publish_windows(
         crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
         Ok(())
     })();
-    if let Err(error) = prepare {
-        return Err(error);
-    }
+    prepare?;
 
     let mut journal = journal;
     let publish = (|| {
@@ -1390,8 +1388,10 @@ fn reject_running_agent(installed_executable: &Path) -> io::Result<()> {
         }
     }
     let snapshot = Snapshot(snapshot);
-    let mut entry = PROCESSENTRY32W::default();
-    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
     // SAFETY: entry is initialized and writable, and snapshot is a valid process snapshot.
     if unsafe { Process32FirstW(snapshot.0, &mut entry) } == 0 {
         return Err(io::Error::other(format!(
