@@ -250,3 +250,52 @@ handoff, or the broader acceptance matrix above. Preserve the generated
 `native-acceptance-receipt.json`, all stream files, bootstrap receipts, and
 extracted output as evidence. Do not claim native acceptance until the
 coordinator retrieves and reviews those actual Windows 7 receipts.
+
+## SERVER-1C NT6.1 loopback SSH/SFTP acceptance
+
+This separate 1C-1008 harness exercises the four source-exact Win7-targeted
+executables on the coordinator-owned Windows Server 2008 R2 Standard SP1 host
+(NT6.1.7601 x64, Windows PowerShell 2). The x64 pair is native and the x86
+pair runs under WOW64. It creates only a private run directory below a fresh,
+empty, current-user-owned protected test root. Each Agent binds an unused
+`127.0.0.1` port and is started as a child of the harness. It never installs
+or contacts a service, Hub, gateway, SSH daemon, registry key, or 1C database.
+The pre-existing v0.4.1 Agent remains outside the test scope.
+
+The coordinator must generate the Ed25519 host and controller key pairs
+off-host with `ssh-keygen`, then copy the private key files with protected
+current-user-only DACLs. Public key files contain one OpenSSH
+`ssh-ed25519 BASE64 [comment]` line each. Supply the same source SHA and
+`receipt.json` from the exact cross-build; the receipt must list matching
+SHA-256 values for both Agent and Client executables at both targets. The
+harness verifies those four files, validates Agent config, authenticates the
+controller against its authorized key, checks the exact host pin, executes
+`exit 7`, round-trips a binary `.upload` file through SFTP, and confirms that
+wrong host pins and unknown SSH users fail. Evidence includes source and
+artifact hashes, OS/kernel/architecture, identity, exit statuses, stream
+hashes, and cleanup status. Key contents are not included in the receipt.
+
+From unelevated Windows PowerShell 2, with a newly created empty private root:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\verify-nt61-agent-loopback.ps1 `
+  -SourceSha 4456b6004019b523a60487992ddfda66ecff9fde `
+  -BuildReceipt C:\HostLinkEvidence\build\receipt.json `
+  -DisposableRoot $env:LOCALAPPDATA\HostLink-NativeAcceptance\4456b60-20261026 `
+  -X64Agent C:\HostLinkEvidence\build\x86_64-win7-windows-msvc\hostlink-agent.exe `
+  -X64Client C:\HostLinkEvidence\build\x86_64-win7-windows-msvc\hostlink.exe `
+  -X86Agent C:\HostLinkEvidence\build\i686-win7-windows-msvc\hostlink-agent.exe `
+  -X86Client C:\HostLinkEvidence\build\i686-win7-windows-msvc\hostlink.exe `
+  -HostPrivateKey C:\HostLinkEvidence\keys\host_ed25519 `
+  -HostPublicKey C:\HostLinkEvidence\keys\host_ed25519.pub `
+  -ControllerPrivateKey C:\HostLinkEvidence\keys\controller_ed25519 `
+  -ControllerPublicKey C:\HostLinkEvidence\keys\controller_ed25519.pub
+```
+
+The supplied root must already exist, be empty, protected by a DACL granting
+access only to the current user, and have no reparse-point ancestors. Private
+key files must be owned by that user and have protected DACLs with no other
+allowed principals. The harness retains its private run evidence below that
+root. A PASS demonstrates loopback SSH and SFTP for the source-bound x64 and
+x86/WOW64 binaries on this Server 2008 R2 host; it is not Windows 7 desktop
+evidence or a broader fleet acceptance result.
