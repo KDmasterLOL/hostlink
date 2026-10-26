@@ -149,6 +149,8 @@ fn write_private(path: &Path, key: &PrivateKey) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .expect("private fixture permissions");
     }
+    #[cfg(windows)]
+    protect_windows_fixture(path, false);
 }
 
 fn write_pin(path: &Path, key: &PublicKey) {
@@ -159,6 +161,33 @@ fn write_pin(path: &Path, key: &PublicKey) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .expect("private fixture permissions");
     }
+    #[cfg(windows)]
+    protect_windows_fixture(path, false);
+}
+
+#[cfg(windows)]
+fn protect_windows_fixture(path: &Path, directory: bool) {
+    use windows_permissions::constants::{SeObjectType, SecurityInformation};
+    use windows_permissions::wrappers::{ConvertSidToStringSid, SetNamedSecurityInfo};
+    use windows_permissions::{LocalBox, SecurityDescriptor};
+
+    let owner = windows_permissions::utilities::current_process_sid().expect("current SID");
+    let sid = ConvertSidToStringSid(&owner).expect("format SID");
+    let inheritance = if directory { "OICI" } else { "" };
+    let descriptor: LocalBox<SecurityDescriptor> =
+        format!("D:P(A;{inheritance};FA;;;{})", sid.to_string_lossy())
+            .parse()
+            .expect("construct private ACL");
+    SetNamedSecurityInfo(
+        path.as_os_str(),
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Owner | SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        Some(owner.as_ref()),
+        None,
+        descriptor.dacl(),
+        None,
+    )
+    .expect("protect disposable Agent test fixture");
 }
 
 fn unused_loopback_port() -> u16 {
@@ -179,6 +208,8 @@ fn route(port: u16, identity: &Path, pin: &Path, remote_port: u16) -> ReverseGat
 
 fn private_root() -> tempfile::TempDir {
     let root = tempfile::tempdir().expect("fixture root");
+    #[cfg(windows)]
+    protect_windows_fixture(root.path(), true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -227,7 +258,11 @@ async fn unavailable_primary_fails_over_to_pinned_route_and_controller_reaches_a
         format!("{}\n", controller.public_key().to_openssh().unwrap()),
     )
     .unwrap();
+    #[cfg(windows)]
+    protect_windows_fixture(&authorized, false);
     std::fs::create_dir(&jobs).unwrap();
+    #[cfg(windows)]
+    protect_windows_fixture(&jobs, true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
