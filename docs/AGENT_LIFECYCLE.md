@@ -142,21 +142,55 @@ Agent update; the Windows update command refuses to replace a binary while its
 service marker is present. A changed binary, marker, registry value, SID, ACL, or
 reparse path fails closed.
 
-This implementation has not yet passed native Windows 11 disposable-user
-acceptance or Windows 7 NT6.1 x64/x86 acceptance. Linux tests and a Windows
-cross-check do not establish those runtime results. PowerShell 2 is not used
-by the lifecycle implementation. A native Windows test is present but ignored
-by default because it creates a current-user startup entry. Run it only from a
-disposable, non-elevated Windows profile:
+## Native Windows 11 acceptance gate
+
+Native lifecycle acceptance has **not** passed yet. The integration test is
+ignored by default because install writes one value to the current user's HKCU
+Run key. Run the positive gate only from a separately created, standard (not
+Administrators) Windows 11 user account after signing into that account. Never
+run it in the WORK profile, from SYSTEM, or in an elevated shell. Windows 7
+NT6.1 x64/x86 is a separate future native gate; neither this script nor a
+cross-compile proves it.
+
+The script defaults to preflight-only and does not set the test opt-in or invoke
+the lifecycle test. Supply independently recorded disposable SID/profile and
+protected WORK SID/profile to the explicit acceptance mode:
 
 ```powershell
-$env:HOSTLINK_WINDOWS_LIFECYCLE_DISPOSABLE = '1'
-cargo test --locked -p hostlink-agent --test agent_lifecycle_windows -- --ignored
+.\scripts\verify-windows-agent-lifecycle.ps1 `
+  -ExpectedDisposableSid 'S-1-5-21-...-...' `
+  -ExpectedDisposableProfile 'C:\Users\HostLinkLifecycleTest' `
+  -ProtectedWorkSid 'S-1-5-21-...-...' `
+  -ProtectedWorkProfile 'C:\Users\WORK' `
+  -RunAcceptance
 ```
 
-The test creates a private LocalAppData Agent root with spaces in its path, checks
-idempotent install and update refusal, rejects a changed binary and launcher,
-checks active-job stop/remove refusal, then starts the real copied Agent,
-verifies its PID-bound lifecycle response and SSH banner, gracefully stops it,
-checks that the listener is closed, removes the startup entry, and retains the
-Agent files. It is not a Windows 7 test and is not run from this Linux worktree.
+Before setting the opt-in, the script verifies the current token SID and
+OS-resolved profile, excludes SYSTEM and Administrators membership/elevation,
+requires a loaded profile and Windows 11 build 22000+, and confirms the
+disposable identity differs from WORK. It builds the locked Agent and ignored
+integration test, records the exact Agent SHA-256, and passes that hash plus
+identity to the test. The test checks its `CARGO_BIN_EXE` hash and the installed
+copy against that value. Only then does the script set
+`HOSTLINK_WINDOWS_LIFECYCLE_DISPOSABLE=1` for the one targeted ignored test.
+It verifies the source hash stayed fixed, the exact root-derived Run value is
+gone, no test Agent remains under the disposable profile, and all other HKCU
+Run values match the pre-run snapshot. The opt-in is cleared/restored on exit.
+
+Preflight-only invocation (omit `-RunAcceptance`) and a WORK-profile attempt
+must leave the HKCU Run snapshot unchanged. Any identity mismatch aborts before
+the test opt-in is set. The positive fixture tests a LocalAppData root with
+spaces and shell metacharacters, protected ACLs, unrelated-root refusal,
+shared-ancestor rejection, install/reinstall/update refusal, binary and
+launcher tampering, an unrelated process reusing a stale lifecycle PID,
+Prepared/Running/Interrupted/unknown-job stop/remove interlocks, repeated
+authenticated status, SSH banner, graceful stop, exact Run-value removal and
+enrollment-file retention. Its fixture path includes spaces and shell
+metacharacters to exercise Windows command quoting. It never refers to or
+adopts the old OneC Agent. A passing Linux compile or cross-target check is not
+native acceptance.
+
+If native acceptance fails before confirmed removal, the test cleanup never
+starts an Agent or recursively removes an installed root with an unresolved
+owner marker. Investigate the disposable user's exact HKCU Run value, owner
+marker and process handle before any manual recovery or directory deletion.
