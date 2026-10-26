@@ -58,13 +58,16 @@ done
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || fail "run from inside a Git worktree"
 repo_root="$(realpath "$repo_root")"
-[[ "$(git -C "$repo_root" branch --show-current)" == "task/1c-1008-win7-source-v3" ]] \
-  || fail "expected task branch task/1c-1008-win7-source-v3"
+source_branch="$(git -C "$repo_root" symbolic-ref --quiet --short HEAD || true)"
+[[ -n "$source_branch" ]] || source_branch="DETACHED_HEAD"
 
 assert_source_clean_and_exact() {
-  local actual status
+  local actual status branch
   actual="$(git -C "$repo_root" rev-parse HEAD)"
   [[ "$actual" == "$source_sha" ]] || fail "source HEAD changed or does not match --source-sha (expected $source_sha, got $actual)"
+  branch="$(git -C "$repo_root" symbolic-ref --quiet --short HEAD || true)"
+  [[ -n "$branch" ]] || branch="DETACHED_HEAD"
+  [[ "$branch" == "$source_branch" ]] || fail "source branch or detached-HEAD state changed during build"
   status="$(git -C "$repo_root" status --porcelain=v1 --untracked-files=all)"
   [[ -z "$status" ]] || fail "source worktree is dirty; commit or remove source changes before building"
 }
@@ -176,7 +179,7 @@ host="$(uname -srm)"
 jq -n \
   --arg status "PE_BUILD_AND_INSPECTION_PASS" \
   --arg source_sha "$source_sha" \
-  --arg branch "task/1c-1008-win7-source-v3" \
+  --arg branch "$source_branch" \
   --arg built_at_utc "$timestamp" \
   --arg build_user "$user" \
   --arg build_uid "$uid" \

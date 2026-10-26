@@ -17,8 +17,9 @@ describes the target and cross-compilation prerequisites.
 
 ## Build a source-exact candidate
 
-Run from the isolated task worktree, after committing the exact source to be
-built. Select a new path below the ignored `target/` directory each time:
+Run from any clean experimental rewrite worktree or detached immutable candidate,
+after committing the exact source to be built. Select a new path below the ignored
+`target/` directory each time:
 
 ```sh
 SOURCE_SHA="$(git rev-parse HEAD)"
@@ -27,7 +28,10 @@ scripts/build-win7-candidate.sh \
   --output-dir "target/win7-candidate-$SOURCE_SHA"
 ```
 
-The script requires branch `task/1c-1008-win7-source-v3`, a clean Git worktree,
+The script accepts any clean source-exact integration/task worktree or detached HEAD.
+The actual branch name (or `DETACHED_HEAD`) is recorded and checked again before
+publishing artifacts, so final integrated release candidates are supported.
+The script requires a clean Git worktree,
 the full lowercase source SHA, Rust `nightly-2026-08-22` with `rust-src`,
 `cargo-xwin` 0.23.1, and `llvm-readobj`. It builds each target using the
 equivalent of:
