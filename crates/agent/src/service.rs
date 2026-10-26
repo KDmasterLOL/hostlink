@@ -1021,12 +1021,19 @@ mod windows {
 
         let old_marker = read_marker_bytes(&record.root)?;
         let run_command = render_command(&record);
-        let pid = match pipe_request(&record, "STATUS")? {
-            reply => running_pid(&reply).ok_or_else(|| {
-                invalid("maintenance requires an authenticated running Agent process")
-            })?,
+        let pid = match pipe_request(&record, "STATUS") {
+            Ok(reply) => Some(running_pid(&reply).ok_or_else(|| {
+                invalid("maintenance lifecycle endpoint did not prove a running Agent process")
+            })?),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                reject_running_agent(&record.executable)?;
+                None
+            }
+            Err(error) => return Err(error),
         };
-        let process = open_owned_process(pid, &record)?;
+        let process = pid
+            .map(|pid| open_owned_process(pid, &record))
+            .transpose()?;
 
         if read_marker_bytes(&record.root)? != old_marker
             || registry_value(&record.run_value)?.as_deref() != Some(run_command.as_str())
@@ -1061,26 +1068,29 @@ mod windows {
             ));
         }
 
-        let reply = pipe_request(&record, "STOP")?;
-        if reply != format!("STOPPING {pid}") {
-            return Err(invalid("authenticated Agent refused maintenance stop"));
-        }
-        // SAFETY: process.handle is a verified live handle opened with SYNCHRONIZE.
-        match unsafe { WaitForSingleObject(process.handle, 10_000) } {
-            WAIT_OBJECT_0 => {
-                refuse_active_jobs(&record)?;
-                Ok(MaintenanceReceipt {
-                    old_marker,
-                    old_record,
-                    run_command,
-                })
+        if let (Some(pid), Some(process)) = (pid, process) {
+            let reply = pipe_request(&record, "STOP")?;
+            if reply != format!("STOPPING {pid}") {
+                return Err(invalid("authenticated Agent refused maintenance stop"));
             }
-            WAIT_TIMEOUT => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Agent did not stop within 10 seconds; maintenance remains disabled and no process was force-terminated",
-            )),
-            _ => Err(io::Error::last_os_error()),
+            // SAFETY: process.handle is a verified live handle opened with SYNCHRONIZE.
+            match unsafe { WaitForSingleObject(process.handle, 10_000) } {
+                WAIT_OBJECT_0 => refuse_active_jobs(&record)?,
+                WAIT_TIMEOUT => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Agent did not stop within 10 seconds; maintenance remains disabled and no process was force-terminated",
+                    ));
+                }
+                _ => return Err(io::Error::last_os_error()),
+            }
         }
+        refuse_active_jobs(&record)?;
+        Ok(MaintenanceReceipt {
+            old_marker,
+            old_record,
+            run_command,
+        })
     }
 
     pub(crate) fn has_registration(root: &Path) -> io::Result<bool> {
@@ -1127,16 +1137,23 @@ mod windows {
                 "registered Agent lifecycle pipe is healthy but its SSH listener is not ready",
             ));
         }
+        // SAFETY: process.handle remains open and is the exact authenticated process handle.
+        if unsafe { WaitForSingleObject(process.handle, 0) } != WAIT_TIMEOUT {
+            return Err(invalid("registered Agent exited during health readback"));
+        }
         Ok(())
     }
 
     pub(crate) fn verify_registered_image(root: &Path, expected_sha256: &str) -> io::Result<()> {
         let record = owned_record(root)?;
         verify_record(&record)?;
-        if record.maintenance || record.executable_sha256 != expected_sha256
+        if record.maintenance
+            || record.executable_sha256 != expected_sha256
             || sha256_file(&record.executable)? != expected_sha256
         {
-            return Err(invalid("registered Agent image does not match the journal identity"));
+            return Err(invalid(
+                "registered Agent image does not match the journal identity",
+            ));
         }
         verify_registration(&record)
     }
@@ -1151,28 +1168,38 @@ mod windows {
         ensure_user_scope()?;
         let mut record = owned_record(root)?;
         verify_record(&record)?;
-        if record.maintenance || record.executable_sha256 != new_sha256
+        if record.maintenance
+            || record.executable_sha256 != new_sha256
             || sha256_file(&record.executable)? != new_sha256
         {
-            return Err(invalid("recovery owner marker does not match the journal candidate"));
+            return Err(invalid(
+                "recovery owner marker does not match the journal candidate",
+            ));
         }
         verify_registration(&record)?;
         refuse_active_jobs(&record)?;
         let pid = match pipe_request(&record, "STATUS") {
-            Ok(reply) => Some(running_pid(&reply).ok_or_else(|| invalid("recovery health endpoint returned an invalid PID"))?),
+            Ok(reply) => Some(
+                running_pid(&reply)
+                    .ok_or_else(|| invalid("recovery health endpoint returned an invalid PID"))?,
+            ),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 reject_running_agent(&record.executable)?;
                 None
             }
             Err(error) => return Err(error),
         };
-        let process = pid.map(|pid| open_owned_process(pid, &record)).transpose()?;
+        let process = pid
+            .map(|pid| open_owned_process(pid, &record))
+            .transpose()?;
         record.maintenance = true;
         record.maintenance_previous_sha256 = Some(old_sha256.to_owned());
         replace_record_atomically(&record)?;
         delete_registry_value(&record.run_value)?;
         if registry_value(&record.run_value)?.is_some() {
-            return Err(invalid("recovery could not disable the exact login registration"));
+            return Err(invalid(
+                "recovery could not disable the exact login registration",
+            ));
         }
         if let (Some(pid), Some(process)) = (pid, process) {
             if pipe_request(&record, "STOP")? != format!("STOPPING {pid}") {
@@ -1180,7 +1207,12 @@ mod windows {
             }
             match unsafe { WaitForSingleObject(process.handle, 10_000) } {
                 WAIT_OBJECT_0 => refuse_active_jobs(&record)?,
-                WAIT_TIMEOUT => return Err(io::Error::new(io::ErrorKind::TimedOut, "recovered candidate did not stop; no process was force-terminated")),
+                WAIT_TIMEOUT => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "recovered candidate did not stop; no process was force-terminated",
+                    ));
+                }
                 _ => return Err(io::Error::last_os_error()),
             }
         }
@@ -1286,7 +1318,13 @@ mod windows {
                         return Err(invalid("maintenance candidate health identity changed"));
                     }
                     if ssh_banner(load_config(&record.config)?.listen)? {
-                        return Ok(());
+                        // SAFETY: process.handle remains open and is the exact spawned process.
+                        if unsafe { WaitForSingleObject(process.handle, 0) } == WAIT_TIMEOUT {
+                            return Ok(());
+                        }
+                        return Err(invalid(
+                            "maintenance candidate exited during health readback",
+                        ));
                     }
                 }
                 Ok(_) => {
@@ -3049,10 +3087,11 @@ pub use windows::{install, remove, start, status, stop};
 #[cfg(windows)]
 #[allow(dead_code)] // Consumed by the separately owned Windows updater integration.
 pub(crate) use windows::{
-    MaintenanceReceipt, begin_maintenance, begin_recovery_maintenance, has_registration, is_in_maintenance,
-    recover_maintenance_after_inventory, recover_maintenance_stop, register_maintenance,
-    restore_maintenance, start_maintenance_candidate, stop_for_maintenance_rollback,
-    update_maintenance_executable, verify_registered_health, verify_registered_image,
+    MaintenanceReceipt, begin_maintenance, begin_recovery_maintenance, has_registration,
+    is_in_maintenance, recover_maintenance_after_inventory, recover_maintenance_stop,
+    register_maintenance, restore_maintenance, start_maintenance_candidate,
+    stop_for_maintenance_rollback, update_maintenance_executable, verify_registered_health,
+    verify_registered_image,
 };
 
 #[cfg(not(any(target_os = "linux", windows)))]

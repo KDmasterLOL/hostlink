@@ -161,6 +161,8 @@ pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
         });
     }
     #[cfg(windows)]
+    ensure_windows_separate_updater(&request.install_root)?;
+    #[cfg(windows)]
     let registered_service = crate::service::has_registration(&request.install_root)?;
     #[cfg(windows)]
     if registered_service {
@@ -184,8 +186,21 @@ pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
         } else if pending {
             let journal = pending_journal.expect("pending journal was checked");
             match journal.phase {
-                crate::update_handoff::UpdatePhase::Staged
-                | crate::update_handoff::UpdatePhase::RolledBack => {
+                crate::update_handoff::UpdatePhase::Staged => {
+                    crate::service::verify_registered_image(
+                        &request.install_root,
+                        &journal.identity.old_executable_sha256,
+                    )?;
+                    recover_windows_handoff(&request.install_root, false, false)?;
+                }
+                crate::update_handoff::UpdatePhase::RolledBack => {
+                    crate::service::recover_maintenance_after_inventory(
+                        &request.install_root,
+                        |root| {
+                            let metadata = read_install_metadata(&root.join(INSTALL_METADATA))?;
+                            validate_installed(&root.join("bin"), &metadata, &metadata.target)
+                        },
+                    )?;
                     crate::service::verify_registered_image(
                         &request.install_root,
                         &journal.identity.old_executable_sha256,
@@ -1825,14 +1840,20 @@ fn publish_windows(
 
 #[cfg(windows)]
 fn ensure_windows_offline_caller(root: &Path) -> io::Result<()> {
+    ensure_windows_separate_updater(root)?;
+    reject_running_agent(&root.join("bin").join("hostlink-agent.exe"))
+}
+
+#[cfg(windows)]
+fn ensure_windows_separate_updater(root: &Path) -> io::Result<()> {
     let installed_executable = root.join("bin").join("hostlink-agent.exe");
     if same_windows_file(&std::env::current_exe()?, &installed_executable)? {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "Windows offline update must be invoked by a separate updater executable",
+            "Windows Agent update must be invoked by a separate updater executable",
         ));
     }
-    reject_running_agent(&installed_executable)
+    Ok(())
 }
 
 #[cfg(windows)]
