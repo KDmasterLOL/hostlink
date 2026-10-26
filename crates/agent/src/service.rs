@@ -833,18 +833,8 @@ mod windows {
                 QueryFullProcessImageNameW, WaitForSingleObject,
             },
         },
-        UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath},
+        UI::Shell::{CSIDL_LOCAL_APPDATA, SHGetFolderPathW},
     };
-
-    // The current Windows SDK imports windows-sys::CoTaskMemFree from
-    // combase.dll, which does not exist on Windows 7. Microsoft's documented
-    // OLE task allocator export is in ole32.dll on all supported targets.
-    // Keep the existing known-folder lookup and free its allocation through
-    // that Win7-compatible export instead of depending on the SDK import lib.
-    #[link(name = "ole32")]
-    unsafe extern "system" {
-        fn CoTaskMemFree(pv: *mut core::ffi::c_void);
-    }
 
     const MARKER: &str = ".hostlink-user-service.json";
     const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -1847,29 +1837,34 @@ mod windows {
 
     fn local_app_data_path() -> io::Result<PathBuf> {
         use std::{ffi::OsString, os::windows::ffi::OsStringExt};
-        let mut path = std::ptr::null_mut();
-        // SAFETY: the known-folder GUID is static and the output pointer is writable.
+        // Win7 exposes SHGetFolderPathW from shell32.dll. The newer SDK's
+        // CoTaskMemFree import may resolve to combase.dll, which is absent on
+        // NT6.1 even when explicitly linked against its ole32 import library.
+        // This older shell API maps CSIDL_LOCAL_APPDATA to the same known folder
+        // on Vista+, and returns into a caller-owned buffer without COM memory.
+        let mut buffer = [0u16; 260];
+        // SAFETY: buffer has the MAX_PATH-wide-character capacity required by
+        // SHGetFolderPathW; a null token selects the current process user.
         let result = unsafe {
-            SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, std::ptr::null_mut(), &mut path)
+            SHGetFolderPathW(
+                std::ptr::null_mut(),
+                CSIDL_LOCAL_APPDATA as i32,
+                std::ptr::null_mut(),
+                0,
+                buffer.as_mut_ptr(),
+            )
         };
-        if result < 0 || path.is_null() {
+        if result < 0 {
             return Err(io::Error::other(format!(
                 "cannot resolve the current user's Windows LocalAppData folder (HRESULT {result:#x})"
             )));
         }
-        // SAFETY: SHGetKnownFolderPath returns a NUL-terminated CoTaskMem allocation.
-        let value = unsafe {
-            let mut length = 0usize;
-            while *path.add(length) != 0 {
-                length += 1;
-            }
-            let result = PathBuf::from(OsString::from_wide(std::slice::from_raw_parts(
-                path, length,
-            )));
-            CoTaskMemFree(path.cast());
-            result
-        };
-        value.canonicalize()
+        let length = buffer
+            .iter()
+            .position(|&unit| unit == 0)
+            .filter(|&length| length > 0 && length < buffer.len() - 1)
+            .ok_or_else(|| invalid("Windows LocalAppData path is empty or truncated"))?;
+        PathBuf::from(OsString::from_wide(&buffer[..length])).canonicalize()
     }
     fn canonical_regular(path: &Path) -> io::Result<PathBuf> {
         use std::os::windows::io::AsRawHandle;
