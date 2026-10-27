@@ -4,7 +4,7 @@
 //! manager or changes login lingering. The service record binds a unit to the
 //! exact private install root, executable digest, config and current uid.
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(target_os = "linux"))]
 use std::{io, path::Path};
 
 #[derive(Debug)]
