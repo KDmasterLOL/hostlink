@@ -18,7 +18,7 @@ use crate::connect::SshClientError;
 
 const CHANNEL_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 use super::{
-    model::{JobOutput, JobState, JobStateKind, JobStatus, Output},
+    model::{JobOutput, JobState, JobStatus, Output},
     validation::validate_id,
 };
 
@@ -99,7 +99,6 @@ pub(super) fn parse_status(value: Value, expected_id: &str) -> Result<JobStatus,
             "eof",
         ],
     )?;
-    let raw = value.clone();
     let reply: SuccessReply = serde_json::from_value(value)
         .map_err(|_| protocol_invalid("status reply fields are missing or unknown"))?;
     if reply.version != 1 || !reply.ok || reply.id != expected_id {
@@ -110,8 +109,7 @@ pub(super) fn parse_status(value: Value, expected_id: &str) -> Result<JobStatus,
     if reply.data_base64.is_some() || reply.next_offset.is_some() || reply.eof.is_some() {
         return Err(protocol_invalid("status reply contains output fields"));
     }
-    validate_state_shape(&raw, &reply.state)?;
-    validate_returned_status(&reply.id, &reply.state)?;
+    validate_id(&reply.id)?;
     Ok(JobStatus {
         id: reply.id,
         state: reply.state,
@@ -134,7 +132,6 @@ pub(super) fn parse_output(value: Value, request: &Output) -> Result<JobOutput, 
             "eof",
         ],
     )?;
-    let raw = value.clone();
     let reply: SuccessReply = serde_json::from_value(value)
         .map_err(|_| protocol_invalid("output reply fields are missing or unknown"))?;
     if reply.version != 1 || !reply.ok || reply.id != request.id {
@@ -151,8 +148,7 @@ pub(super) fn parse_output(value: Value, request: &Output) -> Result<JobOutput, 
     let eof = reply
         .eof
         .ok_or_else(|| protocol_invalid("output reply omitted eof"))?;
-    validate_state_shape(&raw, &reply.state)?;
-    validate_returned_status(&reply.id, &reply.state)?;
+    validate_id(&reply.id)?;
     let decoded = STANDARD
         .decode(data)
         .map_err(|_| protocol_invalid("invalid Base64 output"))?;
@@ -190,36 +186,12 @@ pub(super) fn parse_remote_error(value: Value) -> Result<SshClientError, SshClie
     )))
 }
 
-fn validate_state_shape(value: &Value, parsed: &JobState) -> Result<(), SshClientError> {
-    let Some(state) = value.get("state").and_then(Value::as_object) else {
-        return Err(protocol_invalid("state reply is missing or malformed"));
-    };
-    let has_code = state.contains_key("code");
-    if !state.contains_key("state")
-        || state.len() != if has_code { 2 } else { 1 }
-        || (matches!(parsed.state, JobStateKind::Exited) != has_code)
-    {
-        return Err(protocol_invalid(
-            "state reply fields do not match its state",
-        ));
-    }
-    Ok(())
-}
-
 pub(super) fn require_keys(value: &Value, expected: &[&str]) -> Result<(), SshClientError> {
     let Some(object) = value.as_object() else {
         return Err(protocol_invalid("reply must be a JSON object"));
     };
     if object.len() != expected.len() || expected.iter().any(|key| !object.contains_key(*key)) {
         return Err(protocol_invalid("reply fields are missing or unknown"));
-    }
-    Ok(())
-}
-
-fn validate_returned_status(id: &str, state: &JobState) -> Result<(), SshClientError> {
-    validate_id(id)?;
-    if matches!(state.state, JobStateKind::Exited) != state.code.is_some() {
-        return Err(protocol_invalid("exit code does not match terminal state"));
     }
     Ok(())
 }

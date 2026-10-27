@@ -20,6 +20,7 @@ const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 #[derive(Clone, Copy, Debug)]
 enum Reply {
     Status,
+    State(&'static str),
     WrongVersion,
     Oversized,
     Partial,
@@ -97,9 +98,12 @@ impl server::Handler for Fixture {
             requests.lock().await.push(request);
 
             let mut response = match reply {
-                Reply::Status | Reply::Close => serde_json::json!({
+                Reply::Status | Reply::Close | Reply::State(_) => serde_json::json!({
                     "version": 1, "ok": true, "id": ID,
-                    "state": {"state": "exited", "code": 7},
+                    "state": match reply {
+                        Reply::State(state) => serde_json::from_str::<Value>(state).unwrap(),
+                        _ => serde_json::json!({"state": "exited", "code": 7}),
+                    },
                     "data_base64": null, "next_offset": null, "eof": null
                 })
                 .to_string()
@@ -159,7 +163,9 @@ impl server::Handler for Fixture {
                 return;
             }
             let mut frame = Vec::with_capacity(response.len() + 4);
-            frame.extend_from_slice(&(response.len() as u32).to_be_bytes());
+            if !matches!(reply, Reply::Partial) {
+                frame.extend_from_slice(&(response.len() as u32).to_be_bytes());
+            }
             frame.append(&mut response);
             let _ = stream.write_all(&frame).await;
             let _ = stream.shutdown().await;
@@ -246,8 +252,7 @@ async fn start_status_and_binary_output_use_one_subsystem_request_each() {
         .await
         .expect("start response");
     assert_eq!(status.id, ID);
-    assert_eq!(status.state.state, JobStateKind::Exited);
-    assert_eq!(status.state.code, Some(7));
+    assert_eq!(status.state, JobState::Exited { code: 7 });
     assert_eq!(requests.lock().await[0]["op"], "start");
     finish(connection, task).await;
 
@@ -394,6 +399,29 @@ async fn close_before_reply_is_missing_response_not_fabricated_status() {
 }
 
 #[tokio::test]
+async fn malformed_state_replies_fail_start_without_replaying_it() {
+    for state in [
+        r#"{"state":"exited"}"#,
+        r#"{"state":"exited","code":null}"#,
+        r#"{"state":"running","code":7}"#,
+        r#"{"state":"prepared","unknown":true}"#,
+        r#"{"state":"failed","code":null}"#,
+        r#"{"state":"interrupted","extra":0}"#,
+        r#"{"state":"exited","code":7,"extra":0}"#,
+        r#"{"code":7}"#,
+        r#"{"state":"unknown"}"#,
+    ] {
+        let (mut connection, task, requests) = connected(Reply::State(state)).await;
+        assert!(connection.job_start(&start()).await.is_err(), "{state}");
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 1, "invalid ACK must never replay start");
+        assert_eq!(requests[0]["op"], "start");
+        drop(requests);
+        finish(connection, task).await;
+    }
+}
+
+#[tokio::test]
 async fn lost_start_ack_is_not_retried_and_reconnect_status_is_explicit() {
     let (mut first, first_task, first_requests) = connected(Reply::Close).await;
     assert!(first.job_start(&start()).await.is_err());
@@ -406,7 +434,7 @@ async fn lost_start_ack_is_not_retried_and_reconnect_status_is_explicit() {
         .job_status(&Status { id: ID.into() })
         .await
         .expect("explicit status query after reconnect");
-    assert_eq!(status.state.code, Some(7));
+    assert_eq!(status.state, JobState::Exited { code: 7 });
     assert_eq!(next_requests.lock().await.len(), 1);
     assert_eq!(next_requests.lock().await[0]["op"], "status");
     finish(reconnected, next_task).await;
@@ -429,6 +457,9 @@ async fn rejects_noncanonical_id_before_opening_channel() {
 
 #[test]
 fn rejects_partial_and_trailing_frames() {
+    assert!(decode_frame(&[0, 0, 0]).is_err());
+    assert!(decode_frame(&[0, 0, 0, 0]).is_err());
+    assert!(decode_frame(&((MAX_FRAME_BYTES + 1) as u32).to_be_bytes()).is_err());
     assert!(decode_frame(&[0, 0, 0, 3, b'{']).is_err());
     assert!(decode_frame(&[0, 0, 0, 2, b'{', b'}', 0]).is_err());
 }

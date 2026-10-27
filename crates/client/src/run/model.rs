@@ -83,40 +83,49 @@ pub struct SealedArtifact {
 }
 
 /// Persisted Agent job lifecycle state.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum JobStateKind {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum JobState {
     /// Accepted but not yet running.
+    #[serde(deserialize_with = "deserialize_empty_state")]
     Prepared,
     /// Worker is running.
+    #[serde(deserialize_with = "deserialize_empty_state")]
     Running,
     /// Worker exited; `code` preserves its actual exit code.
-    Exited,
+    Exited {
+        /// Actual process exit code, including nonzero exits.
+        code: i32,
+    },
     /// Agent recorded a worker failure.
+    #[serde(deserialize_with = "deserialize_empty_state")]
     Failed,
     /// Agent restarted or otherwise lost the worker before terminal state.
+    #[serde(deserialize_with = "deserialize_empty_state")]
     Interrupted,
 }
 
+// Serde's internally tagged unit visitor ignores fields even with
+// deny_unknown_fields. Reject all remaining fields after serde consumes the tag.
+fn deserialize_empty_state<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<(), D::Error> {
+    let fields =
+        std::collections::BTreeMap::<String, serde::de::IgnoredAny>::deserialize(deserializer)?;
+    match fields.keys().next() {
+        Some(field) => Err(serde::de::Error::unknown_field(field, &[])),
+        None => Ok(()),
+    }
+}
+
 /// Exact status returned by the Agent.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobStatus {
     /// Canonical lowercase job UUID.
     pub id: JobId,
     /// Current persisted lifecycle state.
     pub state: JobState,
-}
-
-/// Lifecycle data, retaining a nonzero process exit code.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JobState {
-    /// Exact state name.
-    pub state: JobStateKind,
-    /// Process exit code when known.
-    #[serde(default)]
-    pub code: Option<i32>,
 }
 
 /// One decoded raw output chunk and its continuation point.

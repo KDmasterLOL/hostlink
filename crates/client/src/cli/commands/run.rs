@@ -7,7 +7,7 @@ use crate::cli::{
 use hostlink::{
     HostSpec,
     connect::{HostConnection, SshClientError},
-    run::{JobSpec, JobStateKind, JobStream, Output, Seal, Start, Status, sealed_artifact_name},
+    run::{JobSpec, JobState, JobStream, Output, Seal, Start, Status, sealed_artifact_name},
 };
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -148,29 +148,16 @@ async fn run_test_binary(
                 }
             }
         }
-        match status.state.state {
-            JobStateKind::Exited | JobStateKind::Failed | JobStateKind::Interrupted
-                if stdout_eof && stderr_eof =>
-            {
-                return match status.state.state {
-                    JobStateKind::Exited => {
-                        Ok(status.state.code.ok_or("exited job omitted its code")?)
-                    }
-                    JobStateKind::Failed | JobStateKind::Interrupted => Err(unknown(
-                        "terminal status",
-                        &io::Error::other(format!("job ended in {}", state_name(&status))),
-                    )
-                    .into()),
-                    JobStateKind::Prepared | JobStateKind::Running => unreachable!(),
-                };
+        match status.state {
+            JobState::Exited { code } if stdout_eof && stderr_eof => return Ok(code),
+            JobState::Failed | JobState::Interrupted if stdout_eof && stderr_eof => {
+                return Err(unknown(
+                    "terminal status",
+                    &io::Error::other(format!("job ended in {}", state_name(&status))),
+                )
+                .into());
             }
-            JobStateKind::Prepared
-            | JobStateKind::Running
-            | JobStateKind::Exited
-            | JobStateKind::Failed
-            | JobStateKind::Interrupted => {
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            }
+            _ => tokio::time::sleep(std::time::Duration::from_millis(150)).await,
         }
         read_failures = 0;
     }

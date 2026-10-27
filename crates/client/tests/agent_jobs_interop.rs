@@ -4,7 +4,7 @@
 use hostlink::{
     HostSpec,
     connect::HostConnection,
-    run::{Cancel, JobSpec, JobStateKind, JobStream, Output, Start, Status},
+    run::{Cancel, JobSpec, JobState, JobStream, Output, Start, Status},
 };
 use hostlink_agent::{AgentConfig, ssh};
 use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
@@ -118,8 +118,8 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
         .expect("durable start ACK");
     assert_eq!(accepted.id, id);
     assert!(matches!(
-        accepted.state.state,
-        JobStateKind::Running | JobStateKind::Exited
+        accepted.state,
+        JobState::Running | JobState::Exited { .. }
     ));
     original.close().await.expect("close original SSH session");
 
@@ -148,7 +148,7 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
             .job_status(&status)
             .await
             .expect("job status readback");
-        if matches!(next.state.state, JobStateKind::Exited) {
+        if matches!(next.state, JobState::Exited { .. }) {
             observed = Some(next);
             break;
         }
@@ -156,8 +156,8 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
     }
     let terminal = observed.expect("accepted job should finish after session disconnect");
     assert_eq!(
-        terminal.state.code,
-        Some(7),
+        terminal.state,
+        JobState::Exited { code: 7 },
         "must retain actual nonzero exit"
     );
 
@@ -192,7 +192,7 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
         .job_start(&request)
         .await
         .expect("same ID must be idempotent");
-    assert_eq!(original_result.state.code, Some(7));
+    assert_eq!(original_result.state, JobState::Exited { code: 7 });
     let mut conflicting = request.clone();
     conflicting.spec.args.push("conflicting argv".into());
     assert!(
@@ -223,7 +223,7 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
         .job_start(&cancel_request)
         .await
         .expect("start cancellable job");
-    assert!(matches!(accepted.state.state, JobStateKind::Running));
+    assert!(matches!(accepted.state, JobState::Running));
     tokio::time::timeout(Duration::from_secs(7), async {
         while !pid_file.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -251,8 +251,8 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
         .expect("request owned job cancellation");
     assert_eq!(cancellation.id, cancel_id);
     assert!(matches!(
-        cancellation.state.state,
-        JobStateKind::Running | JobStateKind::Failed
+        cancellation.state,
+        JobState::Running | JobState::Failed
     ));
     resumed.close().await.expect("close after cancel request");
     let mut resumed = HostConnection::connect(&spec)
@@ -266,18 +266,15 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
             })
             .await
             .unwrap();
-        if matches!(
-            status.state.state,
-            JobStateKind::Failed | JobStateKind::Interrupted
-        ) {
-            final_state = Some(status.state.state);
+        if matches!(status.state, JobState::Failed | JobState::Interrupted) {
+            final_state = Some(status.state);
             break;
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
     assert_eq!(
         final_state,
-        Some(JobStateKind::Failed),
+        Some(JobState::Failed),
         "verified cancelled tree must be terminal failure, not unknown interruption"
     );
     for _ in 0..140 {
@@ -308,7 +305,7 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
         .job_cancel(&cancel)
         .await
         .expect("terminal cancel is idempotent");
-    assert_eq!(repeated.state.state, JobStateKind::Failed);
+    assert_eq!(repeated.state, JobState::Failed);
     resumed.close().await.expect("close resumed SSH session");
     stop.send(()).expect("server active");
     tokio::time::timeout(Duration::from_secs(7), server)

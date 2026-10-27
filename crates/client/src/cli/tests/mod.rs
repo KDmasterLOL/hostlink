@@ -2,14 +2,14 @@ use super::*;
 use crate::cli::{
     args::{Cli, Command, JobCommand},
     commands::{
-        job::{job_status_value, validate_job_id, validate_job_spec},
+        job::{validate_job_id, validate_job_spec, write_job_status},
         run::{PreparedRun, sftp_failure_may_be_existing_file},
     },
 };
 use clap::Parser;
 use hostlink::{
     connect::SshClientError,
-    run::{JobSpec, JobStateKind, JobStatus, sealed_artifact_name},
+    run::{JobSpec, JobState, JobStatus, sealed_artifact_name},
 };
 use sha2::{Digest as _, Sha256};
 use std::fs::{self, File};
@@ -231,21 +231,26 @@ fn job_start_validation_rejects_non_absolute_program_and_bad_digest() {
 fn job_status_output_preserves_exit_code_and_omits_unknown_code() {
     let exited = JobStatus {
         id: "00000000-0000-4000-8000-000000000000".into(),
-        state: hostlink::run::JobState {
-            state: JobStateKind::Exited,
-            code: Some(7),
-        },
+        state: JobState::Exited { code: 7 },
     };
-    assert_eq!(job_status_value(&exited)["state"]["code"], 7);
+    let mut bytes = Vec::new();
+    write_job_status(&exited, &mut bytes).unwrap();
+    assert_eq!(bytes.last(), Some(&b'\n'));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+        serde_json::json!({"id": exited.id, "state": {"state": "exited", "code": 7}})
+    );
 
     let running = JobStatus {
         id: exited.id,
-        state: hostlink::run::JobState {
-            state: JobStateKind::Running,
-            code: None,
-        },
+        state: JobState::Running,
     };
-    assert!(job_status_value(&running)["state"].get("code").is_none());
+    bytes.clear();
+    write_job_status(&running, &mut bytes).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+        serde_json::json!({"id": running.id, "state": {"state": "running"}})
+    );
 }
 
 #[test]

@@ -43,10 +43,7 @@ pub(super) async fn verify_durable_job(
                 .job_status(&status)
                 .await
                 .expect("reattach by stable job id");
-            if matches!(
-                result.state.state,
-                JobStateKind::Exited | JobStateKind::Failed
-            ) {
+            if matches!(result.state, JobState::Exited { .. } | JobState::Failed) {
                 break result;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -54,7 +51,7 @@ pub(super) async fn verify_durable_job(
     })
     .await
     .expect("durable job terminal state");
-    assert_eq!(terminal.state.code, Some(7));
+    assert_eq!(terminal.state, JobState::Exited { code: 7 });
     assert_eq!(
         resumed
             .job_output(&Output {

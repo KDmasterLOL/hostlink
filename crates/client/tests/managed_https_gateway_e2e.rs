@@ -7,7 +7,7 @@ use hostlink::{
     connect::HostConnection,
     forward,
     hub::{HubClient, HubConfig},
-    run::{JobSpec, JobStateKind, JobStream, Output, Start, Status},
+    run::{JobSpec, JobState, JobStream, Output, Start, Status},
 };
 use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
 use secrecy::ExposeSecret;

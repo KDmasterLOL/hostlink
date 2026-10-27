@@ -1,7 +1,7 @@
 use crate::cli::args::{Command, JobCommand};
 use hostlink::{
     connect::HostConnection,
-    run::{Cancel, JobSpec, JobStateKind, JobStatus, Output, Start, Status},
+    run::{Cancel, JobSpec, JobState, JobStatus, Output, Start, Status},
 };
 use std::{
     error::Error,
@@ -74,34 +74,28 @@ pub(in crate::cli) fn validate_job_spec(spec: &JobSpec) -> Result<(), io::Error>
 }
 
 pub(in crate::cli) fn state_name(status: &JobStatus) -> &'static str {
-    match status.state.state {
-        JobStateKind::Prepared => "prepared",
-        JobStateKind::Running => "running",
-        JobStateKind::Exited => "exited",
-        JobStateKind::Failed => "failed",
-        JobStateKind::Interrupted => "interrupted",
+    match status.state {
+        JobState::Prepared => "prepared",
+        JobState::Running => "running",
+        JobState::Exited { .. } => "exited",
+        JobState::Failed => "failed",
+        JobState::Interrupted => "interrupted",
     }
 }
 
 pub(in crate::cli) fn state_code(status: &JobStatus) -> String {
-    status
-        .state
-        .code
-        .map_or_else(|| "null".into(), |code| code.to_string())
+    match status.state {
+        JobState::Exited { code } => code.to_string(),
+        _ => "null".into(),
+    }
 }
 
-pub(super) fn write_job_status(status: &JobStatus) -> io::Result<()> {
-    let value = job_status_value(status);
-    serde_json::to_writer(io::stdout().lock(), &value)?;
-    io::stdout().lock().write_all(b"\n")
-}
-
-pub(in crate::cli) fn job_status_value(status: &JobStatus) -> serde_json::Value {
-    let state = match status.state.code {
-        Some(code) => serde_json::json!({"state": state_name(status), "code": code}),
-        None => serde_json::json!({"state": state_name(status)}),
-    };
-    serde_json::json!({"id": status.id, "state": state})
+pub(in crate::cli) fn write_job_status(
+    status: &JobStatus,
+    mut writer: impl Write,
+) -> io::Result<()> {
+    serde_json::to_writer(&mut writer, status)?;
+    writer.write_all(b"\n")
 }
 
 pub(super) fn prepare(command: &Command) -> Result<Option<PreparedJob>, Box<dyn Error>> {
@@ -169,17 +163,17 @@ pub(super) async fn execute(
     match (command, prepared) {
         (JobCommand::Start { .. }, PreparedJob::Start(request)) => {
             let status = client.job_start(&request).await.map_err(|error| format!("job start outcome UNKNOWN for {}: {error}; query with `hostlink job status {} --id {}` before any further action", request.id, target_hint, request.id))?;
-            write_job_status(&status)?;
+            write_job_status(&status, io::stdout().lock())?;
             Ok(0)
         }
         (JobCommand::Status { .. }, PreparedJob::Status(request)) => {
             let status = client.job_status(&request).await?;
-            write_job_status(&status)?;
+            write_job_status(&status, io::stdout().lock())?;
             Ok(0)
         }
         (JobCommand::Cancel { .. }, PreparedJob::Cancel(request)) => {
             let status=client.job_cancel(&request).await.map_err(|error| format!("job cancel outcome UNKNOWN for {}: {error}; query job status for this id before further action", request.id))?;
-            write_job_status(&status)?;
+            write_job_status(&status, io::stdout().lock())?;
             Ok(0)
         }
         (

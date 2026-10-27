@@ -123,6 +123,32 @@ async fn run_cli_seals_binary_and_idempotently_returns_exact_nonzero_exit() {
         );
     }
 
+    let conflicting = tokio::time::timeout(
+        Duration::from_secs(20),
+        Command::new(bin)
+            .arg("run")
+            .arg("--config")
+            .arg(&host_config)
+            .arg("--binary")
+            .arg(&source)
+            .arg("--id")
+            .arg(&id)
+            .arg("--")
+            .arg("-c")
+            .arg("printf must-not-run")
+            .output(),
+    )
+    .await
+    .expect("conflicting run deadline")
+    .expect("CLI process");
+    assert!(!conflicting.status.success());
+    assert!(conflicting.stdout.is_empty());
+    let diagnostic = String::from_utf8_lossy(&conflicting.stderr);
+    assert!(diagnostic.contains("run outcome UNKNOWN during start"));
+    assert!(diagnostic.contains("do not rerun or resend start"));
+    assert!(diagnostic.contains(&id));
+    assert_eq!(fs::read(&marker).unwrap(), b"x");
+
     stop_tx.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(7), server)
         .await
