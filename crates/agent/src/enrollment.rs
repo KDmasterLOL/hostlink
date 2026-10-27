@@ -828,7 +828,16 @@ mod tests {
     };
     use hostlink_hub::{HubConfig, HubService, InviteRequest};
     use secrecy::ExposeSecret;
+    use std::sync::Mutex;
     use tower::ServiceExt;
+
+    static LISTENER_ADDRESS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn listener_address_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        LISTENER_ADDRESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     fn reserve_listener_candidates(count: usize) -> Vec<TcpListener> {
         let listeners = AGENT_LISTENER_PORTS
@@ -842,6 +851,7 @@ mod tests {
 
     #[test]
     fn listener_address_binds_a_nonzero_loopback_port_in_the_selected_range() {
+        let _guard = listener_address_test_guard();
         let address = available_loopback_addr().expect("available loopback listener port");
 
         assert!(address.ip().is_loopback());
@@ -852,6 +862,7 @@ mod tests {
 
     #[test]
     fn listener_address_retries_an_occupied_candidate() {
+        let _guard = listener_address_test_guard();
         let mut listeners = reserve_listener_candidates(2);
         let occupied_port = listeners[0].local_addr().unwrap().port();
         let available_port = listeners[1].local_addr().unwrap().port();
@@ -866,6 +877,7 @@ mod tests {
 
     #[test]
     fn listener_address_allocations_avoid_ports_still_held_by_prior_probes() {
+        let _guard = listener_address_test_guard();
         let mut listeners = Vec::new();
         let mut ports = std::collections::BTreeSet::new();
 
@@ -878,6 +890,7 @@ mod tests {
 
     #[test]
     fn listener_address_fails_after_bounded_candidates_are_occupied() {
+        let _guard = listener_address_test_guard();
         let listeners = reserve_listener_candidates(LISTENER_PORT_ATTEMPTS);
         let ports = listeners
             .iter()
