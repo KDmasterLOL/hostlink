@@ -11,9 +11,9 @@ mod tests;
 pub(crate) use journal::{
     UpdateIdentity, UpdateJournal, UpdatePhase, read_journal, write_journal_atomic,
 };
-pub(crate) use recovery::{
-    RecoveryAction, RecoveryEvidence, TransactionFiles, inspect_files, recovery_action,
-};
+#[cfg(test)]
+pub(crate) use recovery::RecoveryEvidence;
+pub(crate) use recovery::{RecoveryAction, TransactionFiles, inspect_files, recovery_action};
 
 pub(super) fn validate_identity(identity: &UpdateIdentity) -> io::Result<()> {
     const WINDOWS_TARGETS: &[&str] = &[

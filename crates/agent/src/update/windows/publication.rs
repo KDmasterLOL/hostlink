@@ -1,15 +1,14 @@
 //! Windows stopped-runtime publication, rollback, and transaction cleanup.
 
 use super::super::manifest::{
-    InstallMetadata, PackageManifest, package_files, read_install_metadata, validate_installed,
+    InstallMetadata, PackageManifest, read_install_metadata, validate_installed,
 };
 use super::super::private_fs::{
-    hash_file, is_reparse_point, open_private_file, set_private_directory,
-    set_staged_file_permissions, validate_path_has_no_reparse_components,
+    hash_file, is_reparse_point, set_private_directory, validate_path_has_no_reparse_components,
 };
 use super::super::{
-    AgentUpdateOutcome, AgentUpdateRequest, EXECUTABLE_BASE, INSTALL_METADATA, MAX_ENTRY_BYTES,
-    MAX_MANIFEST_BYTES, invalid, invalid_owned,
+    AgentUpdateRequest, INSTALL_METADATA, MAX_ENTRY_BYTES, MAX_MANIFEST_BYTES, invalid,
+    invalid_owned,
 };
 use super::fs::{
     copy_private_synced, create_private_directory, reject_running_agent, same_windows_file,
@@ -17,9 +16,7 @@ use super::fs::{
     write_private_synced,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    fs, io,
     path::{Path, PathBuf},
 };
 
