@@ -1,20 +1,21 @@
-//! Windows stopped-runtime publication, rollback, and transaction cleanup.
+//! Windows stopped-runtime publication flow.
 
-use super::super::manifest::{
+use super::super::super::manifest::{
     InstallMetadata, PackageManifest, read_install_metadata, validate_installed,
 };
-use super::super::private_fs::{
+use super::super::super::private_fs::{
     hash_file, is_reparse_point, set_private_directory, validate_path_has_no_reparse_components,
 };
-use super::super::{
+use super::super::super::{
     AgentUpdateRequest, INSTALL_METADATA, MAX_ENTRY_BYTES, MAX_MANIFEST_BYTES, invalid,
     invalid_owned,
 };
-use super::fs::{
+use super::super::fs::{
     copy_private_synced, create_private_directory, reject_running_agent, same_windows_file,
     sha256_hex, validate_windows_private_acl, verify_windows_private_file, windows_file_identity,
     write_private_synced,
 };
+use super::{cleanup::cleanup_windows_transaction, rollback::rollback_windows};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -310,236 +311,4 @@ pub(in crate::update) fn ensure_windows_separate_updater(root: &Path) -> io::Res
         ));
     }
     Ok(())
-}
-
-#[cfg(windows)]
-pub(super) fn rollback_windows(
-    installed_executable: &Path,
-    installed_metadata: &Path,
-    backup_executable: &Path,
-    backup_metadata: &Path,
-    journal_path: &Path,
-    journal: &mut crate::update_handoff::UpdateJournal,
-) -> io::Result<()> {
-    use crate::update_handoff::UpdatePhase;
-    if !matches!(
-        journal.phase,
-        UpdatePhase::RollingBack | UpdatePhase::RolledBack
-    ) {
-        journal.advance(UpdatePhase::RollingBack)?;
-        crate::update_handoff::write_journal_atomic(journal_path, journal)?;
-    }
-    let identity = &journal.identity;
-    if hash_file(backup_executable, MAX_ENTRY_BYTES)? != identity.old_executable_sha256
-        || hash_file(backup_metadata, MAX_MANIFEST_BYTES)? != identity.old_metadata_sha256
-    {
-        return Err(invalid("Windows rollback backup digest mismatch"));
-    }
-    // Preserve whatever new image is currently installed while restoring the verified old copy.
-    let restore_executable = backup_executable.with_extension("restore.exe");
-    let restore_metadata = backup_metadata.with_extension("restore.json");
-    let restore_executable_needed =
-        hash_file(installed_executable, MAX_ENTRY_BYTES)? != identity.old_executable_sha256;
-    let restore_metadata_needed =
-        hash_file(installed_metadata, MAX_MANIFEST_BYTES)? != identity.old_metadata_sha256;
-    if restore_executable_needed {
-        if restore_executable.exists() {
-            if hash_file(&restore_executable, MAX_ENTRY_BYTES)? != identity.old_executable_sha256 {
-                return Err(invalid(
-                    "Windows rollback temporary executable has an unknown digest",
-                ));
-            }
-            fs::remove_file(&restore_executable)?;
-        }
-        copy_private_synced(backup_executable, &restore_executable)?;
-    }
-    if restore_metadata_needed {
-        if restore_metadata.exists() {
-            if hash_file(&restore_metadata, MAX_MANIFEST_BYTES)? != identity.old_metadata_sha256 {
-                return Err(invalid(
-                    "Windows rollback temporary metadata has an unknown digest",
-                ));
-            }
-            fs::remove_file(&restore_metadata)?;
-        }
-        copy_private_synced(backup_metadata, &restore_metadata)?;
-    }
-    let rollback_stash = tempfile::Builder::new()
-        .prefix("rollback-stash-")
-        .tempdir_in(
-            backup_executable
-                .parent()
-                .ok_or_else(|| invalid("Windows rollback backup has no parent"))?,
-        )?;
-    set_private_directory(rollback_stash.path())?;
-    let rollback_stash_metadata = fs::symlink_metadata(rollback_stash.path())?;
-    validate_windows_private_acl(rollback_stash.path(), &rollback_stash_metadata)?;
-    let mut moves = self_update::MoveAll::from_temp(rollback_stash.path());
-    if restore_executable_needed {
-        moves.add(&restore_executable, installed_executable);
-    }
-    if restore_metadata_needed {
-        moves.add(&restore_metadata, installed_metadata);
-    }
-    let move_result = if restore_executable_needed || restore_metadata_needed {
-        moves.commit().map_err(|error| error.to_string())
-    } else {
-        Ok(())
-    };
-    let inventory_result = (|| {
-        if hash_file(installed_executable, MAX_ENTRY_BYTES)? != identity.old_executable_sha256
-            || hash_file(installed_metadata, MAX_MANIFEST_BYTES)? != identity.old_metadata_sha256
-        {
-            return Err(invalid(
-                "Windows rollback readback did not match the old inventory",
-            ));
-        }
-        Ok(())
-    })();
-    if let Err(inventory_error) = inventory_result {
-        return Err(io::Error::other(match move_result {
-            Ok(()) => inventory_error.to_string(),
-            Err(move_error) => format!(
-                "self_update rollback returned an error ({move_error}); old inventory verification failed ({inventory_error})"
-            ),
-        }));
-    }
-    journal.advance(UpdatePhase::RolledBack)?;
-    crate::update_handoff::write_journal_atomic(journal_path, journal)?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn windows_transaction_candidates() -> [&'static str; 8] {
-    [
-        "staged-agent.exe",
-        "staged-install.json",
-        "backup-agent.exe",
-        "backup-install.json",
-        "backup-agent.restore.exe",
-        "backup-install.restore.json",
-        "self_update-stash-0",
-        "self_update-stash-1",
-    ]
-}
-
-#[cfg(windows)]
-pub(super) fn validate_windows_transaction_children(
-    directory: &Path,
-    identity: &crate::update_handoff::UpdateIdentity,
-) -> io::Result<Vec<(PathBuf, u32, u64)>> {
-    use std::os::windows::fs::MetadataExt;
-
-    let allowed = windows_transaction_candidates();
-    let mut observed = Vec::new();
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name
-            .to_str()
-            .ok_or_else(|| invalid("Windows transaction child name is not UTF-8"))?;
-        if !allowed.contains(&name) {
-            return Err(invalid("Windows transaction contains an unexpected child"));
-        }
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)?;
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || metadata.file_attributes() & 0x400 != 0
-        {
-            return Err(invalid("Windows transaction child is not a regular file"));
-        }
-        validate_windows_private_acl(&path, &metadata)?;
-        let expected = match name {
-            "staged-agent.exe" => &[identity.new_executable_sha256.as_str()][..],
-            "staged-install.json" => &[identity.new_metadata_sha256.as_str()][..],
-            "backup-agent.exe" | "backup-agent.restore.exe" => {
-                &[identity.old_executable_sha256.as_str()][..]
-            }
-            "backup-install.json" | "backup-install.restore.json" => {
-                &[identity.old_metadata_sha256.as_str()][..]
-            }
-            "self_update-stash-0" => &[
-                identity.old_executable_sha256.as_str(),
-                identity.new_executable_sha256.as_str(),
-            ][..],
-            "self_update-stash-1" => &[
-                identity.old_metadata_sha256.as_str(),
-                identity.new_metadata_sha256.as_str(),
-            ][..],
-            _ => unreachable!("candidate names were checked against the allowlist"),
-        };
-        let actual = hash_file(&path, MAX_ENTRY_BYTES)?;
-        if !expected.contains(&actual.as_str()) {
-            return Err(invalid("Windows transaction child digest is unknown"));
-        }
-        let (volume, file_index) = windows_file_identity(&path, false)?;
-        observed.push((path, volume, file_index));
-    }
-    Ok(observed)
-}
-
-#[cfg(windows)]
-pub(super) fn cleanup_windows_transaction(
-    journal_path: &Path,
-    directory: &Path,
-    identity: &crate::update_handoff::UpdateIdentity,
-) -> io::Result<()> {
-    use std::os::windows::fs::MetadataExt;
-
-    let directory_metadata = fs::symlink_metadata(directory)?;
-    if !directory_metadata.is_dir()
-        || directory_metadata.file_type().is_symlink()
-        || directory_metadata.file_attributes() & 0x400 != 0
-    {
-        return Err(invalid(
-            "Windows transaction directory changed during cleanup",
-        ));
-    }
-    validate_windows_private_acl(directory, &directory_metadata)?;
-    let (directory_volume, directory_index) = windows_file_identity(directory, true)?;
-    let observed = validate_windows_transaction_children(directory, identity)?;
-    let backup_names = ["backup-agent.exe", "backup-install.json"];
-    let mut ordered = observed;
-    ordered.sort_by_key(|(path, _, _)| {
-        u8::from(
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| backup_names.contains(&name)),
-        )
-    });
-    // Remove expendable files first and verified backups last; leave the journal until the
-    // transaction directory contains no candidates, so interrupted cleanup remains recoverable.
-    for (path, volume, file_index) in ordered {
-        let metadata = fs::symlink_metadata(&path)?;
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || metadata.file_attributes() & 0x400 != 0
-            || windows_file_identity(&path, false)? != (volume, file_index)
-        {
-            return Err(invalid(
-                "Windows transaction child identity changed during cleanup",
-            ));
-        }
-        validate_windows_private_acl(&path, &metadata)?;
-        fs::remove_file(path)?;
-    }
-    if fs::read_dir(directory)?.next().is_some() {
-        return Err(invalid(
-            "Windows transaction directory is not empty after cleanup",
-        ));
-    }
-    let current_directory = fs::symlink_metadata(directory)?;
-    if !current_directory.is_dir()
-        || current_directory.file_type().is_symlink()
-        || current_directory.file_attributes() & 0x400 != 0
-        || windows_file_identity(directory, true)? != (directory_volume, directory_index)
-    {
-        return Err(invalid(
-            "Windows transaction directory identity changed during cleanup",
-        ));
-    }
-    validate_windows_private_acl(directory, &current_directory)?;
-    fs::remove_file(journal_path)?;
-    fs::remove_dir(directory)
 }
