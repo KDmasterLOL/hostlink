@@ -10,7 +10,7 @@ use super::super::fs::{copy_private_synced, validate_windows_private_acl};
 use std::{fs, io, path::Path};
 
 #[cfg(windows)]
-pub(super) fn rollback_windows(
+pub(in crate::update::windows) fn rollback_windows(
     installed_executable: &Path,
     installed_metadata: &Path,
     backup_executable: &Path,

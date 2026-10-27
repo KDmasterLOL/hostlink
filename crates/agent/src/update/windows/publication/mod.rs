@@ -5,7 +5,7 @@ mod publish;
 mod rollback;
 
 pub(super) use cleanup::{cleanup_windows_transaction, validate_windows_transaction_children};
-pub(super) use publish::{
+pub(in crate::update) use publish::{
     ensure_windows_offline_caller, ensure_windows_separate_updater, publish_windows,
 };
 pub(super) use rollback::rollback_windows;
