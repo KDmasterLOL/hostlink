@@ -19,7 +19,7 @@ required-features = ["server"]
 
 [features]
 default = ["server"]
-server = ["dep:axum", "dep:clap", "dep:getrandom", "dep:hex", "dep:serde_json", "dep:sha2", "dep:tokio", "dep:url"]
+server = ["dep:axum", "dep:clap", "dep:getrandom", "dep:hex", "dep:serde_json", "dep:sha2", "dep:subtle", "dep:tokio", "dep:url"]
 
 [dependencies]
 axum = { workspace = true, optional = true }
@@ -31,6 +31,7 @@ serde_json = { workspace = true, optional = true }
 secrecy = { workspace = true, features = ["serde"] }
 sha2 = { workspace = true, optional = true }
 ssh-key = { workspace = true, features = ["ed25519", "rand_core"] }
+subtle = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 

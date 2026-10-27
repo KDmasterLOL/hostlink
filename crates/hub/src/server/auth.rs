@@ -6,6 +6,7 @@ use axum::{
 };
 use secrecy::ExposeSecret;
 use serde::Serialize;
+use subtle::ConstantTimeEq;
 
 #[derive(Debug)]
 pub enum HubError {
@@ -78,20 +79,17 @@ struct ErrorBody {
     message: String,
 }
 
-pub(super) fn authorized(headers: &HeaderMap, expected: &str) -> bool {
+pub(crate) fn authorized(headers: &HeaderMap, expected: &str) -> bool {
     let Some(value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
         return false;
     };
     let Some(token) = value.strip_prefix("Bearer ") else {
         return false;
     };
-    constant_time_eq(token.as_bytes(), expected.as_bytes())
-}
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
+    if token.len() != expected.len() {
         return false;
     }
-    a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+    bool::from(token.as_bytes().ct_eq(expected.as_bytes()))
 }
 pub(super) fn require_operator(headers: &HeaderMap, app: &App) -> Result<(), HubError> {
     if authorized(headers, app.config.operator_token.expose_secret()) {
