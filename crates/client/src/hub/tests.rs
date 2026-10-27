@@ -1,7 +1,8 @@
 use super::*;
 use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
 use hostlink_hub::{
-    EnrollRequest, EnrollResponse, HubConfig as ServerConfig, HubService, MachineId, router,
+    DisplayNameRequest, EnrollRequest, EnrollResponse, HostsResponse, HubConfig as ServerConfig,
+    HubInfo, HubService, MachineId, RevokeReceipt, router,
 };
 use russh::keys::{Algorithm, PrivateKey};
 use secrecy::SecretString;
@@ -34,6 +35,55 @@ fn public_key() -> String {
         .public_key()
         .to_openssh()
         .expect("encode Ed25519 public key")
+}
+
+#[test]
+fn shared_hub_dtos_enforce_v2_contract_and_preserve_info_forward_compatibility() {
+    let info: HubInfo = serde_json::from_value(serde_json::json!({
+        "api_version": 2,
+        "management": true,
+        "gateways": [],
+        "execution_transport": "russh",
+        "hosts_endpoint": "/v2/hosts",
+        "future_capability": true
+    }))
+    .expect("Hub info accepts additive fields");
+    assert!(info.validate().is_ok());
+
+    let unsupported: HubInfo = serde_json::from_value(serde_json::json!({
+        "api_version": 3,
+        "management": true,
+        "gateways": [],
+        "execution_transport": "russh",
+        "hosts_endpoint": "/v2/hosts"
+    }))
+    .expect("deserialize versioned info");
+    assert!(unsupported.validate().is_err());
+
+    assert!(
+        serde_json::from_value::<HostsResponse>(serde_json::json!({
+            "hosts": [],
+            "unexpected": true
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<DisplayNameRequest>(serde_json::json!({
+            "display_name": "Lab",
+            "unexpected": true
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<RevokeReceipt>(serde_json::json!({
+            "revoked_new_connections": true,
+            "confirmed_session_terminated": false,
+            "remote_uninstall": false,
+            "authorized_key_projection": "reconciled",
+            "unexpected": true
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -350,7 +400,13 @@ async fn manages_hosts_through_the_in_process_hub_v2_router() {
         selected.remote_port
     );
 
-    let receipt = client.revoke(&selected).await.expect("revoke managed host");
+    let renamed = client
+        .set_display_name(&selected, "Fixture host")
+        .await
+        .expect("rename through typed display-name request");
+    assert_eq!(renamed.display_name.as_deref(), Some("Fixture host"));
+
+    let receipt = client.revoke(&renamed).await.expect("revoke managed host");
     assert!(receipt.revoked_new_connections);
     assert!(!receipt.confirmed_session_terminated);
     assert!(!receipt.remote_uninstall);

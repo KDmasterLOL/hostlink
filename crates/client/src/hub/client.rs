@@ -2,7 +2,10 @@
 
 use std::{fs::OpenOptions, io::Read, path::Path, time::Duration};
 
-use hostlink_hub::{GatewayEndpoint, InviteRequest, InviteResponse, RegisteredHost};
+use hostlink_hub::{
+    DisplayNameRequest, GatewayEndpoint, HostsResponse, HubInfo, InviteRequest, InviteResponse,
+    RegisteredHost, RevokeReceipt,
+};
 use reqwest::{Method, StatusCode, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -11,8 +14,8 @@ use crate::HostSpec;
 
 use super::{
     config::{
-        HubClientError, HubConfig, MAX_BODY_BYTES, RevokeReceipt, parse_origin,
-        read_private_credential, select_host,
+        HubClientError, HubConfig, MAX_BODY_BYTES, parse_origin, read_private_credential,
+        select_host,
     },
     routes::{host_spec_from_approved_routes, validate_gateway_list},
 };
@@ -77,12 +80,7 @@ impl HubClient {
 
     /// Returns one authoritative inventory snapshot without probing any Agent.
     pub async fn list_hosts(&self) -> Result<Vec<RegisteredHost>, HubClientError> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Response {
-            hosts: Vec<RegisteredHost>,
-        }
-        Ok(self.get_json::<Response>("/v2/hosts").await?.hosts)
+        Ok(self.get_json::<HostsResponse>("/v2/hosts").await?.hosts)
     }
 
     /// Selects an exact canonical name/full ID or a unique machine-ID prefix.
@@ -97,21 +95,9 @@ impl HubClient {
 
     /// Reads and validates Hub v2 management capabilities and its approved gateway routes.
     pub async fn info(&self) -> Result<Vec<GatewayEndpoint>, HubClientError> {
-        let value: serde_json::Value = self.get_json("/v2/info").await?;
-        if value.get("api_version").and_then(|v| v.as_u64()) != Some(2)
-            || value.get("management").and_then(|v| v.as_bool()) != Some(true)
-            || value.get("execution_transport").and_then(|v| v.as_str()) != Some("russh")
-            || value.get("hosts_endpoint").and_then(|v| v.as_str()) != Some("/v2/hosts")
-        {
-            return Err(HubClientError::Response);
-        }
-        let gateways: Vec<GatewayEndpoint> = serde_json::from_value(
-            value
-                .get("gateways")
-                .cloned()
-                .ok_or(HubClientError::Response)?,
-        )
-        .map_err(|_| HubClientError::Response)?;
+        let info: HubInfo = self.get_json("/v2/info").await?;
+        info.validate().map_err(|_| HubClientError::Response)?;
+        let gateways = info.gateways;
         for gateway in &gateways {
             gateway.validate().map_err(HubClientError::Invalid)?;
         }
@@ -143,14 +129,12 @@ impl HubClient {
         host: &RegisteredHost,
         display_name: &str,
     ) -> Result<RegisteredHost, HubClientError> {
-        #[derive(Serialize)]
-        struct Body<'a> {
-            display_name: &'a str,
-        }
         self.request_json(
             Method::PATCH,
             &format!("/v2/hosts/{}/display-name", host.machine_id),
-            Some(&Body { display_name }),
+            Some(&DisplayNameRequest {
+                display_name: display_name.into(),
+            }),
         )
         .await
     }
@@ -158,15 +142,12 @@ impl HubClient {
     /// Revokes new managed access and requires an explicit truthful reconciliation receipt.
     pub async fn revoke(&self, host: &RegisteredHost) -> Result<RevokeReceipt, HubClientError> {
         let receipt: RevokeReceipt = self
-            .request_json::<serde_json::Value, ()>(
+            .request_json(
                 Method::DELETE,
                 &format!("/v2/hosts/{}", host.machine_id),
-                None,
+                None::<&()>,
             )
-            .await
-            .and_then(|value| {
-                serde_json::from_value(value).map_err(|_| HubClientError::Response)
-            })?;
+            .await?;
         if !receipt.revoked_new_connections
             || receipt.confirmed_session_terminated
             || receipt.remote_uninstall

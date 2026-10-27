@@ -36,20 +36,6 @@ pub struct HubConfig {
     pub preferred_gateway: Option<String>,
 }
 
-/// Confirmed result of Hub revocation.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RevokeReceipt {
-    /// Hub revoked authorization for new connections.
-    pub revoked_new_connections: bool,
-    /// Hub cannot confirm termination of already established SSH sessions.
-    pub confirmed_session_terminated: bool,
-    /// Hub does not uninstall the remote Agent.
-    pub remote_uninstall: bool,
-    /// Gateway authorized key projection result.
-    pub authorized_key_projection: String,
-}
-
 /// Safe errors from the Hub client. HTTP bodies and credential values are never rendered.
 #[derive(Debug, Error)]
 pub enum HubClientError {
