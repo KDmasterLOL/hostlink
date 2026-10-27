@@ -19,7 +19,13 @@ pub(super) fn invalid(message: &'static str) -> io::Error {
 
 pub(crate) fn validate_private_path(path: &Path, directory: bool) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || metadata.is_dir() != directory {
+    if metadata.file_type().is_symlink()
+        || (if directory {
+            !metadata.is_dir()
+        } else {
+            !metadata.is_file()
+        })
+    {
         return Err(invalid(
             "private path is a symlink or has the wrong file type",
         ));
@@ -27,7 +33,9 @@ pub(crate) fn validate_private_path(path: &Path, directory: bool) -> io::Result<
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // SAFETY: geteuid reads process identity and takes no pointers.
         if metadata.uid() != unsafe { libc::geteuid() }
+            || (!directory && metadata.nlink() != 1)
             || metadata.permissions().mode() & 0o077 != 0
         {
             return Err(io::Error::new(
@@ -37,7 +45,27 @@ pub(crate) fn validate_private_path(path: &Path, directory: bool) -> io::Result<
         }
     }
     #[cfg(windows)]
-    validate_windows_acl(path, &metadata)?;
+    {
+        validate_windows_acl(path, &metadata)?;
+        if !directory {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::{
+                BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+            };
+
+            let file = File::open(path)?;
+            let mut info = BY_HANDLE_FILE_INFORMATION::default();
+            // SAFETY: the handle belongs to an open File and info is writable.
+            if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if info.nNumberOfLinks != 1 {
+                return Err(invalid(
+                    "private file has multiple hard links; exact ownership cannot be proved",
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -55,53 +83,11 @@ pub(crate) fn restrict_private_path(path: &Path, directory: bool) -> io::Result<
     validate_private_path(path, directory)
 }
 
-pub(super) fn write_new_private(path: &Path, value: &JobRecord) -> io::Result<()> {
-    let data = serde_json::to_vec(value).map_err(io::Error::other)?;
-    if data.len() > MAX_RECORD_BYTES {
-        return Err(invalid("serialized job record exceeds size limit"));
-    }
-    let mut opts = OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut file = opts.open(path)?;
-    restrict_private_path(path, false)?;
-    file.write_all(&data)?;
-    file.sync_all()?;
-    sync_directory(path.parent().expect("created job file has a parent"))
-}
-
-pub(super) fn read_bounded_private(path: &Path) -> io::Result<Vec<u8>> {
-    validate_private_path(path, false)?;
-    let mut input = File::open(path)?.take(MAX_RECORD_BYTES as u64 + 1);
-    let mut bytes = Vec::new();
-    input.read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_RECORD_BYTES {
-        return Err(invalid("job state exceeded its maximum size"));
-    }
-    Ok(bytes)
-}
-
-pub(super) fn atomic_replace_private(path: &Path, data: &[u8]) -> io::Result<()> {
-    if data.len() > MAX_RECORD_BYTES {
-        return Err(invalid("job record exceeds maximum size"));
-    }
-    validate_private_path(path, false)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| invalid("record has no parent"))?;
-    let mut stage = tempfile::NamedTempFile::new_in(parent)?;
-    restrict_private_path(stage.path(), false)?;
-    stage.write_all(data)?;
-    stage.as_file().sync_all()?;
-    stage.persist(path).map_err(|error| error.error)?;
-    sync_directory(parent)
-}
-
-/// A single admission/update lock shared by JobStore and the separate updater.
+/// A single admission/update lock shared by durable admission and the separate updater.
+///
+/// # Errors
+/// Rejects unsafe root/lock paths, private permissions, or filesystem lock failures.
+/// Async callers must acquire it on a blocking worker to avoid executor deadlock.
 pub fn acquire_update_lock(install_root: &Path) -> io::Result<File> {
     validate_private_path(install_root, true)?;
     exclusive_lock(&install_root.join(UPDATE_LOCK_FILE))
@@ -109,16 +95,16 @@ pub fn acquire_update_lock(install_root: &Path) -> io::Result<File> {
 
 pub(super) fn exclusive_lock(path: &Path) -> io::Result<File> {
     let mut opts = OpenOptions::new();
-    opts.read(true).write(true).create(true);
+    opts.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
-    if let Ok(metadata) = fs::symlink_metadata(path)
-        && (metadata.file_type().is_symlink() || !metadata.is_file())
-    {
-        return Err(invalid("lock file is not a regular file"));
+    match fs::symlink_metadata(path) {
+        Ok(_) => validate_private_path(path, false)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
     let file = opts.open(path)?;
     restrict_private_path(path, false)?;
@@ -136,6 +122,18 @@ pub(super) fn sync_directory(parent: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 pub(super) fn validate_windows_acl(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+    validate_windows_acl_contents(path, metadata, true)
+}
+
+// SQLite sidecars may inherit the already private parent's ACL when created.
+// Validate the same owner/SID allowlist BEFORE protecting their DACL, so no
+// foreign allow entry or reparse path is ever silently repaired.
+#[cfg(windows)]
+pub(super) fn validate_windows_acl_contents(
+    path: &Path,
+    metadata: &fs::Metadata,
+    protected: bool,
+) -> io::Result<()> {
     use std::os::windows::fs::MetadataExt;
     use windows_permissions::constants::{AceType, SeObjectType, SecurityInformation};
     use windows_permissions::wrappers::{
@@ -154,7 +152,7 @@ pub(super) fn validate_windows_acl(path: &Path, metadata: &fs::Metadata) -> io::
     let sddl =
         ConvertSecurityDescriptorToStringSecurityDescriptor(&descriptor, SecurityInformation::Dacl)
             .map_err(io::Error::other)?;
-    if !sddl.to_string_lossy().starts_with("D:P") {
+    if protected && !sddl.to_string_lossy().starts_with("D:P") {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Windows ACL inherits permissions",

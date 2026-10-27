@@ -1,7 +1,6 @@
 #![allow(unused_imports)]
 use super::config::{PreparedEmbeddedSshConfig, invalid_data, prepare, validate_jobs_root};
-use super::job_protocol::handle_job_channel;
-use super::job_runtime::{JobCancellation, JobRuntime};
+use super::jobs::{JobRuntime, handle_job_channel};
 use super::*;
 
 struct EmbeddedServer {
@@ -61,10 +60,12 @@ where
     }
     let prepared = prepare(config)?;
     let jobs_root = validate_jobs_root(&config.jobs_root)?;
-    let store = JobStore::open(&jobs_root)?;
-    store.recover_nonterminal()?;
+    let store = DurableStore::open(&jobs_root).await?;
+    let runner = store.acquire_runner()?;
+    store.recover_nonterminal().await?;
     let jobs = Arc::new(JobRuntime {
         store,
+        _runner: runner,
         start_lock: Mutex::new(()),
         slots: Arc::new(Semaphore::new(MAX_ACTIVE_JOBS)),
         channel_slots: Arc::new(Semaphore::new(MAX_JOB_CHANNELS)),
@@ -93,13 +94,26 @@ where
     ));
     tokio::pin!(shutdown_signal);
     tokio::select! {
-        result = &mut server => result,
-        result = &mut tunnel => {
-            if cancellation.is_cancelled() { server.await } else { result }
+        result = &mut server => {
+            cancellation.cancel();
+            // Keep polling the tunnel until its sessions and forwards shut down.
+            result.and(tunnel.await)
         },
-        () = &mut shutdown_signal => tokio::select! {
-            result = &mut server => result,
-            result = &mut tunnel => result,
+        result = &mut tunnel => {
+            let expected_shutdown = cancellation.is_cancelled();
+            cancellation.cancel();
+            // A failed tunnel must still stop and drain Agent-owned process trees.
+            server.await?;
+            match result {
+                Ok(()) if !expected_shutdown => Err(io::Error::other(
+                    "reverse SSH tunnel ended before Agent shutdown",
+                )),
+                result => result,
+            }
+        },
+        () = &mut shutdown_signal => {
+            let (server_result, tunnel_result) = tokio::join!(&mut server, &mut tunnel);
+            server_result.and(tunnel_result)
         },
     }
 }
@@ -473,3 +487,7 @@ fn fail_session_channel(channel: ChannelId, session: &mut Session) -> Result<(),
     session.channel_failure(channel)?;
     session.close(channel)
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "tests/wire/mod.rs"]
+mod wire_tests;

@@ -1,8 +1,9 @@
 //! Authenticated embedded russh server for short exec, SFTP, and direct TCP forwarding.
 
 use crate::{
-    AgentConfig, exec,
-    jobs::{self, Admission, JobId, JobOutput, JobSpec, JobState, JobStore},
+    AgentConfig,
+    durable::{self, Admission, DurableStore, JobId, JobOutput, JobSpec, JobState},
+    exec,
     sftp::SftpSession,
 };
 use russh::keys::ssh_key::authorized_keys::AuthorizedKeys;
@@ -44,8 +45,7 @@ const JOB_TIMEOUT: Duration = Duration::from_secs(30);
 const JOB_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 mod config;
-mod job_protocol;
-mod job_runtime;
+mod jobs;
 mod server;
 
 #[cfg(all(test, target_os = "linux"))]

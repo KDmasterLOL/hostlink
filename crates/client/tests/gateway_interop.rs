@@ -289,6 +289,11 @@ async fn reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&jobs, std::fs::Permissions::from_mode(0o700)).expect("jobs mode");
     }
+    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs)
+        .await
+        .expect("initialize fresh private Agent SQLite fixture")
+        .close()
+        .await;
     let agent_config = AgentConfig {
         listen: agent_addr,
         user: "agent".into(),

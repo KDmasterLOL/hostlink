@@ -106,7 +106,7 @@ where
     validate_inputs(options)?;
     reject_elevated_user()?;
     ensure_fresh_root_parent(&options.install_root)?;
-    jobs::validate_private_path(&options.token_file, false)?;
+    durable::validate_private_path(&options.token_file, false)?;
     let token = read_token(&options.token_file)?;
 
     let machine_id = MachineId::parse(Uuid::new_v4().to_string()).map_err(invalid_data)?;
@@ -122,7 +122,7 @@ where
     // The root and pending marker make a second invocation fail closed even if publication or
     // the Hub acknowledgement was interrupted. The invite is never sent a second time.
     fs::create_dir(&options.install_root)?;
-    jobs::restrict_private_path(&options.install_root, true)?;
+    durable::restrict_private_path(&options.install_root, true)?;
     let pending = options.install_root.join("enrollment.pending");
     write_private_new(
         &pending,
@@ -132,7 +132,7 @@ where
         .install_root
         .join(format!(".stage-{}", Uuid::new_v4()));
     fs::create_dir(&stage)?;
-    jobs::restrict_private_path(&stage, true)?;
+    durable::restrict_private_path(&stage, true)?;
 
     let reverse_private = reverse_key
         .to_openssh(LineEnding::LF)
@@ -193,7 +193,11 @@ where
     // would let a running managed job evade update deferral.
     let jobs_root = options.install_root.join("jobs");
     fs::create_dir(&jobs_root)?;
-    jobs::restrict_private_path(&jobs_root, true)?;
+    durable::restrict_private_path(&jobs_root, true)?;
+    durable::DurableStore::initialize_fresh(&jobs_root)
+        .await?
+        .close()
+        .await;
     let gateway = gateways[0].clone();
     let alternates = gateways
         .iter()

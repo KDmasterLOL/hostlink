@@ -1,6 +1,6 @@
-use super::job_runtime::*;
+use super::jobs::*;
 use super::{MAX_ACTIVE_JOBS, MAX_JOB_CHANNELS};
-use crate::jobs::{self, Admission, JobId, JobOutput, JobSpec, JobState, JobStore};
+use crate::durable::{self, Admission, DurableStore, JobId, JobOutput, JobSpec, JobState};
 use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
@@ -17,7 +17,7 @@ async fn prepared_job(
     tempfile::TempDir,
     Arc<JobRuntime>,
     String,
-    crate::jobs::JobRecord,
+    crate::durable::JobRecord,
 ) {
     let temp = tempfile::tempdir().expect("private test root");
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
@@ -43,17 +43,22 @@ async fn prepared_job(
             Sha256::digest(std::fs::read(&source).expect("hash executable"))
         ),
     };
-    let store = JobStore::open(jobs_root).expect("open private store");
+    let store = DurableStore::initialize_fresh(jobs_root)
+        .await
+        .expect("open private store");
     let id = JobId::new();
     let owner = "d".repeat(64);
-    let Admission::Created(_) = store.admit(id, &owner, &spec).expect("admit job") else {
+    let Admission::Created(_) = store.admit(id, &owner, &spec).await.expect("admit job") else {
         panic!("fresh job ID is newly admitted");
     };
     let record = store
-        .transition(id, &owner, JobState::Prepared, JobState::Running)
+        .claim_start(id, &owner)
+        .await
         .expect("reserve worker state");
+    let runner = store.acquire_runner().expect("exclusive runtime lease");
     let runtime = Arc::new(JobRuntime {
         store,
+        _runner: runner,
         start_lock: Mutex::new(()),
         slots: Arc::new(Semaphore::new(MAX_ACTIVE_JOBS)),
         channel_slots: Arc::new(Semaphore::new(MAX_JOB_CHANNELS)),
@@ -65,11 +70,12 @@ async fn prepared_job(
     let record = runtime
         .store
         .lookup(id, &owner)
+        .await
         .expect("read admitted record");
     (temp, runtime, owner, record)
 }
 
-fn linux_process_is_running(pid: u32) -> bool {
+pub(super) fn linux_process_is_running(pid: u32) -> bool {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return false;
     };
@@ -114,11 +120,13 @@ async fn agent_shutdown_cancels_the_owned_process_tree() {
     tokio::time::timeout(Duration::from_secs(5), worker)
         .await
         .expect("worker teardown deadline")
-        .expect("worker task");
+        .expect("worker task")
+        .expect("persist worker outcome");
     assert_eq!(
         runtime
             .store
             .lookup(id, &owner)
+            .await
             .expect("read final state")
             .state,
         JobState::Interrupted
@@ -158,11 +166,13 @@ async fn output_overflow_kills_the_tree_and_never_records_zero_exit() {
         ),
     )
     .await
-    .expect("overflow teardown deadline");
+    .expect("overflow teardown deadline")
+    .expect("persist worker outcome");
     assert_eq!(
         runtime
             .store
             .lookup(id, &owner)
+            .await
             .expect("read final state")
             .state,
         JobState::Failed
@@ -171,11 +181,16 @@ async fn output_overflow_kills_the_tree_and_never_records_zero_exit() {
         std::fs::metadata(runtime.store.output_path(id, JobOutput::Stdout))
             .expect("bounded stdout file")
             .len(),
-        jobs::MAX_JOB_OUTPUT_BYTES
+        durable::MAX_JOB_OUTPUT_BYTES
     );
     assert!(
         !matches!(
-            runtime.store.lookup(id, &owner).expect("read status").state,
+            runtime
+                .store
+                .lookup(id, &owner)
+                .await
+                .expect("read status")
+                .state,
             JobState::Exited { code: 0 }
         ),
         "an over-limit stream cannot be reported as successful"

@@ -1,6 +1,6 @@
 #![cfg(windows)]
 
-use hostlink_agent::jobs::{Admission, JobId, JobSpec, JobState, JobStore};
+use hostlink_agent::durable::{Admission, DurableStore, JobId, JobSpec, JobState};
 use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
 use serde_json::{Map, json};
 use sha2::{Digest, Sha256};
@@ -8,9 +8,9 @@ use std::{fs, path::Path, process::Command};
 
 // This test writes one root-derived value to the current user's HKCU Run key.
 // Keep it ignored by default; run only in a disposable, non-elevated Windows profile.
-#[test]
+#[tokio::test]
 #[ignore = "requires HOSTLINK_WINDOWS_LIFECYCLE_DISPOSABLE=1 and a disposable Windows user profile"]
-fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root() {
+async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root() {
     assert_eq!(
         std::env::var("HOSTLINK_WINDOWS_LIFECYCLE_DISPOSABLE").as_deref(),
         Ok("1"),
@@ -46,6 +46,11 @@ fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root(
     for directory in [&root, &state, &bin, &root.join("jobs")] {
         private_windows_path(directory, true);
     }
+    DurableStore::initialize_fresh(root.join("jobs"))
+        .await
+        .expect("initialize installed Agent SQLite state")
+        .close()
+        .await;
 
     let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("choose disposable port");
     let listen_port = probe.local_addr().expect("read disposable port").port();
@@ -299,7 +304,9 @@ fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root(
     fs::write(&marker_path, original_marker).expect("restore exact disposable ownership marker");
     private_windows_path(&marker_path, false);
 
-    let store = JobStore::open(root.join("jobs")).expect("open durable job store");
+    let store = DurableStore::open(root.join("jobs"))
+        .await
+        .expect("open durable job store");
     for target_state in [JobState::Prepared, JobState::Running, JobState::Interrupted] {
         let job_id = JobId::new();
         let owner = "a".repeat(64);
@@ -314,16 +321,19 @@ fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root(
                     source_sha256: "b".repeat(64),
                 },
             )
+            .await
             .expect("admit real durable job fixture");
         assert!(matches!(admission, Admission::Created(_)));
         if target_state != JobState::Prepared {
             store
-                .transition(job_id, &owner, JobState::Prepared, JobState::Running)
+                .claim_start(job_id, &owner)
+                .await
                 .expect("mark disposable fixture running");
         }
         if target_state == JobState::Interrupted {
             store
                 .transition(job_id, &owner, JobState::Running, JobState::Interrupted)
+                .await
                 .expect("mark disposable fixture interrupted");
         }
         for action in ["stop", "remove"] {
@@ -338,11 +348,18 @@ fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable_root(
             assert!(String::from_utf8_lossy(&refused.stderr).contains("durable jobs"));
             assert!(root.join(".hostlink-user-service.json").is_file());
         }
-        // Remove only this explicitly disposable fixture record before testing
-        // the next fail-closed state; Interrupted is never made runnable again.
-        fs::remove_dir_all(root.join("jobs").join(job_id.to_string()))
-            .expect("remove exact disposable job fixture");
     }
+    store.close().await;
+    // All three nonterminal records remain durable until this explicitly
+    // disposable test store is removed; Interrupted never becomes runnable.
+    fs::remove_dir_all(root.join("jobs")).expect("remove exact disposable SQLite fixture");
+    fs::create_dir(root.join("jobs")).expect("fresh empty disposable job store");
+    private_windows_path(&root.join("jobs"), true);
+    DurableStore::initialize_fresh(root.join("jobs"))
+        .await
+        .expect("initialize fresh disposable SQLite state")
+        .close()
+        .await;
 
     let unknown_job = root.join("jobs/unknown-fixture-entry");
     fs::create_dir(&unknown_job).expect("create unknown disposable job entry");

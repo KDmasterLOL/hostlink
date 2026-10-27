@@ -129,6 +129,11 @@ async fn controller_scoped_upload_seal_and_durable_exit_seven() {
     std::fs::create_dir(&jobs_root).expect("jobs root");
     std::fs::set_permissions(&jobs_root, std::fs::Permissions::from_mode(0o700))
         .expect("private jobs root");
+    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs_root)
+        .await
+        .expect("initialize fresh private Agent SQLite fixture")
+        .close()
+        .await;
     std::fs::write(
         &host_path,
         host.to_openssh(russh::keys::ssh_key::LineEnding::LF)

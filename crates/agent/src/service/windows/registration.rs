@@ -163,7 +163,7 @@ pub(super) fn validate_sha256(value: &str) -> io::Result<()> {
     Ok(())
 }
 pub(super) fn active_jobs(record: &InstallRecord) -> io::Result<Vec<String>> {
-    jobs::active_ids(&load_config(&record.config)?.jobs_root)
+    durable::active_ids(&load_config(&record.config)?.jobs_root)
 }
 pub(super) fn load_config(path: &Path) -> io::Result<crate::AgentConfig> {
     let metadata = fs::symlink_metadata(path)?;

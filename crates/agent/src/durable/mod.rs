@@ -1,6 +1,6 @@
 //! Source-pinned durable job identities, private state and update admission guards.
 //!
-//! Durable Agent-owned job records, process output and lifecycle state.
+//! Apalis SQLite is the sole record owner; filesystem paths contain only raw output.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -21,19 +21,23 @@ pub(crate) const MAX_OUTPUT_CHUNK_BYTES: usize = 24 * 1024;
 pub const UPDATE_LOCK_FILE: &str = "update.lock";
 
 mod artifacts;
+mod database;
+mod inventory;
+mod lifecycle;
 mod model;
 mod output;
+mod persistence;
 mod private_fs;
-mod store;
 
 pub(crate) use artifacts::ArtifactStore;
+pub use inventory::active_ids;
 pub use model::{Admission, JobId, JobRecord, JobSpec, JobState};
 use output::*;
 pub(crate) use output::{JobOutput, open_output_append};
+pub use persistence::DurableStore;
 pub use private_fs::acquire_update_lock;
 use private_fs::*;
 pub(crate) use private_fs::{restrict_private_path, validate_private_path};
-pub use store::{JobStore, active_ids};
 
 #[cfg(test)]
 mod tests;

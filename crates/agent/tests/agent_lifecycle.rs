@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-use hostlink_agent::jobs::{Admission, JobId, JobSpec, JobState, JobStore};
+use hostlink_agent::durable::{Admission, DurableStore, JobId, JobSpec, JobState};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 use tempfile::TempDir;
 
@@ -47,6 +47,24 @@ fn fixture() -> (
     write_enrollment_fixture(config.parent().unwrap());
     fs::create_dir(root.join("state/jobs")).unwrap();
     fs::set_permissions(root.join("state/jobs"), fs::Permissions::from_mode(0o700)).unwrap();
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        DurableStore::initialize_fresh(root.join("state/jobs"))
+                            .await
+                            .unwrap()
+                            .close()
+                            .await;
+                    });
+            })
+            .join()
+            .unwrap();
+    });
     let runtime = temp.path().join("runtime");
     fs::create_dir(&runtime).unwrap();
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
@@ -141,8 +159,8 @@ fn write_enrollment_fixture(state: &Path) {
     .unwrap();
 }
 
-#[test]
-fn service_commands_bind_private_unit_to_root_and_remove_only_service_metadata() {
+#[tokio::test]
+async fn service_commands_bind_private_unit_to_root_and_remove_only_service_metadata() {
     let (_temp, home, root, config) = fixture();
     let args = [
         "install",
@@ -188,7 +206,7 @@ fn service_commands_bind_private_unit_to_root_and_remove_only_service_metadata()
     fs::set_permissions(&machine_file, fs::Permissions::from_mode(0o600)).unwrap();
 
     let jobs_root = root.join("state/jobs");
-    let store = JobStore::open(&jobs_root).unwrap();
+    let store = DurableStore::open(&jobs_root).await.unwrap();
     let id = JobId::new();
     let admitted = store
         .admit(
@@ -201,6 +219,7 @@ fn service_commands_bind_private_unit_to_root_and_remove_only_service_metadata()
                 source_sha256: "b".repeat(64),
             },
         )
+        .await
         .unwrap();
     assert!(matches!(admitted, Admission::Created(_)));
     for cmd in ["stop", "remove"] {
@@ -214,6 +233,7 @@ fn service_commands_bind_private_unit_to_root_and_remove_only_service_metadata()
     }
     store
         .transition(id, &"a".repeat(64), JobState::Prepared, JobState::Failed)
+        .await
         .unwrap();
 
     let status = invoke(

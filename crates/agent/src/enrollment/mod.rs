@@ -1,6 +1,6 @@
 //! Explicit, one-shot enrollment of a fresh user-owned Agent root.
 
-use crate::{AgentConfig, ReverseGateway, jobs};
+use crate::{AgentConfig, ReverseGateway, durable};
 use hostlink_hub::{EnrollRequest, EnrollResponse, GatewayEndpoint, MachineId};
 use rand::{RngExt, rng};
 use reqwest::{Client, Url, redirect::Policy};

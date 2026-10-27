@@ -58,3 +58,13 @@ Migration of deployed Agents, main/tag/release and production network writes sti
 separate explicit authorization.
 Native Windows11 and Win7 x64/x86 source-exact acceptance needed separately,
 including active-job update deferral, stopped-runtime handoff and rollback.
+
+
+Agent jobs are owned by `durable/` (Apalis SQLite payloads, transactional
+one-use started claims, private output and artifacts) and `ssh/jobs/` (frozen
+jobs-v1 framing and processkit execution). There is one database backend and
+one SSH execution carrier. Every pooled connection verifies WAL/FULL; the
+upstream setup routine that disables synchronous is deliberately bypassed in
+favor of Apalis public migrations. Automatic Apalis polling/orphan retries are
+not used. See [durable storage](AGENT_DURABLE_SQLITE.md) for recovery, migration
+and updater exclusion.

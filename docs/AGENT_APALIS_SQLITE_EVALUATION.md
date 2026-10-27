@@ -1,6 +1,13 @@
 # HostLink Agent jobs — Apalis SQLite 1.0.0 PoC (1C-1064)
 
-Status: **implemented and verified as an isolated experiment, NOT a production Agent replacement.**
+Historical PoC status: **isolated experiment, preserved unchanged.**
+
+The earlier decision below is superseded by user-authorized 1C-1073: the root
+Agent now uses Apalis SQLite in production code, under `durable/`, with a
+one-use claim instead of the automatic Apalis runner. See
+[the current storage/migration contract](AGENT_DURABLE_SQLITE.md). This document
+records the original isolated experiment and its limits; its native Windows
+receipt is not evidence for the new Agent backend.
 
 ## Goal and baseline
 
@@ -29,8 +36,9 @@ install an Agent, run live workers or migrate existing job records. The job
 model is representative, not the complete current Agent JobRecord schema.
 
 The PoC was subsequently integrated as a **standalone** experiment into the
-HostLink development tree on 2026-10-27. It is not a workspace member and
-does not enable scheduled jobs or replace the live Agent's `JobStore`.
+HostLink development tree on 2026-10-27. It remains outside the root workspace.
+That experiment did not replace the former Agent backend; the production
+migration was implemented separately under 1C-1073.
 On HOME Linux (Rust 1.99.1), its eight tests, fmt check, and strict Clippy
 passed; the original Windows 11 native 8/8 receipt covers the identical
 experiment source content.
@@ -75,7 +83,7 @@ configuration without a per-connection check.
 
 ## Size and dependencies
 
-Current production file sizes (physical lines):
+Pre-migration production file sizes (physical lines):
 - jobs/store.rs: 225
 - jobs/private_fs.rs: 226
 - jobs/artifacts.rs: 203, remains necessary
@@ -110,7 +118,7 @@ The isolated extension adds apalis-cron 1.0.0, cron 0.17.0 and UUID v5 to the Po
 
 ## Decision
 
-**Keep existing HostLink Agent JobStore for now.**
+**Historical decision before 1C-1073: retain the former backend pending an authorized production migration.**
 
 Apalis works and persists tasks, but we have not demonstrated lower TOTAL
 production code or preservation of no-replay/owner/state contracts without
@@ -118,6 +126,6 @@ custom SQL and guards. The ordinary Apalis orphan retry behavior conflicts
 with unrepeatable HostLink commands. Do not silently reinterpret those
 commands as safe to retry, and do not change live installed Agents.
 
-This PoC remains in a separate task branch. If automatic job retries become
+This PoC remains in a separate Cargo workspace as a read-only reference. If automatic job retries become
 an explicitly supported product feature later, Apalis is a plausible engine
 but needs production-equivalent crash/replay, migration and Win7 testing.

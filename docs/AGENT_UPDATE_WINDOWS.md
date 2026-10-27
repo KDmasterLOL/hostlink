@@ -77,7 +77,7 @@ also compiles the required `ureq` backend and `self-replace` dependency.
 ## Current implementation boundary
 
 `service.rs` now owns a crate-private maintenance receipt and coordinator
-primitives. The caller must hold the existing `jobs::acquire_update_lock` for
+primitives. The caller must hold the existing `durable::acquire_update_lock` for
 the full transaction. Entry verifies the current SID/root, marker, exact Run
 command, executable digest, and durable job state, then records maintenance in
 the owner marker. Managed login startup refuses that marker before it can start

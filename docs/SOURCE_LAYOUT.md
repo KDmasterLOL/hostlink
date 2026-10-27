@@ -27,12 +27,20 @@ does not certify production or registered Windows updater deployment.
 | Controller CLI and operator command dispatch | `crates/client/src/cli/{mod.rs,args.rs,commands/}`; `main.rs` is the binary entrypoint |
 | Managed Hub HTTP client, routes and trusted SSH pins | `crates/client/src/hub/{mod.rs,client.rs,config.rs,routes.rs}` |
 | Direct and gateway SSH | `crates/client/src/connect/`; `crates/agent/src/ssh/`; `crates/agent/src/tunnel/` |
-| Source-pinned tests / durable jobs | `crates/client/src/run/`; `crates/agent/src/jobs/` |
+| Source-pinned tests / durable jobs | `crates/client/src/run/`; `crates/agent/src/durable/`; `crates/agent/src/ssh/jobs/` |
 | Hub v2 endpoints and authoritative registry | `crates/hub/src/server/`; `crates/hub/src/state.rs` |
 | Fresh enrollment and source-pinned installation | `crates/agent/src/enrollment/`; `crates/client/src/bootstrap/` |
 | Linux service lifecycle | `crates/agent/src/service/linux/` (systemd --user) |
 | Windows user-owned service and maintenance | `crates/agent/src/service/windows/`, with admission, rollback and process ownership |
 | Agent update and ZIP security | `crates/agent/src/update/`, including `archive/`, `windows/` and `update_handoff/` for recovery |
+
+`durable/database.rs` keeps the cohesive private initialization, connection
+and immutable migration-ledger validation contract together; its extra lines
+are a security-contract exception. `durable/persistence.rs` keeps the cohesive
+Apalis payload, immutable claim
+validation and SQL row decoding together. `durable/tests.rs` and
+`ssh/jobs/tests.rs` are larger security/lifecycle regression suites; their
+scenarios exercise real SQLite and processes rather than mock backends.
 
 ## Verification
 

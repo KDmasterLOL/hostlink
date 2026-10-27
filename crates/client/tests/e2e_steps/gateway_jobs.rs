@@ -6,8 +6,8 @@ pub(super) async fn verify_durable_job(
     fixture: &GatewayFixture<'_>,
 ) -> HostConnection {
     let mut session = connect_retry(host).await;
-    // Durable JobStore only contains UUID-named job directories. Test-owned
-    // executables live in a separate private sibling, not inside state/jobs.
+    // SQLite job state and output files belong to the private Agent store.
+    // Test-owned executables live in a separate private sibling.
     let program_root = fixture.agent_root.parent().unwrap().join("programs");
     private_dir(&program_root);
     let program = program_root.join("managed-job-shell");

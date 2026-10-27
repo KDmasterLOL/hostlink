@@ -1,5 +1,5 @@
-use super::job_runtime::verify_job_source;
-use crate::jobs::JobSpec;
+use super::jobs::verify_job_source;
+use crate::durable::JobSpec;
 use sha2::{Digest as _, Sha256};
 use std::os::unix::fs::PermissionsExt;
 

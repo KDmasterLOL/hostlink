@@ -44,7 +44,7 @@ current table and source before treating any historical issue wording as open wo
 
 A1. Agent-owned staging and SFTP isolation (new child).
 Current issue: SFTP is rooted in jobs_root shared by ALL authorized controller keys, and open/read/write/stat/remove do not provide chmod/seal. Unix source verification refuses a writable uploaded file. A naive hostlink run command cannot function safely.
-- Bind SFTP access to the server-derived authenticated key fingerprint. Stage files in private artifacts/<key-fingerprint>, as a SIBLING of jobs_root under the same user-owned install root. Never store artifact directories inside the UUID-only jobs root, because jobs::active_ids assumes every entry is a job UUID.
+- Bind SFTP access to the server-derived authenticated key fingerprint. Stage files in private artifacts/<key-fingerprint>, as a SIBLING of jobs_root under the same user-owned install root. The private jobs root contains jobs.db, SQLite sidecars, a runner lock and bounded outputs/<UUID> directories; durable::active_ids rejects unknown or legacy entries.
 - Reject traversal, symlinks/reparse, cross-key access, unbounded files, overwriting a candidate, modified or partially uploaded contents, wrong SHA and unsafe owner/ACL.
 - Add one bounded versioned Seal request over the EXISTING hostlink-jobs-v1 SSH subsystem. Seal checks exact SHA/length, transforms the user-owned candidate to a non-writable executable (Unix 0500 / protected Windows user ACL), returns the Agent-resolved canonical absolute path. Repeated exact seal may be idempotent; mismatches fail. No new TCP/HTTP listener.
 - Preserve existing start/status/output wire schema and negative tests. Prove same user with two separate authorized keys cannot read/overwrite another key's upload.
@@ -68,7 +68,7 @@ B2. Windows7 x64 + x86 current source (new child).
 - x86 on WOW64 is NOT direct proof of Windows7 x86 32-bit OS; distinguish it. Report BLOCKED if the required target is unavailable.
 
 B3. Windows self-update handoff (existing 1C-1004/1C-991).
-- Preflight exact version, package and installed binary digests/ACL/target/owner under the shared JobStore lock. Prepared/Running/Interrupted/unknown state defers.
+- Preflight exact version, package and installed binary digests/ACL/target/owner under the shared durable admission/update lock. Prepared/Running/Interrupted/unknown state defers.
 - Running EXE cannot simply be overwritten: use a small separate verified updater helper, stop Agent only after no active job and correct owner, stage/publish/journal/relaunch or rollback. No Windows Service takeover and no legacy Toolkit updater.
 - Windows11 and Win7 native success/recovery/failure matrices required. If handoff unproven, remain Unsupported; do not claim migration complete.
 

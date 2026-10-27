@@ -1,6 +1,6 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use hostlink_agent::jobs::{JobId, JobSpec, JobState, JobStore, active_ids};
+use hostlink_agent::durable::{DurableStore, JobId, JobSpec, JobState, active_ids};
 use hostlink_agent::update::{
     AgentUpdateOutcome, AgentUpdateRequest, apply, finalize_fresh_install, verify_fresh_package,
 };
@@ -205,6 +205,21 @@ fn apply_empty_jobs(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutco
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&jobs, fs::Permissions::from_mode(0o700))?;
     }
+    // An installed Agent has an initialized durable database even when no
+    // jobs were admitted. A missing database must not let the updater infer
+    // that no active or interrupted operations existed.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let store = if jobs.join("jobs.db").try_exists()? {
+            DurableStore::open(&jobs).await?
+        } else {
+            DurableStore::initialize_fresh(&jobs).await?
+        };
+        store.close().await;
+        Ok::<(), io::Error>(())
+    })?;
     apply(request)
 }
 

@@ -3,8 +3,18 @@ use super::*;
 #[test]
 fn fresh_package_verifier_extracts_exact_manifest_and_installed_metadata() {
     let (temp, _root) = install_root();
-    let sidecar_path = PathBuf::from(env!("CARGO_BIN_EXE_hostlink-agent"));
-    let sidecar = fs::read(&sidecar_path).expect("read target Agent sidecar bytes");
+    let source_sidecar = PathBuf::from(env!("CARGO_BIN_EXE_hostlink-agent"));
+    let sidecar = fs::read(&source_sidecar).expect("read target Agent sidecar bytes");
+    // Cargo may atomically replace its target executable during another check.
+    // Run this exact private snapshot so current_exe remains the packaged source.
+    let sidecar_path = temp.path().join("verifier-sidecar");
+    fs::write(&sidecar_path, &sidecar).expect("stage exact private verifier sidecar");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&sidecar_path, fs::Permissions::from_mode(0o500))
+            .expect("private read-only verifier sidecar");
+    }
     let version = env!("CARGO_PKG_VERSION");
     let files = BTreeMap::from([("hostlink-agent".to_owned(), identity(&sidecar))]);
     let manifest = json!({

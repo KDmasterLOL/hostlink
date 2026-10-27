@@ -1,25 +1,7 @@
-#![allow(unused_imports)]
-use super::config::invalid_data;
 use super::*;
 
-pub(super) struct JobRuntime {
-    pub(super) store: JobStore,
-    pub(super) start_lock: Mutex<()>,
-    pub(super) slots: Arc<Semaphore>,
-    pub(super) channel_slots: Arc<Semaphore>,
-    pub(super) accepting: AtomicBool,
-    pub(super) shutdown: processkit::CancellationToken,
-    pub(super) active_jobs: std::sync::Mutex<HashMap<JobId, Arc<JobCancellation>>>,
-}
-
-/// Process cancellation is Agent-owned and unrelated to SSH channel lifetimes.
-pub(super) struct JobCancellation {
-    pub(super) process: processkit::CancellationToken,
-    pub(super) requested: AtomicBool,
-}
-
-/// Serves authenticated SSH/SFTP traffic on the configured loopback listener until shutdown.
-pub(super) fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
+/// Verifies the immutable source and platform launch context before process creation.
+pub(in crate::ssh) fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
     if !Path::new(&spec.program).is_absolute() || spec.program.contains('\0') {
         return Err(invalid_data("job executable must be an absolute path"));
     }
@@ -42,9 +24,9 @@ pub(super) fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
                 "durable jobs require a verified non-elevated, non-LocalSystem Windows user context",
             ));
         }
-        jobs::validate_private_path(program, false)?;
+        durable::validate_private_path(program, false)?;
         if let Some(parent) = program.parent() {
-            jobs::validate_private_path(parent, true)?;
+            durable::validate_private_path(parent, true)?;
         }
     }
     #[cfg(unix)]
@@ -152,7 +134,7 @@ pub(super) fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
             if metadata.file_attributes() & 0x400 != 0 {
                 return Err(invalid_data("job working directory is a reparse point"));
             }
-            jobs::validate_private_path(cwd, true)?;
+            durable::validate_private_path(cwd, true)?;
         }
     }
     Ok(program.to_path_buf())
@@ -200,172 +182,4 @@ fn digest_writer<'a>(digest: &'a mut Sha256) -> impl io::Write + 'a {
         }
     }
     DigestWriter(digest)
-}
-
-pub(super) async fn run_job(
-    runtime: Arc<JobRuntime>,
-    owner: String,
-    record: crate::jobs::JobRecord,
-    active: Arc<JobCancellation>,
-) {
-    let id = record.id;
-    if verify_job_source(&record.spec).is_err() {
-        let _ = runtime
-            .store
-            .transition(id, &owner, JobState::Running, JobState::Failed);
-        return;
-    }
-    let (out, out_sync) = match open_job_output(&runtime, id, JobOutput::Stdout) {
-        Ok(files) => files,
-        Err(_) => {
-            let _ = runtime
-                .store
-                .transition(id, &owner, JobState::Running, JobState::Failed);
-            return;
-        }
-    };
-    let (err, err_sync) = match open_job_output(&runtime, id, JobOutput::Stderr) {
-        Ok(files) => files,
-        Err(_) => {
-            let _ = runtime
-                .store
-                .transition(id, &owner, JobState::Running, JobState::Failed);
-            return;
-        }
-    };
-    let overflowed = Arc::new(AtomicBool::new(false));
-    let cancel = active.process.clone();
-    let mut command = processkit::Command::new(&record.spec.program)
-        .args(&record.spec.args)
-        .stdin(processkit::Stdin::empty())
-        .stdout_raw_tee(CappedOutputWriter::new(
-            out,
-            overflowed.clone(),
-            cancel.clone(),
-        ))
-        .stderr_raw_tee(CappedOutputWriter::new(
-            err,
-            overflowed.clone(),
-            cancel.clone(),
-        ))
-        .output_buffer(processkit::OutputBufferPolicy::bounded(256).with_max_bytes(64 * 1024))
-        .timeout(JOB_TIMEOUT)
-        .timeout_grace(Duration::from_secs(2))
-        .kill_on_parent_death()
-        .cancel_on(cancel);
-    if let Some(cwd) = &record.spec.cwd {
-        command = command.current_dir(cwd);
-    }
-    // ProcessKit owns timeout, cancellation and child cleanup. Windows uses its Job Object,
-    // including kill-on-close for the complete process tree; Linux uses its private process group.
-    let outcome = match command.start().await {
-        Ok(child) => child.drain().await,
-        Err(_) => {
-            let _ = runtime
-                .store
-                .transition(id, &owner, JobState::Running, JobState::Failed);
-            return;
-        }
-    };
-    let sync_results =
-        tokio::task::spawn_blocking(move || (out_sync.sync_all(), err_sync.sync_all())).await;
-    let overflow = overflowed.load(Ordering::Acquire);
-    let next = if runtime.shutdown.is_cancelled() {
-        JobState::Interrupted
-    } else if overflow
-        || sync_results.is_err()
-        || sync_results.is_ok_and(|(out, err)| out.is_err() || err.is_err())
-    {
-        JobState::Failed
-    } else if active.requested.load(Ordering::Acquire) {
-        // ProcessKit completed its child/tree drain. A verified cancellation is
-        // terminal non-success; unlike uncertain crash interruption it must not
-        // keep the Agent updater blocked forever.
-        match outcome {
-            Ok(_) => JobState::Failed,
-            Err(error) if matches!(error.reason(), processkit::ErrorReason::Cancelled { .. }) => {
-                // ProcessKit confirms full-tree teardown for Cancelled; only a
-                // Teardown/error with uncertain surviving processes stays blocked.
-                JobState::Failed
-            }
-            Err(_) => JobState::Interrupted,
-        }
-    } else {
-        match outcome {
-            Ok(processkit::Outcome::Exited(code)) => JobState::Exited { code },
-            Ok(
-                processkit::Outcome::Signalled(_)
-                | processkit::Outcome::TimedOut
-                | processkit::Outcome::InactivityTimedOut,
-            ) => JobState::Failed,
-            Err(_) => JobState::Failed,
-            _ => JobState::Failed,
-        }
-    };
-    let _ = runtime
-        .store
-        .transition(id, &owner, JobState::Running, next);
-}
-
-fn open_job_output(
-    runtime: &JobRuntime,
-    id: JobId,
-    stream: JobOutput,
-) -> io::Result<(tokio::fs::File, std::fs::File)> {
-    let file = jobs::open_output_append(&runtime.store.output_path(id, stream))?;
-    let sync_file = file.try_clone()?;
-    Ok((tokio::fs::File::from_std(file), sync_file))
-}
-
-struct CappedOutputWriter {
-    file: tokio::fs::File,
-    written: u64,
-    overflowed: Arc<AtomicBool>,
-    cancel: processkit::CancellationToken,
-}
-
-impl CappedOutputWriter {
-    fn new(
-        file: tokio::fs::File,
-        overflowed: Arc<AtomicBool>,
-        cancel: processkit::CancellationToken,
-    ) -> Self {
-        Self {
-            file,
-            written: 0,
-            overflowed,
-            cancel,
-        }
-    }
-}
-
-impl AsyncWrite for CappedOutputWriter {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buffer: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let remaining = jobs::MAX_JOB_OUTPUT_BYTES.saturating_sub(self.written) as usize;
-        if remaining == 0 && !buffer.is_empty() {
-            self.overflowed.store(true, Ordering::Release);
-            self.cancel.cancel();
-            return Poll::Ready(Err(io::Error::other("job output exceeds 8 MiB limit")));
-        }
-        let allowed = buffer.len().min(remaining);
-        match Pin::new(&mut self.file).poll_write(cx, &buffer[..allowed]) {
-            Poll::Ready(Ok(written)) => {
-                self.written += written as u64;
-                Poll::Ready(Ok(written))
-            }
-            other => other,
-        }
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.file).poll_flush(cx)
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.file).poll_shutdown(cx)
-    }
 }

@@ -169,6 +169,11 @@ async fn loopback_auth_and_exec_keep_binary_streams_and_exit_status() {
     }
     #[cfg(windows)]
     private_windows_test_path(&auth_path, false);
+    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs)
+        .await
+        .expect("initialize fresh private Agent SQLite fixture")
+        .close()
+        .await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("prebind loopback listener");
@@ -330,6 +335,11 @@ async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
         std::fs::set_permissions(&jobs, std::fs::Permissions::from_mode(0o700))
             .expect("private jobs root");
     }
+    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs)
+        .await
+        .expect("initialize fresh private Agent SQLite fixture")
+        .close()
+        .await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind loopback");
@@ -397,18 +407,50 @@ async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
             "source_sha256": source_sha256
         }
     });
-    let accepted = job_request(&mut session, &framed_json(&start)).await;
-    let accepted: serde_json::Value = serde_json::from_slice(&accepted).expect("parse start ack");
-    assert_eq!(accepted["ok"], true);
-    assert_eq!(accepted["id"], id);
+    let bytes = framed_json(&start);
+    let mut start_channel = session
+        .channel_open_session()
+        .await
+        .expect("open lost-ACK job channel");
+    start_channel
+        .request_subsystem(true, "hostlink-jobs-v1")
+        .await
+        .expect("request jobs subsystem");
+    loop {
+        match start_channel.wait().await {
+            Some(ChannelMsg::Success) => break,
+            Some(ChannelMsg::Failure) => panic!("jobs subsystem rejected request"),
+            Some(_) => {}
+            None => panic!("jobs channel closed before request"),
+        }
+    }
+    start_channel
+        .data(&(bytes.len() as u32).to_be_bytes()[..])
+        .await
+        .expect("send job frame length");
+    start_channel
+        .data(bytes.as_slice())
+        .await
+        .expect("send job request");
+    start_channel.eof().await.expect("finish job request");
+    // Observe a real side effect while deliberately never consuming the ACK.
+    // Reattachment below must return this operation without another launch.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !temp.path().join("launch-count").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("job starts before its acknowledgement is lost");
     session
         .disconnect(
             Disconnect::ByApplication,
-            "simulate lost SSH connection",
+            "simulate lost start acknowledgement",
             "en",
         )
         .await
         .expect("drop original session");
+    drop(start_channel);
 
     let mut resumed = connect(listen, &host_public).await;
     assert!(authenticate(&mut resumed, controller.clone()).await);
@@ -499,7 +541,7 @@ async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
     }
     assert_eq!(overflow_status["state"]["state"], "failed");
     assert_eq!(
-        std::fs::metadata(jobs.join(&overflow_id).join("stdout.bin"))
+        std::fs::metadata(jobs.join("outputs").join(&overflow_id).join("stdout.bin"))
             .expect("bounded overflow log")
             .len(),
         8 * 1024 * 1024

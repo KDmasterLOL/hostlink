@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn active_job_blocks_update_despite_unrelated_empty_jobs_directory() {
+#[tokio::test]
+async fn active_job_blocks_update_despite_unrelated_empty_jobs_directory() {
     let (_temp, root) = install_root();
     let (archive, digest) = package(&root, "2.0.0", b"new exact Agent binary");
     let jobs = root.join("jobs");
@@ -15,7 +15,9 @@ fn active_job_blocks_update_despite_unrelated_empty_jobs_directory() {
         fs::set_permissions(&unrelated_empty_jobs, fs::Permissions::from_mode(0o700))
             .expect("private unrelated jobs directory");
     }
-    let store = JobStore::open(&jobs).expect("job store");
+    let store = DurableStore::initialize_fresh(&jobs)
+        .await
+        .expect("job store");
     let id = JobId::new();
     let owner = "1".repeat(64);
     store
@@ -29,6 +31,7 @@ fn active_job_blocks_update_despite_unrelated_empty_jobs_directory() {
                 source_sha256: "2".repeat(64),
             },
         )
+        .await
         .expect("admit prepared job");
 
     let update = request(&root, &archive, "2.0.0", digest);
@@ -48,15 +51,14 @@ fn active_job_blocks_update_despite_unrelated_empty_jobs_directory() {
         active_ids(&jobs).expect("job stays active"),
         vec![id.to_string()]
     );
-    store
-        .transition(id, &owner, JobState::Prepared, JobState::Running)
-        .expect("job is running");
+    store.claim_start(id, &owner).await.expect("job is running");
     assert!(matches!(
         apply(&update).expect("running job defers update"),
         AgentUpdateOutcome::DeferredActiveJobs { job_ids } if job_ids == vec![id.to_string()]
     ));
     store
         .transition(id, &owner, JobState::Running, JobState::Interrupted)
+        .await
         .expect("job is interrupted");
     assert!(matches!(
         apply(&update).expect("interrupted job defers update"),

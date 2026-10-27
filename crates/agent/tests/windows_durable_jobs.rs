@@ -1,6 +1,10 @@
 #![cfg(windows)]
 
-use hostlink_agent::{AgentConfig, ssh};
+use hostlink_agent::{
+    AgentConfig,
+    durable::{DurableStore, JobId, JobSpec},
+    ssh,
+};
 use russh::client::{self, Handler};
 use russh::keys::{
     Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyBase64, PublicKeyOrCertificate,
@@ -150,16 +154,6 @@ struct TestJobSpec {
     source_sha256: String,
 }
 
-#[derive(Serialize)]
-struct InterruptedJobRecord<'a> {
-    version: u32,
-    id: &'a str,
-    controller_key_sha256: String,
-    request_sha256: String,
-    spec: &'a TestJobSpec,
-    state: serde_json::Value,
-}
-
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -254,25 +248,31 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
         cwd: Some(temp.path().to_path_buf()),
         source_sha256: source_sha256.clone(),
     };
-    let spec_bytes = serde_json::to_vec(&unknown_spec).unwrap();
-    let record = InterruptedJobRecord {
-        version: 1,
-        id: &unknown_id,
-        controller_key_sha256: sha256(&controller.public_key().public_key_bytes()),
-        request_sha256: sha256(&spec_bytes),
-        spec: &unknown_spec,
-        state: serde_json::json!({"state":"running"}),
-    };
-    let unknown_dir = jobs.join(&unknown_id);
-    std::fs::create_dir(&unknown_dir).unwrap();
-    private_windows_test_path(&unknown_dir, true);
-    let record_path = unknown_dir.join("record.json");
-    std::fs::write(
-        &record_path,
-        serde_json::to_vec(&record).expect("persist crash-state record"),
-    )
-    .unwrap();
-    private_windows_test_path(&record_path, false);
+    // Commit the real one-use start claim before simulating Agent loss.
+    // Recovery must retain UNKNOWN without launching the OS process.
+    let store = DurableStore::initialize_fresh(&jobs)
+        .await
+        .expect("private SQLite store");
+    let unknown_job_id = JobId::parse(&unknown_id).expect("canonical fixture UUID");
+    let owner = sha256(&controller.public_key().public_key_bytes());
+    store
+        .admit(
+            unknown_job_id,
+            &owner,
+            &JobSpec {
+                program: unknown_spec.program.clone(),
+                args: unknown_spec.args.clone(),
+                cwd: unknown_spec.cwd.clone(),
+                source_sha256: unknown_spec.source_sha256.clone(),
+            },
+        )
+        .await
+        .expect("admit durable pre-crash fixture");
+    store
+        .claim_start(unknown_job_id, &owner)
+        .await
+        .expect("commit irreversible start marker");
+    store.close().await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let listen = listener.local_addr().unwrap();

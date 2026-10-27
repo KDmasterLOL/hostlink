@@ -271,6 +271,11 @@ async fn unavailable_primary_fails_over_to_pinned_route_and_controller_reaches_a
         std::fs::set_permissions(&jobs, std::fs::Permissions::from_mode(0o700))
             .expect("Agent job store must be private");
     }
+    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs)
+        .await
+        .expect("initialize fresh private Agent SQLite fixture")
+        .close()
+        .await;
 
     let reverse_port = unused_loopback_port();
     let unavailable = unused_loopback_port();

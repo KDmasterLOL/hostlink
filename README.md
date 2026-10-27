@@ -107,6 +107,21 @@ UUID is printed **before** the first start request; on a lost acknowledgement,
 query status by UUID instead of resubmitting. Ordinary SSH `exec` remains
 channel-owned and does **not** survive a disconnect.
 
+Agent durable records now use pinned Apalis SQLite 1.0.0 and SQLx 0.9.0 in the
+normal root workspace. The database uses WAL and per-connection verified FULL
+synchronization. One immutable started claim commits before process execution;
+retries, lost ACKs and restarts never replay it. Interrupted remains UNKNOWN
+and prevents Agent replacement. Private raw output and sealed artifacts retain
+their existing bounds and owner checks. The jobs-v1 Client wire is unchanged.
+Fresh enrollment explicitly initializes SQLite in a private empty jobs root.
+Runtime opening requires the existing database and matching migration history;
+missing DBs are rejected even in empty or runner-only roots. Reopening never
+initializes or migrates stored state. Existing legacy job directories fail
+closed without modification; see the
+[migration and storage contract](docs/AGENT_DURABLE_SQLITE.md). The isolated
+`experiments/agent-apalis-poc` remains a separate, unchanged reference workspace.
+
+
 The client also supports Hub v2 inventory and named host selection while
 keeping explicit `--config PATH` as a mutually exclusive option. Start with
 `hostlink hub configure`, then use `hostlink list` for registry data or

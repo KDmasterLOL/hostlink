@@ -47,7 +47,7 @@ impl russh_sftp::server::Handler for SftpSession {
             {
                 return Err(StatusCode::PermissionDenied);
             }
-            if self.upload_count().await? >= crate::jobs::MAX_ARTIFACTS_PER_CONTROLLER {
+            if self.upload_count().await? >= crate::durable::MAX_ARTIFACTS_PER_CONTROLLER {
                 return Err(StatusCode::Failure);
             }
         }
@@ -72,7 +72,7 @@ impl russh_sftp::server::Handler for SftpSession {
         let file = options.open(path).await.map_err(status_from_io)?;
         if create {
             let over_limit = match self.upload_count().await {
-                Ok(count) => count > crate::jobs::MAX_ARTIFACTS_PER_CONTROLLER,
+                Ok(count) => count > crate::durable::MAX_ARTIFACTS_PER_CONTROLLER,
                 Err(error) => {
                     drop(file);
                     let _ = tokio::fs::remove_file(self.root.join(&filename)).await;
@@ -144,7 +144,7 @@ impl russh_sftp::server::Handler for SftpSession {
         let end = offset
             .checked_add(data.len() as u64)
             .ok_or(StatusCode::BadMessage)?;
-        if end > crate::jobs::MAX_ARTIFACT_BYTES
+        if end > crate::durable::MAX_ARTIFACT_BYTES
             || f.write_ranges
                 .iter()
                 .any(|range| offset < range.end && range.start < end)

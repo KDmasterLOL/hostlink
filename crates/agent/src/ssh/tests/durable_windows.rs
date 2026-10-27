@@ -1,6 +1,6 @@
-use super::job_runtime::*;
+use super::jobs::*;
 use super::*;
-use crate::jobs::{Admission, JobId, JobSpec, JobState, JobStore};
+use crate::durable::{Admission, DurableStore, JobId, JobSpec, JobState};
 use std::process::{Command, Stdio};
 
 #[test]
@@ -65,7 +65,9 @@ async fn timeout_cancels_descendants_and_records_failure() {
     let jobs_root = temp.path().join("jobs");
     std::fs::create_dir(&jobs_root).unwrap();
     private_test_path(&jobs_root, true);
-    let store = JobStore::open(jobs_root).expect("open private job store");
+    let store = DurableStore::initialize_fresh(jobs_root)
+        .await
+        .expect("open private job store");
     let owner = "e".repeat(64);
     let id = JobId::new();
     let spec = JobSpec {
@@ -79,14 +81,14 @@ async fn timeout_cancels_descendants_and_records_failure() {
         cwd: Some(temp.path().to_path_buf()),
         source_sha256,
     };
-    let Admission::Created(_) = store.admit(id, &owner, &spec).unwrap() else {
+    let Admission::Created(_) = store.admit(id, &owner, &spec).await.unwrap() else {
         panic!("new test job ID must be created");
     };
-    let record = store
-        .transition(id, &owner, JobState::Prepared, JobState::Running)
-        .unwrap();
+    let record = store.claim_start(id, &owner).await.unwrap();
+    let runner = store.acquire_runner().expect("exclusive runtime lease");
     let runtime = Arc::new(JobRuntime {
         store,
+        _runner: runner,
         start_lock: Mutex::new(()),
         slots: Arc::new(Semaphore::new(MAX_ACTIVE_JOBS)),
         channel_slots: Arc::new(Semaphore::new(MAX_JOB_CHANNELS)),
@@ -126,11 +128,12 @@ async fn timeout_cancels_descendants_and_records_failure() {
         }
         let cleanup = tokio::time::timeout(Duration::from_secs(10), worker).await;
         let cleanup_status = match cleanup {
-            Ok(Ok(())) => "completed".to_owned(),
+            Ok(Ok(Ok(()))) => "completed".to_owned(),
+            Ok(Ok(Err(error))) => format!("state persistence failed: {error}"),
             Ok(Err(error)) => format!("worker task failed: {error}"),
             Err(_) => "worker cleanup deadline exceeded".to_owned(),
         };
-        let state = runtime.store.lookup(id, &owner).unwrap().state;
+        let state = runtime.store.lookup(id, &owner).await.unwrap().state;
         let stdout = timeout_fixture_output(&runtime.store, id, JobOutput::Stdout, temp.path());
         let stderr = timeout_fixture_output(&runtime.store, id, JobOutput::Stderr, temp.path());
         panic!(
@@ -145,9 +148,10 @@ async fn timeout_cancels_descendants_and_records_failure() {
     tokio::time::timeout(Duration::from_secs(40), worker)
         .await
         .expect("timed-out Agent worker teardown deadline")
-        .unwrap();
+        .unwrap()
+        .expect("persist worker outcome");
     assert_eq!(
-        runtime.store.lookup(id, &owner).unwrap().state,
+        runtime.store.lookup(id, &owner).await.unwrap().state,
         JobState::Failed,
         "a timed-out durable job cannot be recorded as successful"
     );
@@ -164,9 +168,9 @@ async fn timeout_cancels_descendants_and_records_failure() {
 }
 
 fn timeout_fixture_output(
-    store: &JobStore,
+    store: &DurableStore,
     id: JobId,
-    stream: crate::jobs::JobOutput,
+    stream: crate::durable::JobOutput,
     private_root: &Path,
 ) -> String {
     const MAX_DIAGNOSTIC_BYTES: usize = 4096;

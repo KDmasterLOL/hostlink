@@ -176,7 +176,11 @@ async fn unavailable_primary_fails_over_and_pinned_nested_agent_execs_and_sftp()
     let jobs = root.path().join("jobs");
     std::fs::create_dir(&jobs).unwrap();
     protect_fixture_path(&jobs, true);
-    hostlink_agent::jobs::JobStore::open(&jobs).expect("private Agent fixture JobStore");
+    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs)
+        .await
+        .expect("private Agent fixture SQLite store")
+        .close()
+        .await;
     let agent_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let agent_address = agent_listener.local_addr().unwrap();
     let reverse_port = 43127;

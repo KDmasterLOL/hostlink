@@ -17,6 +17,11 @@ async fn run_cli_seals_binary_and_idempotently_returns_exact_nonzero_exit() {
     let jobs = temp.path().join("jobs");
     fs::create_dir(&jobs).unwrap();
     fs::set_permissions(&jobs, fs::Permissions::from_mode(0o700)).unwrap();
+    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs)
+        .await
+        .expect("initialize fresh private Agent SQLite fixture")
+        .close()
+        .await;
 
     let agent_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
     let controller_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();

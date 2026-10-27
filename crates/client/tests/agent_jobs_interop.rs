@@ -26,6 +26,11 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
     let jobs = root.path().join("jobs");
     fs::create_dir(&jobs).expect("jobs dir");
     fs::set_permissions(&jobs, fs::Permissions::from_mode(0o700)).unwrap();
+    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs)
+        .await
+        .expect("initialize fresh private Agent SQLite fixture")
+        .close()
+        .await;
 
     let host = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
     let first = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
@@ -296,7 +301,7 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
         "ProcessKit must kill the cancellable job's descendant"
     );
     assert!(
-        hostlink_agent::jobs::active_ids(&jobs_probe)
+        hostlink_agent::durable::active_ids(&jobs_probe)
             .unwrap()
             .is_empty(),
         "completed cancellation must no longer block Agent update"

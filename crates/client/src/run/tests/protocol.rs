@@ -28,7 +28,7 @@ fn output_request() -> Output {
 
 #[test]
 fn lifecycle_states_roundtrip_with_exact_agent_wire_shape() {
-    use hostlink_agent::jobs::JobState as AgentState;
+    use hostlink_agent::durable::JobState as AgentState;
     for (client, agent, wire) in [
         (
             JobState::Prepared,
