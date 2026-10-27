@@ -523,6 +523,35 @@ async fn missing_exited_output_is_an_error_and_never_a_fabricated_eof() {
 }
 
 #[tokio::test]
+async fn claimed_failed_output_loss_is_never_reported_as_empty_eof() {
+    let (_temp, store) = fixture().await;
+    let id = JobId::new();
+    store.admit(id, &owner(), &sample()).await.unwrap();
+    store.claim_start(id, &owner()).await.unwrap();
+    for stream in [JobOutput::Stdout, JobOutput::Stderr] {
+        let mut output = open_output_append(&store.output_path(id, stream)).unwrap();
+        output.write_all(b"partial output").unwrap();
+        output.sync_all().unwrap();
+    }
+    store
+        .transition(id, &owner(), JobState::Running, JobState::Failed)
+        .await
+        .unwrap();
+    fs::remove_file(store.output_path(id, JobOutput::Stdout)).unwrap();
+    assert!(
+        store
+            .read_output(id, &owner(), JobOutput::Stdout, 0)
+            .await
+            .is_err(),
+        "a claimed Failed job must not falsely return empty EOF"
+    );
+    assert!(
+        active_ids(&store.root).is_err(),
+        "lost claimed output must block update safety checks"
+    );
+}
+
+#[tokio::test]
 async fn fresh_initialization_refuses_existing_store_and_upgrade_open_preserves_identity() {
     let (_temp, store) = fixture().await;
     let id = JobId::new();

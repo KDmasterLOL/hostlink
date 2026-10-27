@@ -69,11 +69,21 @@ impl DurableStore {
         offset: u64,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
         let record = self.lookup(id, owner).await?;
+        // Once a process attempt was claimed, terminal failure must not
+        // silently turn lost output files into successful empty EOF.
+        let claimed: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM StartedClaims WHERE job_id=?)")
+                .bind(id.to_string())
+                .fetch_one(&self.pool)
+                .await
+                .map_err(io::Error::other)?;
+        let expects_output = matches!(record.state, JobState::Exited { .. })
+            || (record.state == JobState::Failed && claimed != 0);
         let dir = self.output_dir(id);
         match fs::symlink_metadata(&dir) {
             Ok(_) => validate_private_path(&dir, true)?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                if matches!(record.state, JobState::Exited { .. }) {
+                if expects_output {
                     return Err(invalid(
                         "terminal job output is missing; reconcile lost output",
                     ));
@@ -88,7 +98,7 @@ impl DurableStore {
         let mut file = match read_bounded_output(&self.output_path(id, stream)) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                if matches!(record.state, JobState::Exited { .. }) {
+                if expects_output {
                     return Err(invalid(
                         "terminal job output is missing; reconcile lost output",
                     ));

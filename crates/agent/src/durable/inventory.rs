@@ -49,6 +49,17 @@ async fn inventory(
         let (record, _) = read_record(&mut tx, id, allow_orphan).await?;
         records.push(record);
     }
+    let started: HashSet<String> =
+        sqlx::query_scalar::<_, String>("SELECT job_id FROM StartedClaims LIMIT ?")
+            .bind((MAX_JOBS + 1) as i64)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(io::Error::other)?
+            .into_iter()
+            .collect();
+    if started.len() > MAX_JOBS {
+        return Err(invalid("too many started claims to prove update safety"));
+    }
     tx.commit().await.map_err(io::Error::other)?;
     let ids: HashSet<_> = records.iter().map(|record| record.id).collect();
     let outputs = root.join("outputs");
@@ -85,7 +96,9 @@ async fn inventory(
         }
     }
     for record in &records {
-        if matches!(record.state, JobState::Exited { .. }) {
+        if matches!(record.state, JobState::Exited { .. })
+            || (record.state == JobState::Failed && started.contains(&record.id.to_string()))
+        {
             let dir = root.join("outputs").join(record.id.to_string());
             validate_private_path(&dir, true)?;
             read_bounded_output(&dir.join("stdout.bin"))?;
