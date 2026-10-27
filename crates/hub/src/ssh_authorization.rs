@@ -22,7 +22,7 @@ pub(crate) async fn lookup(
     headers: HeaderMap,
     Json(request): Json<LookupRequest>,
 ) -> Result<Json<LookupResponse>, HubError> {
-    if !crate::HubConfig::authorized(&headers, app.config.gateway_lookup_token.expose_secret()) {
+    if !crate::server::authorized(&headers, app.config.gateway_lookup_token.expose_secret()) {
         return Err(HubError::Unauthorized);
     }
     let host = tokio::task::spawn_blocking(move || {
