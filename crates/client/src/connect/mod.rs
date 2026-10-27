@@ -11,11 +11,11 @@ pub(crate) use session::{MAX_TRANSFER_BYTES, OPERATION_TIMEOUT};
 #[cfg(test)]
 pub(crate) use session::{PinHandler, connect_stream_authenticated};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use identity::{MAX_IDENTITY_BYTES, load_identity};
 #[cfg(test)]
 use russh::keys;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::fs;
 
 #[cfg(test)]
