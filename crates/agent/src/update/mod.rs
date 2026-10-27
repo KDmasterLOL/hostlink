@@ -11,6 +11,7 @@ use std::{io, path::PathBuf};
 
 mod archive;
 mod bootstrap;
+#[cfg(not(windows))]
 mod linux;
 mod manifest;
 mod private_fs;

@@ -4,16 +4,17 @@ use super::super::manifest::{
     InstallMetadata, PackageManifest, package_files, read_install_metadata, validate_installed,
 };
 use super::super::private_fs::{
-    hash_file, is_reparse_point, open_private_file, validate_path_has_no_reparse_components,
+    hash_file, is_reparse_point, open_private_file, set_private_directory,
+    set_staged_file_permissions, validate_path_has_no_reparse_components,
 };
 use super::super::{
     AgentUpdateOutcome, AgentUpdateRequest, EXECUTABLE_BASE, INSTALL_METADATA, MAX_ENTRY_BYTES,
-    invalid, invalid_owned,
+    MAX_MANIFEST_BYTES, invalid, invalid_owned,
 };
 use super::fs::{
     copy_private_synced, create_private_directory, reject_running_agent, same_windows_file,
-    set_private_directory, set_staged_file_permissions, sha256_hex, validate_windows_private_acl,
-    windows_file_identity, write_private_synced,
+    sha256_hex, validate_windows_private_acl, verify_windows_private_file, windows_file_identity,
+    write_private_synced,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -23,7 +24,7 @@ use std::{
 };
 
 #[cfg(windows)]
-pub(super) fn publish_windows(
+pub(in crate::update) fn publish_windows(
     root: &Path,
     metadata_path: &Path,
     request: &AgentUpdateRequest,
@@ -269,13 +270,13 @@ pub(super) fn publish_windows(
 }
 
 #[cfg(windows)]
-pub(super) fn ensure_windows_offline_caller(root: &Path) -> io::Result<()> {
+pub(in crate::update) fn ensure_windows_offline_caller(root: &Path) -> io::Result<()> {
     ensure_windows_separate_updater(root)?;
     reject_running_agent(&root.join("bin").join("hostlink-agent.exe"))
 }
 
 #[cfg(windows)]
-pub(super) fn ensure_windows_separate_updater(root: &Path) -> io::Result<()> {
+pub(in crate::update) fn ensure_windows_separate_updater(root: &Path) -> io::Result<()> {
     let updater = std::env::current_exe()?;
     let updater_metadata = fs::symlink_metadata(&updater)?;
     if !updater_metadata.is_file()

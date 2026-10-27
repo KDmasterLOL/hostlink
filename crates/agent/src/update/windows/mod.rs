@@ -7,7 +7,9 @@ mod recovery;
 mod tests;
 
 pub(crate) use fs::reject_running_agent;
-pub(super) use fs::{set_windows_private_acl, validate_windows_private_acl};
+pub(super) use fs::{
+    create_private_directory, set_windows_private_acl, validate_windows_private_acl,
+};
 pub(super) use publication::{
     ensure_windows_offline_caller, ensure_windows_separate_updater, publish_windows,
 };

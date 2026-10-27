@@ -2,13 +2,14 @@
 
 use super::super::{INSTALL_METADATA, MAX_ENTRY_BYTES, invalid, invalid_owned};
 use super::fs::validate_windows_private_acl;
-use super::fs::{create_private_directory, set_private_directory, write_private_synced};
+use super::fs::{create_private_directory, write_private_synced};
 use super::publication::{
     cleanup_windows_transaction, rollback_windows, validate_windows_transaction_children,
 };
 use crate::update::manifest::{read_install_metadata, validate_installed};
 use crate::update::private_fs::{
-    is_reparse_point, open_private_file, validate_path_has_no_reparse_components,
+    hash_file, is_reparse_point, open_private_file, set_private_directory,
+    validate_path_has_no_reparse_components,
 };
 use std::{
     fs::{self, File},
@@ -17,7 +18,7 @@ use std::{
 };
 
 #[cfg(windows)]
-pub(super) fn recover_windows_handoff(
+pub(in crate::update) fn recover_windows_handoff(
     root: &Path,
     force_rollback: bool,
     restarted_new_healthy: bool,
