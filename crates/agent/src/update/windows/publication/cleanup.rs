@@ -27,7 +27,7 @@ fn windows_transaction_candidates() -> [&'static str; 8] {
 }
 
 #[cfg(windows)]
-pub(super) fn validate_windows_transaction_children(
+pub(in crate::update::windows) fn validate_windows_transaction_children(
     directory: &Path,
     identity: &crate::update_handoff::UpdateIdentity,
 ) -> io::Result<Vec<(PathBuf, u32, u64)>> {
@@ -83,7 +83,7 @@ pub(super) fn validate_windows_transaction_children(
 }
 
 #[cfg(windows)]
-pub(super) fn cleanup_windows_transaction(
+pub(in crate::update::windows) fn cleanup_windows_transaction(
     journal_path: &Path,
     directory: &Path,
     identity: &crate::update_handoff::UpdateIdentity,
