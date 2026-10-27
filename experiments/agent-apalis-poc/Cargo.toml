@@ -9,6 +9,8 @@ publish = false
 
 [dependencies]
 apalis-core = "=1.0.0"
+apalis-cron = "=1.0.0"
+cron = "=0.17.0"
 apalis-sqlite = { version = "=1.0.0", default-features = true }
 futures = "0.3.34"
 serde = { version = "1", features = ["derive"] }
@@ -17,5 +19,5 @@ sha2 = "0.10"
 sqlx = { version = "=0.9.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ulid = "3"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 tempfile = "3"

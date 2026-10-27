@@ -37,6 +37,9 @@ pub struct JobRecord {
     pub owner: String,
     pub request_sha256: String,
     pub spec: JobSpec,
+    /// An optional immutable UTC Unix timestamp; None means eligible immediately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_at: Option<u64>,
 }
 
 impl JobRecord {
@@ -47,7 +50,13 @@ impl JobRecord {
             owner: owner.into(),
             request_sha256,
             spec,
+            run_at: None,
         })
+    }
+
+    pub fn schedule_at(mut self, utc_unix_seconds: u64) -> Self {
+        self.run_at = Some(utc_unix_seconds);
+        self
     }
 }
 
@@ -63,6 +72,7 @@ pub struct StoredJob {
     pub status: String,
     pub attempts: i64,
     pub max_attempts: i64,
+    pub run_at: i64,
     pub record: JobRecord,
 }
 
@@ -103,6 +113,9 @@ impl ApalisJobStore {
             || record.owner.len() != 64
             || record.spec.program.is_empty()
             || record.spec.source_sha256.len() != 64
+            || record
+                .run_at
+                .is_some_and(|time| time == 0 || time > i64::MAX as u64)
             || format!("{:x}", Sha256::digest(serde_json::to_vec(&record.spec)?))
                 != record.request_sha256
         {
@@ -111,12 +124,14 @@ impl ApalisJobStore {
         let apalis_id = TaskId::from_ulid(ulid::Ulid::generate());
         let assigned_id = apalis_id.to_string();
         let data = serde_json::to_vec(record)?;
-        let task = TaskBuilder::new(data)
+        let mut task = TaskBuilder::new(data)
             .task_id(apalis_id)
             .idempotency_key(record.id.clone())
-            .max_attempts(1)
-            .build();
-        self.backend.send(task).await?;
+            .max_attempts(1);
+        if let Some(run_at) = record.run_at {
+            task = task.run_at_timestamp(run_at);
+        }
+        self.backend.send(task.build()).await?;
         let actual = self.get(&record.id).await?.ok_or("lost admitted record")?;
         if actual.record != *record {
             return Err("same JobId submitted with conflicting command or owner".into());
@@ -130,7 +145,7 @@ impl ApalisJobStore {
 
     pub async fn get(&self, uuid: &str) -> Result<Option<StoredJob>> {
         let row = sqlx::query(
-            "SELECT id, status, attempts, max_attempts, job \
+            "SELECT id, status, attempts, max_attempts, run_at, job \
              FROM Jobs WHERE job_type=? AND idempotency_key=?",
         )
         .bind(QUEUE)
@@ -143,6 +158,7 @@ impl ApalisJobStore {
                 status: row.try_get("status")?,
                 attempts: row.try_get("attempts")?,
                 max_attempts: row.try_get("max_attempts")?,
+                run_at: row.try_get("run_at")?,
                 record: serde_json::from_slice(row.try_get("job")?)?,
             })
         })
@@ -302,6 +318,98 @@ mod tests {
             (Admission::Created, Admission::Existing) | (Admission::Existing, Admission::Created)
         ));
         assert_eq!(first.queue_rows().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn delayed_job_is_persisted_and_deduplicated_without_shifting_schedule() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.db");
+        let id = Uuid::new_v4();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let deadline = now + 3_600;
+        let record = JobRecord::new(id, &"b".repeat(64), spec("delayed-command"))
+            .unwrap()
+            .schedule_at(deadline);
+
+        {
+            let mut store = ApalisJobStore::open(&path).await.unwrap();
+            assert_eq!(store.admit(&record).await.unwrap(), Admission::Created);
+            assert_eq!(store.admit(&record).await.unwrap(), Admission::Existing);
+            let queued = store.get(&record.id).await.unwrap().unwrap();
+            assert_eq!(queued.status, "Pending");
+            assert_eq!(queued.run_at, deadline as i64);
+            let due: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM Jobs WHERE job_type=? AND status='Pending' AND run_at<=?",
+            )
+            .bind(QUEUE)
+            .bind(now as i64)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+            assert_eq!(due, 0, "a delayed task must not become eligible early");
+        }
+
+        let mut reopened = ApalisJobStore::open(&path).await.unwrap();
+        assert_eq!(reopened.admit(&record).await.unwrap(), Admission::Existing);
+        assert_eq!(
+            reopened.get(&record.id).await.unwrap().unwrap().run_at,
+            deadline as i64
+        );
+        let shifted = record.clone().schedule_at(deadline + 60);
+        assert!(reopened.admit(&shifted).await.is_err());
+        assert_eq!(reopened.queue_rows().await.unwrap(), 1);
+        assert_eq!(
+            reopened.get(&record.id).await.unwrap().unwrap().run_at,
+            deadline as i64
+        );
+    }
+
+    #[tokio::test]
+    async fn cron_produces_a_durable_deduplicated_occurrence_without_running_commands() {
+        use apalis_cron::CronScheduler;
+        use cron::Schedule;
+        use futures::StreamExt;
+        use std::{str::FromStr, time::Duration};
+
+        let schedule = Schedule::from_str("*/1 * * * * * *").unwrap();
+        // Exercise the real Apalis cron stream, but do NOT run any worker.
+        let stream = CronScheduler::new(schedule).into_stream();
+        let mut stream = Box::pin(stream);
+        let tick = tokio::time::timeout(Duration::from_secs(4), stream.next())
+            .await
+            .expect("cron did not produce a tick")
+            .expect("cron stream ended")
+            .expect("cron tick failed");
+        let timestamp = tick.get_timestamp();
+        let occurrence_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_OID,
+            format!("synthetic-schedule-id:{timestamp}").as_bytes(),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.db");
+        let record = JobRecord::new(
+            occurrence_id,
+            &"b".repeat(64),
+            spec("synthetic-command-not-executed"),
+        )
+        .unwrap()
+        .schedule_at(timestamp);
+        let mut store = ApalisJobStore::open(&path).await.unwrap();
+        assert_eq!(store.admit(&record).await.unwrap(), Admission::Created);
+        drop(store);
+
+        // Re-enqueueing the same occurrence after a restart is idempotent.
+        let mut store = ApalisJobStore::open(&path).await.unwrap();
+        assert_eq!(store.admit(&record).await.unwrap(), Admission::Existing);
+        assert_eq!(store.queue_rows().await.unwrap(), 1);
+        assert_eq!(
+            store.get(&record.id).await.unwrap().unwrap().run_at,
+            timestamp as i64
+        );
     }
 
     #[tokio::test]
