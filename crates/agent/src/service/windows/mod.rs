@@ -72,7 +72,7 @@ pub(super) struct MaintenanceAdmission {
 /// Opaque, in-process evidence captured before the login registration is disabled.
 /// The durable marker retains the prior executable digest for crash-safe rollback.
 #[must_use = "retain the receipt through publication, registration, and any rollback"]
-pub(super) struct MaintenanceReceipt {
+pub(crate) struct MaintenanceReceipt {
     pub(super) old_marker: Vec<u8>,
     pub(super) old_record: InstallRecord,
     pub(super) run_command: String,
@@ -87,11 +87,13 @@ mod process;
 mod registration;
 
 use admission::*;
+#[cfg(test)]
+use lifecycle::refuse_maintenance;
 pub use lifecycle::{
     control_loop, ensure_update_unregistered, install, remove, start, status, stop,
     validate_managed_run, validate_update_root,
 };
-use lifecycle::{refuse_active_jobs, refuse_maintenance, verify_registration};
+use lifecycle::{refuse_active_jobs, verify_registration};
 pub(crate) use maintenance::{
     begin_maintenance, begin_recovery_maintenance, has_registration, is_in_maintenance,
     recover_maintenance_after_inventory, recover_maintenance_stop, register_maintenance,
