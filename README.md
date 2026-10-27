@@ -21,7 +21,11 @@ process, service marker, or durable jobs. It stages and hashes the exact old/new
 inventory, records a journal, atomically replaces files with ACL preservation,
 and rolls back in-process failures. Registered/live Agent handoff and automatic
 recovery after interruption remain unsupported. See
-[docs/AGENT_UPDATE_WINDOWS.md](docs/AGENT_UPDATE_WINDOWS.md).
+[docs/AGENT_UPDATE_WINDOWS.md](docs/AGENT_UPDATE_WINDOWS.md). The opt-in native
+Windows 11 registered-Agent acceptance harness is
+[`scripts/verify-windows-agent-updater-native.ps1`](scripts/verify-windows-agent-updater-native.ps1);
+it requires a separately verified disposable user profile and source-exact
+build/package receipts.
 
 The original HostLink `dev` tree remains unchanged. This experimental branch
 has runnable CLI binaries; it is **not ready for deployment or fleet migration**.

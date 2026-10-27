@@ -154,3 +154,109 @@ recovery, failed restart and rollback, idempotent recovery, and no login
 auto-run race or job replay. Windows update tests must never use the real WORK
 profile or an installed service. Cross-compilation and Linux recovery-planner
 tests do not prove Windows publication behavior.
+
+## Windows 11 live registered-Agent acceptance
+
+`scripts/verify-windows-agent-updater-native.ps1` runs the real Agent CLI in a
+disposable, standard, interactive Windows 11 x64 user profile. It writes only
+the OS-resolved `LocalAppData\HostLink\Agent` tree and its one derived
+`HKCU\...\Run` value. It refuses the ordinary WORK profile, elevated/Admin/
+SYSTEM identities, existing HostLink roots or registration, missing or
+mismatched owner sentinel, reparse paths, foreign allow ACEs, and unreadable
+pre-existing OneC registry/service inventories. LocalAppData comes from
+`SHGetFolderPathW`; `LOCALAPPDATA` is checked only for disagreement. The harness
+does not create or control an SCM service.
+
+This gate requires **two distinct source commits and two distinct executable
+SHA-256 values**. Both artifacts use `x86_64-win7-windows-msvc`; each package
+receipt must bind its own clean source/build receipt. The harness also requires
+all package support files except `hostlink-agent.exe` to have identical bytes,
+so the Agent-only update does not accidentally test unsupported support-file
+changes. Package A is installed and started. The separate updater executable
+is copied from package B's verified sidecar, then performs the live A-to-B
+update. The installed executable SHA must change from A's source-bound SHA to
+B's source-bound SHA, and B must pass registered status and authenticated
+loopback health.
+
+Prepare a separate, owner-only disposable standard user profile. It must not be
+`ALEXROVICH\TIS` and must not belong to local Administrators. Sign in
+interactively as that user and create this sentinel directly in the OS-resolved
+profile directory, binding both full lowercase source SHAs:
+
+```powershell
+$sourceShaA = 'FULL_LOWERCASE_40_CHARACTER_SOURCE_A_SHA'
+$sourceShaB = 'FULL_LOWERCASE_40_CHARACTER_SOURCE_B_SHA'
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$sentinel = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.hostlink-disposable-profile'
+Set-Content -LiteralPath $sentinel -Encoding ASCII -NoNewline -Value "HOSTLINK-NATIVE-UPDATER-DISPOSABLE|SID=$sid|SOURCE_A=$sourceShaA|SOURCE_B=$sourceShaB"
+icacls.exe $sentinel /inheritance:r /grant:r "${sid}:(F)"
+```
+
+Build and package each source from its own clean committed checkout. Choose a
+valid B semantic version different from A. Keep the harness from the tested
+revision alongside the copied artifacts; run the build and package commands in
+each exact source checkout. Copy both resulting build roots and package roots
+into private evidence directories owned by the disposable user. Example from
+each checkout (set `VERSION` to that checkout's crate version):
+
+```sh
+SOURCE_SHA="$(git rev-parse HEAD)"
+VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("crates/agent/Cargo.toml", "rb"))["package"]["version"])')"
+scripts/build-win7-candidate.sh \
+  --source-sha "$SOURCE_SHA" \
+  --output-dir "target/native-updater-$SOURCE_SHA"
+scripts/package-hostlink-agent.py \
+  --source-sha "$SOURCE_SHA" \
+  --target x86_64-win7-windows-msvc \
+  --version "$VERSION" \
+  --binary "target/native-updater-$SOURCE_SHA/x86_64-win7-windows-msvc/hostlink-agent.exe" \
+  --build-receipt "target/native-updater-$SOURCE_SHA/receipt.json" \
+  --output-dir "target/native-updater-$SOURCE_SHA/package-$VERSION"
+```
+
+Copy the committed harness into the disposable evidence directory, and obtain
+the protected WORK SID/profile values from a separately verified inventory.
+Do not infer or substitute them. Run unelevated in Windows PowerShell 5 or
+newer, using exact copied paths and actual package versions:
+
+```powershell
+.\verify-windows-agent-updater-native.ps1 `
+  -SourceShaA FULL_LOWERCASE_40_CHARACTER_SOURCE_A_SHA `
+  -SourceShaB FULL_LOWERCASE_40_CHARACTER_SOURCE_B_SHA `
+  -Target x86_64-win7-windows-msvc `
+  -ExpectedDisposableSid S-1-5-21-... `
+  -ExpectedDisposableProfile 'C:\Users\hostlink-disposable' `
+  -ProtectedWorkSid S-1-5-21-... `
+  -ProtectedWorkProfile 'C:\Users\PROTECTED-WORK-PROFILE' `
+  -SentinelPath 'C:\Users\hostlink-disposable\.hostlink-disposable-profile' `
+  -BuildRootA 'C:\HostLinkEvidence\build-A' `
+  -BuildRootB 'C:\HostLinkEvidence\build-B' `
+  -PackageARoot 'C:\HostLinkEvidence\package-A' `
+  -PackageBRoot 'C:\HostLinkEvidence\package-B'
+```
+
+Assertions cover real install/start/status/update/remove CLI operations; distinct
+source and executable hashes; B as the separate updater; old PID exit and a new
+healthy PID; exact package metadata and Run-value readback; unchanged terminal
+job bytes; bad digest rejection; and distinct negative diagnostics for
+Prepared/Running/Interrupted jobs (`jobs not terminal`) versus malformed job
+records (`job record is invalid or incomplete`). Both negative classes must
+leave installed files and authenticated B health unchanged. The harness compares
+pre-existing HKCU Run values, OneC registry state, and the Windows service
+inventory before and after.
+
+**Candidate health-failure rollback is explicitly `NOT_TESTED`.** This harness
+does not stop A before update and does not claim that restarting the old binary
+proves rollback. A deterministic candidate-health failure and rollback proof
+remain a separate native acceptance item. Cleanup removes registration and the
+test tree only when source/SID/candidate-hash ownership matches and every
+remaining path matches the expected inventory. Unknown files, directories,
+journal state, reparse points, or ambiguous fixture content cause the harness
+to preserve the root and fail for manual evidence recovery.
+
+This procedure has not run in the ordinary WORK profile or in this development
+environment. Static tests and a PowerShell parse do not count as live
+acceptance. Preserve both source SHAs, build/package receipt hashes and
+executable SHAs, target, Windows build/architecture, PowerShell version,
+disposable SID, CLI output, and cleanup result with the evidence. Windows 11
+x64 does not satisfy either native Windows 7 runtime gate.
