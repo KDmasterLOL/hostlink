@@ -87,12 +87,10 @@ mod process;
 mod registration;
 
 use admission::*;
-use lifecycle::*;
-pub(super) use lifecycle::{
+pub use lifecycle::{
     control_loop, ensure_update_unregistered, install, remove, start, status, stop,
     validate_managed_run, validate_update_root,
 };
-use maintenance::*;
 pub(crate) use maintenance::{
     begin_maintenance, begin_recovery_maintenance, has_registration, is_in_maintenance,
     recover_maintenance_after_inventory, recover_maintenance_stop, register_maintenance,

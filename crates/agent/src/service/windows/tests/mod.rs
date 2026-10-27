@@ -1,7 +1,5 @@
 use super::*;
 
-use super::*;
-
 fn record_fields() -> serde_json::Value {
     serde_json::json!({
         "format": 1,
