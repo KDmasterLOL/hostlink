@@ -1,7 +1,10 @@
 # Managed HostLink with one russh execution transport
 
-Branch rewrite/russh-minimal is experimental and independent of current HostLink dev.
-Do not modify, merge or promote dev/main, tags or deployed infrastructure.
+The russh rewrite has explicit user authorization for development integration into
+HostLink `dev` for testing under Huly 1C-987. This authorization is limited to
+that dev testing integration; it does not authorize changes to `main`, tags,
+releases, deployed infrastructure, installed agents, or production data. The
+main coordinator performs a controlled fast-forward only after independent tests.
 The former Agent JSONL TCP listener, Win32 OpenSSH/sshd, legacy Toolkit release engine,
 and legacy Nextest attestation are excluded. **Hub registration/inventory/invitation/revocation
 are REQUIRED product functions**: implement them under a separate HostLink Hub management owner,

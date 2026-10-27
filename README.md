@@ -1,8 +1,11 @@
 # HostLink — managed fleet with russh remote execution
 
-Experimental parallel rewrite. The current two-crate SSH milestone is not a drop-in
-replacement, release, deployment or installed fleet cutover. The final product MUST also
-include Hub-backed inventory, invitations, enrollment, host discovery and revocation. Source baseline: dev 5a1f80b4c44c393dd8cc83faacf0a3ebc49de342.
+Managed HostLink rewrite for development integration testing under Huly 1C-987.
+The workspace contains three crates: Agent, Client and the required Hub. This
+integration is not a release, deployment or installed fleet cutover. The source
+code evidence documented in [the release plan](docs/REWRITE_RELEASE_PLAN.md) is
+for `37fd3663f91dad0ceefd933862a4ec595e4765ce`; a documentation-only commit has
+a different SHA and does not change the tested executable source.
 
 Target packages:
 - hostlink-agent: embedded SSH server, outbound reverse tunnel, SFTP,
@@ -14,17 +17,15 @@ Target packages:
   [crates/hub/README.md](crates/hub/README.md) for server configuration/API.
 
 Updates must pin the exact Agent artifact SHA-256/version/target, defer active
-jobs and reject unsafe roots. Managed-live Windows handoff and restart remain
-required gates, not currently supported. Windows supports
-offline publication only when a separate updater invokes it with no active Agent
-process, service marker, or durable jobs. It stages and hashes the exact old/new
-inventory, records a journal, atomically replaces files with ACL preservation,
-and rolls back in-process failures. Registered/live Agent handoff and automatic
-recovery after interruption remain unsupported. See
+jobs and reject unsafe roots. The Agent-only local ZIP updater is integrated:
+Windows uses `self_update 1.3.1` extraction and `MoveAll`, private durable crash
+recovery, and single-use maintenance-candidate admission. The registered/live
+Windows update, health and rollback flow has not yet passed a real managed-live
+acceptance run; this code status is not release acceptance. See
 [docs/AGENT_UPDATE_WINDOWS.md](docs/AGENT_UPDATE_WINDOWS.md).
 
-The original HostLink `dev` tree remains unchanged. This experimental branch
-has runnable CLI binaries; it is **not ready for deployment or fleet migration**.
+The rewrite is being integrated into HostLink `dev` for testing. It is **not
+ready for release, deployment or fleet migration**.
 The managed-fleet target and acceptance gates are in
 [docs/MANAGED_FLEET_ARCHITECTURE.md](docs/MANAGED_FLEET_ARCHITECTURE.md)
 and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -132,9 +133,10 @@ and reverse-port authorization failures stop without fallback. See
 authorization contract.
 
 A real Linux HOME Agent↔Client SSH test verifies accepted-once execution,
-disconnect/reconnect, binary stdout/stderr and exit code `7`. Native Win7
-x64/x86 and Windows Agent-owned durable execution/updater handoff remain
-explicit acceptance gates. The Agent-only updater is not removed.
+disconnect/reconnect, binary stdout/stderr and exit code `7`. The Win7 evidence
+and remaining gates are recorded in [the release plan](docs/REWRITE_RELEASE_PLAN.md):
+WOW64 does not substitute for a native 32-bit Windows 7 OS, and a full registered
+Agent live-update run remains untested.
 
 ## Local Agent artifact packages
 
