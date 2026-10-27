@@ -93,6 +93,67 @@ pub struct RegisteredHost {
     pub updated_at: i64,
 }
 
+/// Response envelope for the authoritative Hub v2 host inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostsResponse {
+    /// Registered hosts returned by the Hub.
+    pub hosts: Vec<RegisteredHost>,
+}
+
+/// Hub v2 management capabilities and approved gateway routes.
+///
+/// Unknown fields are intentionally accepted for forward compatibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HubInfo {
+    /// Hub management API version; currently must be 2.
+    pub api_version: u8,
+    /// Whether managed fleet operations are available.
+    pub management: bool,
+    /// Operator-approved SSH gateway routes.
+    pub gateways: Vec<GatewayEndpoint>,
+    /// Execution transport; currently must be `russh`.
+    pub execution_transport: String,
+    /// Host inventory endpoint; currently must be `/v2/hosts`.
+    pub hosts_endpoint: String,
+}
+
+impl HubInfo {
+    /// Checks that this response advertises the supported Hub v2 contract.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.api_version != 2
+            || !self.management
+            || self.execution_transport != "russh"
+            || self.hosts_endpoint != "/v2/hosts"
+        {
+            return Err("unsupported Hub management capabilities".into());
+        }
+        Ok(())
+    }
+}
+
+/// Receipt returned after the Hub commits a host revocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeReceipt {
+    /// Whether authorization for new connections was revoked.
+    pub revoked_new_connections: bool,
+    /// Whether termination of existing sessions was confirmed.
+    pub confirmed_session_terminated: bool,
+    /// Whether the remote Agent was uninstalled.
+    pub remote_uninstall: bool,
+    /// Result of reconciling the gateway authorized-key projection.
+    pub authorized_key_projection: String,
+}
+
+/// Request body for changing a host's display-only label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayNameRequest {
+    /// New display label.
+    pub display_name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InviteRequest {
