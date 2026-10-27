@@ -1,9 +1,11 @@
 //! Private filesystem operations shared by Agent update paths.
 
+#[cfg(not(windows))]
+use super::EXECUTABLE_BASE;
 use super::manifest::FileIdentity;
 #[cfg(windows)]
 use super::windows::{set_windows_private_acl, validate_windows_private_acl};
-use super::{EXECUTABLE_BASE, MAX_ENTRY_BYTES, MAX_TOTAL_BYTES, invalid};
+use super::{MAX_ENTRY_BYTES, MAX_TOTAL_BYTES, invalid};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,

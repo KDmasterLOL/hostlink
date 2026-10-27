@@ -6,6 +6,7 @@
 //! registered Agent is updated through its authenticated maintenance and health-check handoff.
 
 use manifest::InstallMetadata;
+#[cfg(not(windows))]
 use serde::{Deserialize, Serialize};
 use std::{io, path::PathBuf};
 
@@ -56,6 +57,7 @@ pub(super) const PACKAGE_MANIFEST: &str = "manifest.json";
 pub(super) const INSTALL_METADATA: &str = "install.json";
 pub(super) const EXECUTABLE_BASE: &str = "hostlink-agent";
 
+#[cfg(not(windows))]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::update) struct PublicationJournal {
