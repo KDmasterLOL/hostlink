@@ -16,10 +16,7 @@ use super::super::fs::{
     write_private_synced,
 };
 use super::{cleanup::cleanup_windows_transaction, rollback::rollback_windows};
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-};
+use std::{fs, io, path::Path};
 
 #[cfg(windows)]
 pub(in crate::update) fn publish_windows(
