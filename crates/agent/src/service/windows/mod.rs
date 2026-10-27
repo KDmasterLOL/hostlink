@@ -91,6 +91,7 @@ pub use lifecycle::{
     control_loop, ensure_update_unregistered, install, remove, start, status, stop,
     validate_managed_run, validate_update_root,
 };
+use lifecycle::{refuse_active_jobs, refuse_maintenance, verify_registration};
 pub(crate) use maintenance::{
     begin_maintenance, begin_recovery_maintenance, has_registration, is_in_maintenance,
     recover_maintenance_after_inventory, recover_maintenance_stop, register_maintenance,
