@@ -10,7 +10,9 @@ controller SSH-key ownership, immutable request+source hash, idempotent admissio
 no accidental replay of started commands, persisted state, raw output, Agent
 update interlock, private filesystem ownership and Windows 7 compatibility.
 
-HostLink baseline: dev 0a78f729d34b692bd527bcdd2838634701bcb6f9.
+HostLink baseline: experimental Hub integration candidate
+`task/1c-1062-integration@0a78f729d34b692bd527bcdd2838634701bcb6f9`
+(ancestor `dev@0905138632e39c5f8f197a8322ecd6e3dce3929f`).
 Tested library: apalis-core 1.0.0, apalis-sqlite 1.0.0, sqlx 0.9.0.
 Upstream sources: https://github.com/apalis-dev/apalis-sqlite/tree/v1.0.0
 (especially src/lib.rs, src/persist.rs, src/sink.rs, task/sink.sql,
@@ -25,6 +27,13 @@ owner/payload conflict checking, durable SQLite settings and a persistent
 at-most-once start marker (StartedClaims). It does NOT launch OS commands,
 install an Agent, run live workers or migrate existing job records. The job
 model is representative, not the complete current Agent JobRecord schema.
+
+The PoC was subsequently integrated as a **standalone** experiment into the
+HostLink development tree on 2026-10-27. It is not a workspace member and
+does not enable scheduled jobs or replace the live Agent's `JobStore`.
+On HOME Linux (Rust 1.99.1), its eight tests, fmt check, and strict Clippy
+passed; the original Windows 11 native 8/8 receipt covers the identical
+experiment source content.
 
 Run from the repository root:
 
