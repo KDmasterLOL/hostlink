@@ -1,7 +1,9 @@
 # HostLink russh execution plane and mandatory Hub management plane
 
-Huly 1C-987; source dev SHA 5a1f80b4c44c393dd8cc83faacf0a3ebc49de342.
-This is a planned architecture and not a claim of passing acceptance.
+Huly 1C-987. This describes the development architecture after the three-crate
+russh + Hub v2 rewrite. The older 5a1f80b SHA was its historical design baseline;
+see [SOURCE_LAYOUT.md](SOURCE_LAYOUT.md) for the current modular source tree.
+This is not a claim of release or deployed-fleet acceptance.
 
 One controller SSH client and one unprivileged Agent embedded SSH server use
 russh. An optional already approved gateway handles reverse SSH/TCP loopback
@@ -44,7 +46,8 @@ pinned test binary through SFTP, uses typed argv in a durable manifest (not
 SSH exec-string quoting), supports test --list and normal execution, and
 retrieves raw outputs and actual exit statuses after reconnect.
 
-The **first two-crate execution milestone** excludes Hub only temporarily. The final product
+The historical **first two-crate execution milestone** excluded Hub only temporarily.
+The current development source contains all three crates. The final product
 requires authoritative Hub inventory, short-lived invitations, fresh Agent enrollment,
 named-host selection and revocation. These management functions use a separate Hub HTTPS
 control plane and do not revive the removed Agent TCP JSONL execution carrier. See
