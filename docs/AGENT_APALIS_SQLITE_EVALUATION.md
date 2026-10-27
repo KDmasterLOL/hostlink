@@ -33,7 +33,7 @@ Run from the repository root:
     cargo run --locked --manifest-path experiments/agent-apalis-poc/Cargo.toml
 
 On **Windows 11 GNU with Rust 1.99.0 (2026-10-27)**:
-6/6 tests passed, zero failed; format passed; Clippy -D warnings passed;
+Initial PoC: 6/6 tests passed, zero failed; format passed; Clippy -D warnings passed;
 executable smoke passed: one stored job, FULL SQLite synchronous mode,
 no command executed. No native Windows 7 or Linux run has been performed.
 
@@ -85,6 +85,19 @@ package versions are absent from the baseline. This is a rough upper
 bound of possible new resolved dependencies, not an exact merged tree.
 SQLx introduces bundled native SQLite compilation. Windows 7 compatibility
 must be verified separately before any adoption.
+
+## Scheduling extension (1C-1065)
+
+The same isolated experiment now exercises two scheduling modes:
+
+- **One-time deferred launch:** an optional immutable UTC Unix timestamp on the synthetic JobRecord. TaskBuilder::run_at_timestamp persists it in the Apalis SQLite Jobs.run_at column. Duplicate UUID with the same timestamp is idempotent; changing the timestamp for the same UUID is rejected, even after reopening. Upstream queries/backend/fetch_next.sql selects Pending only when run_at <= now.
+- **Recurring ticks:** apalis-cron 1.0.0 generates the next UTC tick from a cron expression. The PoC converts each tick to deterministic UUID v5 derived from an example schedule identifier and the tick timestamp, and persists the occurrence with Apalis SQLite. No OS command or real Agent worker is started. Re-adding that occurrence after restarting is idempotent.
+
+This validates scheduled occurrences, not a complete recurring schedule service. CronScheduler computes upcoming ticks from current time. It does NOT persist the schedule definition itself nor backfill ticks missed while the scheduler was offline. pipe_to(SqliteStorage) persists ticks that were actually emitted, not retroactive ticks. A future production design needs an explicit owner-bound schedule definition, immutable command digest, timezone and daylight saving policies, missed-run policy, and schedule cancellation/updates. The one-time execution claim is still required: durable scheduling must not silently replay interrupted remote commands.
+
+If HostLink introduces delayed jobs, Apalis run_at is useful and substantially cheaper than implementing a home-grown scheduler. Keep apalis-cron optional until recurring tasks are part of the product; its presence does not resolve the orphan-requeue contract.
+
+The isolated extension adds apalis-cron 1.0.0, cron 0.17.0 and UUID v5 to the PoC only, NOT the root HostLink workspace. Cargo added 23 versions to this experiment's resolved dependencies. New regression tests check persisted delays, restart, conflict on changed timestamp, and real cron tick -> deduplicated persisted occurrence. On Windows 11, the extended suite passed 8/8 tests (0 failed), strict Clippy, format check and an isolated smoke executable; mcp-job tests b9979a5b-39ac-4d6e-ae49-d19d85d604c9 and QA 1925e585-9052-4b7b-88eb-086f33d8009e. No real command executed.
 
 ## Decision
 
