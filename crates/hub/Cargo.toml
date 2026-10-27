@@ -12,6 +12,11 @@ name = "hostlink-hub"
 path = "src/main.rs"
 required-features = ["server"]
 
+[[test]]
+name = "api"
+path = "tests/api/mod.rs"
+required-features = ["server"]
+
 [features]
 default = ["server"]
 server = ["dep:axum", "dep:clap", "dep:getrandom", "dep:hex", "dep:serde_json", "dep:sha2", "dep:tokio", "dep:url"]
