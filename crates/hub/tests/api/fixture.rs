@@ -145,3 +145,78 @@ pub(crate) fn enrollment(
         ssh_host_public_key: host_key,
     }
 }
+
+/// Drop a polled HTTP request behind a real writer lock, then drain every
+/// blocking continuation before the caller inspects disk. No scheduling sleeps.
+pub(crate) fn abort_locked_request(
+    root: &std::path::Path,
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    token: Option<&str>,
+    body: Value,
+) {
+    use std::{future::Future, task::Poll, time::Duration};
+    let writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join("hostlink-hub-v2/registry-v2.lock"))
+        .unwrap();
+    writer.lock().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    let health = runtime.block_on(async {
+        let mut request = Box::pin(call(app.clone(), method, uri, token, body));
+        // Poll through dispatch into spawn_blocking. Whether the worker is
+        // queued or already waiting in lock(), it cannot publish yet.
+        std::future::poll_fn(|cx| {
+            assert!(request.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let health = tokio::time::timeout(
+            Duration::from_secs(1),
+            call(app, "GET", "/healthz", None, serde_json::json!({})),
+        )
+        .await;
+        drop(request); // Server-side request cancellation, before lock release.
+        writer.unlock().unwrap();
+        health
+    });
+    // A detached spawn_blocking worker cannot escape the persistence assertion.
+    drop(runtime);
+    assert_eq!(health.unwrap().0, StatusCode::OK);
+}
+
+/// The server prepared a response, but the caller never received its status or
+/// body. In particular, this must not recover a plaintext invite from storage.
+pub(crate) async fn lose_response(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    token: Option<&str>,
+    body: Value,
+) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(token) = token {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    drop(
+        app.oneshot(
+            builder
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap(),
+    );
+}
+
+pub(crate) fn persisted(root: &std::path::Path) -> Value {
+    serde_json::from_slice(&std::fs::read(root.join("hostlink-hub-v2/registry-v2.json")).unwrap())
+        .unwrap()
+}

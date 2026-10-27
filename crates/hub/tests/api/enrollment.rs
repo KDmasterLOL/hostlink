@@ -3,6 +3,86 @@ use axum::http::StatusCode;
 use hostlink_hub::router;
 use serde_json::{Value, json};
 
+#[test]
+fn aborted_enrollment_keeps_invite_unused_and_can_be_manually_reconciled() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = router(service(dir.path(), key()));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let token = runtime.block_on(invite(app.clone(), "cancelled", None));
+    let before = persisted(dir.path());
+    let body = serde_json::to_value(enrollment(
+        token,
+        "cancelled-node",
+        "cancelled",
+        key(),
+        key(),
+    ))
+    .unwrap();
+    abort_locked_request(
+        dir.path(),
+        app.clone(),
+        "POST",
+        "/v2/enroll",
+        None,
+        body.clone(),
+    );
+    assert_eq!(persisted(dir.path()), before);
+    assert!(
+        !dir.path()
+            .join("gateway/hostlink-v2-authorized_keys")
+            .exists()
+    );
+    // Explicit new request only after authoritative no-commit evidence.
+    let (status, _) = runtime.block_on(call(app, "POST", "/v2/enroll", None, body));
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(persisted(dir.path())["hosts"].as_object().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn lost_enrollment_response_does_not_roll_back_or_allow_token_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = router(service(dir.path(), key()));
+    let token = invite(app.clone(), "unknown", None).await;
+    let body = serde_json::to_value(enrollment(
+        token.clone(),
+        "unknown-node",
+        "unknown",
+        key(),
+        key(),
+    ))
+    .unwrap();
+    lose_response(app.clone(), "POST", "/v2/enroll", None, body.clone()).await;
+    let committed = persisted(dir.path());
+    assert_eq!(
+        committed["invites"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()["used"],
+        true
+    );
+    assert!(!committed.to_string().contains(&token));
+    let (status, host) = call(
+        app.clone(),
+        "GET",
+        "/v2/hosts/unknown-node",
+        Some(OPERATOR),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(host["machine_id"], "unknown-node");
+    assert!(
+        std::fs::read_to_string(dir.path().join("gateway/hostlink-v2-authorized_keys"))
+            .unwrap()
+            .contains("hostlink-agent:unknown-node")
+    );
+    let (status, _) = call(app, "POST", "/v2/enroll", None, body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(persisted(dir.path()), committed);
+}
+
 #[tokio::test]
 async fn assigned_routes_are_unique_and_reserved_ports_are_never_used() {
     let dir = tempfile::tempdir().unwrap();

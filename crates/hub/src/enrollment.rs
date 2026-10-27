@@ -1,12 +1,16 @@
 use crate::{
-    server::{App, HubError, commit_error, ensure_unique_name, validate_name},
+    server::{App, CommitAdmission, HubError, ensure_unique_name, validate_name},
     state::{AuditEntry, InviteRecord, allocate_port},
     *,
 };
 use secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};
 
-pub(crate) fn create_invite(app: &App, request: InviteRequest) -> Result<InviteResponse, HubError> {
+pub(crate) fn create_invite(
+    app: &App,
+    request: InviteRequest,
+    admission: CommitAdmission,
+) -> Result<InviteResponse, HubError> {
     if !(30..=86400).contains(&request.ttl_seconds) {
         return Err(HubError::bad(
             "invite TTL must be between 30 and 86400 seconds",
@@ -57,14 +61,18 @@ pub(crate) fn create_invite(app: &App, request: InviteRequest) -> Result<InviteR
         action: "invite_created".into(),
         machine_id: None,
     });
-    locked.commit().map_err(commit_error)?;
+    admission.commit(locked)?;
     Ok(InviteResponse {
         token: secrecy::SecretString::from(token),
         expires_at,
     })
 }
 
-pub(crate) fn enroll(app: &App, request: EnrollRequest) -> Result<EnrollResponse, HubError> {
+pub(crate) fn enroll(
+    app: &App,
+    request: EnrollRequest,
+    admission: CommitAdmission,
+) -> Result<EnrollResponse, HubError> {
     let id = MachineId::parse(request.machine_id.as_str()).map_err(HubError::bad)?;
     let name = validate_name(&request.name)?;
     for (field, value) in [
@@ -177,7 +185,7 @@ pub(crate) fn enroll(app: &App, request: EnrollRequest) -> Result<EnrollResponse
         .into(),
         machine_id: Some(id),
     });
-    locked.commit().map_err(commit_error)?;
+    admission.commit(locked)?;
     if super::ssh_authorization::reconcile(app).is_err() {
         return Err(HubError::Unavailable(
             "enrollment committed; gateway authorization projection needs reconciliation".into(),

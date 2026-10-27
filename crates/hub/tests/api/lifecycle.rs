@@ -5,6 +5,74 @@ use serde_json::{Value, json};
 use std::{fs::OpenOptions, sync::mpsc, thread, time::Duration};
 
 #[test]
+fn aborted_invite_before_writer_admission_never_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = router(service(dir.path(), key()));
+    abort_locked_request(
+        dir.path(),
+        app.clone(),
+        "POST",
+        "/v2/invites",
+        Some(OPERATOR),
+        json!({"ttl_seconds":30,"name":"cancelled"}),
+    );
+    assert!(!dir.path().join("hostlink-hub-v2/registry-v2.json").exists());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let token = runtime.block_on(invite(app, "cancelled", None));
+    let state = persisted(dir.path());
+    assert_eq!(state["invites"].as_object().unwrap().len(), 1);
+    assert_eq!(state["audit"].as_array().unwrap().len(), 1);
+    assert!(!state.to_string().contains(&token));
+}
+
+#[tokio::test]
+async fn lost_invite_response_keeps_only_an_expiring_digest() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = router(service(dir.path(), key()));
+    lose_response(
+        app.clone(),
+        "POST",
+        "/v2/invites",
+        Some(OPERATOR),
+        json!({"ttl_seconds":30,"name":"unknown"}),
+    )
+    .await;
+    let mut state = persisted(dir.path());
+    let created_at = state["audit"][0]["at"].as_i64().unwrap();
+    let invites = state["invites"].as_object().unwrap();
+    assert_eq!(invites.len(), 1); // A lost ACK is not rollback.
+    let (digest, record) = invites.iter().next().unwrap();
+    let digest = digest.clone();
+    assert_eq!(digest.len(), 64);
+    assert_eq!(record["digest"], digest);
+    assert!(record.get("token").is_none());
+    assert_eq!(record["used"], false);
+    assert!((0..=30).contains(&(record["expires_at"].as_i64().unwrap() - created_at)));
+    // Operator waits for expiry; no blind retry and no secret readback.
+    state["invites"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+        .next()
+        .unwrap()["expires_at"] = json!(0);
+    std::fs::write(
+        dir.path().join("hostlink-hub-v2/registry-v2.json"),
+        serde_json::to_vec(&state).unwrap(),
+    )
+    .unwrap();
+    invite(app, "unknown", None).await;
+    let reconciled = persisted(dir.path());
+    assert_eq!(reconciled["invites"].as_object().unwrap().len(), 1);
+    assert!(
+        !reconciled["invites"]
+            .as_object()
+            .unwrap()
+            .contains_key(&digest)
+    );
+    assert_eq!(reconciled["audit"].as_array().unwrap().len(), 2);
+}
+
+#[test]
 fn state_lock_wait_does_not_block_health_on_the_tokio_executor() {
     let dir = tempfile::tempdir().unwrap();
     let app = router(service(dir.path(), key()));

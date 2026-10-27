@@ -9,4 +9,4 @@ pub use router::router;
 
 pub(crate) use auth::{authorized, now};
 pub(crate) use config::App;
-pub(crate) use handlers::{commit_error, ensure_unique_name, validate_name};
+pub(crate) use handlers::{CommitAdmission, ensure_unique_name, validate_name};

@@ -73,8 +73,8 @@ pub(super) async fn create_invite(
 ) -> Result<(StatusCode, Json<InviteResponse>), HubError> {
     require_operator(&headers, &app)?;
     let request: InviteRequest = parse_json(body)?;
-    run_blocking(move || {
-        enrollment::create_invite(&app, request)
+    run_mutation(move |admission| {
+        enrollment::create_invite(&app, request, admission)
             .map(|response| (StatusCode::CREATED, Json(response)))
     })
     .await
@@ -84,8 +84,9 @@ pub(super) async fn enroll_host(
     body: Bytes,
 ) -> Result<(StatusCode, Json<EnrollResponse>), HubError> {
     let request: EnrollRequest = parse_json(body)?;
-    run_blocking(move || {
-        enrollment::enroll(&app, request).map(|response| (StatusCode::CREATED, Json(response)))
+    run_mutation(move |admission| {
+        enrollment::enroll(&app, request, admission)
+            .map(|response| (StatusCode::CREATED, Json(response)))
     })
     .await
 }
@@ -106,7 +107,7 @@ pub(super) async fn rename_host(
     let req: DisplayNameRequest = parse_json(body)?;
     let id = MachineId::parse(raw).map_err(HubError::bad)?;
     let name = validate_display_name(&req.display_name)?;
-    run_blocking(move || {
+    run_mutation(move |admission| {
         let mut locked = app
             .store
             .lock()
@@ -121,7 +122,7 @@ pub(super) async fn rename_host(
             action: "rename".into(),
             machine_id: Some(id),
         });
-        locked.commit().map_err(commit_error)?;
+        admission.commit(locked)?;
         Ok(Json(output))
     })
     .await
@@ -133,7 +134,7 @@ pub(super) async fn delete_host(
 ) -> Result<Json<RevokeReceipt>, HubError> {
     require_operator(&headers, &app)?;
     let id = MachineId::parse(raw).map_err(HubError::bad)?;
-    run_blocking(move || {
+    run_mutation(move |admission| {
         let mut locked = app
             .store
             .lock()
@@ -146,7 +147,7 @@ pub(super) async fn delete_host(
             action: "revoke".into(),
             machine_id: Some(id),
         });
-        locked.commit().map_err(commit_error)?;
+        admission.commit(locked)?;
         // The durable revocation may already be visible to the Hub lookup while an
         // earlier authorized_keys projection still admits the revoked gateway key.
         // Do not return HTTP success until the gateway projection is reconciled.
@@ -165,6 +166,20 @@ pub(super) async fn delete_host(
     .await
 }
 
+/// Authorize one irreversible state publication while the HTTP request future lives.
+/// The one-shot admission is not an acknowledgement that commit succeeded.
+pub(crate) struct CommitAdmission(tokio::sync::oneshot::Sender<()>);
+
+impl CommitAdmission {
+    pub(crate) fn commit(self, locked: crate::state::LockedState) -> Result<(), HubError> {
+        self.0.send(()).map_err(|()| {
+            HubError::Unavailable("request cancelled before state publication".into())
+        })?;
+        // After admission, finish committing even if the caller disconnects.
+        locked.commit().map_err(commit_error)
+    }
+}
+
 async fn run_blocking<T, F>(operation: F) -> Result<T, HubError>
 where
     T: Send + 'static,
@@ -173,6 +188,19 @@ where
     tokio::task::spawn_blocking(operation)
         .await
         .map_err(|_| HubError::internal("Hub operation failed"))?
+}
+
+async fn run_mutation<T, F>(operation: F) -> Result<T, HubError>
+where
+    T: Send + 'static,
+    F: FnOnce(CommitAdmission) -> Result<T, HubError> + Send + 'static,
+{
+    let (admission, request_lifetime) = tokio::sync::oneshot::channel();
+    let result = run_blocking(move || operation(CommitAdmission(admission))).await;
+    // Keep the receiver in the request future across await. Dropping that future
+    // closes admission; a successful send is not an HTTP acknowledgement.
+    drop(request_lifetime);
+    result
 }
 pub(crate) fn validate_name(name: &str) -> Result<String, HubError> {
     let value = name.trim();
@@ -214,7 +242,7 @@ pub(crate) fn ensure_unique_name(
         Ok(())
     }
 }
-pub(crate) fn commit_error(error: crate::state::CommitError) -> HubError {
+fn commit_error(error: crate::state::CommitError) -> HubError {
     match error {
         crate::state::CommitError::NotCommitted(_) => {
             HubError::Internal("state publication failed".into())

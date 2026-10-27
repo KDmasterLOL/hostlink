@@ -97,3 +97,83 @@ any deployed database migration.
 The PoC can be checked out from that exact task branch to reproduce the
 standalone `experiments/hub-redb-poc` tests; the locked root workspace does
 not gain a redb dependency.
+
+## JSON Hub request cancellation and lost acknowledgements (1C-1062)
+
+The async I/O candidate at `0a78f729d34b692bd527bcdd2838634701bcb6f9`
+detached a running `spawn_blocking` operation when its HTTP future was dropped.
+A regression with a held registry writer lock, a polled `POST /v2/invites`,
+request cancellation, lock release and blocking-worker drain reproduced an
+unacknowledged persisted invite on that baseline. The same regression now
+requires no snapshot publication, then exactly one invite/audit entry for a
+subsequent explicitly authorized request.
+
+All four mutations (invite, enroll, display-name update, revoke) now require a
+one-use `CommitAdmission`. The HTTP future owns a Tokio oneshot receiver across
+the worker await. Immediately before `LockedState::commit`, while still holding
+the registry lock, the worker sends to that receiver. The existing Tokio
+`Sender::send` atomically orders admission against receiver drop; no new
+dependency, state engine, HTTP endpoint or token readback is needed.
+
+- If the server request future was dropped before admission, the send fails
+  and the local locked snapshot is discarded. In particular, cancellation
+  before obtaining the writer lock cannot publish state or reconcile keys.
+- If admission wins the race, publication is irrevocably attempted. The
+  synchronous commit and subsequent enroll/revoke projection reconciliation
+  finish even if the request disappears. The send only admits publication;
+  it is neither a successful commit receipt nor an HTTP acknowledgement.
+- Storage `NotCommitted`/`Uncertain` handling is unchanged. Projection failure
+  after a committed enrollment or revocation still returns reconciliation
+  required (503), never a successful receipt. Revoke success still requires a
+  reconciled gateway projection and makes no session-termination/uninstall claim.
+
+A client timeout, disconnect or missing response remains **UNKNOWN**: the
+client cannot observe server admission, and a transport disconnect need not
+immediately drop the server future. There is no automatic application replay
+in the existing Client/Agent enrollment paths. Do not infer rollback or retry
+a mutating request from a transport failure. Manually reconcile authoritative
+host identity/keys/routes, audit and gateway authorization before deciding a
+new action. The Agent's existing pending enrollment marker preserves the
+attempt identity and prevents blind one-use-token reuse.
+
+For an invite with a lost response, only its digest is persisted. Its plaintext
+cannot be recovered. Retain UNKNOWN, wait out the original bounded TTL
+(30..86400 seconds; at most 24 hours if the original expiry is unavailable),
+and authorize a fresh invite only after reconciliation. Expired/used records
+are pruned by the next legal invite; capacity remains bounded at 10,000. For
+enrollment, a lost response does not unconsume the token: lookup may show a
+committed host and replay remains unauthorized. For revoke, authoritative
+absence and gateway projection/lookup must be checked separately; a lost
+response does not restore either host or gateway key.
+
+The API regressions use real Hub handlers, private disposable files and OS
+locks. Cancellation tests poll the request behind the lock (worker queued or
+waiting), drop its future, release the lock and drain the dedicated Tokio
+runtime before inspecting persistence. They cover all four mutations and
+locked `/healthz` responsiveness. Lost-response tests discard the actual
+prepared HTTP response without reading its body, then verify invite expiry,
+enrollment one-use/replay and revoke registry/projection/lookup. They do not
+inject cancellation inside fsync/rename, simulate a storage crash, or claim
+native Windows acceptance. Already-running blocking lock waits are not
+interrupted; the existing five-second lock acquisition timeout remains.
+
+Local verification on Linux with Rust/Cargo 1.99.1 (all Cargo commands used
+`--offline --locked`):
+
+| Check | Result |
+| --- | --- |
+| Scoped rustfmt, workspace `cargo fmt --all -- --check`, `git diff --check` | PASS |
+| `cargo check -p hostlink-hub -p hostlink --all-targets` | PASS |
+| `cargo clippy -p hostlink-hub -p hostlink --all-targets -- -D warnings` | PASS |
+| `cargo check -p hostlink-hub --no-default-features` | PASS |
+| `cargo test -p hostlink-hub --test api` | 18 passed, including baseline-red cancellation regression |
+| `cargo test -p hostlink --test hub_client` | 2 passed |
+| `cargo test -p hostlink-hub --lib` | Completed; no unit tests in this target |
+| Client library unit tests | 30 passed; 2 failed at loopback listener setup with sandbox `EPERM`, not accepted as passing |
+| Agent enrollment unit tests | 1 passed; 5 failed because the sandbox prohibits loopback bind/reservation, not accepted as passing |
+| Native Windows / full workspace runtime acceptance | NOT RUN for this change |
+
+The expiry scenario advances the disposable snapshot to an expired timestamp,
+as existing API expiry tests do; it does not sleep for the real token TTL.
+Client loopback and Agent runtime checks require an environment permitting
+disposable listeners before the coordinator can accept those evidence tiers.
