@@ -5,6 +5,7 @@
 //! Windows publication is limited to a separately invoked, current-user-private updater. A
 //! registered Agent is updated through its authenticated maintenance and health-check handoff.
 
+#[cfg(not(windows))]
 use manifest::InstallMetadata;
 #[cfg(not(windows))]
 use serde::{Deserialize, Serialize};
