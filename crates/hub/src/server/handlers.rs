@@ -1,7 +1,7 @@
 use super::{HubError, auth::require_operator, config::App, now};
 use crate::{
-    EnrollRequest, EnrollResponse, InviteRequest, InviteResponse, MachineId, RegisteredHost,
-    enrollment, ssh_authorization,
+    DisplayNameRequest, EnrollRequest, EnrollResponse, HostsResponse, HubInfo, InviteRequest,
+    InviteResponse, MachineId, RegisteredHost, RevokeReceipt, enrollment, ssh_authorization,
 };
 use axum::{
     Json,
@@ -10,7 +10,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
 
 pub(super) async fn health() -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!({"status":"ok"})))
@@ -18,11 +18,15 @@ pub(super) async fn health() -> impl IntoResponse {
 pub(super) async fn info(
     State(app): State<App>,
     headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, HubError> {
+) -> Result<Json<HubInfo>, HubError> {
     require_operator(&headers, &app)?;
-    Ok(Json(
-        serde_json::json!({"api_version":2,"management":true,"gateways":app.config.gateways,"execution_transport":"russh","hosts_endpoint":"/v2/hosts"}),
-    ))
+    Ok(Json(HubInfo {
+        api_version: 2,
+        management: true,
+        gateways: app.config.gateways.clone(),
+        execution_transport: "russh".into(),
+        hosts_endpoint: "/v2/hosts".into(),
+    }))
 }
 pub(super) async fn list_hosts(
     State(app): State<App>,
@@ -39,10 +43,6 @@ pub(super) async fn list_hosts(
         }))
     })
     .await
-}
-#[derive(Serialize)]
-pub(super) struct HostsResponse {
-    hosts: Vec<RegisteredHost>,
 }
 pub(super) async fn get_host(
     State(app): State<App>,
@@ -89,17 +89,12 @@ pub(super) async fn enroll_host(
     })
     .await
 }
-fn parse_json<T: for<'de> Deserialize<'de>>(bytes: Bytes) -> Result<T, HubError> {
+fn parse_json<T: DeserializeOwned>(bytes: Bytes) -> Result<T, HubError> {
     if bytes.is_empty() || bytes.len() > 64 * 1024 {
         return Err(HubError::bad("request body is empty or exceeds 64 KiB"));
     }
     serde_json::from_slice(&bytes)
         .map_err(|_| HubError::bad("request JSON is invalid or contains unknown fields"))
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DisplayNameRequest {
-    display_name: String,
 }
 pub(super) async fn rename_host(
     State(app): State<App>,
@@ -131,18 +126,11 @@ pub(super) async fn rename_host(
     })
     .await
 }
-#[derive(Serialize)]
-pub(super) struct RevokeResponse {
-    revoked_new_connections: bool,
-    confirmed_session_terminated: bool,
-    remote_uninstall: bool,
-    authorized_key_projection: &'static str,
-}
 pub(super) async fn delete_host(
     State(app): State<App>,
     headers: HeaderMap,
     Path(raw): Path<String>,
-) -> Result<Json<RevokeResponse>, HubError> {
+) -> Result<Json<RevokeReceipt>, HubError> {
     require_operator(&headers, &app)?;
     let id = MachineId::parse(raw).map_err(HubError::bad)?;
     run_blocking(move || {
@@ -167,11 +155,11 @@ pub(super) async fn delete_host(
                 "revocation committed; gateway key projection reconciliation is required".into(),
             )
         })?;
-        Ok(Json(RevokeResponse {
+        Ok(Json(RevokeReceipt {
             revoked_new_connections: true,
             confirmed_session_terminated: false,
             remote_uninstall: false,
-            authorized_key_projection: "reconciled",
+            authorized_key_projection: "reconciled".into(),
         }))
     })
     .await
