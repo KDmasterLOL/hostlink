@@ -1,0 +1,21 @@
+[package]
+name = "hostlink-apalis-poc"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Do not add the experiment or its dependency graph to HostLink's workspace.
+[workspace]
+
+[dependencies]
+apalis-core = "=1.0.0"
+apalis-sqlite = { version = "=1.0.0", default-features = true }
+futures = "0.3.34"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "=0.9.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+ulid = "3"
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3"
