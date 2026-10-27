@@ -1,0 +1,85 @@
+name: HostLink dev validation
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hostlink-dev-validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux workspace and source contracts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install stable Rust with checks
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Check all targets
+        run: cargo check --locked --workspace --all-targets
+      - name: Strict Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Unit and loopback integration tests
+        run: cargo test --locked --workspace
+      - name: Python contract tests
+        run: python -m unittest discover -s scripts/tests -p 'test_*.py'
+      - name: Shell syntax
+        run: bash -n scripts/build-win7-candidate.sh
+
+  windows-current:
+    name: Current Windows workspace (not Win7)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install stable Rust with checks
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+      - name: Compile all targets
+        run: cargo check --locked --workspace --all-targets
+      - name: Strict Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Native Windows non-ignored tests
+        run: cargo test --locked --workspace
+      - name: Parse PowerShell scripts
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = @(
+            'crates/agent/assets/Install-HostLink-Agent.ps1',
+            'crates/agent/assets/Run-HostLink-Agent.ps1',
+            'crates/agent/assets/Update-HostLink-Agent.ps1',
+            'scripts/verify-win7-bootstrap-native.ps1',
+            'scripts/verify-windows-agent-lifecycle.ps1'
+          )
+          foreach ($file in $assets) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path -LiteralPath $file).Path,
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Output $_.Message }
+              throw "PowerShell parser rejected $file"
+            }
+          }
+
+# Neither job deploys services, publishes release artifacts, nor claims native
+# NT6.1 Win7 acceptance. Real Win7 x86 bare-OS and managed-live Windows updater
+# remain separate Huly 1C-1008 / 1C-1004 release gates.
