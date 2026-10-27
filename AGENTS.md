@@ -23,3 +23,8 @@ recovery on failed publication and explicit safe handoff on Windows. It is NOT
 another SSH transport, not a general release engine and not the Toolkit updater.
 Changes to real servers require independently verified disposable scope; do not
 alter 1C production databases, running services or original OneC Toolkit.
+
+For multi-file Rust modules use `module/mod.rs` with sibling source files, never
+both `module.rs` and `module/mod.rs`. Target ~200 lines per cohesive file;
+exceptions for protocol/security contracts and E2E tests are documented in
+`docs/SOURCE_LAYOUT.md`. Move private unit tests into sibling test modules.

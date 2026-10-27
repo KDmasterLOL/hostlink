@@ -26,6 +26,8 @@ acceptance run; this code status is not release acceptance. See
 
 The rewrite is being integrated into HostLink `dev` for testing. It is **not
 ready for release, deployment or fleet migration**.
+The source-directory convention and module ownership are in
+[docs/SOURCE_LAYOUT.md](docs/SOURCE_LAYOUT.md).
 The managed-fleet target and acceptance gates are in
 [docs/MANAGED_FLEET_ARCHITECTURE.md](docs/MANAGED_FLEET_ARCHITECTURE.md)
 and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
