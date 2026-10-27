@@ -179,3 +179,57 @@ fn new_hub_rejects_legacy_authorized_keys_projection_filename() {
     assert!(!new_state_root.exists());
     assert!(!old_authorized_keys.exists());
 }
+
+#[tokio::test]
+async fn gateway_lookup_uses_only_gateway_bearer_token_and_rejects_invalid_authorization() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = router(service(dir.path(), key()));
+    let lookup_key = key();
+    let (key_type, key_blob) = lookup_key.split_once(' ').unwrap();
+    let body = json!({"key_type": key_type, "key_blob": key_blob});
+
+    for authorization in [
+        None,
+        Some(format!("Basic {EDGE}")),
+        Some(format!("Bearer {OPERATOR}")),
+        Some("Bearer wrong-token".into()),
+    ] {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/internal/v2/ssh/authorized-key")
+            .header("content-type", "application/json");
+        if let Some(value) = authorization {
+            builder = builder.header("authorization", value);
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    let (status, response) = call(
+        app,
+        "POST",
+        "/internal/v2/ssh/authorized-key",
+        Some(EDGE),
+        body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response, json!({"authorized": false}));
+
+    let (status, _) = call(
+        router(service(dir.path(), key())),
+        "POST",
+        "/internal/v2/ssh/authorized-key",
+        Some(EDGE),
+        json!({"key_type": "ssh-ed25519", "key_blob": "not-base64"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

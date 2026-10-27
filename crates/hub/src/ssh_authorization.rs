@@ -1,9 +1,5 @@
 use crate::server::{App, HubError};
-use axum::{
-    Json,
-    extract::State as AxumState,
-    http::{HeaderMap, header::AUTHORIZATION},
-};
+use axum::{Json, extract::State as AxumState, http::HeaderMap};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use ssh_key::authorized_keys::Entry;
@@ -26,33 +22,38 @@ pub(crate) async fn lookup(
     headers: HeaderMap,
     Json(request): Json<LookupRequest>,
 ) -> Result<Json<LookupResponse>, HubError> {
-    if !authorized(&headers, app.config.gateway_lookup_token.expose_secret()) {
+    if !crate::server::authorized(&headers, app.config.gateway_lookup_token.expose_secret()) {
         return Err(HubError::Unauthorized);
     }
-    let key = format!("{} {}", request.key_type, request.key_blob);
-    let key: ssh_key::PublicKey = key
-        .parse()
-        .map_err(|_| HubError::bad("invalid public key"))?;
-    if key.algorithm() != ssh_key::Algorithm::Ed25519 {
-        return Err(HubError::bad("gateway key must be Ed25519"));
-    }
-    let locked = app
-        .store
-        .lock()
-        .map_err(|_| HubError::internal("Hub state unavailable"))?;
-    let host = locked
-        .state
-        .hosts
-        .values()
-        .find(|h| {
-            h.ssh_public_key
-                .parse::<ssh_key::PublicKey>()
-                .is_ok_and(|registered| {
-                    registered.fingerprint(ssh_key::HashAlg::Sha256)
-                        == key.fingerprint(ssh_key::HashAlg::Sha256)
-                })
-        })
-        .cloned();
+    let host = tokio::task::spawn_blocking(move || {
+        let key = format!("{} {}", request.key_type, request.key_blob);
+        let key: ssh_key::PublicKey = key
+            .parse()
+            .map_err(|_| HubError::bad("invalid public key"))?;
+        if key.algorithm() != ssh_key::Algorithm::Ed25519 {
+            return Err(HubError::bad("gateway key must be Ed25519"));
+        }
+        let locked = app
+            .store
+            .lock()
+            .map_err(|_| HubError::internal("Hub state unavailable"))?;
+        let host = locked
+            .state
+            .hosts
+            .values()
+            .find(|h| {
+                h.ssh_public_key
+                    .parse::<ssh_key::PublicKey>()
+                    .is_ok_and(|registered| {
+                        registered.fingerprint(ssh_key::HashAlg::Sha256)
+                            == key.fingerprint(ssh_key::HashAlg::Sha256)
+                    })
+            })
+            .cloned();
+        Ok::<_, HubError>(host)
+    })
+    .await
+    .map_err(|_| HubError::internal("Hub state lookup failed"))??;
     match host {
         Some(host) => Ok(Json(LookupResponse {
             authorized: true,
@@ -63,23 +64,6 @@ pub(crate) async fn lookup(
             authorized_key: None,
         })),
     }
-}
-fn authorized(headers: &HeaderMap, expected: &str) -> bool {
-    let Some(value) = headers
-        .get(AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-    else {
-        return false;
-    };
-    if value.len() != expected.len() {
-        return false;
-    }
-    value
-        .bytes()
-        .zip(expected.bytes())
-        .fold(0u8, |a, (x, y)| a | (x ^ y))
-        == 0
 }
 fn render_key(host: &crate::RegisteredHost) -> Result<String, HubError> {
     Ok(format!(

@@ -1317,6 +1317,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "ssh-key",
+ "subtle",
  "tempfile",
  "tokio",
  "tower",

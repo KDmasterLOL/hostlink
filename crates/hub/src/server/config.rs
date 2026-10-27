@@ -78,31 +78,6 @@ impl HubConfig {
             .listen
             .parse()
             .map_err(|_| HubError::bad("listen must be a loopback socket address"))?;
-        if !listen.ip().is_loopback() || listen.port() == 0 {
-            return Err(HubError::bad(
-                "Hub listener must bind a nonzero loopback address",
-            ));
-        }
-        validate_public_url(&wire.public_url)?;
-        if wire.gateways.is_empty() || wire.gateways.len() > 16 {
-            return Err(HubError::bad(
-                "one to sixteen approved gateways are required",
-            ));
-        }
-        for gateway in &wire.gateways {
-            gateway.validate().map_err(HubError::bad)?;
-        }
-        if wire.operator_ssh_public_keys.is_empty() || wire.operator_ssh_public_keys.len() > 32 {
-            return Err(HubError::bad(
-                "one to thirty-two operator SSH keys are required",
-            ));
-        }
-        for key in &wire.operator_ssh_public_keys {
-            validate_ed25519_public_key(key).map_err(HubError::bad)?;
-        }
-        if wire.port_from == 0 || wire.port_from > wire.port_to {
-            return Err(HubError::bad("invalid reverse port range"));
-        }
         let parent = path.parent().unwrap_or(FsPath::new("."));
         let state_root = if wire.state_root.is_absolute() {
             wire.state_root
@@ -128,7 +103,7 @@ impl HubConfig {
                 "operator and gateway tokens must be distinct secrets of at least 32 bytes",
             ));
         }
-        Ok(Self {
+        let config = Self {
             listen,
             public_url: wire.public_url,
             state_root,
@@ -140,7 +115,9 @@ impl HubConfig {
             port_from: wire.port_from,
             port_to: wire.port_to,
             reserved_ports: wire.reserved_ports,
-        })
+        };
+        validate_runtime_config(&config)?;
+        Ok(config)
     }
 }
 fn default_env_operator() -> String {
@@ -155,9 +132,6 @@ pub struct HubService {
 }
 impl HubService {
     pub fn new(config: HubConfig) -> Result<Self, HubError> {
-        if !config.listen.ip().is_loopback() || config.listen.port() == 0 {
-            return Err(HubError::bad("Hub listener must be loopback-only"));
-        }
         validate_runtime_config(&config)?;
         // A distinct projection file is mandatory for side-by-side operation
         // with the installed legacy Hub. Never overwrite its authorized_keys.
@@ -206,6 +180,11 @@ impl HubService {
 }
 
 pub(super) fn validate_runtime_config(config: &HubConfig) -> Result<(), HubError> {
+    if !config.listen.ip().is_loopback() || config.listen.port() == 0 {
+        return Err(HubError::bad(
+            "Hub listener must bind a nonzero loopback address",
+        ));
+    }
     validate_public_url(&config.public_url)?;
     if config.gateways.is_empty() || config.gateways.len() > 16 {
         return Err(HubError::bad(

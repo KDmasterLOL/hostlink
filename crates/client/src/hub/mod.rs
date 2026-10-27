@@ -6,7 +6,8 @@ mod routes;
 
 pub use client::HubClient;
 pub(crate) use client::read_ca_certificate;
-pub use config::{HubClientError, HubConfig, RevokeReceipt};
+pub use config::{HubClientError, HubConfig};
+pub use hostlink_hub::RevokeReceipt;
 pub use routes::{host_spec_from, host_spec_from_approved_routes};
 
 #[cfg(test)]
