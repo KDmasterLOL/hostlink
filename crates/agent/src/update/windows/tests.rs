@@ -1,21 +1,18 @@
 //! Windows-only recovery regressions retained with the Windows implementation.
 
-use super::super::*;
-use super::fs::*;
-use super::publication::*;
-use super::recovery::*;
-use super::*;
-
-#[cfg(all(test, windows))]
+#[cfg(windows)]
 mod windows_recovery_tests {
-    use super::super::*;
-    use super::fs::*;
-    use super::publication::*;
-    use super::recovery::*;
-    use super::*;
+    use crate::update::{
+        INSTALL_METADATA,
+        manifest::{FileIdentity, InstallMetadata},
+        windows::{
+            fs::{create_private_directory, write_private_synced},
+            recovery::recover_windows_handoff,
+        },
+    };
     use crate::update_handoff::{UpdateIdentity, UpdateJournal, UpdatePhase, write_journal_atomic};
     use sha2::{Digest, Sha256};
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, fs, path::PathBuf};
     use tempfile::TempDir;
 
     fn digest(bytes: &[u8]) -> String {

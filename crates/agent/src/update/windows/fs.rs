@@ -228,7 +228,7 @@ pub(super) fn write_private_synced(destination: &Path, bytes: &[u8]) -> io::Resu
 }
 
 #[cfg(windows)]
-fn verify_windows_private_file(path: &Path) -> io::Result<()> {
+pub(super) fn verify_windows_private_file(path: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() || is_reparse_point(&metadata) {
         return Err(invalid(
@@ -244,7 +244,7 @@ pub(super) fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(windows)]
-pub(super) fn create_private_directory(path: &Path) -> io::Result<()> {
+pub(in crate::update) fn create_private_directory(path: &Path) -> io::Result<()> {
     match fs::create_dir(path) {
         Ok(()) => set_private_directory(path)?,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -269,7 +269,10 @@ fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
 }
 
 #[cfg(windows)]
-pub(super) fn validate_windows_private_acl(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+pub(in crate::update) fn validate_windows_private_acl(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> io::Result<()> {
     use std::os::windows::fs::MetadataExt;
     use windows_permissions::constants::{AceType, SeObjectType, SecurityInformation};
     use windows_permissions::wrappers::GetNamedSecurityInfo;
@@ -327,7 +330,7 @@ pub(super) fn validate_windows_private_acl(path: &Path, metadata: &fs::Metadata)
 }
 
 #[cfg(windows)]
-pub(super) fn set_windows_private_acl(path: &Path, directory: bool) -> io::Result<()> {
+pub(in crate::update) fn set_windows_private_acl(path: &Path, directory: bool) -> io::Result<()> {
     use windows_permissions::constants::{SeObjectType, SecurityInformation};
     use windows_permissions::wrappers::{ConvertSidToStringSid, SetNamedSecurityInfo};
     use windows_permissions::{LocalBox, SecurityDescriptor};

@@ -9,9 +9,11 @@ use crate::update::manifest::{
     BootstrapReceipt, InstallMetadata, package_files, read_install_metadata, validate_installed,
 };
 use crate::update::private_fs::{
-    hash_file, is_reparse_point, open_private_file, set_staged_file_permissions, sync_directory,
-    validate_path_has_no_reparse_components, validate_private_directory, validate_user_owned_root,
+    hash_file, is_reparse_point, open_private_file, set_staged_file_permissions,
+    validate_path_has_no_reparse_components, validate_user_owned_root,
 };
+#[cfg(not(windows))]
+use crate::update::private_fs::{sync_directory, validate_private_directory};
 #[cfg(windows)]
 use crate::update::windows::validate_windows_private_acl;
 use std::{

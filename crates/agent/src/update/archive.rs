@@ -1,15 +1,14 @@
 //! Archive path validation, strict ZIP index validation, and private package staging.
 
+#[cfg(not(windows))]
+use super::private_fs::{create_private_directory, validate_private_directory};
 #[cfg(windows)]
-use super::windows::validate_windows_private_acl;
+use super::windows::{create_private_directory, validate_windows_private_acl};
 use super::{
     MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_TOTAL_BYTES, PACKAGE_MANIFEST,
     invalid, invalid_owned,
     manifest::{FileIdentity, PackageManifest, package_files},
-    private_fs::{
-        create_private_directory, hash_file, set_private_directory, set_staged_file_permissions,
-        validate_private_directory,
-    },
+    private_fs::{hash_file, set_private_directory, set_staged_file_permissions},
     private_fs::{is_reparse_point, validate_path_has_no_reparse_components},
 };
 use sha2::{Digest, Sha256};
