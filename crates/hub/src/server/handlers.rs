@@ -29,13 +29,16 @@ pub(super) async fn list_hosts(
     headers: HeaderMap,
 ) -> Result<Json<HostsResponse>, HubError> {
     require_operator(&headers, &app)?;
-    let locked = app
-        .store
-        .lock()
-        .map_err(|_| HubError::internal("Hub state unavailable"))?;
-    Ok(Json(HostsResponse {
-        hosts: locked.state.hosts.into_values().collect(),
-    }))
+    run_blocking(move || {
+        let locked = app
+            .store
+            .lock()
+            .map_err(|_| HubError::internal("Hub state unavailable"))?;
+        Ok(Json(HostsResponse {
+            hosts: locked.state.hosts.into_values().collect(),
+        }))
+    })
+    .await
 }
 #[derive(Serialize)]
 pub(super) struct HostsResponse {
@@ -48,17 +51,20 @@ pub(super) async fn get_host(
 ) -> Result<Json<RegisteredHost>, HubError> {
     require_operator(&headers, &app)?;
     let id = MachineId::parse(raw).map_err(HubError::bad)?;
-    let locked = app
-        .store
-        .lock()
-        .map_err(|_| HubError::internal("Hub state unavailable"))?;
-    locked
-        .state
-        .hosts
-        .get(&id)
-        .cloned()
-        .map(Json)
-        .ok_or(HubError::NotFound)
+    run_blocking(move || {
+        let locked = app
+            .store
+            .lock()
+            .map_err(|_| HubError::internal("Hub state unavailable"))?;
+        locked
+            .state
+            .hosts
+            .get(&id)
+            .cloned()
+            .map(Json)
+            .ok_or(HubError::NotFound)
+    })
+    .await
 }
 pub(super) async fn create_invite(
     State(app): State<App>,
@@ -67,14 +73,21 @@ pub(super) async fn create_invite(
 ) -> Result<(StatusCode, Json<InviteResponse>), HubError> {
     require_operator(&headers, &app)?;
     let request: InviteRequest = parse_json(body)?;
-    enrollment::create_invite(&app, request).map(|response| (StatusCode::CREATED, Json(response)))
+    run_blocking(move || {
+        enrollment::create_invite(&app, request)
+            .map(|response| (StatusCode::CREATED, Json(response)))
+    })
+    .await
 }
 pub(super) async fn enroll_host(
     State(app): State<App>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<EnrollResponse>), HubError> {
     let request: EnrollRequest = parse_json(body)?;
-    enrollment::enroll(&app, request).map(|response| (StatusCode::CREATED, Json(response)))
+    run_blocking(move || {
+        enrollment::enroll(&app, request).map(|response| (StatusCode::CREATED, Json(response)))
+    })
+    .await
 }
 fn parse_json<T: for<'de> Deserialize<'de>>(bytes: Bytes) -> Result<T, HubError> {
     if bytes.is_empty() || bytes.len() > 64 * 1024 {
@@ -98,22 +111,25 @@ pub(super) async fn rename_host(
     let req: DisplayNameRequest = parse_json(body)?;
     let id = MachineId::parse(raw).map_err(HubError::bad)?;
     let name = validate_display_name(&req.display_name)?;
-    let mut locked = app
-        .store
-        .lock()
-        .map_err(|_| HubError::internal("Hub state unavailable"))?;
-    ensure_unique_name(&locked.state.hosts, &name, Some(&id))?;
-    let host = locked.state.hosts.get_mut(&id).ok_or(HubError::NotFound)?;
-    host.display_name = Some(name);
-    host.updated_at = now();
-    let output = host.clone();
-    locked.state.audit.push(crate::state::AuditEntry {
-        at: now(),
-        action: "rename".into(),
-        machine_id: Some(id),
-    });
-    locked.commit().map_err(commit_error)?;
-    Ok(Json(output))
+    run_blocking(move || {
+        let mut locked = app
+            .store
+            .lock()
+            .map_err(|_| HubError::internal("Hub state unavailable"))?;
+        ensure_unique_name(&locked.state.hosts, &name, Some(&id))?;
+        let host = locked.state.hosts.get_mut(&id).ok_or(HubError::NotFound)?;
+        host.display_name = Some(name);
+        host.updated_at = now();
+        let output = host.clone();
+        locked.state.audit.push(crate::state::AuditEntry {
+            at: now(),
+            action: "rename".into(),
+            machine_id: Some(id),
+        });
+        locked.commit().map_err(commit_error)?;
+        Ok(Json(output))
+    })
+    .await
 }
 #[derive(Serialize)]
 pub(super) struct RevokeResponse {
@@ -129,33 +145,46 @@ pub(super) async fn delete_host(
 ) -> Result<Json<RevokeResponse>, HubError> {
     require_operator(&headers, &app)?;
     let id = MachineId::parse(raw).map_err(HubError::bad)?;
-    let mut locked = app
-        .store
-        .lock()
-        .map_err(|_| HubError::internal("Hub state unavailable"))?;
-    if locked.state.hosts.remove(&id).is_none() {
-        return Err(HubError::NotFound);
-    }
-    locked.state.audit.push(crate::state::AuditEntry {
-        at: now(),
-        action: "revoke".into(),
-        machine_id: Some(id),
-    });
-    locked.commit().map_err(commit_error)?;
-    // The durable revocation may already be visible to the Hub lookup while an
-    // earlier authorized_keys projection still admits the revoked gateway key.
-    // Do not return HTTP success until the gateway projection is reconciled.
-    ssh_authorization::reconcile(&app).map_err(|_| {
-        HubError::Unavailable(
-            "revocation committed; gateway key projection reconciliation is required".into(),
-        )
-    })?;
-    Ok(Json(RevokeResponse {
-        revoked_new_connections: true,
-        confirmed_session_terminated: false,
-        remote_uninstall: false,
-        authorized_key_projection: "reconciled",
-    }))
+    run_blocking(move || {
+        let mut locked = app
+            .store
+            .lock()
+            .map_err(|_| HubError::internal("Hub state unavailable"))?;
+        if locked.state.hosts.remove(&id).is_none() {
+            return Err(HubError::NotFound);
+        }
+        locked.state.audit.push(crate::state::AuditEntry {
+            at: now(),
+            action: "revoke".into(),
+            machine_id: Some(id),
+        });
+        locked.commit().map_err(commit_error)?;
+        // The durable revocation may already be visible to the Hub lookup while an
+        // earlier authorized_keys projection still admits the revoked gateway key.
+        // Do not return HTTP success until the gateway projection is reconciled.
+        ssh_authorization::reconcile(&app).map_err(|_| {
+            HubError::Unavailable(
+                "revocation committed; gateway key projection reconciliation is required".into(),
+            )
+        })?;
+        Ok(Json(RevokeResponse {
+            revoked_new_connections: true,
+            confirmed_session_terminated: false,
+            remote_uninstall: false,
+            authorized_key_projection: "reconciled",
+        }))
+    })
+    .await
+}
+
+async fn run_blocking<T, F>(operation: F) -> Result<T, HubError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, HubError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|_| HubError::internal("Hub operation failed"))?
 }
 pub(crate) fn validate_name(name: &str) -> Result<String, HubError> {
     let value = name.trim();

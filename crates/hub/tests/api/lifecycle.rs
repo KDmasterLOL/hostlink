@@ -2,6 +2,62 @@ use super::*;
 use axum::http::StatusCode;
 use hostlink_hub::router;
 use serde_json::{Value, json};
+use std::{fs::OpenOptions, sync::mpsc, thread, time::Duration};
+
+#[test]
+fn state_lock_wait_does_not_block_health_on_the_tokio_executor() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = router(service(dir.path(), key()));
+    let lock_path = dir.path().join("hostlink-hub-v2/registry-v2.lock");
+    let writer_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .unwrap();
+    writer_lock.lock().unwrap();
+
+    let (progress_tx, progress_rx) = mpsc::sync_channel(1);
+    let request_app = app.clone();
+    let health_app = app;
+    let request_thread = thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let list_request = tokio::spawn(call(
+                request_app,
+                "GET",
+                "/v2/hosts",
+                Some(OPERATOR),
+                json!({}),
+            ));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let health_progressed = tokio::time::timeout(
+                Duration::from_millis(500),
+                call(health_app, "GET", "/healthz", None, json!({})),
+            )
+            .await
+            .is_ok();
+            let _ = progress_tx.send(health_progressed);
+            list_request.await.unwrap()
+        })
+    });
+
+    // Observe progress before releasing the lock. Always release it before
+    // asserting so a regression cannot strand the request thread.
+    let health_progressed = progress_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or(false);
+    writer_lock.unlock().unwrap();
+    let (status, _) = request_thread.join().unwrap();
+
+    assert!(
+        health_progressed,
+        "health waited behind the state file lock"
+    );
+    assert_eq!(status, StatusCode::OK);
+}
 
 #[tokio::test]
 async fn invite_enroll_inventory_rename_revoke_and_restart_are_secret_free() {
