@@ -1,16 +1,15 @@
 use super::database::{connect, inspect_layout, verify_schema};
 use super::*;
+use sqlx::SqlitePool;
 use std::collections::HashSet;
 
 impl JobStore {
     pub(super) async fn inventory(&self) -> io::Result<Vec<JobView>> {
-        inventory(self).await
+        inspect_inventory(&self.root, &self.pool).await
     }
 }
 
-async fn inventory(store: &JobStore) -> io::Result<Vec<JobView>> {
-    let root = &store.root;
-    let pool = &store.pool;
+async fn inspect_inventory(root: &Path, pool: &SqlitePool) -> io::Result<Vec<JobView>> {
     inspect_layout(root)?;
     let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "{} ORDER BY j.id LIMIT ?",
@@ -106,13 +105,12 @@ async fn scan_active(root: PathBuf) -> io::Result<Vec<String>> {
         return Err(invalid("missing jobs.db cannot prove update safety"));
     }
     let pool = connect(&root, true).await?;
-    let store = JobStore::from_pool(root, pool.clone());
     let result = async {
         verify_schema(&pool).await?;
-        store.inventory().await
+        inspect_inventory(&root, &pool).await
     }
     .await;
-    store.close().await;
+    pool.close().await;
     Ok(result?
         .into_iter()
         .filter(|r| r.state.blocks_update())
