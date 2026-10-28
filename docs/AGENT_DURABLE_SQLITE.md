@@ -51,6 +51,12 @@ Tokio executor can still finish SQL. Service and updater retain synchronous
 safety checks using a read-only SQLite connection on a scoped runtime thread;
 they do not reacquire the updater's already-held lock. Active and Interrupted
 states defer replacement, and invalid/unknown state returns an error.
+The candidate's read-only existing-store open and restart reconciliation do not
+acquire update.lock: a registered Windows updater retains that lock while
+waiting for its replacement Agent's authenticated SSH health. The candidate
+holds an exclusive runner lease; new admission and one-use process claims
+still require the update lock. A lock-held candidate startup regression verifies
+this ordering on disposable state.
 Processkit cancellation/timeout waits for tree teardown. Uncertain teardown,
 shutdown or failed output synchronization stays Interrupted.
 

@@ -22,7 +22,10 @@ impl DurableStore {
     /// legacy state, incompatible migration history and SQLite durability failures.
     pub async fn open(root: impl Into<PathBuf>) -> io::Result<Self> {
         let root = root.into();
-        let _lock = update_lock(&root).await?;
+        // Existing-state verification never admits a job or upgrades the
+        // schema. A registered Windows updater holds update.lock while it
+        // waits for its replacement Agent's authenticated health; acquiring
+        // that lock here would deadlock the replacement startup.
         let pool = database::open_existing(&root).await?;
         Self::attach(root, pool).await
     }

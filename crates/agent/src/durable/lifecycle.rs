@@ -88,7 +88,10 @@ impl DurableStore {
     /// # Errors
     /// Rejects corrupt/unknown persisted state or uncertain SQLite commits.
     pub async fn recover_nonterminal(&self) -> io::Result<()> {
-        let _lock = update_lock(&self.root).await?;
+        // Called only after the Agent holds the exclusive runner lease.
+        // Admission/start still require update.lock; recovery must be able to
+        // run during the registered updater's fenced replacement health check.
+        // If an active job was visible, the updater already deferred.
         let records = self.inventory_inner(true).await?;
         let mut tx = self
             .pool

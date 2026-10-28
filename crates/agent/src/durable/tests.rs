@@ -66,6 +66,43 @@ async fn runtime_never_recreates_a_missing_database_or_runner_only_root() {
     assert_eq!(fs::read(spool).unwrap(), [0, 255, 7]);
 }
 
+#[tokio::test]
+async fn registered_replacement_can_open_and_recover_while_updater_holds_lock() {
+    use std::sync::mpsc;
+    let (_temp, store) = fixture().await;
+    let root = store.root.clone();
+    store.close().await;
+    let install_root = root.parent().unwrap().to_path_buf();
+
+    let (locked_tx, locked_rx) = mpsc::sync_channel(1);
+    let (unlock_tx, unlock_rx) = mpsc::sync_channel::<()>(1);
+    let updater = std::thread::spawn(move || {
+        let _lock = acquire_update_lock(&install_root).unwrap();
+        locked_tx.send(()).unwrap();
+        unlock_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+    });
+    locked_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let candidate = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let store = DurableStore::open(&root).await?;
+        let runner = store.acquire_runner()?;
+        store.recover_nonterminal().await?;
+        drop(runner);
+        store.close().await;
+        Ok::<(), io::Error>(())
+    })
+    .await;
+    unlock_tx.send(()).unwrap();
+    updater.join().unwrap();
+    assert!(
+        matches!(candidate, Ok(Ok(()))),
+        "registered replacement cannot wait for the updater-held lock during health"
+    );
+}
+
 fn sample() -> JobSpec {
     JobSpec {
         program: "echo".into(),
