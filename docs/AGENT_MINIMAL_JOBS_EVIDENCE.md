@@ -1,5 +1,49 @@
 # 1C-1081 simplification and P1 follow-up evidence
 
+## Integration review of runtime ownership and updater scan
+
+Verified code candidate: `3d376121a20c186fbfcde47404183a48bac2f2bb`
+(subsequent edits to this file/documentation do not change Rust behavior).
+Starting from `dev@ea17116c6551a1ccab80452f28773d3eafd3662f`, the task
+deletes `agent/src/ssh/jobs` and `agent/src/durable`, and replaces the
+old jobs-v1 commands with `jobs run/list/status/logs/cancel` over
+`hostlink-jobs`. Apalis SQLite holds native status/results, with only one
+immutable per-start execution claim; ProcessKit owns OS process trees.
+No production jobs-v1 adapter, second UUID, or alternate `claim_start`
+remains.
+
+Last refinement: `JobRuntime::open` now holds existing-store opening,
+exclusive runner lock, recovery and runtime construction within the jobs
+owner, rather than SSH manually assembling the mechanism. The updater's
+`active_ids` safety scan now reads directly through the validated read-only
+SQLite pool; it no longer instantiates a write-capable Apalis queue for a
+read-only inspection. Pinned Apalis `ConcurrencyLimitLayer` must remain
+distinct from retained OS-tree `slots`: the former bounds dequeue consumer
+futures, while the latter quarantines UNKNOWN process capacity beyond worker
+completion. Eliminating it would weaken an actual safety invariant.
+
+| Source-scoped code validation at 3d37612 | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | PASS |
+| `cargo check --offline --locked --workspace --all-targets` | PASS |
+| `cargo clippy --offline --locked --workspace --all-targets -- -D warnings` | PASS |
+| Agent: exclusive runner lease, missing store, orphan no-replay, updater-locked recovery, tampered native claim | 5 focused tests PASS |
+| Client: `cargo test --offline --locked -p hostlink --lib run::` | 16 PASS |
+| Client: `cargo test --offline --locked -p hostlink --bin hostlink` | 10 PASS |
+| Agent full Linux `jobs::tests::` scan with Btrfs TMPDIR | 25 PASS, 1 source-ancestor fixture FAIL (the HOME connector maps `/` to foreign UID 65534; no ACL bypass) |
+
+The identical **production-file** line-count method (all `*.rs` under
+Agent job directories, excluding files with `test` in the name) gives
+`dev` legacy 2577 lines and this candidate 2859 lines (**+282**).
+The accepted simplification is ownership/API/state correctness, **not**
+a net decrease in Agent LOC. The extra ProcessKit cancellation, output
+proof and security checks remain necessary under the current no-replay
+contract. Previous intermediate LOC snapshots further below are
+historical, not the final count. Earlier native Windows 11 evidence was
+for **8bbaf21 only**; Windows 11/Win7 native acceptance on the final
+integrated source, and full Linux workspace runtime with strong
+containment, are **not proven**. No client/production deployment.
+
 ## 2026-10-28 — owned ProcessKit deadline and Windows 11 acceptance
 
 Latest source-exact **task-branch** candidate:

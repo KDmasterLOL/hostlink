@@ -8,7 +8,19 @@ execution, framing or Client commands. This is development integration only.
 One `SqliteStorage<JobPayload>` sink and one Agent-owned `WorkerBuilder` handle
 admission and processing. The worker polls every 100 ms in batches of 16;
 concurrency is bounded to 16 processes, with no retry middleware or alternate
-backend. ProcessKit owns execution, raw output and tree teardown. Local cancellation
+backend.
+Runtime startup lives in `jobs::JobRuntime::open`: open only an established
+private SQLite root, obtain its exclusive runner lease, recover, then publish a
+fully initialized Agent-owned runtime. SSH never assembles job storage, process
+locks or scheduler state. The Tower concurrency layer bounds simultaneous Apalis
+consumer futures; the separate process semaphore retains capacity until OS
+tree teardown/output publication and deliberately keeps a permit quarantined
+when that completion is UNKNOWN. They protect different lifetimes and must not
+be mechanically collapsed.
+Updater/service safety scans read SQLite through their read-only pool without
+constructing a write-capable Apalis backend.
+
+ProcessKit owns execution, raw output and tree teardown. Local cancellation
 uses the Agent's active token to stop the explicit group concurrently with child
 drain; jobs do not wire `Command::cancel_on`. In pinned 3.3.4 that finisher's
 Cancelled result masks a pump read error. An error-free drain plus both stream-end

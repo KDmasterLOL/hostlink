@@ -42,6 +42,10 @@ filesystem durability in one security contract, also exceeding 200 lines.
 bounded native-status/result/claim snapshot for lookup, list and deep inventory. `jobs/lifecycle.rs` holds the one-use execution fence and native result
 publication. `jobs/engine.rs` keeps the supervised consumer, dequeue-bound Busy
 backoff and permit quarantine together as a lifecycle contract exceeding 200 lines.
+`jobs/mod.rs::JobRuntime::open` owns existing-store opening, runner lease,
+recovery and runtime construction; `ssh/server.rs` never assembles the job
+engine. `jobs/inventory.rs` performs updater safety scans directly against a
+read-only SQLite pool, without constructing a queue backend.
 `jobs/worker.rs` keeps group ownership, verified teardown and output
 completion in one security contract. `jobs/*tests.rs` and `ssh/tests/wire/` retain larger real SQLite,
 ProcessKit and encrypted SSH regression scenarios. See the
