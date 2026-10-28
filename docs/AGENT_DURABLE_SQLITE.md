@@ -20,9 +20,13 @@ production code and the isolated PoC workspace are unchanged.
   references. Restart recovery turns Prepared/Running into Interrupted and
   disables their Apalis queue eligibility, preserving the claim. Interrupted
   has no automatic reconciliation transition and always blocks update.
-- The normal Apalis worker/orphan retry loop is deliberately not enabled:
-  upstream orphan recovery requeues Running even with max_attempts=1. Tests
-  exercise that actual query and prove it cannot authorize a second claim.
+- A real Agent-owned Apalis WorkerBuilder now polls SQLite. Backend automatic
+  Lock/Complete persistence and retry middleware are disabled. The service
+  atomically verifies Queued, exact task ID/worker lock, the immutable payload,
+  eligibility and absence of a StartedClaim before launching. Upstream orphan
+  requeue still exists and ignores max_attempts for Pending; it never authorizes
+  a second claim. See [the worker contract](AGENT_APALIS_WORKER.md) for the
+  shutdown ordering, failure handling and executed acceptance boundary.
 - jobs-v1 has no scheduling fields. It rejects unknown input; no cron or hidden
   retry scheduler has been introduced. Native Apalis run_at eligibility is
   checked when claiming, without exposing an untrusted new protocol field.

@@ -124,7 +124,7 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
     assert_eq!(accepted.id, id);
     assert!(matches!(
         accepted.state,
-        JobState::Running | JobState::Exited { .. }
+        JobState::Prepared | JobState::Running | JobState::Exited { .. }
     ));
     original.close().await.expect("close original SSH session");
 
@@ -228,7 +228,10 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
         .job_start(&cancel_request)
         .await
         .expect("start cancellable job");
-    assert!(matches!(accepted.state, JobState::Running));
+    assert!(matches!(
+        accepted.state,
+        JobState::Prepared | JobState::Running
+    ));
     tokio::time::timeout(Duration::from_secs(7), async {
         while !pid_file.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;

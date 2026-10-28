@@ -44,53 +44,9 @@ pub(super) async fn handle_job_request(
                             .await;
                         return JobResponse::error("source executable verification failed");
                     }
-                    let permit = match runtime.slots.clone().try_acquire_owned() {
-                        Ok(permit) => permit,
-                        Err(_) => {
-                            let _ = runtime
-                                .store
-                                .transition(id, owner, JobState::Prepared, JobState::Failed)
-                                .await;
-                            return JobResponse::error("active job limit reached");
-                        }
-                    };
-                    // Commit the immutable, once-only start claim before any OS process.
-                    // A lost SSH acknowledgement cannot make this UUID eligible again.
-                    let record = match runtime.store.claim_start(id, owner).await {
-                        Ok(record) => record,
-                        Err(_) => return JobResponse::error("job start reservation failed"),
-                    };
-                    let active = Arc::new(JobCancellation {
-                        process: runtime.shutdown.child_token(),
-                        requested: AtomicBool::new(false),
-                    });
-                    runtime
-                        .active_jobs
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(id, active.clone());
-                    let runtime = runtime.clone();
-                    let owner = owner.to_owned();
-                    let response = JobResponse::success(id.to_string(), JobState::Running);
-                    tokio::spawn(async move {
-                        let _permit = permit;
-                        if run_job(runtime.clone(), owner, record, active)
-                            .await
-                            .is_err()
-                        {
-                            // No terminal state was published: the durable started claim
-                            // remains blocked for recovery, and is never re-enqueued.
-                            eprintln!(
-                                "hostlink-agent: durable job {id} state persistence failed; its started claim blocks update"
-                            );
-                        }
-                        runtime
-                            .active_jobs
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .remove(&id);
-                    });
-                    response
+                    // The Agent-owned Apalis worker polls the committed database.
+                    // Prepared is truthful even if dequeue races this response.
+                    JobResponse::success(id.to_string(), JobState::Prepared)
                 }
             }
         }
@@ -129,9 +85,15 @@ pub(super) async fn handle_job_request(
                     // Cancellation is not terminal until the process tree is gone.
                     JobResponse::success(id.to_string(), JobState::Running)
                 }
-                JobState::Prepared | JobState::Interrupted => {
-                    JobResponse::error("job has no cancellable worker")
-                }
+                JobState::Prepared => match runtime
+                    .store
+                    .transition(id, owner, JobState::Prepared, JobState::Failed)
+                    .await
+                {
+                    Ok(record) => JobResponse::success(id.to_string(), record.state),
+                    Err(_) => JobResponse::error("job cancellation unavailable"),
+                },
+                JobState::Interrupted => JobResponse::error("job has no cancellable worker"),
                 state => JobResponse::success(id.to_string(), state),
             }
         }

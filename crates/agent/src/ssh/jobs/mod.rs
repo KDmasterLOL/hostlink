@@ -3,6 +3,7 @@
 use super::config::invalid_data;
 use super::*;
 
+mod engine;
 mod frame;
 mod output;
 mod protocol;
@@ -10,6 +11,7 @@ mod source;
 mod wire;
 mod worker;
 
+pub(in crate::ssh) use engine::JobWorker;
 pub(super) use frame::handle_job_channel;
 pub(super) use source::verify_job_source;
 pub(super) use worker::run_job;
@@ -35,3 +37,6 @@ pub(in crate::ssh) struct JobCancellation {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod engine_tests;

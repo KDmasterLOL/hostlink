@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 use super::config::{PreparedEmbeddedSshConfig, invalid_data, prepare, validate_jobs_root};
-use super::jobs::{JobRuntime, handle_job_channel};
+use super::jobs::{JobRuntime, JobWorker, handle_job_channel};
 use super::*;
 
 struct EmbeddedServer {
@@ -156,8 +156,16 @@ where
     tokio::pin!(running);
     tokio::pin!(shutdown);
 
+    let mut worker = JobWorker::start(jobs.clone());
+    let mut worker_result = None;
     let result = tokio::select! {
         result = &mut running => result,
+        result = &mut worker.task => {
+            worker_result = Some(result.map_err(io::Error::other).and_then(|r| r));
+            handle.shutdown("HostLink durable worker stopped".to_owned());
+            let _ = tokio::time::timeout(SHUTDOWN_GRACE, &mut running).await;
+            Err(io::Error::other("durable Apalis worker stopped before Agent shutdown"))
+        }
         () = &mut shutdown => {
             handle.shutdown("onec-agent embedded SSH shutdown".to_owned());
             match tokio::time::timeout(SHUTDOWN_GRACE, &mut running).await {
@@ -170,11 +178,23 @@ where
         }
     };
     exec_shutdown.cancel();
-    {
-        let _start = jobs.start_lock.lock().await;
-        jobs.accepting.store(false, Ordering::Release);
-        jobs.shutdown.cancel();
-    }
+    // Close admission and signal trees without awaiting a possibly blocked
+    // admission/claim lock here. The supervised worker serializes its final
+    // drain under start_lock; the outer shutdown deadline must stay bounded.
+    jobs.accepting.store(false, Ordering::Release);
+    jobs.shutdown.cancel();
+    let worker_result = match worker_result {
+        Some(result) => result,
+        None => tokio::time::timeout(SHUTDOWN_GRACE, &mut worker.task)
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "durable Apalis worker shutdown timed out",
+                )
+            })?
+            .map_err(io::Error::other)?,
+    };
     let all_job_slots = jobs
         .slots
         .clone()
@@ -188,7 +208,7 @@ where
             "durable job process trees did not finish during Agent shutdown",
         ));
     }
-    result
+    result.and(worker_result)
 }
 
 impl russh::server::Server for EmbeddedServer {

@@ -41,6 +41,9 @@ Apalis payload, immutable claim
 validation and SQL row decoding together. `durable/tests.rs` and
 `ssh/jobs/tests.rs` are larger security/lifecycle regression suites; their
 scenarios exercise real SQLite and processes rather than mock backends.
+`ssh/jobs/engine_tests.rs` is likewise a cohesive worker security/lifecycle
+regression suite covering real dequeue, forged claims, crash windows, retry
+suppression, process limits and failure-driven tree teardown.
 
 ## Verification
 

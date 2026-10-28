@@ -107,8 +107,13 @@ UUID is printed **before** the first start request; on a lost acknowledgement,
 query status by UUID instead of resubmitting. Ordinary SSH `exec` remains
 channel-owned and does **not** survive a disconnect.
 
-Agent durable records now use pinned Apalis SQLite 1.0.0 and SQLx 0.9.0 in the
-normal root workspace. The database uses WAL and per-connection verified FULL
+Agent durable jobs use a real Apalis 1.0.0 SQLite WorkerBuilder consumer and
+SQLx 0.9.0 in the normal root workspace. Start commits and returns Prepared;
+the Agent-owned worker polls the database and runs at most 16 processes, with
+no automatic retry or backend lifecycle ACK. An atomic dequeue-bound claim
+owns Running and all terminal states. Shutdown cancels and drains process trees
+before stopping polling; failures stop admission and retain blocking claims.
+See the [worker contract and evidence](docs/AGENT_APALIS_WORKER.md). The database uses WAL and per-connection verified FULL
 synchronization. One immutable started claim commits before process execution;
 retries, lost ACKs and restarts never replay it. Interrupted remains UNKNOWN
 and prevents Agent replacement. Private raw output and sealed artifacts retain

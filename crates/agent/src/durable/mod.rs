@@ -9,6 +9,8 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+pub(crate) const WORKER_NAME: &str = "hostlink-agent-worker-v1";
+
 const SCHEMA_VERSION: u32 = 1;
 const MAX_RECORD_BYTES: usize = 64 * 1024;
 const MAX_JOBS: usize = 4096;

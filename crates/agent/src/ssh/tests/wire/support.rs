@@ -21,6 +21,7 @@ pub(super) struct WireFixture {
     pub(super) root: tempfile::TempDir,
     pub(super) jobs: Arc<JobRuntime>,
     pub(super) keys: [PrivateKey; 2],
+    worker: JobWorker,
     host: PrivateKey,
     clients: Vec<client::Handle<Pin>>,
     sessions: tokio::task::JoinSet<Result<(), russh::Error>>,
@@ -45,9 +46,11 @@ impl WireFixture {
             shutdown: processkit::CancellationToken::new(),
             active_jobs: std::sync::Mutex::new(HashMap::new()),
         });
+        let worker = JobWorker::start(jobs.clone());
         Self {
             root,
             jobs,
+            worker,
             keys: std::array::from_fn(|_| {
                 PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap()
             }),
@@ -189,7 +192,10 @@ impl WireFixture {
                 if response["state"] == state {
                     break;
                 }
-                assert_eq!(response["state"], json!({"state":"running"}));
+                assert!(matches!(
+                    response["state"]["state"].as_str(),
+                    Some("running" | "prepared")
+                ));
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -222,6 +228,11 @@ impl WireFixture {
         })
         .await
         .expect("real sessions and process trees finish before fixture disposal");
+        tokio::time::timeout(Duration::from_secs(5), &mut self.worker.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         self.jobs.store.clone().close().await;
     }
 }

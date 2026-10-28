@@ -3,7 +3,7 @@ use super::wire::JobRequest;
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
-async fn fixture(script: &str) -> (tempfile::TempDir, Arc<JobRuntime>, String, JobSpec) {
+pub(super) async fn fixture(script: &str) -> (tempfile::TempDir, Arc<JobRuntime>, String, JobSpec) {
     let temp = tempfile::tempdir().expect("private test root");
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let source = temp.path().join("pinned-sh");
@@ -22,7 +22,7 @@ async fn fixture(script: &str) -> (tempfile::TempDir, Arc<JobRuntime>, String, J
     (temp, runtime, "a".repeat(64), spec)
 }
 
-fn runtime(store: DurableStore) -> Arc<JobRuntime> {
+pub(super) fn runtime(store: DurableStore) -> Arc<JobRuntime> {
     let runner = store.acquire_runner().expect("exclusive runtime lease");
     Arc::new(JobRuntime {
         store,
@@ -36,7 +36,7 @@ fn runtime(store: DurableStore) -> Arc<JobRuntime> {
     })
 }
 
-fn start(id: JobId, spec: &JobSpec) -> JobRequest {
+pub(super) fn start(id: JobId, spec: &JobSpec) -> JobRequest {
     JobRequest::Start {
         version: 1,
         id: id.to_string(),
@@ -49,6 +49,7 @@ async fn lost_ack_retry_keeps_one_execution_raw_output_and_nonzero_exit() {
     let (temp, runtime, owner, spec) =
         fixture("printf x >> counter; printf '\\377\\000raw' ; printf diagnostic >&2; exit 23")
             .await;
+    let mut worker = JobWorker::start(runtime.clone());
     let id = JobId::new();
     // The worker belongs to the Agent: discarding the ACK does not cancel it.
     let _lost_ack = handle_job_request(start(id, &spec), &runtime, &owner).await;
@@ -58,7 +59,10 @@ async fn lost_ack_retry_keeps_one_execution_raw_output_and_nonzero_exit() {
             if record.state == (JobState::Exited { code: 23 }) {
                 break;
             }
-            assert_eq!(record.state, JobState::Running);
+            assert!(matches!(
+                record.state,
+                JobState::Prepared | JobState::Running
+            ));
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -116,6 +120,12 @@ async fn lost_ack_retry_keeps_one_execution_raw_output_and_nonzero_exit() {
             .ok
     );
     assert_eq!(std::fs::read(temp.path().join("counter")).unwrap(), b"x");
+    runtime.shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), &mut worker.task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]
@@ -194,6 +204,7 @@ async fn wrong_source_and_noncanonical_id_never_launch() {
 #[tokio::test]
 async fn detached_worker_retains_runner_lease_until_process_teardown() {
     let (temp, runtime, owner, spec) = fixture("printf started > ready; sleep 300").await;
+    let mut worker = JobWorker::start(runtime.clone());
     let observer = runtime.store.clone();
     let shutdown = runtime.shutdown.clone();
     let weak = Arc::downgrade(&runtime);
@@ -210,6 +221,11 @@ async fn detached_worker_retains_runner_lease_until_process_teardown() {
     let lease_was_retained = observer.acquire_runner().is_err();
     // Always stop the fixture tree before asserting the observed safety properties.
     shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), &mut worker.task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while weak.upgrade().is_some() {
             tokio::time::sleep(Duration::from_millis(10)).await;

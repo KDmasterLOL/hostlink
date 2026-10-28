@@ -45,7 +45,13 @@ impl DurableStore {
     }
 
     async fn attach(root: PathBuf, pool: SqlitePool) -> io::Result<Self> {
-        let backend = SqliteStorage::new(&pool).with_config(Config::default().queue(QUEUE));
+        let backend = SqliteStorage::new(&pool).with_config(
+            Config::default()
+                .queue(QUEUE)
+                .batch_size(16)
+                .lock_tasks(false)
+                .persist_results(false),
+        );
         let store = Self {
             root,
             pool,
@@ -53,6 +59,10 @@ impl DurableStore {
         };
         store.inventory_inner(true).await?;
         Ok(store)
+    }
+
+    pub(crate) fn worker_backend(&self) -> SqliteStorage<JobRecord> {
+        self.backend.clone()
     }
 
     /// Close all pooled handles before explicitly disposing a test-owned root.
@@ -213,7 +223,10 @@ pub(super) fn decode(
     if queue != QUEUE
         || max_attempts != 1
         || (status != queue_status(record.state)
-            && !(allow_orphan && record.state == JobState::Running && status == "Pending"))
+            && !(record.state == JobState::Prepared && status == "Queued")
+            && !(allow_orphan
+                && record.state == JobState::Running
+                && matches!(status.as_str(), "Pending" | "Queued")))
     {
         return Err(invalid(
             "Apalis queue/payload state mismatch; operation is UNKNOWN",
