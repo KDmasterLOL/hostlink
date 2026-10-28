@@ -1,5 +1,59 @@
 # 1C-1081 simplification and P1 follow-up evidence
 
+## 2026-10-28 — owned ProcessKit deadline and Windows 11 acceptance
+
+Latest source-exact **task-branch** candidate:
+`8bbaf21cb62d49b04771cb8f6ee957cc522ed58d`.
+Only the isolated task branch was committed/pushed. Neither `dev`,
+`main`, release tags, installed Agents, customer machines, services nor databases
+were changed by this continuation.
+
+Pinned ProcessKit 3.3.4 kills only the direct child on a shared-group
+`Command::timeout`. A descendant that inherits stdout/stderr can therefore
+hold the pipes open until `join_pumps` silently aborts after five seconds,
+leaving neither raw tee with a confirmed EOF flush. The earlier Windows
+fixture repeatedly reproduced that truthful UNKNOWN error on
+`98e6c22` and `dff64e8`. Commit `bfd9991` moved the deadline into the
+owned `ProcessGroup`: timeout or explicit cancellation stops the entire
+group before the joined output pumps are finalized. Commit `8bbaf21`
+bounds that stop-and-drain phase to ten seconds and propagates any stop,
+reap or pipe failure as UNKNOWN. The separate five-second group membership
+confirmation, both stream-end flush markers and spool fsync still gate
+`Failed`/EOF. Unknown or unconfirmed results retain the non-replay fence,
+stop admission and quarantine capacity; there is no silent retry.
+
+| Source-exact verification | Result |
+| --- | --- |
+| HOME `cargo fmt --all -- --check` | PASS |
+| HOME `cargo check --offline --locked --workspace --all-targets` | PASS |
+| HOME `cargo clippy --offline --locked --workspace --all-targets -- -D warnings` | PASS |
+| HOME `jobs::worker::tests::stalled_process_reap_is_bounded_and_never_reports_completion` | 1 PASS, real ProcessKit empty group and intentionally pending drain |
+| HOME `jobs::tests::actual_apalis_orphan_requeue_cannot_replay_started_command_even_after_restart` | 1 PASS, real Apalis SQL and immutable claim |
+| HOME Client binary CLI tests | 10 PASS |
+| WORK Windows 11 `bfd9991`, compact test profile, native timeout/tree/EOF | **1 PASS**, source-exact `mcp-job 765dd840-42c9-4260-b824-ef5213cf298e` |
+| WORK Windows 11 `8bbaf21`, compact test profile, `cargo test --locked -p hostlink-agent --lib jobs:: -- --nocapture --test-threads=1` | **27 PASS, 0 failed, 2 ignored fixture helpers**, source-exact `mcp-job 2dd3be2b-5dce-45b5-bf9c-ae5b7d037294` |
+| WORK Windows 11 `8bbaf21`, Client `cargo test --locked -p hostlink --lib run::` and `--bin hostlink` | **16 protocol and 9 CLI PASS**, 0 failed, `mcp-job 9017c239-68cd-4c8c-8525-9fa2fe8d324f` |
+| Independent read-only ProcessKit 3.3.4 review of `bfd9991..8bbaf21` | No P0/P1 findings |
+
+On WORK the native test runs with `CARGO_PROFILE_TEST_DEBUG=0` and
+`CARGO_INCREMENTAL=0`; this produces a test binary within the immutable
+64 MiB artifact seal limit. Without the compact profile, the ordinary
+debug test binary was about 275 MiB and Seal correctly refused it
+**before execution**. The test now fails with an actionable profile diagnostic
+instead of an opaque artifact-size error. No production limit was weakened.
+The Windows fixture verifies the descendant exits, the terminal state is
+`Failed`, and both output streams report EOF only after confirmed teardown.
+
+On HOME, 25 of 26 jobs storage tests passed; the remaining Seal test was
+rejected because the connector's UID namespace reports `/` as UID 65534.
+This is expected fail-closed ancestor ownership enforcement, **not** a passing
+source-authorization runtime test. A full Linux workspace PASS for the
+`8bbaf21` source is **not established**. A full WORK Windows workspace run
+and real Windows 7 x64/x86 acceptance have also **not** been established.
+The candidate is **not release/deployment certified**; the evidence above
+is confined to the branch, native Windows 11 jobs, Linux static checks and
+selected regressions. No existing jobs-root database was migrated.
+
 Current follow-up is based on `task/1c-1081-minimal-apalis-jobs` at
 `a60b7b3f1069cfb03406bd15e97760ca39b7779b`, 2026-10-28.
 No release, deployment, dev/main merge, installed Agent, customer data or services
