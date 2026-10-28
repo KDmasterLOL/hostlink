@@ -8,7 +8,14 @@ execution, framing or Client commands. This is development integration only.
 One `SqliteStorage<JobPayload>` sink and one Agent-owned `WorkerBuilder` handle
 admission and processing. The worker polls every 100 ms in batches of 16;
 concurrency is bounded to 16 processes, with no retry middleware or alternate
-backend. ProcessKit owns execution, raw output, cancellation and tree teardown.
+backend. ProcessKit owns execution, raw output and tree teardown. Local cancellation
+uses the Agent's active token to stop the explicit group concurrently with child
+drain; jobs do not wire `Command::cancel_on`. In pinned 3.3.4 that finisher's
+Cancelled result masks a pump read error. An error-free drain plus both stream-end
+flushes, spool sync and confirmed empty group permits clean user cancel to become
+Failed. Any drain error (including Io with a cancelled active token) stays UNKNOWN.
+The final pre-spawn cancel check and ProcessKit start hold `start_lock`, shared
+with authenticated Cancel, so an acknowledged pre-start cancel cannot execute.
 Before any OS spawn, the Agent inspects the **actual created group's**
 `ProcessGroup::mechanism()`. Only Linux `CgroupV2`, Windows `JobObject` and
 FreeBSD `ProcessReaper` are trusted; POSIX `ProcessGroup`, other platforms and
@@ -161,26 +168,34 @@ payload, 8 MiB per raw stream, 64 MiB per artifact and 128 artifacts/controller.
 Both spools must be durable for exited and claimed failed jobs. ProcessKit 3.3.4
 can silently abort output pumps after its five-second join grace; fsync alone
 therefore cannot prove complete output. Both private raw tee writers must report
-a successful EOF flush and both spool fsyncs must succeed before terminal complete
-logs. Missing markers mean UNKNOWN, updater deferral and `eof=false`. At overflow,
+a successful stream-end flush, drain must be error-free, and both spool fsyncs
+must succeed before terminal complete logs. Missing markers mean UNKNOWN,
+updater deferral and `eof=false`. At overflow,
 the writer cancels the tree and discards excess bytes while draining to EOF;
 the bounded captured prefix remains a Failed result after confirmed teardown.
 
-The marker relies on pinned `pump.rs` calling raw tee flush only at stream end
-(also on read error, which drain reports as an error). `AsyncWrite::poll_flush`
-is not intrinsically an EOF API: an upstream early flush would invalidate this
+The marker relies on pinned `pump.rs` calling raw tee flush only at stream end,
+including read error. Flush alone is not proof of clean EOF: without `cancel_on`,
+`child.drain` preserves the sink read error as Io, even during user cancellation.
+`AsyncWrite::poll_flush` is not intrinsically an EOF API: an upstream early flush would invalidate this
 proof; later writes clear the marker, but a future ProcessKit upgrade must recheck
-this contract. No marker is needed when no pumps existed: source rejection and
-proven pre-spawn Spawn/NotFound/Cancelled yield Failed only after spool fsync.
+this contract. No marker is needed when no pumps existed: pre-spawn
+rejection/cancel or Spawn/NotFound yield Failed only after spool fsync.
 Other launch/teardown errors remain UNKNOWN. Lost spool files are
 errors rather than empty EOF. Service/updater scans use a read-only connection;
-admission and dequeue claim share `update.lock`. While holding `start_lock` they
-use a nonblocking try-lock and return Busy, so an updater waiting for Agent STOP
-cannot deadlock shutdown. Both explicitly unlock before FD close (a concurrent
-fork may briefly inherit a descriptor until exec). Busy never enqueues, claims,
-spawns or silently retries; an explicit same-ID retry remains idempotent after
-contention. Fresh initialization/updater retain their blocking lock APIs. Installed Agent publication defers for
-prepared, running, UNKNOWN or invalid state. No new Windows API is introduced;
+admission and dequeue claim share `update.lock` and use a nonblocking try-lock.
+Admission returns Busy without enqueue; an explicit same-ID retry is idempotent.
+The consumer retains the exact dequeue-bound task on WouldBlock, releases its
+permit and `start_lock`, and retries after async 10/20/40/80/100 ms backoff (capped
+at 100 ms) until the lock is available or Agent shutdown cancels the wait. Each
+attempt re-reads cancellation/terminal state under `start_lock`. It never returns
+success merely for Busy, never blocks Tokio, and never retries a committed claim.
+On shutdown it leaves unclaimed Queued work for native Apalis recovery during
+restart; spent claims remain fenced as UNKNOWN. Other handler/backend errors
+still fail closed and stop admission/process trees. Both lock APIs explicitly
+unlock before FD close (a concurrent fork may inherit a descriptor until exec).
+Fresh initialization/updater retain their blocking lock APIs. Installed Agent
+publication defers for prepared, running, UNKNOWN or invalid state. No new Windows API is introduced;
 Win7 runtime and disposable native Windows acceptance remain separate gates.
 
 Native positive process tests probe the actual created group's mechanism and emit

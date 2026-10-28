@@ -116,33 +116,52 @@ async fn consume(
     worker: WorkerContext,
 ) -> io::Result<()> {
     let runtime = Arc::clone(&runtime);
-    let start = runtime.start_lock.lock().await;
-    if !runtime.accepting.load(Ordering::Acquire) || runtime.shutdown.is_cancelled() {
-        return Ok(());
-    }
-    // Cancellation may have durably completed a Prepared job after dequeue.
-    // Re-read rather than launching the stale snapshot delivered by Apalis.
-    let current = runtime
-        .store
-        .lookup(snapshot.id, &snapshot.controller_key_sha256)
-        .await?;
-    if current.started || current.state == JobState::Interrupted {
-        return Err(io::Error::other(
-            "started claim blocks replay; operation UNKNOWN",
-        ));
-    }
-    if matches!(current.state, JobState::Failed | JobState::Exited { .. }) {
-        return Ok(());
-    }
-    let permit = runtime
-        .slots
-        .clone()
-        .try_acquire_owned()
-        .map_err(io::Error::other)?;
-    let record = runtime
-        .store
-        .claim_dequeued(&snapshot, &task.to_string(), worker.name())
-        .await?;
+    let mut backoff = Duration::from_millis(10);
+    let (start, permit, record) = loop {
+        let start = runtime.start_lock.lock().await;
+        if !runtime.accepting.load(Ordering::Acquire) || runtime.shutdown.is_cancelled() {
+            return Ok(());
+        }
+        // Cancellation may have durably completed a Prepared job after dequeue.
+        // Re-read rather than launching the stale snapshot delivered by Apalis.
+        let current = runtime
+            .store
+            .lookup(snapshot.id, &snapshot.controller_key_sha256)
+            .await?;
+        if current.started || current.state == JobState::Interrupted {
+            return Err(io::Error::other(
+                "started claim blocks replay; operation UNKNOWN",
+            ));
+        }
+        if matches!(current.state, JobState::Failed | JobState::Exited { .. }) {
+            return Ok(());
+        }
+        let permit = runtime
+            .slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(io::Error::other)?;
+        match runtime
+            .store
+            .claim_dequeued(&snapshot, &task.to_string(), worker.name())
+            .await
+        {
+            Ok(record) => break (start, permit, record),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                // No claim was written. Keep this exact dequeue delivery alive,
+                // but let STOP and Cancel acquire start_lock while the updater
+                // inspects active_ids. Never block a Tokio thread on update.lock.
+                drop(permit);
+                drop(start);
+                tokio::select! {
+                    () = runtime.shutdown.cancelled() => return Ok(()),
+                    () = tokio::time::sleep(backoff) => {}
+                }
+                backoff = (backoff * 2).min(Duration::from_millis(100));
+            }
+            Err(error) => return Err(error),
+        }
+    };
     let id = record.id;
     let owner = record.controller_key_sha256.clone();
     let active = runtime.shutdown.child_token();
@@ -181,3 +200,7 @@ async fn consume(
     drop(start);
     process.await.map_err(io::Error::other)?
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "busy_tests.rs"]
+mod busy_tests;

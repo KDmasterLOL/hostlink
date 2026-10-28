@@ -17,7 +17,7 @@ fn update_lock_drop_releases_fork_shared_open_file_description() {
 
 use apalis_core::backend::WorkerFilter;
 
-async fn fixture() -> (tempfile::TempDir, JobStore) {
+pub(super) async fn fixture() -> (tempfile::TempDir, JobStore) {
     let root = tempfile::tempdir().unwrap();
     restrict_private_path(root.path(), true).unwrap();
     let jobs = root.path().join("jobs");
@@ -119,7 +119,7 @@ async fn registered_replacement_can_open_and_recover_while_updater_holds_lock() 
     );
 }
 
-fn sample() -> JobSpec {
+pub(super) fn sample() -> JobSpec {
     JobSpec {
         program: "echo".into(),
         args: vec!["hello".into()],
@@ -127,7 +127,7 @@ fn sample() -> JobSpec {
         source_sha256: "a".repeat(64),
     }
 }
-fn owner() -> String {
+pub(super) fn owner() -> String {
     "b".repeat(64)
 }
 

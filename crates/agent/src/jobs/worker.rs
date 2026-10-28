@@ -49,8 +49,9 @@ pub(super) async fn run_job(
         .output_buffer(processkit::OutputBufferPolicy::bounded(256).with_max_bytes(64 * 1024))
         .timeout(JOB_TIMEOUT)
         .timeout_grace(Duration::from_secs(2))
-        .kill_on_parent_death()
-        .cancel_on(cancel);
+        // Do not use cancel_on: ProcessKit 3.3.4 reports Cancelled before
+        // checking pump read errors, even when the raw tee flushed successfully.
+        .kill_on_parent_death();
     if let Some(cwd) = &record.spec.cwd {
         command = command.current_dir(cwd);
     }
@@ -68,9 +69,18 @@ pub(super) async fn run_job(
             )));
         }
     };
+    // Serialize the cancel check AND start with authenticated Cancel. A cancel
+    // acknowledged before this gate must never execute; after start, the select
+    // below stops the group while drain preserves ProcessKit's Io errors.
+    let start = runtime.start_lock.lock().await;
+    if active.is_cancelled() {
+        drop(start);
+        return fail_before_launch(&runtime, &owner, id, (out_sync, err_sync)).await;
+    }
     // Re-authorize the controller's sealed source after queue delay, immediately
     // before ProcessKit starts. No launch-by-FD guarantee is implied.
     if verify_job_source(&runtime.store, &owner, &record.spec).is_err() {
+        drop(start);
         return fail_before_launch(&runtime, &owner, id, (out_sync, err_sync)).await;
     }
     // POSIX process groups cannot contain setsid() descendants. Inspect the
@@ -80,17 +90,19 @@ pub(super) async fn run_job(
             "hostlink-agent: job {id} rejected before launch: unsupported containment {:?}",
             group.mechanism()
         );
+        drop(start);
         return fail_before_launch(&runtime, &owner, id, (out_sync, err_sync)).await;
     }
-    let outcome = match group.start(&command).await {
+    let launched = group.start(&command).await;
+    drop(start);
+    let outcome = match launched {
         Ok(child) => {
             let drain = child.drain();
             tokio::pin!(drain);
             let outcome = tokio::select! {
                 outcome = &mut drain => outcome,
                 () = active.cancelled() => {
-                    // A shared-group cancel may kill only the direct child.
-                    // Drain/reap it concurrently with group shutdown so a child's
+                    // Drain/reap concurrently with group shutdown so a child's
                     // zombie or inherited pipe cannot consume the pump timeout.
                     let (teardown, outcome) =
                         tokio::join!(group.stop(Duration::ZERO, true), &mut drain);
@@ -109,7 +121,6 @@ pub(super) async fn run_job(
         Err(error) => {
             // Even a failed start must finish group teardown before publication.
             let teardown = confirm_group_drained(&group).await;
-            // runner.rs:914: Cancelled from start() short-circuits BEFORE spawn.
             // No output pumps exist for these proven launch failures.
             let synced =
                 tokio::task::spawn_blocking(move || (out_sync.sync_all(), err_sync.sync_all()))
@@ -120,7 +131,6 @@ pub(super) async fn run_job(
                     error.reason(),
                     processkit::ErrorReason::Spawn { .. }
                         | processkit::ErrorReason::NotFound { .. }
-                        | processkit::ErrorReason::Cancelled { .. }
                 ) {
                 JobState::Failed
             } else {
@@ -212,7 +222,8 @@ async fn confirm_group_drained(group: &processkit::ProcessGroup) -> io::Result<(
 }
 
 // A successful ProcessKit drain alone does not confirm raw tee completion:
-// join_pumps can silently abort a straggler. Both EOF flushes AND fsync must finish.
+// join_pumps can silently abort a straggler, and a read error also flushes.
+// Require an error-free drain, both stream-end flushes AND fsync.
 async fn finish_job(
     runtime: &JobRuntime,
     owner: &str,
@@ -222,10 +233,7 @@ async fn finish_job(
     pump_ends: &[Arc<AtomicBool>; 2],
     (out_sync, err_sync): (File, File),
 ) -> io::Result<()> {
-    let unconfirmed_tree = matches!(
-        &outcome,
-        Err(error) if !matches!(error.reason(), processkit::ErrorReason::Cancelled { .. })
-    );
+    let unconfirmed_outcome = outcome.is_err();
     // Observe EOF before fsync, never afterwards: a late pump write must not
     // race a sync on the cloned FD and then manufacture durable completion.
     let pumps_ended = pump_ends.iter().all(|ended| ended.load(Ordering::Acquire));
@@ -236,14 +244,6 @@ async fn finish_job(
         JobState::Interrupted
     } else {
         match outcome {
-            // This error explicitly means the process tree could not be confirmed gone.
-            Err(error) if matches!(error.reason(), processkit::ErrorReason::Teardown { .. }) => {
-                JobState::Interrupted
-            }
-            Err(error) if matches!(error.reason(), processkit::ErrorReason::Cancelled { .. }) => {
-                // run_job already confirmed an empty OS-backed group after drain.
-                JobState::Failed
-            }
             Err(_) => JobState::Interrupted,
             // User cancellation and spool failure share the same monotonic token.
             // A racing natural exit must not hide either failure.
@@ -262,7 +262,7 @@ async fn finish_job(
         .store
         .transition(id, owner, JobState::Running, next)
         .await?;
-    if unconfirmed_tree || !synced || !pumps_ended {
+    if unconfirmed_outcome || !synced || !pumps_ended {
         return Err(io::Error::other(
             "ProcessKit did not confirm process-tree/output completion",
         ));

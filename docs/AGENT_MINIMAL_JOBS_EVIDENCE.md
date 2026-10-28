@@ -1,9 +1,86 @@
 # 1C-1081 simplification and P1 follow-up evidence
 
-Scope: dirty isolated `task/1c-1081-minimal-apalis-jobs`, base/unchanged HEAD
-`ea17116c6551a1ccab80452f28773d3eafd3662f`, 2026-10-28. No deployment,
-release, merge, push, other-worktree mutation or customer-machine operation.
+Current follow-up is based on `task/1c-1081-minimal-apalis-jobs` at
+`a60b7b3f1069cfb03406bd15e97760ca39b7779b`, 2026-10-28.
+No release, deployment, dev/main merge, installed Agent, customer data or services
+were touched. The original Windows 11 run of a60b7b3 is historical evidence
+and failed one process-tree timeout test; retest the corrected source separately.
 Contract: [minimal jobs](AGENT_MINIMAL_JOBS.md).
+
+## Updater Busy and cancellation/read-error P1 fixes
+
+- Consumer retries only WouldBlock on the exact dequeue-bound claim, releasing
+  `start_lock` and permit during cancellable 10–100 ms async backoff. It re-reads
+  terminal/cancel state each attempt. Shutdown leaves unclaimed Queued work for
+  native Apalis restart recovery; spent claims cannot replay. Other errors still
+  stop admission and process trees. Admission still returns Busy without enqueue.
+- Local cancel no longer configures ProcessKit `cancel_on`: explicit group stop
+  runs alongside drain, preserving Io. The final cancel check/start share
+  `start_lock` with authenticated Cancel. Clean drain + both stream-end flushes +
+  spool fsync + full group-empty confirmation allow Failed; any drain error stays
+  UNKNOWN and follows existing permit quarantine. Global shutdown may stay UNKNOWN.
+- Pinned source checked locally: ProcessKit 3.3.4 `pump.rs` flushes before setting
+  read-error; `running/mod.rs` checks Cancelled before read-error in finish_lines.
+  Apalis SQLite/core 1.0.0 native fetch/register/requeue and disabled Lock/Complete
+  persistence retain task identity and at-most-once execution. No dependency added.
+
+Files changed by this P1 task: `jobs/{engine.rs,busy_tests.rs,worker.rs,worker_tests.rs,
+tests.rs}` under `crates/agent/src/`; `README.md`; and
+`docs/{AGENT_MINIMAL_JOBS.md,AGENT_MINIMAL_JOBS_EVIDENCE.md,SOURCE_LAYOUT.md}`.
+`tests.rs` only exposes existing fixture helpers to sibling tests. Strong backend,
+ancestor/source checks, CLI/SSH exec and Windows JobObject implementation are
+unchanged by this task. During final verification, concurrent edits appeared in
+`jobs/private_fs.rs` and `jobs/database.rs` (FileLease ownership flag and consuming
+unlock). They were preserved, are not authored by this task and are outside the
+two independent reviews. An additional concurrent `busy_tests.rs` edit adds an
+optional source-ancestor capability skip (required mode still fails); it is not
+authored by this task. The Busy reviewer checked this guard separately and found
+no production bypass; its NOT RUN is not native evidence. Build checks and focused regressions were repeated on the
+combined FileLease tree; the broad-suite result precedes those concurrent edits.
+Two separate read-only reviewers inspected Busy against pinned Apalis
+and cancellation against pinned ProcessKit; both reported no findings. The
+cancellation reviewer also checked the added deterministic Cancel/spawn FIFO test.
+
+The Windows 11 baseline test also logged repeated `ERROR_NOT_LOCKED (158)`.
+`FileLease::unlock(self)` now consumes its guard, sets the held flag to false
+after an explicit successful unlock, and `Drop` only unlocks still-held leases.
+This removes duplicate unlock attempts while retaining fail-closed explicit
+unlock errors and fork-safe release on unwinding. Native Windows recheck is
+required; this source change by itself is not evidence of Windows success.
+
+### Executed verification
+
+Common environment: `CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=$PWD/target
+TMPDIR=$PWD/target/test-tmp MISE_STATE_DIR=/tmp/hostlink-1c1081-mise`.
+Cargo commands used `--offline --locked`; tests used `-p hostlink-agent --lib`.
+
+| Check | Observed result |
+| --- | --- |
+| `cargo fmt --all -- --check` | exit 0 |
+| `cargo check --offline --locked --workspace --all-targets` | exit 0, includes final test source and concurrent FileLease edits |
+| `cargo clippy --offline --locked --workspace --all-targets -- -D warnings` | exit 0, includes final test source and concurrent FileLease edits |
+| `cargo test … jobs::engine::busy_tests -- --nocapture --test-threads=1` | exit 0: 3 fully exercised SQLite/Apalis tests; running+queued native scenario NOT RUN (`process_group`) |
+| `cargo test … jobs::worker::tests::cancelled_signal_and_flushed_spools_do_not_mask_io_read_error -- --exact --nocapture` | exit 0: real finish_job/SQLite/filesystem; Err(Io)+cancel+flushed spools gives UNKNOWN/eof=false/error; clean signalled outcome+cancel gives Failed/eof=true |
+| `cargo test … jobs:: -- --nocapture --test-threads=1` | exit 101: libtest 50 passed, 19 failed, 1 ignored; 17 NOT RUN diagnostics (16 early returns plus a partial positive-ancestor skip); before the final FIFO test was added, P1 production code identical |
+| `cargo test … jobs::worker::tests::authenticated_cancel_waiting_at_spawn_gate_prevents_execution -- --exact --nocapture` | exit 0 with NOT RUN (`process_group`); no native acceptance |
+| `HOSTLINK_REQUIRE_NATIVE_CONTAINMENT=1 cargo test … jobs::worker::tests::clean_user_cancel_confirms_failed_and_worker_continues -- --exact --nocapture` | exit 101: required backend unavailable (`process_group`), before fixture/spawn; no native acceptance |
+| `git diff --check` | exit 0 |
+
+All 19 broad-suite failures occurred at existing sealed-source fixture setup with
+`PermissionDenied: source ancestor permits foreign entry replacement`. This
+sandbox exposes `/` and `/home` as UID 65534 (`uid_map: 1000 0 1`); the ancestor
+gate remains intact. The SQLite Busy tests deliberately use an unauthorized
+storage-only source, exercising actual dequeue/claim/recovery then the real
+pre-spawn rejection with synced empty spools; they do not prove successful spawn.
+The read-error regression injects public Err(Io) at the real finisher boundary;
+it does not reproduce a faulty OS pipe. Native clean cancel, authenticated
+Cancel/spawn ordering, running+queued updater contention and all Windows/Win7
+execution remain NOT RUN here. Final runtime acceptance remains **NO-GO** until
+verified on a host with provable ancestors and an actual strong backend.
+
+The sections below retain historical evidence from earlier snapshots, including
+`ea17116c6551a1ccab80452f28773d3eafd3662f`; their scope/results do not describe
+this P1 follow-up.
 
 ## Final ancestor-security P1 and required-native P2 follow-up
 

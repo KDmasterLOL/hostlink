@@ -40,7 +40,9 @@ ledger contract, whose security checks justify exceeding 200 lines.
 filesystem durability in one security contract, also exceeding 200 lines.
 `jobs/persistence.rs` owns immutable admission; `jobs/query.rs` decodes one
 bounded native-status/result/claim snapshot for lookup, list and deep inventory. `jobs/lifecycle.rs` holds the one-use execution fence and native result
-publication. `jobs/worker.rs` keeps group ownership, verified teardown and output
+publication. `jobs/engine.rs` keeps the supervised consumer, dequeue-bound Busy
+backoff and permit quarantine together as a lifecycle contract exceeding 200 lines.
+`jobs/worker.rs` keeps group ownership, verified teardown and output
 completion in one security contract. `jobs/*tests.rs` and `ssh/tests/wire/` retain larger real SQLite,
 ProcessKit and encrypted SSH regression scenarios. See the
 [minimal jobs contract](AGENT_MINIMAL_JOBS.md).

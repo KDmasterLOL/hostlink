@@ -174,7 +174,16 @@ pub(crate) fn restrict_private_path(path: &Path, directory: bool) -> io::Result<
 /// An OS file lock must be explicitly unlocked on drop: forked children may
 /// temporarily inherit a duplicate FD, so merely closing ours is insufficient.
 #[derive(Debug)]
-pub struct FileLease(pub(super) File);
+pub struct FileLease(pub(super) File, pub(super) bool);
+
+impl FileLease {
+    /// Release exactly once while preserving I/O errors for explicit callers.
+    pub fn unlock(mut self) -> io::Result<()> {
+        self.0.unlock()?;
+        self.1 = false;
+        Ok(())
+    }
+}
 
 impl std::ops::Deref for FileLease {
     type Target = File;
@@ -186,7 +195,9 @@ impl std::ops::Deref for FileLease {
 
 impl Drop for FileLease {
     fn drop(&mut self) {
-        if let Err(error) = self.0.unlock() {
+        if self.1
+            && let Err(error) = self.0.unlock()
+        {
             eprintln!("hostlink-agent: failed to release filesystem lock: {error}");
         }
     }
@@ -223,7 +234,7 @@ pub(super) fn open_lock(path: &Path) -> io::Result<File> {
 pub(super) fn exclusive_lock(path: &Path) -> io::Result<FileLease> {
     let file = open_lock(path)?;
     file.lock()?;
-    Ok(FileLease(file))
+    Ok(FileLease(file, true))
 }
 
 pub(super) fn sync_directory(parent: &Path) -> io::Result<()> {

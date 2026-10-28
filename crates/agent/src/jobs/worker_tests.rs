@@ -2,6 +2,179 @@ use super::*;
 use crate::jobs::process_tests::prepared_job;
 use tokio::io::AsyncWriteExt;
 
+#[tokio::test]
+async fn cancelled_signal_and_flushed_spools_do_not_mask_io_read_error() {
+    for read_error in [true, false] {
+        let (_root, store) = crate::jobs::tests::fixture().await;
+        let runtime = crate::jobs::protocol_tests::runtime(store);
+        let owner = crate::jobs::tests::owner();
+        let id = JobId::new();
+        runtime
+            .store
+            .admit(id, &owner, &crate::jobs::tests::sample())
+            .await
+            .unwrap();
+        runtime.store.claim_fixture(id, &owner).await.unwrap();
+        let cancel = runtime.shutdown.child_token();
+        let ends = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
+        let (out, out_sync) = open_job_output(&runtime, id, JobOutput::Stdout).unwrap();
+        let (err, err_sync) = open_job_output(&runtime, id, JobOutput::Stderr).unwrap();
+        let mut out = CappedOutputWriter::new(out, cancel.clone(), ends[0].clone());
+        let mut err = CappedOutputWriter::new(err, cancel.clone(), ends[1].clone());
+        out.write_all(b"partial stdout").await.unwrap();
+        err.write_all(b"partial stderr").await.unwrap();
+        // Match pinned pump.rs: raw tees flush even on a read-error exit.
+        out.flush().await.unwrap();
+        err.flush().await.unwrap();
+        assert!(ends.iter().all(|end| end.load(Ordering::Acquire)));
+        cancel.cancel();
+        // Fault injection at the actual finisher boundary, without mocking a
+        // reader or ProcessKit. The clean outcome covers a confirmed group kill.
+        let outcome = if read_error {
+            Err(processkit::ErrorReason::Io(io::Error::other("pipe read failed")).into())
+        } else {
+            Ok(processkit::Outcome::Signalled(Some(9)))
+        };
+        let result = finish_job(
+            &runtime,
+            &owner,
+            id,
+            &cancel,
+            outcome,
+            &ends,
+            (out_sync, err_sync),
+        )
+        .await;
+        assert_eq!(result.is_err(), read_error);
+        let record = runtime.store.lookup(id, &owner).await.unwrap();
+        assert_eq!(
+            record.state,
+            if read_error {
+                JobState::Interrupted
+            } else {
+                JobState::Failed
+            }
+        );
+        for stream in [JobOutput::Stdout, JobOutput::Stderr] {
+            let (bytes, _, eof) = runtime.store.read_output(&record, stream, 0).unwrap();
+            assert!(!bytes.is_empty());
+            assert_eq!(eof, !read_error);
+        }
+        assert_eq!(
+            active_ids(&runtime.store.root).unwrap().is_empty(),
+            !read_error
+        );
+    }
+}
+
+#[tokio::test]
+async fn authenticated_cancel_waiting_at_spawn_gate_prevents_execution() {
+    if !crate::jobs::process_tests::native_containment_available() {
+        return;
+    }
+    let cwd = tempfile::tempdir().unwrap();
+    let (_root, runtime, owner, record) = prepared_job(
+        vec!["-c".into(), "printf forbidden > cancelled-marker".into()],
+        cwd.path(),
+    )
+    .await;
+    let id = record.id;
+    let active = runtime.shutdown.child_token();
+    runtime
+        .active_jobs
+        .lock()
+        .unwrap()
+        .insert(id, active.clone());
+    let gate = runtime.start_lock.lock().await;
+    let cancel = crate::jobs::protocol::handle_job_request(
+        crate::jobs::frame::JobRequest::Cancel { id },
+        &runtime,
+        &owner,
+    );
+    tokio::pin!(cancel);
+    // Poll the real authenticated request into Tokio Mutex's FIFO wait queue
+    // before run_job reaches the same gate. No timing-dependent sleeps.
+    assert!(futures::poll!(&mut cancel).is_pending());
+    let run = run_job(runtime.clone(), owner.clone(), record, active.clone());
+    tokio::pin!(run);
+    assert!(futures::poll!(&mut run).is_pending());
+    drop(gate);
+    let (cancelled, completed) = tokio::join!(cancel, run);
+    cancelled.unwrap();
+    completed.unwrap();
+    assert!(active.is_cancelled());
+    assert!(!cwd.path().join("cancelled-marker").exists());
+    let record = runtime.store.lookup(id, &owner).await.unwrap();
+    assert_eq!(record.state, JobState::Failed);
+    for stream in [JobOutput::Stdout, JobOutput::Stderr] {
+        assert_eq!(
+            runtime.store.read_output(&record, stream, 0).unwrap(),
+            (vec![], 0, true)
+        );
+    }
+}
+
+#[tokio::test]
+async fn clean_user_cancel_confirms_failed_and_worker_continues() {
+    if !crate::jobs::process_tests::native_containment_available() {
+        return;
+    }
+    let (root, runtime, owner, spec) = crate::jobs::protocol_tests::fixture(
+        "printf ready > ready; printf output; printf diagnostic >&2; sleep 300",
+    )
+    .await;
+    let id = JobId::new();
+    runtime.store.admit(id, &owner, &spec).await.unwrap();
+    let mut worker = JobWorker::start(runtime.clone());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !root.path().join("ready").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    crate::jobs::protocol::handle_job_request(
+        crate::jobs::frame::JobRequest::Cancel { id },
+        &runtime,
+        &owner,
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while runtime.store.lookup(id, &owner).await.unwrap().state != JobState::Failed {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let record = runtime.store.lookup(id, &owner).await.unwrap();
+    for stream in [JobOutput::Stdout, JobOutput::Stderr] {
+        assert!(runtime.store.read_output(&record, stream, 0).unwrap().2);
+    }
+    assert!(!runtime.shutdown.is_cancelled());
+    assert!(runtime.accepting.load(Ordering::Acquire));
+    let second = JobId::new();
+    let mut next = spec;
+    next.args = vec!["-c".into(), "exit 7".into()];
+    runtime.store.admit(second, &owner, &next).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while runtime.store.lookup(second, &owner).await.unwrap().state
+            != (JobState::Exited { code: 7 })
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    runtime.shutdown.cancel();
+    (&mut worker.task).await.unwrap().unwrap();
+    assert_eq!(runtime.slots.available_permits(), MAX_ACTIVE_JOBS);
+    assert!(runtime.unknown_permits.lock().unwrap().is_empty());
+}
+
 #[test]
 fn containment_policy_never_trusts_posix_fallback() {
     assert!(!trusted_mechanism(processkit::Mechanism::ProcessGroup));

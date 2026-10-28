@@ -112,7 +112,10 @@ exec is channel-owned.
 One Agent-owned Apalis SQLite 1.0.0 WorkerBuilder polls the queue and runs at most
 16 ProcessKit trees. Native Apalis status/result is authoritative; the payload is
 immutable. A durable one-use start claim prevents replay after disconnect,
-orphan requeue or restart. UNKNOWN blocks updates. Private raw output, source
+orphan requeue or restart. Updater lock contention keeps the same unclaimed
+dequeue pending with cancellable async backoff. User cancel stops the ProcessKit
+group while draining pipes: clean capture becomes Failed; read errors stay UNKNOWN.
+UNKNOWN blocks updates. Private raw output, source
 SHA checks and per-controller sealed artifacts retain their bounds. Fresh private
 roots only; old record.json and SQLite schemas fail closed without migration.
 New runs require the authenticated controller's exact canonical sealed source,

@@ -33,7 +33,7 @@ pub(super) fn try_update_lock(root: &Path) -> io::Result<FileLease> {
         }
         std::fs::TryLockError::Error(error) => error,
     })?;
-    Ok(FileLease(file))
+    Ok(FileLease(file, true))
 }
 
 pub(super) fn inspect_layout(root: &Path) -> io::Result<bool> {
