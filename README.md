@@ -128,6 +128,7 @@ before spawn; after empty spool sync this is a definite Failed job with no repla
 Native-positive acceptance uses `HOSTLINK_REQUIRE_NATIVE_CONTAINMENT=1`; missing
 strong containment then fails tests instead of reporting an optional skip.
 The CLI/protocol change is breaking, with no v1 compatibility. See the
+[jobs module guide](crates/agent/src/jobs/README.md),
 [minimal jobs contract](docs/AGENT_MINIMAL_JOBS.md) and
 [verification evidence](docs/AGENT_MINIMAL_JOBS_EVIDENCE.md).
 

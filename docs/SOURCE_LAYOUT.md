@@ -49,7 +49,8 @@ read-only SQLite pool, without constructing a queue backend.
 `jobs/worker.rs` keeps group ownership, verified teardown and output
 completion in one security contract. `jobs/*tests.rs` and `ssh/tests/wire/` retain larger real SQLite,
 ProcessKit and encrypted SSH regression scenarios. See the
-[minimal jobs contract](AGENT_MINIMAL_JOBS.md).
+[jobs module guide](../crates/agent/src/jobs/README.md) for the architecture and
+file map, then the [minimal jobs contract](AGENT_MINIMAL_JOBS.md) for invariants.
 
 ## Verification
 

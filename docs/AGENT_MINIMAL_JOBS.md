@@ -2,6 +2,8 @@
 
 Owner: `crates/agent/src/jobs/`. Update this contract when changing job storage,
 execution, framing or Client commands. This is development integration only.
+See the [module README](../crates/agent/src/jobs/README.md) for the entry
+points, ownership diagram and per-file source map.
 
 ## Queue and execution
 
