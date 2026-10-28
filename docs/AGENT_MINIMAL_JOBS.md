@@ -165,18 +165,17 @@ was subsequently removed or changed; they never enqueue another attempt.
 Hashing an opened descriptor followed by pathname exec does **not** guarantee
 execution of that descriptor against same-UID replacement between check and exec.
 
-On Unix, ArtifactStore opening, Seal and source authorization also walk every
-directory ancestor from `/`, before canonicalization can erase symlinks. Every
-component must be a directory owned by root or the Agent. Group/world-writable
-non-sticky directories are rejected. A writable sticky parent is allowed only
-when its next directory entry is also root/Agent-owned. This permits standard
-protected `/home` installations and root-owned sticky `/tmp` with an Agent-owned
-child, while rejecting unknown owners (including unmapped namespace UIDs),
-symlink ancestors and a writable ancestor above the install root. Checking only
-`0755` is insufficient for a foreign-owned directory: its owner can chmod it.
-Existing install/sealed private permissions and Windows ACL checks still apply.
-The worker repeats the ancestor policy through the existing source verifier;
-these are pathname checks, not an atomic guarantee against root/same-UID mutation.
+On Unix, the Agent no longer imposes a second ownership/mode policy on every
+directory ancestor from `/` to the install root. A single standard
+`canonicalize` comparison rejects non-canonical path aliases and ancestor
+symlinks. The **managed** install/artifact/controller/sealed directories still
+require private Agent ownership and permissions; sealed executable ownership,
+read-only mode, single-link identity, exact controller path and SHA-256 are
+still checked. On Windows, the existing private SID/DACL and reparse checks
+remain. This uses the explicit trusted-controller, unprivileged-Agent model
+instead of treating the host's entire ancestor hierarchy as Agent-controlled.
+It is a pathname policy, **not** an atomic guarantee against mutation by the
+same user or a hostile process able to modify an ancestor between operations.
 
 ## Private roots and durability
 
@@ -240,8 +239,8 @@ HOSTLINK_REQUIRE_NATIVE_CONTAINMENT=1 CARGO_INCREMENTAL=0 \
 All jobs/internal, encrypted SSH wire and shared Agent/Client integration
 capability checks use one test-only helper. In required mode an unavailable
 actual CgroupV2/JobObject/ProcessReaper backend panics with its name and the test
-name before any skip. The native ancestor fixture likewise fails in this mode
-when root ownership or the root-owned sticky `/tmp` case cannot be proved.
+name before any skip. Host-wide ancestor ownership is no longer a separate
+native acceptance gate; private managed roots remain mandatory.
 The mode regression uses isolated current-test-binary subprocesses; its helper
 test is explicitly ignored outside those subprocesses. No production bypass or
 new dependency is involved. A nonzero required-mode run is **not** native acceptance.

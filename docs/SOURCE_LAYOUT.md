@@ -36,7 +36,7 @@ does not certify production or registered Windows updater deployment.
 
 `jobs/database.rs` retains the cohesive private SQLite/WAL/FULL and migration
 ledger contract, whose security checks justify exceeding 200 lines.
-`jobs/private_fs.rs` keeps private permissions/ACLs, source-ancestor trust and
+`jobs/private_fs.rs` keeps private permissions/ACLs, canonical source paths and
 filesystem durability in one security contract, also exceeding 200 lines.
 `jobs/persistence.rs` owns immutable admission; `jobs/query.rs` decodes one
 bounded native-status/result/claim snapshot for lookup, list and deep inventory. `jobs/lifecycle.rs` holds the one-use execution fence and native result

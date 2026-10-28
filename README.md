@@ -120,8 +120,11 @@ SHA checks and per-controller sealed artifacts retain their bounds. Fresh privat
 roots only; old record.json and SQLite schemas fail closed without migration.
 New runs require the authenticated controller's exact canonical sealed source,
 with private-parent and digest checks repeated immediately before launch.
-On Unix, every canonical ancestor must have provable root/Agent ownership and
-safe directory-entry permissions; sticky shared parents require an owned next entry.
+On Unix, the managed install/artifact roots must be Agent-owned and private.
+Source paths must be canonical (no ancestor symlink aliases), but we no longer
+walk the host filesystem enforcing owner/mode policy on every ancestor above
+the managed install root. This assumes trusted SSH controllers and the
+non-privileged Agent's filesystem boundary.
 Job execution requires actual cgroup v2 containment on Linux (delegation required),
 Job Objects on Windows, or a process reaper on FreeBSD. POSIX fallback is rejected
 before spawn; after empty spool sync this is a definite Failed job with no replay.

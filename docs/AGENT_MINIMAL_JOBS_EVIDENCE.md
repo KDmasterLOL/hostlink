@@ -1,5 +1,65 @@
 # 1C-1081 simplification and P1 follow-up evidence
 
+## 2026-10-28 — Apalis-first deletion pass (post-a144f57)
+
+The user requested **maximum removal** of bespoke jobs machinery, prioritizing
+upstream libraries and asking before adding any new guarantee. Baseline
+`dev@a144f57d974e4af6f1aed021f63970f9b4c6c898`: 2,859 production lines
+and 3,504 test lines under `agent/src/jobs`. This isolated candidate combines
+the Agent-owned source refactor and storage micro-cleanup:
+
+- Remove the bespoke Unix walk from `/` through every ancestor's UID/mode/sticky
+  bits, and delete `ancestor_tests.rs`. Use `std::fs::canonicalize` to reject
+  path aliases; rely on private, Agent-owned **managed roots**, SSH key trust,
+  and the OS user boundary instead of a global host-filesystem policy.
+- Reduce `source.rs` from 180 to 75 lines by reusing
+  `ArtifactStore::authorize_source` (private file/link/ACL/owner checks), then
+  verifying the sealed source SHA at admission and dequeue and its execute/read-only
+  mode. Do not claim this atomically pins pathname execution against same-UID
+  replacement.
+- Remove the second hand-coded digest-copy loop in `artifacts.rs`. Use
+  `std::io::copy` with an explicit size cap, and reuse the existing
+  `verify_artifact` on the **finished sealed file**.
+- Remove duplicate `JobStore::from_pool` construction path and one redundant
+  owner digest check; keep the database read-only inspector and one-shot claim.
+- Preserve public `jobs run/list/status/logs/cancel`, per-controller sealed
+  artifacts, immutable ULIDs/idempotency, bounded output, OS-tree shutdown,
+  updater locks, and no replay of started commands.
+
+The pinned **apalis-sqlite 1.0.0** source was examined: `FetchById` and
+`ListTasks` cannot atomically provide the required owner+native result+claim
+projection. In particular, upstream `reenqueue_orphaned.sql` changes
+Running/Queued to Pending **without** filtering `max_attempts`; `fetch_next.sql`
+selects Pending unconditionally on attempts. Thus `max_attempts(1)` alone
+does not preserve the root `AGENTS.md` rule against silent replay of started
+programs. Apalis `TaskSink`, `WorkerBuilder` and `ack_tasks` are already used;
+do not invent another infrastructure layer to work around their limits.
+Additional major removal of `StartedClaims`/native SQL requires a user-approved
+change in no-replay guarantees and deliberate migration review; neither was
+silently performed.
+
+| Current source-scoped verification | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | PASS |
+| `cargo check --offline --locked --workspace --all-targets` | PASS |
+| `cargo clippy --offline --locked --workspace --all-targets -- -D warnings` | PASS |
+| Agent `cargo test --offline --locked -p hostlink-agent --lib jobs:: -- --test-threads=1` | **69 PASS, 0 failed, 1 ignored subprocess helper** |
+| Encrypted authenticated in-memory SSH wire scenario | 1 PASS, **weak-containment rejection branch**; full positive process execution not reached |
+| SFTP library tests | 4 PASS |
+| Client run/protocol tests | 16 PASS |
+| Client binary CLI tests | 10 PASS |
+| `cargo test --offline --locked --workspace -- --test-threads=1` with shared Cargo target and private HOME TMPDIR | **PASS, exit 0** across Client/Agent/Hub and their integration targets; two external HTTPS/gateway fixtures and subprocess helper explicitly ignored |
+
+This candidate has **2,664 production lines** and **3,416 test lines** in
+`agent/src/jobs`: production **−195 lines (−6.8%)**, ten test files reduced
+to nine, and tests **−88 lines** (mostly removed obsolete ancestor tests).
+The result is a *limited*, proven code reduction, not a claim that HostLink
+is now a one-file vanilla Apalis worker. Native Windows 11/Win7 acceptance of
+this source and mandatory strong Linux process-tree containment have **not**
+been shown. Older verification below is historical to its documented SHAs.
+No installed Agent, production host, database, job state or migration was
+modified.
+
 ## Integration review of runtime ownership and updater scan
 
 Verified code candidate: `3d376121a20c186fbfcde47404183a48bac2f2bb`

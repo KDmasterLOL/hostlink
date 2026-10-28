@@ -180,7 +180,7 @@ exec-by-file-descriptor guarantee against same-user replacement.
 | [frame.rs](frame.rs) | One bounded request/reply frame over an SSH channel |
 | [protocol.rs](protocol.rs) | Authenticated run/list/status/logs/cancel/seal dispatch |
 
-The other ten Rust files in this directory are regression suites (including
+The other nine Rust files in this directory are regression suites (including
 Linux/Windows process and filesystem fixtures), **not** additional job engines.
 Useful starting points are `tests.rs` (storage and recovery),
 `engine_tests.rs` (queue/claims), `worker_tests.rs` (execution), and
@@ -188,25 +188,26 @@ Useful starting points are `tests.rs` (storage and recovery),
 
 ## Why is this module large?
 
-Source snapshot at `dev@cec18e7` (physical lines, including comments and
+Source snapshot after the library-first refinement based on `dev@a144f57`
+(physical lines, including comments and
 blank lines; not a measure of runtime cost):
 
 Before 1C-1081, the separate `ssh/jobs` + `durable` modules contained
-**2,577 implementation lines and 1,454 test lines**. Their replacement has
-**282 more implementation lines**, but **2,050 more test lines**. This explains
+**2,577 implementation lines and 1,454 test lines**. The current replacement has
+**87 more implementation lines**, but **1,962 more test lines**. This explains
 why the new consolidated directory looks much larger despite eliminating
 the duplicate module boundaries and legacy protocol.
 
 | Responsibility | Implementation lines |
 | --- | ---: |
-| Database, durable claims, queries, models, recovery | 1,037 |
-| Filesystem ownership, executable verification, sealed artifacts | 766 |
+| Database, durable claims, queries, models, recovery | 1,032 |
+| Filesystem ownership, executable verification, sealed artifacts | 574 |
 | Apalis consumer, ProcessKit execution, bounded streaming | 602 |
 | SSH frame and operation dispatch | 189 |
 | Output reading | 117 |
-| Module root and runtime assembly | 148 |
-| **Total implementation** | **2,859** |
-| **Regression tests (10 files)** | **3,504** |
+| Module root and runtime assembly | 150 |
+| **Total implementation** | **2,664** |
+| **Regression tests (9 files)** | **3,416** |
 
 Most lines are **not scheduling logic**. They implement security and failure
 guarantees not provided by a generic queue: authenticated ownership, immutable
