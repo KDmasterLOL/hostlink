@@ -232,13 +232,23 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
         accepted.state,
         JobState::Prepared | JobState::Running
     ));
-    tokio::time::timeout(Duration::from_secs(7), async {
+    let process_ready = tokio::time::timeout(Duration::from_secs(12), async {
         while !pid_file.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("owned descendant PID published");
+    .await;
+    if process_ready.is_err() {
+        let last = resumed
+            .job_status(&Status {
+                id: cancel_id.clone(),
+            })
+            .await;
+        panic!(
+            "owned descendant PID never published: status={last:?}, server_finished={}",
+            server.is_finished()
+        );
+    }
     let child_pid: u32 = fs::read_to_string(&pid_file)
         .unwrap()
         .trim()

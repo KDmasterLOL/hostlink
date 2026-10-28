@@ -525,24 +525,23 @@ async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
             .expect("overflow job ack");
     assert_eq!(overflow_ack["ok"], true);
     let overflow_status_request = serde_json::json!({"version":1,"op":"status","id":overflow_id});
-    let overflow_status: serde_json::Value =
-        tokio::time::timeout(Duration::from_secs(8), async {
-            loop {
-                let status: serde_json::Value = serde_json::from_slice(
-                    &job_request(&mut resumed, &framed_json(&overflow_status_request)).await,
-                )
-                .expect("poll overflow job");
-                if !matches!(
-                    status["state"]["state"].as_str(),
-                    Some("prepared" | "running")
-                ) {
-                    break status;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
+    let overflow_status: serde_json::Value = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let status: serde_json::Value = serde_json::from_slice(
+                &job_request(&mut resumed, &framed_json(&overflow_status_request)).await,
+            )
+            .expect("poll overflow job");
+            if !matches!(
+                status["state"]["state"].as_str(),
+                Some("prepared" | "running")
+            ) {
+                break status;
             }
-        })
-        .await
-        .expect("overflow worker reaches a terminal state");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("overflow worker reaches a terminal state");
     assert_eq!(overflow_status["state"]["state"], "failed");
     assert_eq!(
         std::fs::metadata(jobs.join("outputs").join(&overflow_id).join("stdout.bin"))
