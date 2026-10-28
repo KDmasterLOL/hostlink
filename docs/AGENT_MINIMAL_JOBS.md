@@ -27,7 +27,13 @@ reaches `start()`: its claimed job becomes Failed only after both fresh empty
 spools sync. Sync/publication uncertainty stays UNKNOWN and blocks updates.
 The Agent retains an explicit ProcessGroup owner through child drain and always
 requires `group.stop(Duration::ZERO, true).members_after() == Some(0)` before
-result publication and permit release. A successful kill call alone is insufficient.
+result publication and permit release. The job deadline is enforced against
+this owned group rather than via `Command::timeout`: in ProcessKit 3.3.4
+the shared-group command timeout kills only its direct child, potentially
+leaving a grandchild's inherited stdout/stderr open until `join_pumps`
+aborts without an EOF flush. On deadline the Agent cancels the active token,
+stops the entire group concurrently with `drain()`, then confirms group
+emptiness, both stream-end flushes and durable sync before recording Failed. A successful kill call alone is insufficient.
 After the direct child is drained/reaped, the Agent repeats the OS-backed stop/count
 query every 25 ms for at most five seconds, retaining group ownership. This includes
 descendants that close stdio and outlive their parent. Cancellation issues group

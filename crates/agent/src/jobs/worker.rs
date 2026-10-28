@@ -47,8 +47,10 @@ pub(super) async fn run_job(
             pump_ends[1].clone(),
         ))
         .output_buffer(processkit::OutputBufferPolicy::bounded(256).with_max_bytes(64 * 1024))
-        .timeout(JOB_TIMEOUT)
-        .timeout_grace(Duration::from_secs(2))
+        // The deadline is enforced against the shared ProcessGroup below.
+        // ProcessKit's own timeout only kills the direct child in a shared
+        // group. An inherited pipe can then keep its output pump alive until
+        // the five-second abort, losing the raw tee's EOF flush.
         // Do not use cancel_on: ProcessKit 3.3.4 reports Cancelled before
         // checking pump read errors, even when the raw tee flushed successfully.
         .kill_on_parent_death();
@@ -100,10 +102,20 @@ pub(super) async fn run_job(
             let drain = child.drain();
             tokio::pin!(drain);
             let outcome = tokio::select! {
+                biased;
                 outcome = &mut drain => outcome,
                 () = active.cancelled() => {
-                    // Drain/reap concurrently with group shutdown so a child's
-                    // zombie or inherited pipe cannot consume the pump timeout.
+                    // Kill the whole group before the pump's bounded EOF drain,
+                    // including descendants that inherited stdout/stderr.
+                    let (teardown, outcome) =
+                        tokio::join!(group.stop(Duration::ZERO, true), &mut drain);
+                    teardown.and(outcome)
+                }
+                () = tokio::time::sleep(JOB_TIMEOUT) => {
+                    // A shared ProcessKit command timeout kills only the direct
+                    // child. Own the deadline here so all descendants are
+                    // terminated before drain can abort an output pump.
+                    active.cancel();
                     let (teardown, outcome) =
                         tokio::join!(group.stop(Duration::ZERO, true), &mut drain);
                     teardown.and(outcome)

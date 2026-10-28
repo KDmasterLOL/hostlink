@@ -147,11 +147,22 @@ async fn timeout_cancels_descendants_and_records_failure() {
         .expect("timed-out Agent worker teardown deadline")
         .unwrap()
         .expect("persist worker outcome");
+    let record = runtime.store.lookup(id, &owner).await.unwrap();
     assert_eq!(
-        runtime.store.lookup(id, &owner).await.unwrap().state,
+        record.state,
         JobState::Failed,
         "a timed-out durable job cannot be recorded as successful"
     );
+    for stream in [JobOutput::Stdout, JobOutput::Stderr] {
+        let (_, _, eof) = runtime
+            .store
+            .read_output(&record, stream, 0)
+            .expect("timed-out process must persist complete output");
+        assert!(
+            eof,
+            "confirmed timeout must preserve the raw {stream:?} EOF"
+        );
+    }
     for _ in 0..100 {
         if process_exited(pid) {
             break;
