@@ -19,7 +19,8 @@ and `jobs/`. The separate stage parent must already exist and be private. Use
 absolute paths without links, junctions, parent traversal or unverified aliases.
 On Windows ordinary drive-letter and verbatim paths are accepted after ancestor
 reparse checks; source/stage overlap is compared using canonical paths.
-Windows execution is not yet validated.
+Windows 11 GNU execution of the copied-snapshot staging CLI has passed on
+`ce9963b`. This is not validation of installed-root cutover or Windows 7.
 
 ```text
 hostlink-agent durable import-legacy --root /private/snapshot/jobs --stage /private/stages/import-1075
@@ -123,4 +124,5 @@ recovery, trusted install identity and a forward-only old-binary admission
 fence, plus Linux/Windows native acceptance. Do not simulate that proof by
 removing records, changing IDs or reporting fresh-root tests as migration.
 
-Windows 11 and source-exact NT6.1 acceptance remain separate, unexecuted gates.
+Windows 11 staging-only tests passed, but installed-root cutover and source-exact
+NT6.1 (Windows 7) acceptance remain unexecuted gates.

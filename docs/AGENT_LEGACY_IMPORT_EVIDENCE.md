@@ -39,6 +39,9 @@ No manifest or lockfile dependency changes.
 | `RUST_TEST_THREADS=2 cargo test --offline --locked --workspace --all-targets -q` outside delegated sandbox | PASS, 0 failures, 2 intentionally ignored |
 | Existing updater / Linux lifecycle integration in full run | 26 / 2 PASS on disposable fixtures; no installed services changed |
 | `cargo check --offline --locked -p hostlink-agent --all-targets --target x86_64-pc-windows-msvc` | BLOCKED in dependency C build: `lib.exe` absent; not a Windows compile PASS |
+| WORK Windows 11 GNU, `ce9963b74278f8ae0b89f1ed926023fe685cc071`: fmt, workspace all-targets check, strict Clippy | PASS |
+| WORK Windows 11 GNU, same SHA: `cargo test -p hostlink-agent --lib durable::legacy_import` | 10/10 PASS |
+| WORK Windows 11 GNU, same SHA: `cargo test -p hostlink-agent --test legacy_import_cli` | 1/1 PASS; CLI correctly refuses publication |
 | Independent read-only review | Per-UUID claim-presence finding fixed and regression tested; follow-up found no further blocking staging findings |
 
 New tests cover every old state, signed nonzero exit, exact original JSON,
@@ -51,11 +54,12 @@ interrupted reservation/journal/database/sink/build/verification boundaries,
 and readback corruption of output, claims, tombstones, attempt budget,
 quarantine and journal. No mock execution/store functions were introduced.
 
-Windows SID/DACL/reparse/hardlink branches reuse the existing private filesystem
-owner but are **NOT native-tested**. Foreign filesystem UID ownership was not
+Windows 11 GNU staging branch now passed native fixture tests for private paths
+and raw outputs. It does not cover installed-root cutover or true NT6.1.
+Foreign filesystem UID ownership was not
 fabricated in Linux fixtures; public permissions and foreign controller digests
 are tested separately. Fault-boundary construction is not hardware power-loss
-proof. Actual disk exhaustion, Windows 11 and source-exact NT6.1 execution,
+proof. Actual disk exhaustion, source-exact NT6.1 execution,
 installed-root cutover/recovery and old-Agent rollback remain NOT RUN.
 
 The delegated sandbox's earlier full run suffered loopback `EPERM` errors;
