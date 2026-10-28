@@ -53,12 +53,6 @@ impl JobStore {
     }
 
     async fn attach(root: PathBuf, pool: SqlitePool) -> io::Result<Self> {
-        let store = Self::from_pool(root, pool);
-        store.inventory().await?;
-        Ok(store)
-    }
-
-    pub(super) fn from_pool(root: PathBuf, pool: SqlitePool) -> Self {
         let backend = SqliteStorage::new(&pool).with_config(
             Config::default()
                 .queue(QUEUE)
@@ -66,11 +60,13 @@ impl JobStore {
                 .lock_tasks(false)
                 .persist_results(false),
         );
-        Self {
+        let store = Self {
             root,
             pool,
             backend,
-        }
+        };
+        store.inventory().await?;
+        Ok(store)
     }
 
     pub(crate) fn worker_backend(&self) -> SqliteStorage<JobPayload> {

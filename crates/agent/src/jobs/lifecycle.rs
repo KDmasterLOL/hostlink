@@ -62,7 +62,6 @@ impl JobStore {
         expected: JobState,
         next: JobState,
     ) -> io::Result<JobView> {
-        validate_digest(owner)?;
         if !matches!(expected, JobState::Prepared | JobState::Running)
             || !matches!(
                 next,
