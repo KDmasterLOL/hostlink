@@ -38,6 +38,9 @@ impl JobWorker {
             let worker = WorkerBuilder::new(crate::jobs::WORKER_NAME)
                 .backend(backend)
                 .data(runtime.clone())
+                // Bounds concurrent dequeued consume futures. JobRuntime::slots
+                // separately covers process-tree teardown and retained UNKNOWN
+                // permits, even if this worker future stops early.
                 .layer(tower::limit::ConcurrencyLimitLayer::new(MAX_ACTIVE_JOBS))
                 .on_event(move |_, event| {
                     if matches!(event, Event::Error(_)) {

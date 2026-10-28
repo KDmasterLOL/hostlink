@@ -1,4 +1,5 @@
 use super::*;
+use crate::jobs::JobStore;
 use russh::client;
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{ChannelMsg, Disconnect};
@@ -34,19 +35,9 @@ impl WireFixture {
         let state = root.path().join("jobs");
         std::fs::create_dir(&state).unwrap();
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let store = JobStore::initialize_fresh(state).await.unwrap();
-        let runner = store.acquire_runner().unwrap();
-        let jobs = Arc::new(JobRuntime {
-            store,
-            _runner: runner,
-            start_lock: Mutex::new(()),
-            slots: Arc::new(Semaphore::new(MAX_ACTIVE_JOBS)),
-            channel_slots: Arc::new(Semaphore::new(MAX_JOB_CHANNELS)),
-            accepting: AtomicBool::new(true),
-            shutdown: processkit::CancellationToken::new(),
-            active_jobs: std::sync::Mutex::new(HashMap::new()),
-            unknown_permits: std::sync::Mutex::new(Vec::new()),
-        });
+        let provisioned = JobStore::initialize_fresh(&state).await.unwrap();
+        provisioned.close().await;
+        let jobs = JobRuntime::open(&state).await.unwrap();
         let worker = JobWorker::start(jobs.clone());
         Self {
             root,

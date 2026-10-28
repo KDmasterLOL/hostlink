@@ -3,6 +3,24 @@ use super::protocol::handle_job_request;
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
+#[tokio::test]
+async fn runtime_open_holds_exclusive_runner_lease() {
+    let temp = tempfile::tempdir().expect("private test root");
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let jobs_root = temp.path().join("jobs");
+    std::fs::create_dir(&jobs_root).unwrap();
+    std::fs::set_permissions(&jobs_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    JobStore::initialize_fresh(&jobs_root)
+        .await
+        .unwrap()
+        .close()
+        .await;
+    let _runtime = JobRuntime::open(&jobs_root).await.unwrap();
+    assert!(JobRuntime::open(&jobs_root).await.is_err());
+    assert!(jobs_root.join("jobs.db").is_file());
+}
+
 pub(super) async fn fixture(script: &str) -> (tempfile::TempDir, Arc<JobRuntime>, String, JobSpec) {
     let temp = tempfile::tempdir().expect("private test root");
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();

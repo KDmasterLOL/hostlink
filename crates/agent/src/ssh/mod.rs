@@ -1,10 +1,6 @@
 //! Authenticated embedded russh server for short exec, SFTP, and direct TCP forwarding.
 
-use crate::{
-    AgentConfig, exec,
-    jobs::{JobStore, MAX_ACTIVE_JOBS, MAX_JOB_CHANNELS},
-    sftp::SftpSession,
-};
+use crate::{AgentConfig, exec, jobs::MAX_ACTIVE_JOBS, sftp::SftpSession};
 use russh::keys::ssh_key::authorized_keys::AuthorizedKeys;
 use russh::keys::{Algorithm, PrivateKey, PublicKey, PublicKeyBase64};
 use russh::server::{Auth, Msg, Server as _, Session};
@@ -15,7 +11,7 @@ use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore};
 

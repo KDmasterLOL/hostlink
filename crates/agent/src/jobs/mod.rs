@@ -88,12 +88,37 @@ pub(crate) struct JobRuntime {
     // Retained by process tasks through complete teardown, even if SSH stops.
     pub(crate) _runner: File,
     pub(crate) start_lock: Mutex<()>,
+    // Tower bounds active consume futures; this semaphore instead tracks OS
+    // process-tree lifetimes and remains held through UNKNOWN/quarantine.
     pub(crate) slots: Arc<Semaphore>,
     pub(crate) channel_slots: Arc<Semaphore>,
     pub(crate) accepting: AtomicBool,
     pub(crate) shutdown: processkit::CancellationToken,
     pub(crate) active_jobs: std::sync::Mutex<HashMap<JobId, processkit::CancellationToken>>,
     pub(crate) unknown_permits: std::sync::Mutex<Vec<tokio::sync::OwnedSemaphorePermit>>,
+}
+
+impl JobRuntime {
+    /// Open an established jobs root and own its exclusive Agent runtime lease.
+    ///
+    /// Opening, recovery and runtime construction stay together so SSH only
+    /// receives a fully recovered, exclusively owned jobs subsystem.
+    pub(crate) async fn open(jobs_root: &Path) -> io::Result<Arc<Self>> {
+        let store = JobStore::open(jobs_root).await?;
+        let runner = store.acquire_runner()?;
+        store.recover_nonterminal().await?;
+        Ok(Arc::new(Self {
+            store,
+            _runner: runner,
+            start_lock: Mutex::new(()),
+            slots: Arc::new(Semaphore::new(MAX_ACTIVE_JOBS)),
+            channel_slots: Arc::new(Semaphore::new(MAX_JOB_CHANNELS)),
+            accepting: AtomicBool::new(true),
+            shutdown: processkit::CancellationToken::new(),
+            active_jobs: std::sync::Mutex::new(HashMap::new()),
+            unknown_permits: std::sync::Mutex::new(Vec::new()),
+        }))
+    }
 }
 
 impl Drop for JobRuntime {

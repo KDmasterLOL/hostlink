@@ -60,20 +60,7 @@ where
     }
     let prepared = prepare(config)?;
     let jobs_root = validate_jobs_root(&config.jobs_root)?;
-    let store = JobStore::open(&jobs_root).await?;
-    let runner = store.acquire_runner()?;
-    store.recover_nonterminal().await?;
-    let jobs = Arc::new(JobRuntime {
-        store,
-        _runner: runner,
-        start_lock: Mutex::new(()),
-        slots: Arc::new(Semaphore::new(MAX_ACTIVE_JOBS)),
-        channel_slots: Arc::new(Semaphore::new(MAX_JOB_CHANNELS)),
-        accepting: AtomicBool::new(true),
-        shutdown: processkit::CancellationToken::new(),
-        active_jobs: std::sync::Mutex::new(HashMap::new()),
-        unknown_permits: std::sync::Mutex::new(Vec::new()),
-    });
+    let jobs = JobRuntime::open(&jobs_root).await?;
     if config.gateway.is_none() {
         return serve_prepared_until(listener, prepared, jobs, shutdown).await;
     }
