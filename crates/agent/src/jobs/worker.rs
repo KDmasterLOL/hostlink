@@ -105,20 +105,15 @@ pub(super) async fn run_job(
                 biased;
                 outcome = &mut drain => outcome,
                 () = active.cancelled() => {
-                    // Kill the whole group before the pump's bounded EOF drain,
-                    // including descendants that inherited stdout/stderr.
-                    let (teardown, outcome) =
-                        tokio::join!(group.stop(Duration::ZERO, true), &mut drain);
-                    teardown.and(outcome)
+                    // Kill the whole group, then drain every pipe. A failed
+                    // stop or a stalled reap cannot hold the worker forever.
+                    stop_and_drain(&group, &mut drain, Duration::from_secs(10)).await
                 }
                 () = tokio::time::sleep(JOB_TIMEOUT) => {
                     // A shared ProcessKit command timeout kills only the direct
-                    // child. Own the deadline here so all descendants are
-                    // terminated before drain can abort an output pump.
+                    // child. Stop all descendants before the pump's EOF drain.
                     active.cancel();
-                    let (teardown, outcome) =
-                        tokio::join!(group.stop(Duration::ZERO, true), &mut drain);
-                    teardown.and(outcome)
+                    stop_and_drain(&group, &mut drain, Duration::from_secs(10)).await
                 }
             };
             if let Err(error) = confirm_group_drained(&group).await {
@@ -171,6 +166,30 @@ pub(super) async fn run_job(
         (out_sync, err_sync),
     )
     .await
+}
+
+// ProcessKit's own drain has no bound while waiting for an unresponsive OS
+// child. A stop failure or stalled reap must propagate UNKNOWN rather than
+// permanently blocking the worker after the active deadline/cancel fired.
+async fn stop_and_drain(
+    group: &processkit::ProcessGroup,
+    drain: impl std::future::Future<Output = processkit::Result<processkit::Outcome>>,
+    budget: Duration,
+) -> processkit::Result<processkit::Outcome> {
+    tokio::time::timeout(budget, async {
+        let (_, outcome) = tokio::try_join!(
+            async { group.stop(Duration::ZERO, true).await.map(|_| ()) },
+            drain,
+        )?;
+        Ok(outcome)
+    })
+    .await
+    .map_err(|_| {
+        processkit::ErrorReason::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "process group stop/reap/output drain unconfirmed",
+        ))
+    })?
 }
 
 pub(super) fn trusted_mechanism(mechanism: processkit::Mechanism) -> bool {

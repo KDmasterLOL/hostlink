@@ -3,6 +3,22 @@ use crate::jobs::process_tests::prepared_job;
 use tokio::io::AsyncWriteExt;
 
 #[tokio::test]
+async fn stalled_process_reap_is_bounded_and_never_reports_completion() {
+    // No child is spawned. This exercises the actual ProcessKit group stop
+    // with a pending reap future, so a lost OS wait cannot hang an Agent worker.
+    let group = processkit::ProcessGroup::new().unwrap();
+    let error = stop_and_drain(
+        &group,
+        std::future::pending::<processkit::Result<processkit::Outcome>>(),
+        Duration::from_millis(50),
+    )
+    .await
+    .expect_err("a stalled reap must remain UNKNOWN");
+    assert!(matches!(error.reason(), processkit::ErrorReason::Io(_)));
+    assert!(error.to_string().contains("unconfirmed"));
+}
+
+#[tokio::test]
 async fn cancelled_signal_and_flushed_spools_do_not_mask_io_read_error() {
     for read_error in [true, false] {
         let (_root, store) = crate::jobs::tests::fixture().await;

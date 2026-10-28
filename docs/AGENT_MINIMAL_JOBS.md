@@ -33,7 +33,11 @@ the shared-group command timeout kills only its direct child, potentially
 leaving a grandchild's inherited stdout/stderr open until `join_pumps`
 aborts without an EOF flush. On deadline the Agent cancels the active token,
 stops the entire group concurrently with `drain()`, then confirms group
-emptiness, both stream-end flushes and durable sync before recording Failed. A successful kill call alone is insufficient.
+emptiness, both stream-end flushes and durable sync before recording Failed.
+The stop/reap/drain phase has a ten-second upper bound; if OS termination,
+reaping or pipe drainage cannot be confirmed, the worker publishes UNKNOWN,
+closes admission and retains its permit instead of hanging indefinitely
+or reporting a false terminal result. A successful kill call alone is insufficient.
 After the direct child is drained/reaped, the Agent repeats the OS-backed stop/count
 query every 25 ms for at most five seconds, retaining group ownership. This includes
 descendants that close stdio and outlive their parent. Cancellation issues group

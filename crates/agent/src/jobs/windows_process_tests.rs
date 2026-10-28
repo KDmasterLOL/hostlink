@@ -63,6 +63,15 @@ async fn timeout_cancels_descendants_and_records_failure() {
     let artifacts = store.artifacts(&owner).unwrap();
     let bytes =
         std::fs::read(std::env::current_exe().unwrap()).expect("read source-owned test executable");
+    assert!(
+        bytes.len() as u64 <= MAX_ARTIFACT_BYTES,
+        concat!(
+            "Windows test executable is {} bytes, exceeding the production {}-byte ",
+            "seal limit; run the native test with CARGO_PROFILE_TEST_DEBUG=0"
+        ),
+        bytes.len(),
+        MAX_ARTIFACT_BYTES
+    );
     let source_sha256 = format!("{:x}", Sha256::digest(&bytes));
     let upload_name = format!("{source_sha256}.upload");
     let upload = artifacts.upload_root().join(&upload_name);
