@@ -110,7 +110,7 @@ impl ArtifactStore {
             use std::os::unix::fs::OpenOptionsExt;
             input_options.custom_flags(libc::O_NOFOLLOW);
         }
-        let mut input = input_options.open(&source)?;
+        let input = input_options.open(&source)?;
         let input_meta = input.metadata()?;
         if !input_meta.is_file() || input_meta.len() != expected_size {
             return Err(invalid(
@@ -129,31 +129,14 @@ impl ArtifactStore {
         }
         let mut output = output_options.open(&target)?;
         let result = (|| {
-            let mut hasher = Sha256::new();
-            let mut total = 0_u64;
-            let mut buffer = [0_u8; 64 * 1024];
-            loop {
-                let read = input.read(&mut buffer)?;
-                if read == 0 {
-                    break;
-                }
-                total = total
-                    .checked_add(read as u64)
-                    .ok_or_else(|| invalid("artifact size overflow"))?;
-                if total > expected_size || total > MAX_ARTIFACT_BYTES {
-                    return Err(invalid("uploaded artifact changed during seal"));
-                }
-                hasher.update(&buffer[..read]);
-                output.write_all(&buffer[..read])?;
-            }
-            let digest = format!("{:x}", hasher.finalize());
-            if total != expected_size || digest != expected_sha256 {
-                return Err(invalid(
-                    "uploaded artifact digest or length does not match seal request",
-                ));
+            // Use the same sealed-file verifier for initial and repeat seal.
+            // A bounded copy cannot import more bytes than the claimed size.
+            if io::copy(&mut input.take(expected_size + 1), &mut output)? != expected_size {
+                return Err(invalid("uploaded artifact length changed during seal"));
             }
             output.sync_all()?;
             restrict_sealed_artifact(&target, &output)?;
+            verify_artifact(&target, expected_sha256, expected_size)?;
             sync_directory(&sealed)?;
             Ok(())
         })();

@@ -30,20 +30,27 @@ pub(super) async fn fixture() -> (tempfile::TempDir, JobStore, String, JobSpec) 
 }
 
 #[tokio::test]
-async fn unsafe_ancestor_above_install_rejects_source_open_and_seal() {
+async fn private_managed_root_does_not_require_foreign_ancestor_ownership() {
     let (temp, store, owner, spec) = fixture().await;
     let artifacts = store.artifacts(&owner).unwrap();
     let name = format!("{}.upload", spec.source_sha256);
     let size = fs::metadata(&spec.program).unwrap().len();
+    // An authorized Agent owns the private install/artifact tree. A writable
+    // ancestor *above* the managed root is not an additional access policy.
     fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o777)).unwrap();
-    assert!(verify_job_source(&store, &owner, &spec).is_err());
-    assert!(
-        artifacts
-            .authorize_source(&spec.program, &spec.source_sha256)
-            .is_err()
-    );
-    assert!(artifacts.seal(&name, &spec.source_sha256, size).is_err());
+    verify_job_source(&store, &owner, &spec).unwrap();
+    artifacts
+        .authorize_source(&spec.program, &spec.source_sha256)
+        .unwrap();
+    artifacts.seal(&name, &spec.source_sha256, size).unwrap();
     restrict_private_path(temp.path(), true).unwrap();
+
+    // In contrast, an unsafe *managed* root remains forbidden.
+    let install = temp.path().join("install");
+    fs::set_permissions(&install, fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(verify_job_source(&store, &owner, &spec).is_err());
+    assert!(artifacts.seal(&name, &spec.source_sha256, size).is_err());
+    restrict_private_path(&install, true).unwrap();
     verify_job_source(&store, &owner, &spec).unwrap();
 
     let aliases = tempfile::tempdir().unwrap();

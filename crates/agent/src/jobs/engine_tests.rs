@@ -26,7 +26,7 @@ async fn wait_state(runtime: &JobRuntime, id: JobId, owner: &str, expected: JobS
 }
 
 #[tokio::test]
-async fn ancestor_changed_after_admission_fails_without_replay() {
+async fn managed_artifact_root_changed_after_admission_fails_without_replay() {
     use std::os::unix::fs::PermissionsExt;
     let (outer, store, owner, spec) = super::source_tests::fixture().await;
     let runtime = runtime(store);
@@ -34,7 +34,10 @@ async fn ancestor_changed_after_admission_fails_without_replay() {
     handle_job_request(start(id, &spec), &runtime, &owner)
         .await
         .unwrap();
-    std::fs::set_permissions(outer.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    // Only invalidate the executable store, not the independent SQLite
+    // directory, so the worker can record a definite source rejection.
+    let artifacts = outer.path().join("install/artifacts");
+    std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o777)).unwrap();
     assert!(verify_job_source(&runtime.store, &owner, &spec).is_err());
     let fresh = JobId::new();
     assert!(
@@ -53,7 +56,7 @@ async fn ancestor_changed_after_admission_fails_without_replay() {
             (vec![], 0, true)
         );
     }
-    restrict_private_path(outer.path(), true).unwrap();
+    restrict_private_path(&artifacts, true).unwrap();
     verify_job_source(&runtime.store, &owner, &spec).unwrap();
     assert_eq!(
         handle_job_request(start(id, &spec), &runtime, &owner)

@@ -5,7 +5,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+#[cfg(test)]
+use std::io::Write;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 pub(crate) const WORKER_NAME: &str = "hostlink-agent-worker";

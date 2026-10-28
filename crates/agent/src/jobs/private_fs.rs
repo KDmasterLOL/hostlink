@@ -17,85 +17,15 @@ pub(super) fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-/// Check directory entries from / down without first resolving away symlinks.
-/// This is a pathname policy check, not an atomic pathname-exec guarantee.
+/// Reject aliases in the caller-provided path; managed roots are independently
+/// private and Agent-owned. No custom host-wide ancestor ownership policy.
 #[cfg(unix)]
 pub(super) fn validate_source_ancestors(directory: &Path) -> io::Result<()> {
-    use std::path::Component;
-    if !directory.is_absolute() {
-        return Err(invalid("source ancestors must be absolute"));
-    }
-    let mut path = PathBuf::new();
-    let mut parent = None;
-    for component in directory.components() {
-        if !matches!(component, Component::RootDir | Component::Normal(_)) {
-            return Err(invalid("source ancestors contain path traversal"));
-        }
-        path.push(component);
-        let current = fs::symlink_metadata(&path)?;
-        if !current.is_dir() || current.file_type().is_symlink() {
-            return Err(invalid("source ancestor is not a non-symlink directory"));
-        }
-        if let Some(previous) = &parent {
-            validate_source_directory(previous, Some(&current))?;
-        }
-        parent = Some(current);
-    }
-    let last = parent.ok_or_else(|| invalid("missing source ancestor"))?;
-    validate_source_directory(&last, None)?;
-    if directory.as_os_str() != directory.canonicalize()?.as_os_str() {
-        return Err(invalid(
-            "source ancestors must use their exact canonical path",
-        ));
+    if !directory.is_absolute() || directory.as_os_str() != directory.canonicalize()?.as_os_str() {
+        return Err(invalid("source ancestors must be canonical absolute paths"));
     }
     Ok(())
 }
-
-#[cfg(unix)]
-fn validate_source_directory(
-    metadata: &fs::Metadata,
-    child: Option<&fs::Metadata>,
-) -> io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "untrusted source ancestor type or owner",
-        ));
-    }
-    validate_source_directory_ownership(
-        metadata.mode(),
-        metadata.uid(),
-        child.map(fs::Metadata::uid),
-    )
-}
-
-#[cfg(unix)]
-fn validate_source_directory_ownership(
-    mode: u32,
-    owner: u32,
-    child_owner: Option<u32>,
-) -> io::Result<()> {
-    // SAFETY: geteuid reads the current process identity without pointers.
-    let agent = unsafe { libc::geteuid() };
-    let trusted = |uid| uid == 0 || uid == agent;
-    // A foreign owner can chmod a 0755 directory, so mode bits alone do not
-    // prove that its next entry is protected from replacement.
-    if !trusted(owner)
-        || (mode & 0o022 != 0
-            && (mode & 0o1000 == 0 || child_owner.is_none_or(|uid| !trusted(uid))))
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "source ancestor permits foreign entry replacement",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(all(test, unix))]
-#[path = "ancestor_tests.rs"]
-mod ancestor_tests;
 
 pub(crate) fn validate_private_path(path: &Path, directory: bool) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
