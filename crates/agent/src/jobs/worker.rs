@@ -233,6 +233,10 @@ async fn finish_job(
     pump_ends: &[Arc<AtomicBool>; 2],
     (out_sync, err_sync): (File, File),
 ) -> io::Result<()> {
+    let drain_error = outcome
+        .as_ref()
+        .err()
+        .map(|error| format!("{:?}", error.kind()));
     let unconfirmed_outcome = outcome.is_err();
     // Observe EOF before fsync, never afterwards: a late pump write must not
     // race a sync on the cloned FD and then manufacture durable completion.
@@ -263,9 +267,11 @@ async fn finish_job(
         .transition(id, owner, JobState::Running, next)
         .await?;
     if unconfirmed_outcome || !synced || !pumps_ended {
-        return Err(io::Error::other(
-            "ProcessKit did not confirm process-tree/output completion",
-        ));
+        return Err(io::Error::other(format!(
+            "ProcessKit did not confirm process-tree/output completion: drain_error={drain_error:?}, stdout_end={}, stderr_end={}, synced={synced}",
+            pump_ends[0].load(Ordering::Acquire),
+            pump_ends[1].load(Ordering::Acquire),
+        )));
     }
     Ok(())
 }
