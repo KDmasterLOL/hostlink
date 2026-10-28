@@ -3,32 +3,20 @@ use super::*;
 
 pub(super) async fn verify_durable_job(
     host: &hostlink::HostSpec,
-    fixture: &GatewayFixture<'_>,
+    _fixture: &GatewayFixture<'_>,
 ) -> HostConnection {
     let mut session = connect_retry(host).await;
-    // SQLite job state and output files belong to the private Agent store.
-    // Test-owned executables live in a separate private sibling.
-    let program_root = fixture.agent_root.parent().unwrap().join("programs");
-    private_dir(&program_root);
-    let program = program_root.join("managed-job-shell");
-    fs::copy("/bin/sh", &program).expect("stage private job executable");
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o500))
-        .expect("lock staged executable");
-    let job_id = uuid::Uuid::new_v4().to_string();
-    let start = Start {
-        id: job_id.clone(),
-        spec: JobSpec {
-            program: program.to_string_lossy().into_owned(),
-            args: vec![
-                "-c".into(),
-                "sleep 1; printf job-out; printf job-err >&2; exit 7".into(),
-            ],
-            cwd: Some(program_root.to_string_lossy().into_owned()),
-            source_sha256: format!("{:x}", Sha256::digest(fs::read(&program).unwrap())),
-        },
-    };
+    if !containment::supported() {
+        return session;
+    }
+    let binary = fs::read("/bin/sh").unwrap();
+    let job_id = ulid::Ulid::generate().to_string();
+    let args = vec![
+        "-c".into(),
+        "sleep 1; printf job-out; printf job-err >&2; exit 7".into(),
+    ];
     session
-        .job_start(&start)
+        .job_run(&job_id, &binary, &args)
         .await
         .expect("durable job accepted once");
     session

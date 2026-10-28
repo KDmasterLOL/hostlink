@@ -1,8 +1,11 @@
 #![cfg(windows)]
 
+#[path = "support/started_job.rs"]
+mod started_job;
+
 use hostlink_agent::{
     AgentConfig,
-    durable::{DurableStore, JobId, JobSpec},
+    jobs::{JobId, JobSpec, JobStore},
     ssh,
 };
 use russh::client::{self, Handler};
@@ -82,7 +85,7 @@ async fn job_request(
         .await
         .expect("open jobs channel");
     channel
-        .request_subsystem(true, "hostlink-jobs-v1")
+        .request_subsystem(true, "hostlink-jobs")
         .await
         .expect("request jobs subsystem");
     loop {
@@ -126,7 +129,7 @@ async fn send_job_request_and_drop_response(
         .await
         .expect("open jobs channel for lost-ack fixture");
     channel
-        .request_subsystem(true, "hostlink-jobs-v1")
+        .request_subsystem(true, "hostlink-jobs")
         .await
         .expect("request jobs subsystem");
     loop {
@@ -159,15 +162,11 @@ fn sha256(bytes: &[u8]) -> String {
 }
 
 fn start(id: &str, spec: &TestJobSpec) -> serde_json::Value {
-    serde_json::json!({"version":1,"op":"start","id":id,"spec":spec})
+    serde_json::json!({"op":"run","id":id,"spec":spec})
 }
 
 async fn status(session: &mut client::Handle<Pin>, id: &str) -> serde_json::Value {
-    job_request(
-        session,
-        &serde_json::json!({"version":1,"op":"status","id":id}),
-    )
-    .await
+    job_request(session, &serde_json::json!({"op":"status","id":id})).await
 }
 
 async fn wait_for_state(
@@ -241,20 +240,39 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
     .unwrap();
     private_windows_test_path(&auth_path, false);
 
-    let unknown_id = uuid::Uuid::new_v4().to_string();
+    let owner = sha256(&controller.public_key().public_key_bytes());
+    // Crash fault injection precedes SSH startup: reproduce the private sealed
+    // layout for this persisted claim only. Live admissions below still upload
+    // and call the real Seal handler before using its returned canonical path.
+    let artifacts = temp.path().join("artifacts");
+    let owner_root = artifacts.join(&owner);
+    let sealed_root = owner_root.join("sealed");
+    for directory in [
+        &artifacts,
+        &owner_root,
+        &owner_root.join("uploads"),
+        &sealed_root,
+    ] {
+        std::fs::create_dir(directory).unwrap();
+        private_windows_test_path(directory, true);
+    }
+    let crash_source = sealed_root.join(format!("{source_sha256}.program"));
+    std::fs::copy(&source, &crash_source).unwrap();
+    private_windows_test_path(&crash_source, false);
+    let crash_source = crash_source.canonicalize().unwrap();
+    let unknown_id = ulid::Ulid::generate().to_string();
     let unknown_spec = TestJobSpec {
-        program: source.to_string_lossy().into_owned(),
+        program: crash_source.to_string_lossy().into_owned(),
         args: vec!["exit7".into()],
         cwd: Some(temp.path().to_path_buf()),
         source_sha256: source_sha256.clone(),
     };
     // Commit the real one-use start claim before simulating Agent loss.
     // Recovery must retain UNKNOWN without launching the OS process.
-    let store = DurableStore::initialize_fresh(&jobs)
+    let store = JobStore::initialize_fresh(&jobs)
         .await
         .expect("private SQLite store");
-    let unknown_job_id = JobId::parse(&unknown_id).expect("canonical fixture UUID");
-    let owner = sha256(&controller.public_key().public_key_bytes());
+    let unknown_job_id = JobId::parse(&unknown_id).expect("canonical fixture ULID");
     store
         .admit(
             unknown_job_id,
@@ -268,10 +286,7 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
         )
         .await
         .expect("admit durable pre-crash fixture");
-    store
-        .claim_start(unknown_job_id, &owner)
-        .await
-        .expect("commit irreversible start marker");
+    started_job::started(&jobs, &store, unknown_job_id, &owner).await;
     store.close().await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -303,7 +318,40 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
         !temp.path().join("launch-count").exists(),
         "an unknown pre-crash worker must never be replayed during recovery"
     );
-    let success_id = uuid::Uuid::new_v4().to_string();
+    let source_bytes = std::fs::read(&source).unwrap();
+    let upload_name = format!("{source_sha256}.upload");
+    let channel = session.channel_open_session().await.unwrap();
+    channel.request_subsystem(true, "sftp").await.unwrap();
+    let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
+        .await
+        .unwrap();
+    let mut upload = sftp
+        .open_with_flags(
+            upload_name.clone(),
+            russh_sftp::protocol::OpenFlags::CREATE
+                | russh_sftp::protocol::OpenFlags::EXCLUDE
+                | russh_sftp::protocol::OpenFlags::WRITE,
+        )
+        .await
+        .unwrap();
+    use tokio::io::AsyncWriteExt as _;
+    upload.write_all(&source_bytes).await.unwrap();
+    upload.close().await.unwrap();
+    sftp.close().await.unwrap();
+    let sealed = job_request(
+        &mut session,
+        &serde_json::json!({
+            "op":"seal", "name":upload_name, "sha256":source_sha256, "size":source_bytes.len()
+        }),
+    )
+    .await;
+    assert_eq!(sealed["ok"], true);
+    let source = PathBuf::from(
+        sealed["program"]
+            .as_str()
+            .expect("canonical authenticated sealed source"),
+    );
+    let success_id = ulid::Ulid::generate().to_string();
     let success = TestJobSpec {
         program: source.to_string_lossy().into_owned(),
         args: vec!["exit7".into()],
@@ -354,7 +402,7 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
     use base64::Engine as _;
     let first = job_request(
         &mut resumed,
-        &serde_json::json!({"version":1,"op":"output","id":success_id,"stream":"stdout","offset":0}),
+        &serde_json::json!({"op":"logs","id":success_id,"stream":"stdout","offset":0}),
     )
     .await;
     assert_eq!(
@@ -367,7 +415,7 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
     assert_eq!(first["eof"], true);
     let tail = job_request(
         &mut resumed,
-        &serde_json::json!({"version":1,"op":"output","id":success_id,"stream":"stdout","offset":1}),
+        &serde_json::json!({"op":"logs","id":success_id,"stream":"stdout","offset":1}),
     )
     .await;
     assert_eq!(
@@ -378,7 +426,7 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
     );
     let stderr = job_request(
         &mut resumed,
-        &serde_json::json!({"version":1,"op":"output","id":success_id,"stream":"stderr","offset":0}),
+        &serde_json::json!({"op":"logs","id":success_id,"stream":"stderr","offset":0}),
     )
     .await;
     assert_eq!(
@@ -389,7 +437,7 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
     );
     assert_eq!(stderr["eof"], true);
 
-    let bad_hash_id = uuid::Uuid::new_v4().to_string();
+    let bad_hash_id = ulid::Ulid::generate().to_string();
     let mut invalid_source = TestJobSpec {
         program: source.to_string_lossy().into_owned(),
         args: success.args.clone(),
@@ -407,7 +455,7 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
     set_unprotected_fixture_acl(&unprotected_source);
     invalid_source.program = unprotected_source.to_string_lossy().into_owned();
     invalid_source.source_sha256 = source_sha256.clone();
-    let bad_acl_id = uuid::Uuid::new_v4().to_string();
+    let bad_acl_id = ulid::Ulid::generate().to_string();
     assert_eq!(
         job_request(&mut resumed, &start(&bad_acl_id, &invalid_source)).await["ok"],
         false,
@@ -419,7 +467,7 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
     private_windows_test_path(&multiply_linked, false);
     let second_link = temp.path().join("executable-alias.exe");
     std::fs::hard_link(&multiply_linked, &second_link).unwrap();
-    let linked_id = uuid::Uuid::new_v4().to_string();
+    let linked_id = ulid::Ulid::generate().to_string();
     invalid_source.program = multiply_linked.to_string_lossy().into_owned();
     invalid_source.source_sha256 = source_sha256.clone();
     assert_eq!(
@@ -428,7 +476,7 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
         "an executable with an alias path must be rejected"
     );
 
-    let tree_id = uuid::Uuid::new_v4().to_string();
+    let tree_id = ulid::Ulid::generate().to_string();
     let tree = TestJobSpec {
         program: source.to_string_lossy().into_owned(),
         args: vec![
@@ -456,7 +504,7 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
     let descendant_pid: u32 = std::fs::read_to_string(&pid_path).unwrap().parse().unwrap();
     let cancel = job_request(
         &mut resumed,
-        &serde_json::json!({"version":1,"op":"cancel","id":tree_id}),
+        &serde_json::json!({"op":"cancel","id":tree_id}),
     )
     .await;
     assert_eq!(cancel["ok"], true);

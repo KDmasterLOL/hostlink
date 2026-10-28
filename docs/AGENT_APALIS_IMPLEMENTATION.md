@@ -1,5 +1,8 @@
 # 1C-1073 implementation context
 
+Historical 1C-1073 record. Current implementation and acceptance are described
+in [1C-1081 minimal jobs](AGENT_MINIMAL_JOBS.md).
+
 Source: clean `dev@4570a45c5ba53f5440a8265906393cbcf629c033`.
 Scope: task/1c-1073-apalis-production only. No deployment or promotion.
 

@@ -103,7 +103,7 @@ async fn cli_run_starts_only_one_agent_owned_reverse_tunnel() {
     let jobs = root.path().join("jobs");
     std::fs::create_dir(&jobs).unwrap();
     std::fs::set_permissions(&jobs, std::fs::Permissions::from_mode(0o700)).unwrap();
-    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs)
+    hostlink_agent::jobs::JobStore::initialize_fresh(&jobs)
         .await
         .expect("initialize fresh private Agent SQLite fixture")
         .close()

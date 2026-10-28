@@ -1,5 +1,7 @@
 #![cfg(unix)]
 //! Actual hostlink CLI -> pinned russh -> key-scoped SFTP -> Seal -> durable exec.
+#[path = "../../agent/tests/support/containment.rs"]
+mod containment;
 use hostlink_agent::{AgentConfig, ssh};
 use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
 use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
@@ -12,12 +14,15 @@ fn privately_write(path: &std::path::Path, bytes: &[u8]) {
 
 #[tokio::test]
 async fn run_cli_seals_binary_and_idempotently_returns_exact_nonzero_exit() {
+    if !containment::supported() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let jobs = temp.path().join("jobs");
     fs::create_dir(&jobs).unwrap();
     fs::set_permissions(&jobs, fs::Permissions::from_mode(0o700)).unwrap();
-    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs)
+    hostlink_agent::jobs::JobStore::initialize_fresh(&jobs)
         .await
         .expect("initialize fresh private Agent SQLite fixture")
         .close()
@@ -80,7 +85,7 @@ async fn run_cli_seals_binary_and_idempotently_returns_exact_nonzero_exit() {
     );
 
     let source = fs::canonicalize("/bin/sh").expect("source-exact local executable");
-    let id = uuid::Uuid::new_v4().to_string();
+    let id = ulid::Ulid::generate().to_string();
     let marker = temp.path().join("launches");
     let script = format!(
         "printf x >> '{}'; printf '\\000\\377'; printf '\\377E' >&2; exit 7",
@@ -92,7 +97,7 @@ async fn run_cli_seals_binary_and_idempotently_returns_exact_nonzero_exit() {
         let result = tokio::time::timeout(
             Duration::from_secs(20),
             Command::new(bin)
-                .arg("run")
+                .args(["jobs", "run", "--wait"])
                 .arg("--config")
                 .arg(&host_config)
                 .arg("--binary")
@@ -120,7 +125,7 @@ async fn run_cli_seals_binary_and_idempotently_returns_exact_nonzero_exit() {
             "raw stderr unavailable"
         );
         let stderr = String::from_utf8_lossy(&result.stderr);
-        assert!(stderr.contains(&id), "UUID must be visible before start");
+        assert!(stderr.contains(&id), "ULID must be visible before start");
         assert_eq!(
             fs::read(&marker).unwrap(),
             b"x",
@@ -131,7 +136,7 @@ async fn run_cli_seals_binary_and_idempotently_returns_exact_nonzero_exit() {
     let conflicting = tokio::time::timeout(
         Duration::from_secs(20),
         Command::new(bin)
-            .arg("run")
+            .args(["jobs", "run", "--wait"])
             .arg("--config")
             .arg(&host_config)
             .arg("--binary")
@@ -149,10 +154,44 @@ async fn run_cli_seals_binary_and_idempotently_returns_exact_nonzero_exit() {
     assert!(!conflicting.status.success());
     assert!(conflicting.stdout.is_empty());
     let diagnostic = String::from_utf8_lossy(&conflicting.stderr);
-    assert!(diagnostic.contains("run outcome UNKNOWN during start"));
+    assert!(diagnostic.contains("run outcome UNKNOWN during upload/seal/start"));
     assert!(diagnostic.contains("do not rerun or resend start"));
     assert!(diagnostic.contains(&id));
     assert_eq!(fs::read(&marker).unwrap(), b"x");
+
+    // Default mode returns admission promptly while the Agent keeps the process alive.
+    let queued_id = ulid::Ulid::generate().to_string();
+    let queued = tokio::time::timeout(
+        Duration::from_secs(5),
+        Command::new(bin)
+            .args(["jobs", "run", "--config"])
+            .arg(&host_config)
+            .arg("--binary")
+            .arg(&source)
+            .arg("--id")
+            .arg(&queued_id)
+            .args(["--", "-c", "sleep 300"])
+            .output(),
+    )
+    .await
+    .expect("enqueue does not wait for execution")
+    .unwrap();
+    assert!(queued.status.success(), "{:?}", queued.stderr);
+    let accepted: serde_json::Value = serde_json::from_slice(&queued.stdout).unwrap();
+    assert_eq!(accepted["id"], queued_id);
+    assert!(matches!(
+        accepted["state"]["state"].as_str(),
+        Some("prepared" | "running")
+    ));
+    let cancelled = Command::new(bin)
+        .args(["jobs", "cancel", "--config"])
+        .arg(&host_config)
+        .arg("--id")
+        .arg(&queued_id)
+        .output()
+        .await
+        .unwrap();
+    assert!(cancelled.status.success(), "{:?}", cancelled.stderr);
 
     stop_tx.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(7), server)
@@ -160,4 +199,50 @@ async fn run_cli_seals_binary_and_idempotently_returns_exact_nonzero_exit() {
         .expect("server shutdown deadline")
         .expect("join Agent")
         .expect("Agent shutdown");
+}
+
+#[tokio::test]
+async fn run_preflight_prints_ulid_before_network_and_rejects_overflow() {
+    let root = tempfile::tempdir().unwrap();
+    let binary = root.path().join("local-only");
+    fs::write(
+        &binary,
+        b"no network or execution in this preflight fixture",
+    )
+    .unwrap();
+    let missing_config = root.path().join("missing-host.json");
+    let result = Command::new(env!("CARGO_BIN_EXE_hostlink"))
+        .args(["jobs", "run", "--binary"])
+        .arg(&binary)
+        .arg("--config")
+        .arg(&missing_config)
+        .output()
+        .await
+        .unwrap();
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let line = stderr
+        .lines()
+        .find_map(|s| s.strip_prefix("hostlink: job id: "))
+        .expect("ID must print before target resolution");
+    hostlink::run::validate_id(line).unwrap();
+    for id in [
+        "8ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+        "550e8400-e29b-41d4-a716-446655440000",
+    ] {
+        let result = Command::new(env!("CARGO_BIN_EXE_hostlink"))
+            .args(["jobs", "run", "--binary"])
+            .arg(&binary)
+            .arg("--config")
+            .arg(&missing_config)
+            .arg("--id")
+            .arg(id)
+            .output()
+            .await
+            .unwrap();
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("canonical uppercase ULID"), "{stderr}");
+        assert!(!stderr.contains("hostlink: job id:"));
+    }
 }

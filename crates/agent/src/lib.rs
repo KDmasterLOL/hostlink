@@ -1,9 +1,9 @@
 //! Embedded SSH Agent: authenticated transport, execution, and durable jobs.
 //! The former Agent JSONL listener, OpenSSH process and updater are absent.
 
-pub mod durable;
 pub mod enrollment;
 pub mod exec;
+pub mod jobs;
 pub mod service;
 pub mod sftp;
 pub mod ssh;

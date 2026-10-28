@@ -15,7 +15,7 @@ use tokio::{
 use super::*;
 use crate::connect::{HostConnection, connect_stream_authenticated};
 
-const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+const ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FA0";
 
 #[derive(Clone, Copy, Debug)]
 enum Reply {
@@ -99,7 +99,7 @@ impl server::Handler for Fixture {
 
             let mut response = match reply {
                 Reply::Status | Reply::Close | Reply::State(_) => serde_json::json!({
-                    "version": 1, "ok": true, "id": ID,
+                    "ok": true, "id": ID,
                     "state": match reply {
                         Reply::State(state) => serde_json::from_str::<Value>(state).unwrap(),
                         _ => serde_json::json!({"state": "exited", "code": 7}),
@@ -118,42 +118,42 @@ impl server::Handler for Fixture {
                 Reply::Oversized => vec![b'x'; MAX_FRAME_BYTES + 5],
                 Reply::Partial => vec![0, 0, 0, 25, b'{'],
                 Reply::BinaryOutput => serde_json::json!({
-                    "version": 1, "ok": true, "id": ID,
+                    "ok": true, "id": ID,
                     "state": {"state": "running"},
                     "data_base64": "AP8K/w==", "next_offset": 4, "eof": false
                 })
                 .to_string()
                 .into_bytes(),
                 Reply::BadOffset => serde_json::json!({
-                    "version": 1, "ok": true, "id": ID,
+                    "ok": true, "id": ID,
                     "state": {"state": "running"},
                     "data_base64": "AP8K/w==", "next_offset": 9, "eof": false
                 })
                 .to_string()
                 .into_bytes(),
                 Reply::EmptyRunning => serde_json::json!({
-                    "version": 1, "ok": true, "id": ID,
+                    "ok": true, "id": ID,
                     "state": {"state": "running"},
                     "data_base64": "", "next_offset": 0, "eof": false
                 })
                 .to_string()
                 .into_bytes(),
                 Reply::SealSuccess => serde_json::json!({
-                    "version": 1, "ok": true,
+                    "ok": true,
                     "program": if cfg!(windows) { r"C:\\agent\\artifacts\\pinned.exe" } else { "/agent/artifacts/pinned" },
                     "sha256": "a".repeat(64)
                 })
                 .to_string()
                 .into_bytes(),
                 Reply::SealWrongDigest => serde_json::json!({
-                    "version": 1, "ok": true,
+                    "ok": true,
                     "program": if cfg!(windows) { r"C:\\agent\\artifacts\\pinned.exe" } else { "/agent/artifacts/pinned" },
                     "sha256": "b".repeat(64)
                 })
                 .to_string()
                 .into_bytes(),
                 Reply::SealMalformed => serde_json::json!({
-                    "version": 1, "ok": true, "program": "relative/path", "sha256": "a".repeat(64)
+                    "ok": true, "program": "relative/path", "sha256": "a".repeat(64)
                 })
                 .to_string()
                 .into_bytes(),
@@ -253,7 +253,7 @@ async fn start_status_and_binary_output_use_one_subsystem_request_each() {
         .expect("start response");
     assert_eq!(status.id, ID);
     assert_eq!(status.state, JobState::Exited { code: 7 });
-    assert_eq!(requests.lock().await[0]["op"], "start");
+    assert_eq!(requests.lock().await[0]["op"], "run");
     finish(connection, task).await;
 
     let (mut connection, task, requests) = connected(Reply::BinaryOutput).await;
@@ -268,7 +268,7 @@ async fn start_status_and_binary_output_use_one_subsystem_request_each() {
     assert_eq!(output.data, [0, 255, 10, 255]);
     assert_eq!(output.next_offset, 4);
     assert!(!output.eof);
-    assert_eq!(requests.lock().await[0]["op"], "output");
+    assert_eq!(requests.lock().await[0]["op"], "logs");
     finish(connection, task).await;
 }
 
@@ -283,9 +283,8 @@ async fn seal_uses_frozen_contract_and_returns_agent_path_only_after_digest_matc
         })
         .await
         .expect("exact Seal response");
-    assert_eq!(sealed.sha256, "a".repeat(64));
-    assert!(std::path::Path::new(&sealed.program).is_absolute() || cfg!(windows));
-    assert_eq!(requests.lock().await[0]["version"], 1);
+    assert!(std::path::Path::new(&sealed).is_absolute() || cfg!(windows));
+    assert!(requests.lock().await[0].get("version").is_none());
     assert_eq!(requests.lock().await[0]["op"], "seal");
     assert_eq!(
         requests.lock().await[0]["name"],
@@ -415,7 +414,7 @@ async fn malformed_state_replies_fail_start_without_replaying_it() {
         assert!(connection.job_start(&start()).await.is_err(), "{state}");
         let requests = requests.lock().await;
         assert_eq!(requests.len(), 1, "invalid ACK must never replay start");
-        assert_eq!(requests[0]["op"], "start");
+        assert_eq!(requests[0]["op"], "run");
         drop(requests);
         finish(connection, task).await;
     }
@@ -426,7 +425,7 @@ async fn lost_start_ack_is_not_retried_and_reconnect_status_is_explicit() {
     let (mut first, first_task, first_requests) = connected(Reply::Close).await;
     assert!(first.job_start(&start()).await.is_err());
     assert_eq!(first_requests.lock().await.len(), 1);
-    assert_eq!(first_requests.lock().await[0]["op"], "start");
+    assert_eq!(first_requests.lock().await[0]["op"], "run");
     finish(first, first_task).await;
 
     let (mut reconnected, next_task, next_requests) = connected(Reply::Status).await;

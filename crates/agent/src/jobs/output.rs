@@ -56,29 +56,22 @@ pub(super) fn read_bounded_output(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-impl DurableStore {
+impl JobStore {
     pub(crate) fn output_path(&self, id: JobId, stream: JobOutput) -> PathBuf {
         self.output_dir(id).join(stream.file_name())
     }
 
-    pub(crate) async fn read_output(
+    pub(crate) fn read_output(
         &self,
-        id: JobId,
-        owner: &str,
+        record: &JobView,
         stream: JobOutput,
         offset: u64,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
-        let record = self.lookup(id, owner).await?;
+        let id = record.id;
         // Once a process attempt was claimed, terminal failure must not
         // silently turn lost output files into successful empty EOF.
-        let claimed: i64 =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM StartedClaims WHERE job_id=?)")
-                .bind(id.to_string())
-                .fetch_one(&self.pool)
-                .await
-                .map_err(io::Error::other)?;
         let expects_output = matches!(record.state, JobState::Exited { .. })
-            || (record.state == JobState::Failed && claimed != 0);
+            || (record.state == JobState::Failed && record.started);
         let dir = self.output_dir(id);
         match fs::symlink_metadata(&dir) {
             Ok(_) => validate_private_path(&dir, true)?,

@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-use hostlink_agent::durable::{Admission, DurableStore, JobId, JobSpec, JobState};
+use hostlink_agent::jobs::{JobId, JobSpec, JobState, JobStore};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 use tempfile::TempDir;
 
@@ -55,7 +55,7 @@ fn fixture() -> (
                     .build()
                     .unwrap()
                     .block_on(async {
-                        DurableStore::initialize_fresh(root.join("state/jobs"))
+                        JobStore::initialize_fresh(root.join("state/jobs"))
                             .await
                             .unwrap()
                             .close()
@@ -206,7 +206,7 @@ async fn service_commands_bind_private_unit_to_root_and_remove_only_service_meta
     fs::set_permissions(&machine_file, fs::Permissions::from_mode(0o600)).unwrap();
 
     let jobs_root = root.join("state/jobs");
-    let store = DurableStore::open(&jobs_root).await.unwrap();
+    let store = JobStore::open(&jobs_root).await.unwrap();
     let id = JobId::new();
     let admitted = store
         .admit(
@@ -221,7 +221,7 @@ async fn service_commands_bind_private_unit_to_root_and_remove_only_service_meta
         )
         .await
         .unwrap();
-    assert!(matches!(admitted, Admission::Created(_)));
+    assert_eq!((admitted).id, id);
     for cmd in ["stop", "remove"] {
         let blocked = invoke(
             &root.join("bin/hostlink-agent"),

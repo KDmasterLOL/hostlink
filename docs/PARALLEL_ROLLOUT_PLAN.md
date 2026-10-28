@@ -49,7 +49,7 @@ hostlink hub configure; hostlink hub check;
 hostlink invite --name NAME --target TARGET --version VERSION --installer-url HTTPS --installer-sha256 SHA --agent-url HTTPS --agent-sha256 SHA --archive-url HTTPS --archive-sha256 SHA
 target: install verified Agent, enter invite token privately, start new user-scoped service;
 hostlink list; hostlink list --check; hostlink info NAME; hostlink verify NAME;
-hostlink exec --host NAME --command ...; hostlink upload/download; hostlink run/job; hostlink forward/rdp/probe;
+hostlink exec --host NAME --command ...; hostlink upload/download; hostlink jobs run/list/status/logs/cancel; hostlink forward/rdp/probe;
 hostlink remove NAME --yes (Hub revocation only);
 target: hostlink-agent service stop/remove (independent physical uninstall after jobs reconciled).
 

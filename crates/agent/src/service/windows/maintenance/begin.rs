@@ -1,6 +1,6 @@
 use super::*;
 
-/// Enter maintenance while the caller holds durable::acquire_update_lock(root).
+/// Enter maintenance while the caller holds jobs::acquire_update_lock(root).
 /// No Run value or marker is changed until owner, image, registration, and jobs verify.
 pub(crate) fn begin_maintenance(root: &Path) -> io::Result<MaintenanceReceipt> {
     ensure_user_scope()?;

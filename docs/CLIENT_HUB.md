@@ -44,12 +44,11 @@ hostlink check --host lab-win7
 hostlink exec --host lab-win7 --command 'hostname'
 hostlink upload --host lab-win7 --local ./input.bin --remote input.bin
 hostlink download --host lab-win7 --remote output.bin --local ./output.bin
-hostlink run --host lab-win7 --binary ./tests -- --list
-hostlink job start --host lab-win7 --program /opt/tests --source-sha256 <sha256> -- --list
+hostlink jobs run --host lab-win7 --binary ./tests --wait -- --list
 hostlink job status --host lab-win7 --id <uuid>
 ```
 
-The existing `--config PATH` form remains available and cannot be combined with `--host`. Managed selection fetches fresh Hub records and builds the existing `HostSpec`; all execution remains on `HostConnection::connect`. A lost job-start acknowledgement remains `UNKNOWN`; query its printed UUID and do not repeat the start request.
+The existing `--config PATH` form remains available and cannot be combined with `--host`. Managed selection fetches fresh Hub records and builds the existing `HostSpec`; all execution remains on `HostConnection::connect`. A lost job-start acknowledgement remains `UNKNOWN`; query its printed ULID and do not repeat the start request.
 
 ## Invitations
 
@@ -95,5 +94,5 @@ The old manual `HostSpec` JSON with one `gateway` remains valid. Its optional
 separate from Hub route selection.
 
 CLI command callers use `--host` for managed routing: `check`, `exec`, `run`,
-`job start/status/cancel/output`, `forward`, `rdp`, and `probe`. `--config PATH`
+`jobs run/list/status/cancel/logs`, `forward`, `rdp`, and `probe`. `--config PATH`
 continues to load a manual `HostSpec` and does not consult Hub settings.

@@ -1,5 +1,8 @@
 # 1C-1073 strict runtime-open follow-up receipt
 
+Historical 1C-1073 record. Current implementation and acceptance are described
+in [1C-1081 minimal jobs](AGENT_MINIMAL_JOBS.md).
+
 Scope: the runtime-open fail-open correction, explicit fresh provisioning,
 related call sites/fixtures and documentation. This receipt does **not** certify
 completion of the whole Apalis migration or its separately owned worker,

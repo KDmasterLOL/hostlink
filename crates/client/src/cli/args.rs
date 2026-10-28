@@ -144,24 +144,9 @@ pub(super) enum Command {
         local: PathBuf,
     },
     /// Inspect or reattach to an Agent-owned durable job.
-    Job {
+    Jobs {
         #[command(subcommand)]
         command: JobCommand,
-    },
-    /// Upload, seal and run a source-pinned test binary with exact argv.
-    Run {
-        #[arg(long, group = "host_selection", required_unless_present = "host")]
-        config: Option<PathBuf>,
-        #[arg(long, group = "host_selection", required_unless_present = "config")]
-        host: Option<String>,
-        #[arg(long)]
-        binary: PathBuf,
-        /// Caller-owned canonical UUID; a UUID v4 is generated when omitted.
-        #[arg(long)]
-        id: Option<String>,
-        /// Exact test-runner arguments, separated from CLI options with `--`.
-        #[arg(last = true, allow_hyphen_values = true)]
-        args: Vec<String>,
     },
 }
 
@@ -184,25 +169,32 @@ pub(super) enum MigrationCommand {
 
 #[derive(Subcommand)]
 pub(super) enum JobCommand {
-    /// Start one durable job request without retrying it.
-    Start {
+    /// List one page (32 jobs) owned by this controller, across all statuses.
+    List {
         #[arg(long, group = "host_selection", required_unless_present = "host")]
         config: Option<PathBuf>,
         #[arg(long, group = "host_selection", required_unless_present = "config")]
         host: Option<String>,
-        /// Absolute executable path on the managed host.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=128))]
+        page: u32,
+        /// Optional native Apalis status.
+        #[arg(long, value_parser = ["Pending", "Queued", "Running", "Done", "Failed", "Killed"])]
+        status: Option<String>,
+    },
+    /// Upload, seal and enqueue a source-pinned binary with exact argv.
+    Run {
+        #[arg(long, group = "host_selection", required_unless_present = "host")]
+        config: Option<PathBuf>,
+        #[arg(long, group = "host_selection", required_unless_present = "config")]
+        host: Option<String>,
         #[arg(long)]
-        program: String,
-        /// Lowercase SHA-256 digest of the executable.
-        #[arg(long)]
-        source_sha256: String,
-        /// Caller-owned canonical UUID; a UUID v4 is generated when omitted.
+        binary: PathBuf,
+        /// Caller-owned canonical ULID; generated and printed before connecting when omitted.
         #[arg(long)]
         id: Option<String>,
-        /// Optional absolute working directory on the managed host.
+        /// Stream raw output and return the actual process exit code.
         #[arg(long)]
-        cwd: Option<String>,
-        /// Exact argument vector, separated from CLI options with `--`.
+        wait: bool,
         #[arg(last = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -225,7 +217,7 @@ pub(super) enum JobCommand {
         id: String,
     },
     /// Read one raw output stream from a persisted byte offset.
-    Output {
+    Logs {
         #[arg(long, group = "host_selection", required_unless_present = "host")]
         config: Option<PathBuf>,
         #[arg(long, group = "host_selection", required_unless_present = "config")]

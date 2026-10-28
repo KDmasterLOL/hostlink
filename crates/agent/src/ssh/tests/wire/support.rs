@@ -34,7 +34,7 @@ impl WireFixture {
         let state = root.path().join("jobs");
         std::fs::create_dir(&state).unwrap();
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let store = DurableStore::initialize_fresh(state).await.unwrap();
+        let store = JobStore::initialize_fresh(state).await.unwrap();
         let runner = store.acquire_runner().unwrap();
         let jobs = Arc::new(JobRuntime {
             store,
@@ -123,6 +123,25 @@ impl WireFixture {
             .unwrap();
     }
 
+    pub(super) async fn rejects_subsystem(&self, client: usize, name: &str) {
+        let mut channel = self.clients[client].channel_open_session().await.unwrap();
+        channel.request_subsystem(true, name).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match channel.wait().await {
+                    Some(ChannelMsg::Failure) => break,
+                    Some(ChannelMsg::Success) | None => {
+                        panic!("unexpected subsystem acceptance/close")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        channel.close().await.unwrap();
+    }
+
     pub(super) async fn send(
         &self,
         client: usize,
@@ -139,7 +158,7 @@ impl WireFixture {
                 match channel.wait().await {
                     Some(ChannelMsg::Success) => break,
                     Some(ChannelMsg::Failure) | None => {
-                        panic!("real Agent rejected jobs-v1 subsystem")
+                        panic!("real Agent rejected jobs subsystem")
                     }
                     _ => {}
                 }
@@ -174,7 +193,7 @@ impl WireFixture {
             }
         })
         .await
-        .expect("framed jobs-v1 response deadline");
+        .expect("framed jobs response deadline");
         assert!(frame.len() >= 4);
         assert_eq!(
             u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize,
@@ -187,7 +206,7 @@ impl WireFixture {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let response = self
-                    .rpc(client, &json!({"version":1,"op":"status","id":id}), false)
+                    .rpc(client, &json!({"op":"status","id":id}), false)
                     .await;
                 assert_eq!(response["ok"], true);
                 if response["state"] == state {

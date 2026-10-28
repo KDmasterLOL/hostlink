@@ -1,10 +1,17 @@
 use super::*;
 
 /// Verifies the immutable source and platform launch context before process creation.
-pub(in crate::ssh) fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
+pub(super) fn verify_job_source(
+    store: &JobStore,
+    owner: &str,
+    spec: &JobSpec,
+) -> io::Result<PathBuf> {
     if !Path::new(&spec.program).is_absolute() || spec.program.contains('\0') {
         return Err(invalid_data("job executable must be an absolute path"));
     }
+    store
+        .artifacts(owner)?
+        .authorize_source(&spec.program, &spec.source_sha256)?;
     let program = Path::new(&spec.program);
     let metadata = std::fs::symlink_metadata(program)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
@@ -24,9 +31,9 @@ pub(in crate::ssh) fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
                 "durable jobs require a verified non-elevated, non-LocalSystem Windows user context",
             ));
         }
-        durable::validate_private_path(program, false)?;
+        crate::jobs::validate_private_path(program, false)?;
         if let Some(parent) = program.parent() {
-            durable::validate_private_path(parent, true)?;
+            crate::jobs::validate_private_path(parent, true)?;
         }
     }
     #[cfg(unix)]
@@ -65,7 +72,9 @@ pub(in crate::ssh) fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if opened_metadata.uid() != unsafe { libc::geteuid() }
+        // SAFETY: geteuid reads the process identity without pointers.
+        let owner = unsafe { libc::geteuid() };
+        if opened_metadata.uid() != owner
             || opened_metadata.nlink() != 1
             || opened_metadata.permissions().mode() & 0o222 != 0
         {
@@ -76,7 +85,7 @@ pub(in crate::ssh) fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
         }
     }
     let mut digest = Sha256::new();
-    io::copy(&mut file, &mut digest_writer(&mut digest))?;
+    io::copy(&mut file, &mut digest)?;
     if format!("{:x}", digest.finalize()) != spec.source_sha256 {
         return Err(invalid_data("job executable digest mismatch"));
     }
@@ -134,7 +143,7 @@ pub(in crate::ssh) fn verify_job_source(spec: &JobSpec) -> io::Result<PathBuf> {
             if metadata.file_attributes() & 0x400 != 0 {
                 return Err(invalid_data("job working directory is a reparse point"));
             }
-            durable::validate_private_path(cwd, true)?;
+            crate::jobs::validate_private_path(cwd, true)?;
         }
     }
     Ok(program.to_path_buf())
@@ -168,18 +177,4 @@ fn windows_file_identity(file: &std::fs::File) -> io::Result<(u32, u64, u64, u64
         ));
     }
     Ok((info.dwVolumeSerialNumber, index, size, write_time))
-}
-
-fn digest_writer<'a>(digest: &'a mut Sha256) -> impl io::Write + 'a {
-    struct DigestWriter<'a>(&'a mut Sha256);
-    impl io::Write for DigestWriter<'_> {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.update(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    DigestWriter(digest)
 }

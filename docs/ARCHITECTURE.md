@@ -36,12 +36,12 @@ needs a proven out-of-process handoff with the old Agent quiesced rather than
 attempting to overwrite its running EXE. This update engine is Agent-only,
 not a general package manager, a second network service or old Toolkit updater.
 
-Use a small versioned job subsystem over the SAME authenticated SSH
+Use the small `hostlink-jobs` subsystem over the SAME authenticated SSH
 connection, not a second listener or a custom network carrier. Preserve
 strict known-host pins, authorized users, file ownership and path safety,
 bounded storage, timeouts, transparent errors and process cleanup.
 
-Caller owns test policy/side effects. The eventual hostlink run API stages a
+Caller owns test policy/side effects. The `hostlink jobs run --binary LOCAL` API stages a
 pinned test binary through SFTP, uses typed argv in a durable manifest (not
 SSH exec-string quoting), supports test --list and normal execution, and
 retrieves raw outputs and actual exit statuses after reconnect.
@@ -60,11 +60,9 @@ Native Windows11 and Win7 x64/x86 source-exact acceptance needed separately,
 including active-job update deferral, stopped-runtime handoff and rollback.
 
 
-Agent jobs are owned by `durable/` (Apalis SQLite payloads, transactional
-one-use started claims, private output and artifacts) and `ssh/jobs/` (frozen
-jobs-v1 framing and processkit execution). There is one database backend and
-one SSH execution carrier. Every pooled connection verifies WAL/FULL; the
-upstream setup routine that disables synchronous is deliberately bypassed in
-favor of Apalis public migrations. Automatic Apalis polling/orphan retries are
-not used. See [durable storage](AGENT_DURABLE_SQLITE.md) for recovery, migration
-and updater exclusion.
+Agent jobs have one owner, `crates/agent/src/jobs/`: one Apalis SQLite sink and
+WorkerBuilder with 100 ms polling, ProcessKit execution, authenticated
+`hostlink-jobs` framing, private output and artifacts. Lifecycle/result lives in
+native Apalis columns; an immutable one-use claim prevents orphan/reconnect
+replay. UNKNOWN blocks Agent updates. See the [jobs contract](AGENT_MINIMAL_JOBS.md)
+for native result publication, fresh-only schemas and cancellation semantics.

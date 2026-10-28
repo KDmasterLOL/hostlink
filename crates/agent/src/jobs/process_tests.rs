@@ -1,7 +1,5 @@
-use super::jobs::*;
-use super::{MAX_ACTIVE_JOBS, MAX_JOB_CHANNELS};
-use crate::durable::{self, Admission, DurableStore, JobId, JobOutput, JobSpec, JobState};
-use sha2::{Digest as _, Sha256};
+use super::*;
+use crate::jobs::{self, JobId, JobOutput, JobSpec, JobState, JobStore};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -10,14 +8,19 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore};
 
-async fn prepared_job(
+#[path = "../../tests/support/containment.rs"]
+mod containment;
+#[path = "containment_mode_tests.rs"]
+mod containment_mode_tests;
+
+pub(super) async fn prepared_job(
     args: Vec<String>,
     cwd: &Path,
 ) -> (
     tempfile::TempDir,
     Arc<JobRuntime>,
     String,
-    crate::durable::JobRecord,
+    crate::jobs::JobView,
 ) {
     let temp = tempfile::tempdir().expect("private test root");
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
@@ -26,33 +29,28 @@ async fn prepared_job(
     std::fs::create_dir(&jobs_root).expect("create job store root");
     std::fs::set_permissions(&jobs_root, std::fs::Permissions::from_mode(0o700))
         .expect("private job store mode");
-    let source = temp.path().join("pinned-sh");
-    std::fs::copy(
-        std::fs::canonicalize("/bin/sh").expect("resolve shell"),
-        &source,
-    )
-    .expect("stage executable");
-    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o500))
-        .expect("make executable read-only");
+    let store = JobStore::initialize_fresh(jobs_root)
+        .await
+        .expect("open private store");
+    let owner = "d".repeat(64);
+    let artifacts = store.artifacts(&owner).unwrap();
+    let bytes = std::fs::read(std::fs::canonicalize("/bin/sh").unwrap()).unwrap();
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let name = format!("{digest}.upload");
+    let upload = artifacts.upload_root().join(&name);
+    std::fs::write(&upload, &bytes).unwrap();
+    restrict_private_path(&upload, false).unwrap();
+    let source = artifacts.seal(&name, &digest, bytes.len() as u64).unwrap();
     let spec = JobSpec {
         program: source.display().to_string(),
         args,
         cwd: Some(cwd.to_path_buf()),
-        source_sha256: format!(
-            "{:x}",
-            Sha256::digest(std::fs::read(&source).expect("hash executable"))
-        ),
+        source_sha256: digest,
     };
-    let store = DurableStore::initialize_fresh(jobs_root)
-        .await
-        .expect("open private store");
     let id = JobId::new();
-    let owner = "d".repeat(64);
-    let Admission::Created(_) = store.admit(id, &owner, &spec).await.expect("admit job") else {
-        panic!("fresh job ID is newly admitted");
-    };
+    store.admit(id, &owner, &spec).await.expect("admit job");
     let record = store
-        .claim_start(id, &owner)
+        .claim_fixture(id, &owner)
         .await
         .expect("reserve worker state");
     let runner = store.acquire_runner().expect("exclusive runtime lease");
@@ -76,7 +74,13 @@ async fn prepared_job(
     (temp, runtime, owner, record)
 }
 
-pub(super) fn linux_process_is_running(pid: u32) -> bool {
+// Native positives remain runnable on delegated-cgroup hosts. This probes the
+// actual backend exactly as production does, without weakening the launch gate.
+pub(crate) fn native_containment_available() -> bool {
+    containment::supported()
+}
+
+pub(crate) fn linux_process_is_running(pid: u32) -> bool {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return false;
     };
@@ -88,6 +92,9 @@ pub(super) fn linux_process_is_running(pid: u32) -> bool {
 
 #[tokio::test]
 async fn agent_shutdown_cancels_the_owned_process_tree() {
+    if !native_containment_available() {
+        return;
+    }
     assert_eq!(
         processkit::Command::kill_on_parent_death_scope(),
         processkit::ParentDeathCleanup::DirectChildOnly,
@@ -99,10 +106,7 @@ async fn agent_shutdown_cancels_the_owned_process_tree() {
     let (temp_root, runtime, owner, record) =
         prepared_job(vec!["-c".into(), script], temp.path()).await;
     let id = record.id;
-    let active = Arc::new(JobCancellation {
-        process: runtime.shutdown.child_token(),
-        requested: AtomicBool::new(false),
-    });
+    let active = runtime.shutdown.child_token();
     let worker = tokio::spawn(run_job(runtime.clone(), owner.clone(), record, active));
     tokio::time::timeout(Duration::from_secs(5), async {
         while !pid_path.exists() {
@@ -147,6 +151,9 @@ async fn agent_shutdown_cancels_the_owned_process_tree() {
 
 #[tokio::test]
 async fn output_overflow_kills_the_tree_and_never_records_zero_exit() {
+    if !native_containment_available() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("working directory");
     let (temp_root, runtime, owner, record) = prepared_job(
         vec!["-c".into(), "head -c 8388609 /dev/zero".into()],
@@ -160,10 +167,7 @@ async fn output_overflow_kills_the_tree_and_never_records_zero_exit() {
             runtime.clone(),
             owner.clone(),
             record,
-            Arc::new(JobCancellation {
-                process: runtime.shutdown.child_token(),
-                requested: AtomicBool::new(false),
-            }),
+            runtime.shutdown.child_token(),
         ),
     )
     .await
@@ -182,7 +186,7 @@ async fn output_overflow_kills_the_tree_and_never_records_zero_exit() {
         std::fs::metadata(runtime.store.output_path(id, JobOutput::Stdout))
             .expect("bounded stdout file")
             .len(),
-        durable::MAX_JOB_OUTPUT_BYTES
+        jobs::MAX_JOB_OUTPUT_BYTES
     );
     assert!(
         !matches!(

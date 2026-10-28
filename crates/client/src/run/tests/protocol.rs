@@ -1,11 +1,11 @@
 use super::{JobState, JobStream, Output, protocol::*};
 use serde_json::{Value, json};
 
-const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+const ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FA0";
 
 fn status_reply(state: Value) -> Value {
     json!({
-        "version": 1, "ok": true, "id": ID, "state": state,
+        "ok": true, "id": ID, "state": state,
         "data_base64": null, "next_offset": null, "eof": null
     })
 }
@@ -28,7 +28,7 @@ fn output_request() -> Output {
 
 #[test]
 fn lifecycle_states_roundtrip_with_exact_agent_wire_shape() {
-    use hostlink_agent::durable::JobState as AgentState;
+    use hostlink_agent::jobs::JobState as AgentState;
     for (client, agent, wire) in [
         (
             JobState::Prepared,
@@ -124,15 +124,7 @@ fn success_envelope_requires_every_key_including_null_output_fields() {
                 parse_status(value, ID).is_err()
             }
         };
-        for key in [
-            "version",
-            "ok",
-            "id",
-            "state",
-            "data_base64",
-            "next_offset",
-            "eof",
-        ] {
+        for key in ["ok", "id", "state", "data_base64", "next_offset", "eof"] {
             let mut missing = reply.clone();
             missing.as_object_mut().unwrap().remove(key);
             assert!(rejects(missing), "missing {key}");
@@ -142,7 +134,7 @@ fn success_envelope_requires_every_key_including_null_output_fields() {
             ("version", json!(null)),
             ("ok", json!(false)),
             ("ok", json!(null)),
-            ("id", json!("550e8400-e29b-41d4-a716-446655440001")),
+            ("id", json!("01ARZ3NDEKTSV4RRFFQ69G5FA1")),
             ("id", json!("550E8400-E29B-41D4-A716-446655440000")),
             ("id", json!("invalid")),
             ("id", json!(null)),
@@ -186,10 +178,10 @@ fn output_validation_keeps_base64_size_and_exact_offsets() {
 }
 
 #[test]
-fn remote_errors_require_exact_bounded_versioned_envelope() {
-    let valid = json!({"version": 1, "ok": false, "error": "unavailable"});
+fn remote_errors_require_exact_bounded_envelope() {
+    let valid = json!({"ok": false, "error": "unavailable"});
     assert!(parse_remote_error(valid.clone()).is_ok());
-    for key in ["version", "ok", "error"] {
+    for key in ["ok", "error"] {
         let mut reply = valid.clone();
         reply.as_object_mut().unwrap().remove(key);
         assert!(parse_remote_error(reply).is_err());
@@ -204,5 +196,53 @@ fn remote_errors_require_exact_bounded_versioned_envelope() {
         let mut reply = valid.clone();
         reply[key] = value;
         assert!(parse_remote_error(reply).is_err());
+    }
+}
+
+use crate::connect::SshClientError;
+#[test]
+fn only_generic_remote_sftp_failure_can_enter_exact_seal_verification() {
+    let failure = || {
+        SshClientError::Sftp(russh_sftp::client::error::Error::Status(
+            russh_sftp::protocol::Status {
+                id: 1,
+                status_code: russh_sftp::protocol::StatusCode::Failure,
+                error_message: "Failure".into(),
+                language_tag: "en-US".into(),
+            },
+        ))
+    };
+    let denied = SshClientError::Sftp(russh_sftp::client::error::Error::Status(
+        russh_sftp::protocol::Status {
+            id: 1,
+            status_code: russh_sftp::protocol::StatusCode::PermissionDenied,
+            error_message: "Permission denied".into(),
+            language_tag: "en-US".into(),
+        },
+    ));
+    assert!(super::upload::sftp_failure_may_be_existing_file(&failure()));
+    assert!(!super::upload::sftp_failure_may_be_existing_file(&denied));
+    assert!(!super::upload::sftp_failure_may_be_existing_file(
+        &SshClientError::Timeout
+    ));
+}
+
+#[test]
+fn caller_ids_require_canonical_ulid_without_overflow_or_uuid_compatibility() {
+    for id in [
+        "00000000000000000000000000",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "7ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+    ] {
+        assert!(super::validate_id(id).is_ok());
+    }
+    for id in [
+        "8ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+        "01arz3ndektsv4rrffq69g5fav",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAI",
+        "550e8400-e29b-41d4-a716-446655440000",
+        "../unsafe",
+    ] {
+        assert!(super::validate_id(id).is_err(), "{id}");
     }
 }

@@ -1,6 +1,9 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use hostlink_agent::durable::{DurableStore, JobId, JobSpec, JobState, active_ids};
+#[path = "support/started_job.rs"]
+mod started_job;
+
+use hostlink_agent::jobs::{JobId, JobSpec, JobState, JobStore, active_ids};
 use hostlink_agent::update::{
     AgentUpdateOutcome, AgentUpdateRequest, apply, finalize_fresh_install, verify_fresh_package,
 };
@@ -213,9 +216,9 @@ fn apply_empty_jobs(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutco
         .build()?;
     runtime.block_on(async {
         let store = if jobs.join("jobs.db").try_exists()? {
-            DurableStore::open(&jobs).await?
+            JobStore::open(&jobs).await?
         } else {
-            DurableStore::initialize_fresh(&jobs).await?
+            JobStore::initialize_fresh(&jobs).await?
         };
         store.close().await;
         Ok::<(), io::Error>(())

@@ -2,12 +2,9 @@
 
 Historical PoC status: **isolated experiment, preserved unchanged.**
 
-The earlier decision below is superseded by user-authorized 1C-1073: the root
-Agent now uses Apalis SQLite in production code, under `durable/`, with a
-one-use claim instead of the automatic Apalis runner. See
-[the current storage/migration contract](AGENT_DURABLE_SQLITE.md). This document
-records the original isolated experiment and its limits; its native Windows
-receipt is not evidence for the new Agent backend.
+The root Agent uses the [1C-1081 minimal jobs engine](AGENT_MINIMAL_JOBS.md).
+This document records the isolated experiment; its native Windows receipt is
+not evidence for the current Agent backend.
 
 ## Goal and baseline
 

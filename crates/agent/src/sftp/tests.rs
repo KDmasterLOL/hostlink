@@ -13,7 +13,7 @@ async fn rejects_parent_paths_and_symlinks_outside_root() {
         .await
         .expect("create jobs root");
     let artifacts =
-        crate::durable::ArtifactStore::open(&jobs, &"d".repeat(64)).expect("controller artifacts");
+        crate::jobs::ArtifactStore::open(&jobs, &"d".repeat(64)).expect("controller artifacts");
     let root = artifacts.upload_root();
     let outside = temp.path().join("outside");
     tokio::fs::write(&outside, b"secret")
@@ -50,7 +50,7 @@ async fn rejects_upload_growth_past_the_per_file_limit() {
     let jobs = temp.path().join("jobs");
     std::fs::create_dir(&jobs).expect("jobs root");
     let artifacts =
-        crate::durable::ArtifactStore::open(&jobs, &"e".repeat(64)).expect("controller artifacts");
+        crate::jobs::ArtifactStore::open(&jobs, &"e".repeat(64)).expect("controller artifacts");
     let upload_path = artifacts
         .upload_root()
         .join(format!("{}.upload", "f".repeat(64)));
@@ -60,7 +60,7 @@ async fn rejects_upload_growth_past_the_per_file_limit() {
         .open(upload_path)
         .await
         .expect("create sparse upload fixture");
-    file.set_len(crate::durable::MAX_ARTIFACT_BYTES)
+    file.set_len(crate::jobs::MAX_ARTIFACT_BYTES)
         .await
         .expect("set exact maximum length");
     let permit = std::sync::Arc::new(tokio::sync::Semaphore::new(1))
@@ -81,7 +81,7 @@ async fn rejects_upload_growth_past_the_per_file_limit() {
             &mut session,
             1,
             "h".into(),
-            crate::durable::MAX_ARTIFACT_BYTES,
+            crate::jobs::MAX_ARTIFACT_BYTES,
             vec![0],
         )
         .await,
@@ -100,7 +100,7 @@ async fn accepts_pipelined_out_of_order_non_overlapping_writes() {
     let jobs = temp.path().join("jobs");
     std::fs::create_dir(&jobs).expect("jobs root");
     let artifacts =
-        crate::durable::ArtifactStore::open(&jobs, &"b".repeat(64)).expect("controller artifacts");
+        crate::jobs::ArtifactStore::open(&jobs, &"b".repeat(64)).expect("controller artifacts");
     let file_path = artifacts
         .upload_root()
         .join(format!("{}.upload", "c".repeat(64)));
@@ -161,8 +161,8 @@ async fn total_upload_and_sealed_file_count_is_bounded() {
     let jobs = temp.path().join("jobs");
     std::fs::create_dir(&jobs).expect("jobs root");
     let artifacts =
-        crate::durable::ArtifactStore::open(&jobs, &"9".repeat(64)).expect("controller artifacts");
-    for index in 0..crate::durable::MAX_ARTIFACTS_PER_CONTROLLER - 1 {
+        crate::jobs::ArtifactStore::open(&jobs, &"9".repeat(64)).expect("controller artifacts");
+    for index in 0..crate::jobs::MAX_ARTIFACTS_PER_CONTROLLER - 1 {
         let path = artifacts.upload_root().join(format!("{index:064x}.upload"));
         std::fs::write(&path, b"upload").expect("seed upload");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))

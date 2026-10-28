@@ -12,6 +12,8 @@ impl ArtifactStore {
         let install_root = jobs_root
             .parent()
             .ok_or_else(|| invalid("jobs root has no parent"))?;
+        #[cfg(unix)]
+        validate_source_ancestors(install_root)?;
         validate_private_path(install_root, true)?;
         let artifacts_root = install_root.join("artifacts");
         create_private_directory(&artifacts_root)?;
@@ -30,6 +32,32 @@ impl ArtifactStore {
         self.owner_root.join("sealed")
     }
 
+    /// Bind execution to this controller's exact sealed path, never an alias.
+    pub(crate) fn authorize_source(&self, program: &str, sha256: &str) -> io::Result<()> {
+        validate_digest(sha256)?;
+        let artifacts = self
+            .owner_root
+            .parent()
+            .ok_or_else(|| invalid("missing artifact root"))?;
+        let install = artifacts
+            .parent()
+            .ok_or_else(|| invalid("missing install root"))?;
+        for directory in [install, artifacts, &self.owner_root, &self.sealed_root()] {
+            validate_private_path(directory, true)?;
+        }
+        let target = self.sealed_root().join(format!("{sha256}.program"));
+        #[cfg(unix)]
+        validate_source_ancestors(&self.sealed_root())?;
+        validate_private_path(&target, false)?;
+        let canonical = target.canonicalize()?;
+        if Path::new(program).as_os_str() != canonical.as_os_str() {
+            return Err(invalid(
+                "job executable is not this controller's exact sealed source",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn seal(
         &self,
         name: &str,
@@ -40,6 +68,8 @@ impl ArtifactStore {
         if expected_size > MAX_ARTIFACT_BYTES || name != format!("{expected_sha256}.upload") {
             return Err(invalid("artifact name, digest, or size is invalid"));
         }
+        #[cfg(unix)]
+        validate_source_ancestors(&self.sealed_root())?;
         let _lock = exclusive_lock(&self.owner_root.join("seal.lock"))?;
         validate_private_path(
             self.owner_root
@@ -152,7 +182,7 @@ pub(super) fn verify_artifact(
     expected_size: u64,
 ) -> io::Result<()> {
     validate_private_path(path, false)?;
-    let mut file = File::open(path)?;
+    let file = File::open(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -167,16 +197,7 @@ pub(super) fn verify_artifact(
         return Err(invalid("sealed artifact length conflicts with repeat seal"));
     }
     let mut hasher = Sha256::new();
-    let mut total = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        total += read as u64;
-        hasher.update(&buffer[..read]);
-    }
+    let total = io::copy(&mut file.take(expected_size + 1), &mut hasher)?;
     if total != expected_size || format!("{:x}", hasher.finalize()) != expected_sha256 {
         return Err(invalid("sealed artifact conflicts with repeat seal"));
     }

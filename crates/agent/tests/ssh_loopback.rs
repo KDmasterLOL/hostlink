@@ -6,6 +6,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(unix)]
+#[path = "support/containment.rs"]
+mod containment;
+
 #[cfg(windows)]
 fn private_windows_test_path(path: &std::path::Path, directory: bool) {
     use windows_permissions::constants::{SeObjectType, SecurityInformation};
@@ -68,7 +72,7 @@ async fn job_request(session: &mut client::Handle<Pin>, bytes: &[u8]) -> Vec<u8>
         .await
         .expect("open jobs channel");
     channel
-        .request_subsystem(true, "hostlink-jobs-v1")
+        .request_subsystem(true, "hostlink-jobs")
         .await
         .expect("request jobs subsystem");
     loop {
@@ -169,7 +173,7 @@ async fn loopback_auth_and_exec_keep_binary_streams_and_exit_status() {
     }
     #[cfg(windows)]
     private_windows_test_path(&auth_path, false);
-    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs)
+    hostlink_agent::jobs::JobStore::initialize_fresh(&jobs)
         .await
         .expect("initialize fresh private Agent SQLite fixture")
         .close()
@@ -303,6 +307,10 @@ async fn loopback_auth_and_exec_keep_binary_streams_and_exit_status() {
 async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
     use sha2::{Digest as _, Sha256};
 
+    if !containment::supported() {
+        return;
+    }
+
     let temp = tempfile::tempdir().expect("temporary directory");
     {
         use std::os::unix::fs::PermissionsExt;
@@ -335,7 +343,7 @@ async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
         std::fs::set_permissions(&jobs, std::fs::Permissions::from_mode(0o700))
             .expect("private jobs root");
     }
-    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs)
+    hostlink_agent::jobs::JobStore::initialize_fresh(&jobs)
         .await
         .expect("initialize fresh private Agent SQLite fixture")
         .close()
@@ -380,25 +388,42 @@ async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
         false
     );
 
-    let id = uuid::Uuid::new_v4().to_string();
-    let executable = temp.path().join("pinned-sh");
-    std::fs::copy(
-        std::fs::canonicalize("/bin/sh").expect("resolve shell executable"),
-        &executable,
+    let id = ulid::Ulid::generate().to_string();
+    let binary = std::fs::read("/bin/sh").expect("read exact upload source");
+    let source_sha256 = format!("{:x}", Sha256::digest(&binary));
+    let upload_name = format!("{source_sha256}.upload");
+    let sftp_channel = session.channel_open_session().await.unwrap();
+    sftp_channel.request_subsystem(true, "sftp").await.unwrap();
+    let sftp = russh_sftp::client::SftpSession::new(sftp_channel.into_stream())
+        .await
+        .unwrap();
+    use tokio::io::AsyncWriteExt as _;
+    let mut upload = sftp
+        .open_with_flags(
+            upload_name.clone(),
+            russh_sftp::protocol::OpenFlags::CREATE
+                | russh_sftp::protocol::OpenFlags::EXCLUDE
+                | russh_sftp::protocol::OpenFlags::WRITE,
+        )
+        .await
+        .unwrap();
+    upload.write_all(&binary).await.unwrap();
+    upload.close().await.unwrap();
+    sftp.close().await.unwrap();
+    let sealed: serde_json::Value = serde_json::from_slice(
+        &job_request(
+            &mut session,
+            &framed_json(&serde_json::json!({
+                "op":"seal", "name":upload_name, "sha256":source_sha256, "size":binary.len()
+            })),
+        )
+        .await,
     )
-    .expect("stage private source-pinned executable");
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500))
-            .expect("make staged executable read-only");
-    }
-    let source_sha256 = format!(
-        "{:x}",
-        Sha256::digest(std::fs::read(&executable).expect("read pinned executable"))
-    );
+    .unwrap();
+    assert_eq!(sealed["ok"], true);
+    let executable = sealed["program"].as_str().expect("canonical sealed source");
     let start = serde_json::json!({
-        "version": 1,
-        "op": "start",
+        "op": "run",
         "id": id,
         "spec": {
             "program": executable,
@@ -413,7 +438,7 @@ async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
         .await
         .expect("open lost-ACK job channel");
     start_channel
-        .request_subsystem(true, "hostlink-jobs-v1")
+        .request_subsystem(true, "hostlink-jobs")
         .await
         .expect("request jobs subsystem");
     loop {
@@ -454,7 +479,7 @@ async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
 
     let mut resumed = connect(listen, &host_public).await;
     assert!(authenticate(&mut resumed, controller.clone()).await);
-    let status_request = serde_json::json!({"version":1,"op":"status","id":id});
+    let status_request = serde_json::json!({"op":"status","id":id});
     let mut status: serde_json::Value =
         serde_json::from_slice(&job_request(&mut resumed, &framed_json(&status_request)).await)
             .expect("status response");
@@ -470,8 +495,7 @@ async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
     assert_eq!(status["state"]["state"], "exited");
     assert_eq!(status["state"]["code"], 7);
 
-    let output_request =
-        serde_json::json!({"version":1,"op":"output","id":id,"stream":"stdout","offset":0});
+    let output_request = serde_json::json!({"op":"logs","id":id,"stream":"stdout","offset":0});
     let output: serde_json::Value =
         serde_json::from_slice(&job_request(&mut resumed, &framed_json(&output_request)).await)
             .expect("stdout response");
@@ -483,8 +507,7 @@ async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
         [0_u8, 255]
     );
     assert_eq!(output["eof"], true);
-    let stderr_request =
-        serde_json::json!({"version":1,"op":"output","id":id,"stream":"stderr","offset":0});
+    let stderr_request = serde_json::json!({"op":"logs","id":id,"stream":"stderr","offset":0});
     let stderr: serde_json::Value =
         serde_json::from_slice(&job_request(&mut resumed, &framed_json(&stderr_request)).await)
             .expect("stderr response");
@@ -508,10 +531,9 @@ async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
         "x"
     );
 
-    let overflow_id = uuid::Uuid::new_v4().to_string();
+    let overflow_id = ulid::Ulid::generate().to_string();
     let overflow_start = serde_json::json!({
-        "version": 1,
-        "op": "start",
+        "op": "run",
         "id": overflow_id,
         "spec": {
             "program": executable,
@@ -524,7 +546,7 @@ async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
         serde_json::from_slice(&job_request(&mut resumed, &framed_json(&overflow_start)).await)
             .expect("overflow job ack");
     assert_eq!(overflow_ack["ok"], true);
-    let overflow_status_request = serde_json::json!({"version":1,"op":"status","id":overflow_id});
+    let overflow_status_request = serde_json::json!({"op":"status","id":overflow_id});
     let overflow_status: serde_json::Value = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let status: serde_json::Value = serde_json::from_slice(
@@ -550,10 +572,9 @@ async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
         8 * 1024 * 1024
     );
 
-    let tree_id = uuid::Uuid::new_v4().to_string();
+    let tree_id = ulid::Ulid::generate().to_string();
     let tree_start = serde_json::json!({
-        "version": 1,
-        "op": "start",
+        "op": "run",
         "id": tree_id,
         "spec": {
             "program": executable,

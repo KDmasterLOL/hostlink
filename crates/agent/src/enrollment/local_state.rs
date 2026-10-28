@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn read_token(path: &Path) -> io::Result<SecretString> {
-    durable::validate_private_path(path, false)?;
+    jobs::validate_private_path(path, false)?;
     let mut bytes = Vec::new();
     File::open(path)?
         .take(MAX_TOKEN_BYTES + 1)
@@ -47,7 +47,7 @@ pub(super) fn write_private_new(path: &Path, contents: &[u8]) -> io::Result<()> 
             ),
         )
     })?;
-    durable::restrict_private_path(path, false).map_err(|error| {
+    jobs::restrict_private_path(path, false).map_err(|error| {
         io::Error::new(
             error.kind(),
             format!(
@@ -106,7 +106,7 @@ pub(super) fn ensure_fresh_root_parent(root: &Path) -> io::Result<()> {
         }
     }
     #[cfg(windows)]
-    durable::validate_private_path(parent, true)?;
+    jobs::validate_private_path(parent, true)?;
     Ok(())
 }
 

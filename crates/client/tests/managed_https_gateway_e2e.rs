@@ -7,7 +7,7 @@ use hostlink::{
     connect::HostConnection,
     forward,
     hub::{HubClient, HubConfig},
-    run::{JobSpec, JobState, JobStream, Output, Start, Status},
+    run::{JobState, JobStream, Output, Status},
 };
 use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
 use secrecy::ExposeSecret;
@@ -29,6 +29,8 @@ mod bootstrap;
 mod cleanup;
 #[path = "e2e_steps/cli.rs"]
 mod cli;
+#[path = "../../agent/tests/support/containment.rs"]
+mod containment;
 #[path = "e2e_steps/enrollment.rs"]
 mod enrollment;
 #[path = "e2e_steps/fixture.rs"]

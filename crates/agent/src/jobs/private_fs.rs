@@ -17,6 +17,86 @@ pub(super) fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+/// Check directory entries from / down without first resolving away symlinks.
+/// This is a pathname policy check, not an atomic pathname-exec guarantee.
+#[cfg(unix)]
+pub(super) fn validate_source_ancestors(directory: &Path) -> io::Result<()> {
+    use std::path::Component;
+    if !directory.is_absolute() {
+        return Err(invalid("source ancestors must be absolute"));
+    }
+    let mut path = PathBuf::new();
+    let mut parent = None;
+    for component in directory.components() {
+        if !matches!(component, Component::RootDir | Component::Normal(_)) {
+            return Err(invalid("source ancestors contain path traversal"));
+        }
+        path.push(component);
+        let current = fs::symlink_metadata(&path)?;
+        if !current.is_dir() || current.file_type().is_symlink() {
+            return Err(invalid("source ancestor is not a non-symlink directory"));
+        }
+        if let Some(previous) = &parent {
+            validate_source_directory(previous, Some(&current))?;
+        }
+        parent = Some(current);
+    }
+    let last = parent.ok_or_else(|| invalid("missing source ancestor"))?;
+    validate_source_directory(&last, None)?;
+    if directory.as_os_str() != directory.canonicalize()?.as_os_str() {
+        return Err(invalid(
+            "source ancestors must use their exact canonical path",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_source_directory(
+    metadata: &fs::Metadata,
+    child: Option<&fs::Metadata>,
+) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "untrusted source ancestor type or owner",
+        ));
+    }
+    validate_source_directory_ownership(
+        metadata.mode(),
+        metadata.uid(),
+        child.map(fs::Metadata::uid),
+    )
+}
+
+#[cfg(unix)]
+fn validate_source_directory_ownership(
+    mode: u32,
+    owner: u32,
+    child_owner: Option<u32>,
+) -> io::Result<()> {
+    // SAFETY: geteuid reads the current process identity without pointers.
+    let agent = unsafe { libc::geteuid() };
+    let trusted = |uid| uid == 0 || uid == agent;
+    // A foreign owner can chmod a 0755 directory, so mode bits alone do not
+    // prove that its next entry is protected from replacement.
+    if !trusted(owner)
+        || (mode & 0o022 != 0
+            && (mode & 0o1000 == 0 || child_owner.is_none_or(|uid| !trusted(uid))))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "source ancestor permits foreign entry replacement",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+#[path = "ancestor_tests.rs"]
+mod ancestor_tests;
+
 pub(crate) fn validate_private_path(path: &Path, directory: bool) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink()
@@ -91,17 +171,38 @@ pub(crate) fn restrict_private_path(path: &Path, directory: bool) -> io::Result<
     validate_private_path(path, directory)
 }
 
+/// An OS file lock must be explicitly unlocked on drop: forked children may
+/// temporarily inherit a duplicate FD, so merely closing ours is insufficient.
+#[derive(Debug)]
+pub struct FileLease(pub(super) File);
+
+impl std::ops::Deref for FileLease {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+
+impl Drop for FileLease {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.unlock() {
+            eprintln!("hostlink-agent: failed to release filesystem lock: {error}");
+        }
+    }
+}
+
 /// A single admission/update lock shared by durable admission and the separate updater.
 ///
 /// # Errors
 /// Rejects unsafe root/lock paths, private permissions, or filesystem lock failures.
 /// Async callers must acquire it on a blocking worker to avoid executor deadlock.
-pub fn acquire_update_lock(install_root: &Path) -> io::Result<File> {
+pub fn acquire_update_lock(install_root: &Path) -> io::Result<FileLease> {
     validate_private_path(install_root, true)?;
     exclusive_lock(&install_root.join(UPDATE_LOCK_FILE))
 }
 
-pub(super) fn exclusive_lock(path: &Path) -> io::Result<File> {
+pub(super) fn open_lock(path: &Path) -> io::Result<File> {
     let mut opts = OpenOptions::new();
     opts.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
@@ -116,8 +217,13 @@ pub(super) fn exclusive_lock(path: &Path) -> io::Result<File> {
     }
     let file = opts.open(path)?;
     restrict_private_path(path, false)?;
-    file.lock()?;
     Ok(file)
+}
+
+pub(super) fn exclusive_lock(path: &Path) -> io::Result<FileLease> {
+    let file = open_lock(path)?;
+    file.lock()?;
+    Ok(FileLease(file))
 }
 
 pub(super) fn sync_directory(parent: &Path) -> io::Result<()> {
@@ -229,4 +335,17 @@ pub(super) fn set_private_windows_acl(path: &Path, directory: bool) -> io::Resul
         None,
     )
     .map_err(io::Error::other)
+}
+
+/// Harden only a file just created successfully with SFTP CREATE_NEW.
+/// Validate inherited ACL ownership/allow ACEs and link identity BEFORE changing it.
+#[cfg(windows)]
+pub(crate) fn secure_new_upload(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(invalid("new upload must be a regular non-symlink file"));
+    }
+    validate_windows_acl_contents(path, &metadata, false)?;
+    reject_windows_hardlinks(path)?;
+    restrict_private_path(path, false)
 }

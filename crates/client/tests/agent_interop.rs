@@ -68,7 +68,7 @@ async fn agent_and_controller_authenticate_stream_execute_and_transfer() {
     let jobs_root = root.path().join("jobs");
     fs::create_dir(&jobs_root).expect("jobs root");
     private_directory(&jobs_root);
-    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs_root)
+    hostlink_agent::jobs::JobStore::initialize_fresh(&jobs_root)
         .await
         .expect("initialize fresh private Agent SQLite fixture")
         .close()

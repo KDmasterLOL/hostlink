@@ -15,12 +15,13 @@ pub(super) fn validate_absolute_path(value: &str) -> Result<(), ()> {
         Err(())
     }
 }
-pub(super) fn validate_id(id: &str) -> Result<(), SshClientError> {
-    let parsed = uuid::Uuid::parse_str(id)
-        .map_err(|_| SshClientError::Invalid("job ID must be a canonical lowercase UUID".into()))?;
+pub fn validate_id(id: &str) -> Result<(), SshClientError> {
+    let parsed = id
+        .parse::<ulid::Ulid>()
+        .map_err(|_| SshClientError::Invalid("job ID must be a canonical uppercase ULID".into()))?;
     if parsed.to_string() != id {
         return Err(SshClientError::Invalid(
-            "job ID must be a canonical lowercase UUID".into(),
+            "job ID must be a canonical uppercase ULID".into(),
         ));
     }
     Ok(())

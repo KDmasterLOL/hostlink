@@ -93,7 +93,7 @@ fn key() -> (PrivateKey, String) {
 fn fresh_root_accepts_dos_drive_path_without_allowing_alias_or_network_root() {
     let fixture = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))
         .expect("fresh current-user Windows fixture");
-    durable::restrict_private_path(fixture.path(), true)
+    jobs::restrict_private_path(fixture.path(), true)
         .expect("protect current-user fixture with explicit ACL");
     let canonical = fs::canonicalize(fixture.path()).expect("canonical Windows path");
     assert_ne!(
@@ -203,13 +203,13 @@ async fn fresh_enrollment_publishes_private_config_once_against_local_hub_v2() {
     let fixture = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))
         .expect("isolated disposable fixture under Agent crate");
     #[cfg(windows)]
-    durable::restrict_private_path(fixture.path(), true)
+    jobs::restrict_private_path(fixture.path(), true)
         .expect("fresh enrollment fixture must have a protected current-user ACL");
     let operator = "operator-test-secret-000000000000000000000000000000000000";
     let gateway_lookup = "gateway-test-secret-000000000000000000000000000000";
     let projection = fixture.path().join("projection");
     fs::create_dir(&projection).unwrap();
-    durable::restrict_private_path(&projection, true).unwrap();
+    jobs::restrict_private_path(&projection, true).unwrap();
     let gateway_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
     let alternate_gateway_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
     let controller_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
@@ -342,7 +342,7 @@ async fn fresh_enrollment_publishes_private_config_once_against_local_hub_v2() {
     assert!(config.jobs_root.is_dir());
     assert!(config.jobs_root.join("jobs.db").is_file());
     assert!(
-        durable::active_ids(&config.jobs_root).unwrap().is_empty(),
+        jobs::active_ids(&config.jobs_root).unwrap().is_empty(),
         "fresh enrolled Agent and updater must share the same owned job store"
     );
     assert!(

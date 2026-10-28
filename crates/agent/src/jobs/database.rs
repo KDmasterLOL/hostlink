@@ -5,12 +5,12 @@ use sqlx::{
 };
 use std::time::Duration;
 
-pub(super) const QUEUE: &str = "hostlink-agent-v1";
+pub(super) const QUEUE: &str = "hostlink-agent";
 pub(super) const DATABASE: &str = "jobs.db";
 
 /// Never wait for a filesystem lock on a Tokio executor thread: another task
 /// on that executor may need to commit SQLite before releasing the same lock.
-pub(super) async fn update_lock(root: &Path) -> io::Result<File> {
+pub(super) async fn update_lock(root: &Path) -> io::Result<FileLease> {
     let parent = root
         .parent()
         .ok_or_else(|| invalid("jobs root has no parent"))?
@@ -18,6 +18,22 @@ pub(super) async fn update_lock(root: &Path) -> io::Result<File> {
     tokio::task::spawn_blocking(move || acquire_update_lock(&parent))
         .await
         .map_err(io::Error::other)?
+}
+
+/// Admission/dequeue hold start_lock: never wait for an updater waiting for STOP.
+pub(super) fn try_update_lock(root: &Path) -> io::Result<FileLease> {
+    let parent = root
+        .parent()
+        .ok_or_else(|| invalid("jobs root has no parent"))?;
+    validate_private_path(parent, true)?;
+    let file = open_lock(&parent.join(UPDATE_LOCK_FILE))?;
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => {
+            io::Error::new(io::ErrorKind::WouldBlock, "Agent update busy")
+        }
+        std::fs::TryLockError::Error(error) => error,
+    })?;
+    Ok(FileLease(file))
 }
 
 pub(super) fn inspect_layout(root: &Path) -> io::Result<bool> {
@@ -33,11 +49,11 @@ pub(super) fn inspect_layout(root: &Path) -> io::Result<bool> {
         let name = entry.file_name();
         match name.to_str() {
             Some(DATABASE) => {
-                validate_sqlite_file(&entry.path())?;
+                validate_private_path(&entry.path(), false)?;
                 database = true;
             }
             Some("jobs.db-wal" | "jobs.db-shm") => validate_sidecar(&entry.path())?,
-            Some("runner.lock") => validate_sqlite_file(&entry.path())?,
+            Some("runner.lock") => validate_private_path(&entry.path(), false)?,
             Some("outputs") => validate_private_path(&entry.path(), true)?,
             _ => {
                 return Err(io::Error::new(
@@ -60,21 +76,9 @@ pub(super) fn inspect_layout(root: &Path) -> io::Result<bool> {
     Ok(database)
 }
 
-pub(super) fn validate_sqlite_file(path: &Path) -> io::Result<()> {
-    validate_private_path(path, false)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if fs::symlink_metadata(path)?.nlink() != 1 {
-            return Err(invalid("durable database/lock must not be hard linked"));
-        }
-    }
-    Ok(())
-}
-
 fn validate_sidecar(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
-    validate_sqlite_file(path)?;
+    validate_private_path(path, false)?;
     #[cfg(windows)]
     {
         let metadata = fs::symlink_metadata(path)?;
@@ -94,14 +98,14 @@ pub(super) fn secure_sidecars(root: &Path) -> io::Result<()> {
         match fs::symlink_metadata(&path) {
             Ok(_) => {
                 if name == DATABASE {
-                    validate_sqlite_file(&path)?;
+                    validate_private_path(&path, false)?;
                 } else {
                     validate_sidecar(&path)?;
                 }
                 // Only known regular owner/SID-validated sidecars are hardened.
                 // New Windows sidecars inherit this private directory's safe ACL.
                 restrict_private_path(&path, false)?;
-                validate_sqlite_file(&path)?;
+                validate_private_path(&path, false)?;
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
@@ -222,7 +226,7 @@ pub(super) async fn initialize_fresh(root: &Path) -> io::Result<SqlitePool> {
         .run(&pool)
         .await
         .map_err(io::Error::other)?;
-    sqlx::raw_sql("CREATE TABLE DurableMeta (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);\nINSERT INTO DurableMeta VALUES(1,1);\nCREATE TABLE StartedClaims (job_id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE REFERENCES Jobs(id), owner TEXT NOT NULL, request_sha256 TEXT NOT NULL);")
+    sqlx::raw_sql("CREATE TABLE DurableMeta (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);\nINSERT INTO DurableMeta VALUES(1,3);\nCREATE TABLE StartedClaims (task_id TEXT PRIMARY KEY REFERENCES Jobs(id), owner TEXT NOT NULL, request_sha256 TEXT NOT NULL);")
         .execute(&pool).await.map_err(io::Error::other)?;
     artifacts::create_private_directory(&root.join("outputs"))?;
     secure_sidecars(root)?;
@@ -233,7 +237,7 @@ pub(super) async fn initialize_fresh(root: &Path) -> io::Result<SqlitePool> {
 pub(super) async fn verify_schema(pool: &SqlitePool) -> io::Result<()> {
     let version: i64 = sqlx::query_scalar("SELECT version FROM DurableMeta WHERE id=1")
         .fetch_one(pool).await.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("incomplete or unrecognized durable database; preserve it for reconciliation: {e}")))?;
-    if version != 1 {
+    if version != 3 {
         return Err(invalid("unsupported durable SQLite schema version"));
     }
     // Validate the ledger read-only; never invoke Migrator::run on old state.

@@ -314,7 +314,7 @@ pub async fn control_loop(
                 format!("RUNNING {}\n", std::process::id())
             }
         } else if request == format!("STOP {token}") {
-            let active = durable::active_ids(&config.jobs_root)?;
+            let active = jobs::active_ids(&config.jobs_root)?;
             if active.is_empty() {
                 shutdown.cancel();
                 format!("STOPPING {}\n", std::process::id())

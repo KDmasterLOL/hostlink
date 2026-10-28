@@ -42,17 +42,20 @@ current table and source before treating any historical issue wording as open wo
 
 ## A. Remote test artifact execution (priority critical)
 
-A1. Agent-owned staging and SFTP isolation (new child).
-Current issue: SFTP is rooted in jobs_root shared by ALL authorized controller keys, and open/read/write/stat/remove do not provide chmod/seal. Unix source verification refuses a writable uploaded file. A naive hostlink run command cannot function safely.
-- Bind SFTP access to the server-derived authenticated key fingerprint. Stage files in private artifacts/<key-fingerprint>, as a SIBLING of jobs_root under the same user-owned install root. The private jobs root contains jobs.db, SQLite sidecars, a runner lock and bounded outputs/<UUID> directories; durable::active_ids rejects unknown or legacy entries.
-- Reject traversal, symlinks/reparse, cross-key access, unbounded files, overwriting a candidate, modified or partially uploaded contents, wrong SHA and unsafe owner/ACL.
-- Add one bounded versioned Seal request over the EXISTING hostlink-jobs-v1 SSH subsystem. Seal checks exact SHA/length, transforms the user-owned candidate to a non-writable executable (Unix 0500 / protected Windows user ACL), returns the Agent-resolved canonical absolute path. Repeated exact seal may be idempotent; mismatches fail. No new TCP/HTTP listener.
-- Preserve existing start/status/output wire schema and negative tests. Prove same user with two separate authorized keys cannot read/overwrite another key's upload.
+A1. Agent-owned staging and SFTP isolation are implemented in the current
+[jobs contract](AGENT_MINIMAL_JOBS.md): private per-controller artifacts beside
+the SQLite jobs root, bounded create-new uploads, exact SHA/size sealing,
+read-only executables, and strict owner/path/ACL checks over the existing SSH
+transport. The breaking subsystem is `hostlink-jobs`; there is no v1 adapter.
 
-A2. Typed Controller run (new child, based on A1 Seal contract).
-- CLI run --config HOST --binary LOCAL [--id UUID] -- [typed libtest/Nextest args...] hashes a bounded regular local file, prints UUID before connecting, opens pinned SSH, uploads create-new via SFTP, seals via jobs-v1 and runs the exact server-returned path with SHA-pinned JobSpec. No shell string or guessed path.
-- Lost start acknowledgement is UNKNOWN: show status/output reattach commands; never blindly resubmit. Binary stdout/stderr read by monotonic offsets, exact exit including 7 and timeout, no fabricated success.
-- Owner-only cleanup of known terminal task artifacts, preserve unresolved jobs for readback. Unit protocol/error tests plus real SSH fixture with source-pinned executable, --list, disconnect, same ID without duplicate effect.
+A2. The single Controller flow is `hostlink jobs run --binary LOCAL
+[--id ULID] [--wait] --config HOST -- [argv...]`. It prints the canonical ULID
+before connecting, uploads/seals/enqueues, and returns admission promptly.
+`--wait` reads raw offset-based output and returns the process code. A lost ACK
+requires status lookup; no automatic start resend. See the
+[current evidence](AGENT_MINIMAL_JOBS_EVIDENCE.md) for executed core/SSH tests
+and remaining TCP/native Windows gates. Artifact cleanup policy and broader
+native/Nextest evidence remain separate work.
 
 ## B. Windows + Windows7 acceptance (priority release-blocking)
 

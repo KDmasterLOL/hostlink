@@ -75,7 +75,7 @@ pub fn start(root: &Path) -> io::Result<()> {
 pub fn stop(root: &Path) -> io::Result<()> {
     let record = owned_record(root)?;
     verify_record(&record)?;
-    let active = durable::active_ids(&load_config(&record.config)?.jobs_root)?;
+    let active = jobs::active_ids(&load_config(&record.config)?.jobs_root)?;
     if !active.is_empty() {
         return Err(busy(&active));
     }
@@ -83,7 +83,7 @@ pub fn stop(root: &Path) -> io::Result<()> {
     // Close the check/stop race: if a request was admitted while systemd
     // was stopping the listener, preserve its durable record and restore
     // the service so the owner can inspect the interrupted outcome.
-    let active = durable::active_ids(&load_config(&record.config)?.jobs_root)?;
+    let active = jobs::active_ids(&load_config(&record.config)?.jobs_root)?;
     if !active.is_empty() {
         systemctl(&["start", &record.unit_name])?;
         return Err(busy(&active));
@@ -94,14 +94,14 @@ pub fn stop(root: &Path) -> io::Result<()> {
 pub fn remove(root: &Path) -> io::Result<()> {
     let record = owned_record(root)?;
     verify_record(&record)?;
-    let active = durable::active_ids(&load_config(&record.config)?.jobs_root)?;
+    let active = jobs::active_ids(&load_config(&record.config)?.jobs_root)?;
     if !active.is_empty() {
         return Err(busy(&active));
     }
     let unit = unit_dir()?.join(&record.unit_name);
     verify_unit_file(&record, &unit)?;
     systemctl(&["stop", &record.unit_name])?;
-    let active = durable::active_ids(&load_config(&record.config)?.jobs_root)?;
+    let active = jobs::active_ids(&load_config(&record.config)?.jobs_root)?;
     if !active.is_empty() {
         systemctl(&["start", &record.unit_name])?;
         return Err(busy(&active));

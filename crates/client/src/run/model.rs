@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Job identifier must be a canonical lowercase UUID.
+/// Job identifier must be a canonical uppercase ULID.
 pub type JobId = String;
 
 /// Executable and exact argument vector admitted for a durable job.
@@ -21,7 +21,7 @@ pub struct JobSpec {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Start {
-    /// Canonical lowercase UUID chosen by the caller.
+    /// Canonical uppercase ULID chosen by the caller.
     pub id: JobId,
     /// Exact executable and argv manifest.
     pub spec: JobSpec,
@@ -30,7 +30,7 @@ pub struct Start {
 /// Status query for a previously admitted job.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Status {
-    /// Canonical lowercase UUID returned by the original start request.
+    /// Canonical uppercase ULID returned by the original start request.
     pub id: JobId,
 }
 
@@ -53,7 +53,7 @@ pub enum JobStream {
 /// Reads bytes starting at a persisted byte offset.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Output {
-    /// Canonical lowercase UUID returned by the original start request.
+    /// Canonical uppercase ULID returned by the original start request.
     pub id: JobId,
     /// Output stream to read.
     pub stream: JobStream,
@@ -72,17 +72,7 @@ pub struct Seal {
     pub size: u64,
 }
 
-/// Agent-resolved executable path and verified artifact digest.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SealedArtifact {
-    /// Canonical absolute path selected by the Agent.
-    pub program: String,
-    /// Digest verified by the Agent.
-    pub sha256: String,
-}
-
-/// Persisted Agent job lifecycle state.
+/// Read-only projection of native Agent queue status/result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobState {
@@ -122,7 +112,7 @@ fn deserialize_empty_state<'de, D: serde::Deserializer<'de>>(
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobStatus {
-    /// Canonical lowercase job UUID.
+    /// Canonical uppercase job ULID.
     pub id: JobId,
     /// Current persisted lifecycle state.
     pub state: JobState,

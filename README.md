@@ -101,30 +101,32 @@ bootstrap receipt before the token prompt. See
 [docs/ENROLLMENT.md](docs/ENROLLMENT.md) for the full bootstrap contract and
 native acceptance limits.
 
-Durable jobs use the same authenticated SSH connection, with
-`hostlink job start`, `hostlink job status` and `hostlink job output`. The job
-UUID is printed **before** the first start request; on a lost acknowledgement,
-query status by UUID instead of resubmitting. Ordinary SSH `exec` remains
-channel-owned and does **not** survive a disconnect.
+Durable jobs use `hostlink jobs run/list/status/logs/cancel` over the authenticated
+`hostlink-jobs` SSH subsystem. `hostlink jobs run --binary ./runner --config
+host.json -- [argv...]` uploads, seals and enqueues; `--wait` streams raw output
+and returns the exact exit code. The canonical ULID prints before connecting
+and is also the Apalis TaskId. After a lost acknowledgement, query that same
+ULID. Top-level `hostlink run` and low-level run flags are removed. Ordinary SSH
+exec is channel-owned.
 
-Agent durable jobs use a real Apalis 1.0.0 SQLite WorkerBuilder consumer and
-SQLx 0.9.0 in the normal root workspace. Start commits and returns Prepared;
-the Agent-owned worker polls the database and runs at most 16 processes, with
-no automatic retry or backend lifecycle ACK. An atomic dequeue-bound claim
-owns Running and all terminal states. Shutdown cancels and drains process trees
-before stopping polling; failures stop admission and retain blocking claims.
-See the [worker contract and evidence](docs/AGENT_APALIS_WORKER.md). The database uses WAL and per-connection verified FULL
-synchronization. One immutable started claim commits before process execution;
-retries, lost ACKs and restarts never replay it. Interrupted remains UNKNOWN
-and prevents Agent replacement. Private raw output and sealed artifacts retain
-their existing bounds and owner checks. The jobs-v1 Client wire is unchanged.
-Fresh enrollment explicitly initializes SQLite in a private empty jobs root.
-Runtime opening requires the existing database and matching migration history;
-missing DBs are rejected even in empty or runner-only roots. Reopening never
-initializes or migrates stored state. Existing legacy job directories fail
-closed without modification; see the
-[migration and storage contract](docs/AGENT_DURABLE_SQLITE.md). The isolated
-`experiments/agent-apalis-poc` remains a separate, unchanged reference workspace.
+One Agent-owned Apalis SQLite 1.0.0 WorkerBuilder polls the queue and runs at most
+16 ProcessKit trees. Native Apalis status/result is authoritative; the payload is
+immutable. A durable one-use start claim prevents replay after disconnect,
+orphan requeue or restart. UNKNOWN blocks updates. Private raw output, source
+SHA checks and per-controller sealed artifacts retain their bounds. Fresh private
+roots only; old record.json and SQLite schemas fail closed without migration.
+New runs require the authenticated controller's exact canonical sealed source,
+with private-parent and digest checks repeated immediately before launch.
+On Unix, every canonical ancestor must have provable root/Agent ownership and
+safe directory-entry permissions; sticky shared parents require an owned next entry.
+Job execution requires actual cgroup v2 containment on Linux (delegation required),
+Job Objects on Windows, or a process reaper on FreeBSD. POSIX fallback is rejected
+before spawn; after empty spool sync this is a definite Failed job with no replay.
+Native-positive acceptance uses `HOSTLINK_REQUIRE_NATIVE_CONTAINMENT=1`; missing
+strong containment then fails tests instead of reporting an optional skip.
+The CLI/protocol change is breaking, with no v1 compatibility. See the
+[minimal jobs contract](docs/AGENT_MINIMAL_JOBS.md) and
+[verification evidence](docs/AGENT_MINIMAL_JOBS_EVIDENCE.md).
 
 
 The client also supports Hub v2 inventory and named host selection while

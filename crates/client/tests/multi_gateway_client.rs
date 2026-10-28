@@ -176,7 +176,7 @@ async fn unavailable_primary_fails_over_and_pinned_nested_agent_execs_and_sftp()
     let jobs = root.path().join("jobs");
     std::fs::create_dir(&jobs).unwrap();
     protect_fixture_path(&jobs, true);
-    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs)
+    hostlink_agent::jobs::JobStore::initialize_fresh(&jobs)
         .await
         .expect("private Agent fixture SQLite store")
         .close()

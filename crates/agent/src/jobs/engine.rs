@@ -12,8 +12,8 @@ use apalis_core::{
 /// One supervised queue consumer per Agent, never per SSH request. Dropping the
 /// serving future signals cancellation; it cannot release the runner lease
 /// while the consumer or any process-tree teardown still owns the runtime.
-pub(in crate::ssh) struct JobWorker {
-    pub(in crate::ssh) task: tokio::task::JoinHandle<io::Result<()>>,
+pub(crate) struct JobWorker {
+    pub(crate) task: tokio::task::JoinHandle<io::Result<()>>,
     shutdown: processkit::CancellationToken,
 }
 
@@ -24,7 +24,7 @@ impl Drop for JobWorker {
 }
 
 impl JobWorker {
-    pub(in crate::ssh) fn start(runtime: Arc<JobRuntime>) -> Self {
+    pub(crate) fn start(runtime: Arc<JobRuntime>) -> Self {
         let shutdown = runtime.shutdown.clone();
         let task = tokio::spawn(async move {
             let stopping = runtime.clone();
@@ -35,7 +35,7 @@ impl JobWorker {
                 .store
                 .worker_backend()
                 .poll_with_interval(Duration::from_millis(100));
-            let worker = WorkerBuilder::new(crate::durable::WORKER_NAME)
+            let worker = WorkerBuilder::new(crate::jobs::WORKER_NAME)
                 .backend(backend)
                 .data(runtime.clone())
                 .layer(tower::limit::ConcurrencyLimitLayer::new(MAX_ACTIVE_JOBS))
@@ -57,69 +57,18 @@ impl JobWorker {
                         let _start = stopping.start_lock.lock().await;
                         stopping.accepting.store(false, Ordering::Release);
                     }
-                    if !stopping
-                        .unknown_permits
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .is_empty()
-                    {
-                        return Err(WorkerError::BackendError(Box::new(io::Error::other(
-                            "one or more process trees have an unconfirmed teardown",
-                        ))));
-                    }
-                    // Keep Apalis polling until process tasks have persisted
-                    // their outcomes. Stopping earlier can park an in-flight
-                    // SQLite Fetch transaction while services need that very
-                    // connection to finish (CallAll drains before poll_close).
-                    let _trees = tokio::time::timeout(
-                        SHUTDOWN_GRACE,
-                        stopping
-                            .slots
-                            .clone()
-                            .acquire_many_owned(MAX_ACTIVE_JOBS as u32),
-                    )
-                    .await
-                    .map_err(|_| {
-                        WorkerError::BackendError(Box::new(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "unconfirmed process teardown or outstanding durable work",
-                        )))
-                    })?
-                    .map_err(|e| WorkerError::BackendError(Box::new(e)))?;
+                    drain(&stopping)
+                        .await
+                        .map_err(|e| WorkerError::BackendError(Box::new(e)))?;
                     Ok::<(), WorkerError>(())
                 })
                 .await
                 .map_err(io::Error::other);
             runtime.accepting.store(false, Ordering::Release);
             runtime.shutdown.cancel();
-            if !runtime
-                .unknown_permits
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_empty()
-            {
-                return Err(io::Error::other(
-                    "durable process teardown unconfirmed; preserve UNKNOWN state",
-                ));
-            }
-            // Apalis returns immediately on a backend error and drops service
-            // futures. Process tasks retain their own permits and runtime, so
-            // even this path must drain tree teardown before releasing ownership.
-            let _trees = tokio::time::timeout(
-                SHUTDOWN_GRACE,
-                runtime
-                    .slots
-                    .clone()
-                    .acquire_many_owned(MAX_ACTIVE_JOBS as u32),
-            )
-            .await
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "unconfirmed process teardown or outstanding durable work",
-                )
-            })?
-            .map_err(io::Error::other)?;
+            // Backend failure can drop the service future. Independent process
+            // tasks still hold runtime/permits until teardown and publication.
+            drain(&runtime).await?;
             if failed.load(Ordering::Acquire) {
                 return Err(io::Error::other(
                     "durable Apalis service failed; persisted claims require reconciliation",
@@ -131,8 +80,37 @@ impl JobWorker {
     }
 }
 
+async fn drain(runtime: &JobRuntime) -> io::Result<()> {
+    if !runtime
+        .unknown_permits
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_empty()
+    {
+        return Err(io::Error::other(
+            "process teardown unconfirmed; preserve UNKNOWN",
+        ));
+    }
+    let _trees = tokio::time::timeout(
+        SHUTDOWN_GRACE,
+        runtime
+            .slots
+            .clone()
+            .acquire_many_owned(MAX_ACTIVE_JOBS as u32),
+    )
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "unconfirmed process teardown or publication",
+        )
+    })?
+    .map_err(io::Error::other)?;
+    Ok(())
+}
+
 async fn consume(
-    snapshot: crate::durable::JobRecord,
+    snapshot: crate::jobs::JobPayload,
     runtime: Data<Arc<JobRuntime>>,
     task: TaskId,
     worker: WorkerContext,
@@ -148,10 +126,12 @@ async fn consume(
         .store
         .lookup(snapshot.id, &snapshot.controller_key_sha256)
         .await?;
-    if matches!(
-        current.state,
-        JobState::Failed | JobState::Exited { .. } | JobState::Interrupted
-    ) {
+    if current.started || current.state == JobState::Interrupted {
+        return Err(io::Error::other(
+            "started claim blocks replay; operation UNKNOWN",
+        ));
+    }
+    if matches!(current.state, JobState::Failed | JobState::Exited { .. }) {
         return Ok(());
     }
     let permit = runtime
@@ -165,10 +145,7 @@ async fn consume(
         .await?;
     let id = record.id;
     let owner = record.controller_key_sha256.clone();
-    let active = Arc::new(JobCancellation {
-        process: runtime.shutdown.child_token(),
-        requested: AtomicBool::new(false),
-    });
+    let active = runtime.shutdown.child_token();
     runtime
         .active_jobs
         .lock()

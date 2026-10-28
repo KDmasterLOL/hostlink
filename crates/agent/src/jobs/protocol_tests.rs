@@ -1,28 +1,36 @@
+use super::frame::JobRequest;
 use super::protocol::handle_job_request;
-use super::wire::JobRequest;
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
 pub(super) async fn fixture(script: &str) -> (tempfile::TempDir, Arc<JobRuntime>, String, JobSpec) {
     let temp = tempfile::tempdir().expect("private test root");
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let source = temp.path().join("pinned-sh");
-    std::fs::copy(std::fs::canonicalize("/bin/sh").unwrap(), &source).unwrap();
-    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o500)).unwrap();
     let root = temp.path().join("jobs");
     std::fs::create_dir(&root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let runtime = runtime(JobStore::initialize_fresh(root).await.unwrap());
+    let owner = "a".repeat(64);
+    let artifacts = runtime.store.artifacts(&owner).unwrap();
+    let bytes = std::fs::read(std::fs::canonicalize("/bin/sh").unwrap()).unwrap();
+    let source_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let upload_name = format!("{source_sha256}.upload");
+    let upload = artifacts.upload_root().join(&upload_name);
+    std::fs::write(&upload, &bytes).unwrap();
+    crate::jobs::restrict_private_path(&upload, false).unwrap();
+    let source = artifacts
+        .seal(&upload_name, &source_sha256, bytes.len() as u64)
+        .unwrap();
     let spec = JobSpec {
         program: source.display().to_string(),
         args: vec!["-c".into(), script.into()],
         cwd: Some(temp.path().to_path_buf()),
-        source_sha256: format!("{:x}", Sha256::digest(std::fs::read(source).unwrap())),
+        source_sha256,
     };
-    let runtime = runtime(DurableStore::initialize_fresh(root).await.unwrap());
-    (temp, runtime, "a".repeat(64), spec)
+    (temp, runtime, owner, spec)
 }
 
-pub(super) fn runtime(store: DurableStore) -> Arc<JobRuntime> {
+pub(super) fn runtime(store: JobStore) -> Arc<JobRuntime> {
     let runner = store.acquire_runner().expect("exclusive runtime lease");
     Arc::new(JobRuntime {
         store,
@@ -38,15 +46,17 @@ pub(super) fn runtime(store: DurableStore) -> Arc<JobRuntime> {
 }
 
 pub(super) fn start(id: JobId, spec: &JobSpec) -> JobRequest {
-    JobRequest::Start {
-        version: 1,
-        id: id.to_string(),
+    JobRequest::Run {
+        id,
         spec: spec.clone(),
     }
 }
 
 #[tokio::test]
 async fn lost_ack_retry_keeps_one_execution_raw_output_and_nonzero_exit() {
+    if !super::process_tests::native_containment_available() {
+        return;
+    }
     let (temp, runtime, owner, spec) =
         fixture("printf x >> counter; printf '\\377\\000raw' ; printf diagnostic >&2; exit 23")
             .await;
@@ -70,13 +80,15 @@ async fn lost_ack_retry_keeps_one_execution_raw_output_and_nonzero_exit() {
     .await
     .expect("worker records its actual nonzero exit");
     let retry = handle_job_request(start(id, &spec), &runtime, &owner).await;
-    assert!(retry.ok);
-    assert_eq!(retry.state, Some(JobState::Exited { code: 23 }));
+    assert!(retry.is_ok());
+    assert_eq!(
+        retry.unwrap()["state"],
+        serde_json::json!(JobState::Exited { code: 23 })
+    );
     assert_eq!(std::fs::read(temp.path().join("counter")).unwrap(), b"x");
     let output = handle_job_request(
-        JobRequest::Output {
-            version: 1,
-            id: id.to_string(),
+        JobRequest::Logs {
+            id,
             stream: JobOutput::Stdout,
             offset: 0,
         },
@@ -84,41 +96,33 @@ async fn lost_ack_retry_keeps_one_execution_raw_output_and_nonzero_exit() {
         &owner,
     )
     .await;
-    assert!(output.ok);
+    assert!(output.is_ok());
     use base64::Engine as _;
     let raw = base64::engine::general_purpose::STANDARD
-        .decode(output.data_base64.unwrap())
+        .decode(output.as_ref().unwrap()["data_base64"].as_str().unwrap())
         .unwrap();
     assert_eq!(raw, b"\xff\0raw");
-    assert_eq!(output.next_offset, Some(5));
-    assert_eq!(output.eof, Some(true));
+    assert_eq!(output.as_ref().unwrap()["next_offset"], 5);
+    assert_eq!(output.unwrap()["eof"], true);
     for request in [
-        JobRequest::Status {
-            version: 1,
-            id: id.to_string(),
-        },
-        JobRequest::Cancel {
-            version: 1,
-            id: id.to_string(),
-        },
-        JobRequest::Output {
-            version: 1,
-            id: id.to_string(),
+        JobRequest::Status { id },
+        JobRequest::Cancel { id },
+        JobRequest::Logs {
+            id,
             stream: JobOutput::Stderr,
             offset: 0,
         },
         start(id, &spec),
     ] {
         let response = handle_job_request(request, &runtime, &"b".repeat(64)).await;
-        assert!(!response.ok);
-        assert_eq!(response.error, Some("job belongs to another controller"));
+        assert!(response.is_err());
     }
     let mut changed = spec;
     changed.args.push("different".into());
     assert!(
         !handle_job_request(start(id, &changed), &runtime, &owner)
             .await
-            .ok
+            .is_ok()
     );
     assert_eq!(std::fs::read(temp.path().join("counter")).unwrap(), b"x");
     runtime.shutdown.cancel();
@@ -133,30 +137,22 @@ async fn lost_ack_retry_keeps_one_execution_raw_output_and_nonzero_exit() {
 async fn restart_after_committed_start_before_spawn_stays_interrupted_and_never_replays() {
     let (temp, old, owner, spec) = fixture("printf replayed > forbidden").await;
     let id = JobId::new();
-    assert!(matches!(
-        old.store.admit(id, &owner, &spec).await.unwrap(),
-        Admission::Created(_)
-    ));
-    old.store.claim_start(id, &owner).await.unwrap();
+    assert_eq!(old.store.admit(id, &owner, &spec).await.unwrap().id, id);
+    old.store.claim_fixture(id, &owner).await.unwrap();
     drop(old);
-    let store = DurableStore::open(temp.path().join("jobs")).await.unwrap();
+    let store = JobStore::open(temp.path().join("jobs")).await.unwrap();
     store.recover_nonterminal().await.unwrap();
     let reopened = runtime(store);
     let response = handle_job_request(start(id, &spec), &reopened, &owner).await;
-    assert!(response.ok);
-    assert_eq!(response.state, Some(JobState::Interrupted));
+    assert!(response.is_ok());
+    assert_eq!(
+        response.unwrap()["state"],
+        serde_json::json!(JobState::Interrupted)
+    );
     assert!(!temp.path().join("forbidden").exists());
-    assert!(reopened.store.claim_start(id, &owner).await.is_err());
-    let cancel = handle_job_request(
-        JobRequest::Cancel {
-            version: 1,
-            id: id.to_string(),
-        },
-        &reopened,
-        &owner,
-    )
-    .await;
-    assert!(!cancel.ok);
+    assert!(reopened.store.claim_fixture(id, &owner).await.is_err());
+    let cancel = handle_job_request(JobRequest::Cancel { id }, &reopened, &owner).await;
+    assert!(cancel.is_err());
     assert!(
         reopened
             .store
@@ -175,35 +171,17 @@ async fn wrong_source_and_noncanonical_id_never_launch() {
     let correct = spec.clone();
     spec.source_sha256 = "0".repeat(64);
     let response = handle_job_request(start(id, &spec), &runtime, &owner).await;
-    assert_eq!(
-        response.error,
-        Some("source executable verification failed")
-    );
-    assert_eq!(
-        runtime.store.lookup(id, &owner).await.unwrap().state,
-        JobState::Failed
-    );
-    assert!(
-        !handle_job_request(start(id, &correct), &runtime, &owner)
-            .await
-            .ok
-    );
-    let response = handle_job_request(
-        JobRequest::Start {
-            version: 1,
-            id: "01234567-89AB-4CDE-8FAB-0123456789AB".into(),
-            spec: correct,
-        },
-        &runtime,
-        &owner,
-    )
-    .await;
-    assert_eq!(response.error, Some("invalid job ID"));
+    assert!(response.is_err());
+    assert!(runtime.store.lookup(id, &owner).await.is_err());
+    assert!(serde_json::from_value::<JobRequest>(serde_json::json!({"op":"run", "id":"01234567-89AB-4CDE-8FAB-0123456789AB", "spec":correct})).is_err());
     assert!(!temp.path().join("forbidden").exists());
 }
 
 #[tokio::test]
 async fn detached_worker_retains_runner_lease_until_process_teardown() {
+    if !super::process_tests::native_containment_available() {
+        return;
+    }
     let (temp, runtime, owner, spec) = fixture("printf started > ready; sleep 300").await;
     let mut worker = JobWorker::start(runtime.clone());
     let observer = runtime.store.clone();
@@ -211,7 +189,7 @@ async fn detached_worker_retains_runner_lease_until_process_teardown() {
     let weak = Arc::downgrade(&runtime);
     let id = JobId::new();
     let response = handle_job_request(start(id, &spec), &runtime, &owner).await;
-    assert!(response.ok);
+    assert!(response.is_ok());
     drop(runtime);
     let readiness = tokio::time::timeout(Duration::from_secs(5), async {
         while !temp.path().join("ready").exists() {
@@ -260,4 +238,48 @@ async fn detached_worker_retains_runner_lease_until_process_teardown() {
     .expect("runner lease is released after its final destructor");
     drop(lease);
     observer.close().await;
+}
+
+#[tokio::test]
+async fn sealed_source_admission_rejects_another_controller_without_creating_job() {
+    let (temp, runtime, owner, spec) = fixture("printf forbidden > replay").await;
+    let id = JobId::new();
+    let foreign = "b".repeat(64);
+    assert!(
+        handle_job_request(start(id, &spec), &runtime, &foreign)
+            .await
+            .is_err()
+    );
+    assert!(runtime.store.lookup(id, &foreign).await.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM Jobs")
+            .fetch_one(&runtime.store.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(!temp.path().join("replay").exists());
+    handle_job_request(start(id, &spec), &runtime, &owner)
+        .await
+        .unwrap();
+    for request in [
+        JobRequest::Status { id },
+        JobRequest::Cancel { id },
+        JobRequest::Logs {
+            id,
+            stream: JobOutput::Stdout,
+            offset: 0,
+        },
+        start(id, &spec),
+    ] {
+        assert!(
+            handle_job_request(request, &runtime, &foreign)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(
+        runtime.store.lookup(id, &owner).await.unwrap().state,
+        JobState::Prepared
+    );
 }

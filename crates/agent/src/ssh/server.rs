@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 use super::config::{PreparedEmbeddedSshConfig, invalid_data, prepare, validate_jobs_root};
-use super::jobs::{JobRuntime, JobWorker, handle_job_channel};
 use super::*;
+use crate::jobs::{JobRuntime, JobWorker, handle_job_channel};
 
 struct EmbeddedServer {
     expected_user: Arc<str>,
@@ -60,7 +60,7 @@ where
     }
     let prepared = prepare(config)?;
     let jobs_root = validate_jobs_root(&config.jobs_root)?;
-    let store = DurableStore::open(&jobs_root).await?;
+    let store = JobStore::open(&jobs_root).await?;
     let runner = store.acquire_runner()?;
     store.recover_nonterminal().await?;
     let jobs = Arc::new(JobRuntime {

@@ -29,10 +29,7 @@ pub(super) struct SftpSession {
 }
 
 impl SftpSession {
-    pub(super) fn new(
-        artifacts: crate::durable::ArtifactStore,
-        slot: OwnedSemaphorePermit,
-    ) -> Self {
+    pub(super) fn new(artifacts: crate::jobs::ArtifactStore, slot: OwnedSemaphorePermit) -> Self {
         Self {
             files: HashMap::new(),
             next_handle: 0,
@@ -94,7 +91,7 @@ impl SftpSession {
                     return Err(StatusCode::PermissionDenied);
                 }
                 count += 1;
-                if count > crate::durable::MAX_ARTIFACTS_PER_CONTROLLER {
+                if count > crate::jobs::MAX_ARTIFACTS_PER_CONTROLLER {
                     return Err(StatusCode::Failure);
                 }
             }
@@ -115,7 +112,7 @@ impl SftpSession {
             &self.root,
             &self.sealed_root,
         ] {
-            crate::durable::validate_private_path(path, true).map_err(status_from_io)?;
+            crate::jobs::validate_private_path(path, true).map_err(status_from_io)?;
         }
         Ok(())
     }

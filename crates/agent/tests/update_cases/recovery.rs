@@ -63,9 +63,7 @@ async fn active_job_prevents_recovery_mutations_then_update_recovers_backup() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&jobs, fs::Permissions::from_mode(0o700)).expect("private jobs root");
     }
-    let store = DurableStore::initialize_fresh(&jobs)
-        .await
-        .expect("job store");
+    let store = JobStore::initialize_fresh(&jobs).await.expect("job store");
     let id = JobId::new();
     let owner = "1".repeat(64);
     store
@@ -203,7 +201,7 @@ async fn orphan_output_blocks_update_without_claiming_a_known_terminal_job() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&jobs, fs::Permissions::from_mode(0o700)).expect("private job root");
     }
-    DurableStore::initialize_fresh(&jobs)
+    JobStore::initialize_fresh(&jobs)
         .await
         .expect("fresh SQLite store")
         .close()

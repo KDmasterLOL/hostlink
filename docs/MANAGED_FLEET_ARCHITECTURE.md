@@ -18,7 +18,7 @@ hostlink CLI / HubClient  <---------------------------------->  hostlink-hub
       +------------------ pinned gateway hop ----------------------+-- SSH gateway
                                     |
                                     +----- reverse loopback SSH ----- hostlink-agent
-                                             exec | SFTP | jobs-v1 | TCP forward
+                                             exec | SFTP | jobs | TCP forward
 ```
 
 Hub owns **fleet identity/topology/lifecycle** only. It does not run shell commands, proxy arbitrary Agent RPC, store per-Agent command secrets, own user jobs, or become a second execution transport. The Agent stays an unprivileged `russh` server with an outbound reverse SSH tunnel. The Controller uses `russh` with *independently pinned* gateway and target host keys. A static, explicit `HostSpec` remains a supported unmanaged mode, not the default replacement for Hub-managed hosts.
@@ -64,7 +64,7 @@ hostlink info lab-win7
 hostlink verify lab-win7      # actual target SSH identity/check; nonzero if failed
 hostlink invite --name lab-win7 --ttl-seconds 900   # source-pinned bootstrap
 hostlink exec --host lab-win7 --command "..."
-hostlink run --host lab-win7 --binary ./tests -- --list
+hostlink jobs run --host lab-win7 --binary ./tests --wait -- --list
 hostlink job status --host lab-win7 --id <uuid>
 hostlink display-name lab-win7 "Lab machine"
 hostlink remove lab-win7     # Hub revocation, NOT remote uninstall

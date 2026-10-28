@@ -71,16 +71,16 @@ pub(in crate::update) struct PublicationJournal {
 ///
 /// The durable-job store beneath `install_root` is read under the same update lock. Any returned
 /// job ID defers the update; corrupt or unreadable job state is propagated as an error by
-/// `durable::active_ids`.
+/// `jobs::active_ids`.
 pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
     validate_request(request)?;
     private_fs::validate_user_owned_root(&request.install_root)?;
     let archive_path =
         archive::validate_archive_path(&request.install_root, &request.archive_file)?;
-    let _update_lock = crate::durable::acquire_update_lock(&request.install_root)?;
+    let _update_lock = crate::jobs::acquire_update_lock(&request.install_root)?;
 
     let jobs_root = request.install_root.join("jobs");
-    let active_ids = crate::durable::active_ids(&jobs_root)?;
+    let active_ids = crate::jobs::active_ids(&jobs_root)?;
     if !active_ids.is_empty() {
         return Ok(AgentUpdateOutcome::DeferredActiveJobs {
             job_ids: active_ids,

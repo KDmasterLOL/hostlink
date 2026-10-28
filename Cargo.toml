@@ -23,6 +23,7 @@ semver = "=1.0.28"
 zip = { version = "=6.0.0", default-features = false, features = ["deflate"] }
 libc = "=0.2.191"
 thiserror = "2.0.17"
+ulid = { version = "=3.0.0", features = ["serde"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 tempfile = "3.27.0"
 secrecy = "0.10.3"

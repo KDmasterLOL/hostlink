@@ -1,13 +1,29 @@
 use super::*;
+
+#[cfg(unix)]
+#[test]
+fn update_lock_drop_releases_fork_shared_open_file_description() {
+    let root = tempfile::tempdir().unwrap();
+    restrict_private_path(root.path(), true).unwrap();
+    let lease = acquire_update_lock(root.path()).unwrap();
+    // Duplicated descriptors share one flock; closing the original without
+    // LOCK_UN would leave the lock held until the duplicate closed.
+    let inherited = lease.try_clone().unwrap();
+    drop(lease);
+    let replacement = acquire_update_lock(root.path()).unwrap();
+    drop(replacement);
+    drop(inherited);
+}
+
 use apalis_core::backend::WorkerFilter;
 
-async fn fixture() -> (tempfile::TempDir, DurableStore) {
+async fn fixture() -> (tempfile::TempDir, JobStore) {
     let root = tempfile::tempdir().unwrap();
     restrict_private_path(root.path(), true).unwrap();
     let jobs = root.path().join("jobs");
     fs::create_dir(&jobs).unwrap();
     restrict_private_path(&jobs, true).unwrap();
-    let store = DurableStore::initialize_fresh(jobs).await.unwrap();
+    let store = JobStore::initialize_fresh(jobs).await.unwrap();
     (root, store)
 }
 
@@ -29,12 +45,12 @@ async fn runtime_never_recreates_a_missing_database_or_runner_only_root() {
     fs::create_dir(&jobs).unwrap();
     restrict_private_path(&jobs, true).unwrap();
 
-    assert!(DurableStore::open(&jobs).await.is_err());
+    assert!(JobStore::open(&jobs).await.is_err());
     assert!(!jobs.join("jobs.db").exists());
     fs::write(jobs.join("runner.lock"), b"runner evidence").unwrap();
     restrict_private_path(&jobs.join("runner.lock"), false).unwrap();
-    assert!(DurableStore::open(&jobs).await.is_err());
-    assert!(DurableStore::initialize_fresh(&jobs).await.is_err());
+    assert!(JobStore::open(&jobs).await.is_err());
+    assert!(JobStore::initialize_fresh(&jobs).await.is_err());
     assert!(!jobs.join("jobs.db").exists());
     assert_eq!(
         fs::read(jobs.join("runner.lock")).unwrap(),
@@ -43,7 +59,7 @@ async fn runtime_never_recreates_a_missing_database_or_runner_only_root() {
 
     // All mutations below are confined to this disposable fresh fixture.
     fs::remove_file(jobs.join("runner.lock")).unwrap();
-    let store = DurableStore::initialize_fresh(&jobs).await.unwrap();
+    let store = JobStore::initialize_fresh(&jobs).await.unwrap();
     let id = JobId::new();
     store.admit(id, &owner(), &sample()).await.unwrap();
     let spool = store.output_path(id, JobOutput::Stdout);
@@ -59,8 +75,8 @@ async fn runtime_never_recreates_a_missing_database_or_runner_only_root() {
             Err(error) => panic!("remove disposable closed database: {error}"),
         }
     }
-    assert!(DurableStore::open(&jobs).await.is_err());
-    assert!(DurableStore::initialize_fresh(&jobs).await.is_err());
+    assert!(JobStore::open(&jobs).await.is_err());
+    assert!(JobStore::initialize_fresh(&jobs).await.is_err());
     assert!(active_ids(&jobs).is_err());
     assert!(!jobs.join("jobs.db").exists());
     assert_eq!(fs::read(spool).unwrap(), [0, 255, 7]);
@@ -87,7 +103,7 @@ async fn registered_replacement_can_open_and_recover_while_updater_holds_lock() 
         .recv_timeout(std::time::Duration::from_secs(5))
         .unwrap();
     let candidate = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        let store = DurableStore::open(&root).await?;
+        let store = JobStore::open(&root).await?;
         let runner = store.acquire_runner()?;
         store.recover_nonterminal().await?;
         drop(runner);
@@ -160,14 +176,8 @@ async fn artifact_seal_preserves_content_and_controller_ownership() {
 async fn same_identity_is_idempotent_and_owner_or_spec_conflicts_fail() {
     let (_temp, store) = fixture().await;
     let id = JobId::new();
-    assert!(matches!(
-        store.admit(id, &owner(), &sample()).await.unwrap(),
-        Admission::Created(_)
-    ));
-    assert!(matches!(
-        store.admit(id, &owner(), &sample()).await.unwrap(),
-        Admission::Existing(_)
-    ));
+    assert_eq!((store.admit(id, &owner(), &sample()).await.unwrap()).id, id);
+    assert_eq!((store.admit(id, &owner(), &sample()).await.unwrap()).id, id);
     let mut conflict = sample();
     conflict.args.push("again".into());
     assert!(store.admit(id, &owner(), &conflict).await.is_err());
@@ -176,7 +186,7 @@ async fn same_identity_is_idempotent_and_owner_or_spec_conflicts_fail() {
     assert!(store.admit(id, &owner(), &conflict).await.is_err());
     assert!(store.admit(id, &"c".repeat(64), &sample()).await.is_err());
     assert!(store.lookup(id, &"c".repeat(64)).await.is_err());
-    assert!(store.claim_start(id, &"c".repeat(64)).await.is_err());
+    assert!(store.claim_fixture(id, &"c".repeat(64)).await.is_err());
     assert_eq!(active_ids(&store.root).unwrap(), vec![id.to_string()]);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM Jobs")
@@ -199,7 +209,7 @@ async fn terminal_nonzero_exit_does_not_block_but_interrupted_stays_unknown() {
             .await
             .is_err()
     );
-    store.claim_start(id, &owner()).await.unwrap();
+    store.claim_fixture(id, &owner()).await.unwrap();
     assert_eq!(active_ids(&store.root).unwrap(), vec![id.to_string()]);
     for stream in [JobOutput::Stdout, JobOutput::Stderr] {
         open_output_append(&store.output_path(id, stream))
@@ -217,7 +227,7 @@ async fn terminal_nonzero_exit_does_not_block_but_interrupted_stays_unknown() {
         .await
         .unwrap();
     assert!(active_ids(&store.root).unwrap().is_empty());
-    assert!(store.claim_start(id, &owner()).await.is_err());
+    assert!(store.claim_fixture(id, &owner()).await.is_err());
     assert!(
         store
             .transition(
@@ -234,7 +244,7 @@ async fn terminal_nonzero_exit_does_not_block_but_interrupted_stays_unknown() {
     store.recover_nonterminal().await.unwrap();
     assert_eq!(
         store.lookup(next, &owner()).await.unwrap().state,
-        JobState::Interrupted
+        JobState::Prepared
     );
     assert_eq!(active_ids(&store.root).unwrap(), vec![next.to_string()]);
     assert!(
@@ -243,7 +253,7 @@ async fn terminal_nonzero_exit_does_not_block_but_interrupted_stays_unknown() {
             .await
             .is_err()
     );
-    assert!(store.claim_start(next, &owner()).await.is_err());
+    store.claim_fixture(next, &owner()).await.unwrap();
 }
 
 #[tokio::test]
@@ -251,9 +261,9 @@ async fn actual_apalis_orphan_requeue_cannot_replay_started_command_even_after_r
     let (_temp, store) = fixture().await;
     let id = JobId::new();
     store.admit(id, &owner(), &sample()).await.unwrap();
-    store.claim_start(id, &owner()).await.unwrap();
+    store.claim_fixture(id, &owner()).await.unwrap();
     // This is the real upstream query that ignores max_attempts for Pending.
-    sqlx::query("INSERT INTO Workers(id,worker_type,storage_name,last_seen) VALUES('crashed-worker','hostlink-agent-v1','SqliteStorage',0)").execute(&store.pool).await.unwrap();
+    sqlx::query("INSERT INTO Workers(id,worker_type,storage_name,last_seen) VALUES('crashed-worker','hostlink-agent','SqliteStorage',0)").execute(&store.pool).await.unwrap();
     sqlx::query("UPDATE Jobs SET lock_at=0,lock_by='crashed-worker' WHERE idempotency_key=?")
         .bind(id.to_string())
         .execute(&store.pool)
@@ -273,21 +283,21 @@ async fn actual_apalis_orphan_requeue_cannot_replay_started_command_even_after_r
         .await
         .unwrap();
     assert_eq!(status, "Pending");
-    assert!(store.claim_start(id, &owner()).await.is_err());
-    assert!(active_ids(&store.root).is_err());
+    assert!(store.claim_fixture(id, &owner()).await.is_err());
+    assert_eq!(active_ids(&store.root).unwrap(), vec![id.to_string()]);
     let root = store.root.clone();
     store.close().await;
-    let reopened = DurableStore::open(root).await.unwrap();
+    let reopened = JobStore::open(root).await.unwrap();
     reopened.recover_nonterminal().await.unwrap();
     assert_eq!(
         reopened.lookup(id, &owner()).await.unwrap().state,
         JobState::Interrupted
     );
-    assert!(matches!(
-        reopened.admit(id, &owner(), &sample()).await.unwrap(),
-        Admission::Existing(_)
-    ));
-    assert!(reopened.claim_start(id, &owner()).await.is_err());
+    assert_eq!(
+        (reopened.admit(id, &owner(), &sample()).await.unwrap()).id,
+        id
+    );
+    assert!(reopened.claim_fixture(id, &owner()).await.is_err());
     assert_eq!(active_ids(&reopened.root).unwrap(), vec![id.to_string()]);
 }
 
@@ -296,27 +306,24 @@ async fn lost_admission_and_claim_ack_never_grants_another_attempt() {
     let (_temp, store) = fixture().await;
     let id = JobId::new();
     let _lost_admission = store.admit(id, &owner(), &sample()).await.unwrap();
-    assert!(matches!(
-        store.admit(id, &owner(), &sample()).await.unwrap(),
-        Admission::Existing(_)
-    ));
-    let _lost_claim = store.claim_start(id, &owner()).await.unwrap();
+    assert_eq!((store.admit(id, &owner(), &sample()).await.unwrap()).id, id);
+    let _lost_claim = store.claim_fixture(id, &owner()).await.unwrap();
     let root = store.root.clone();
     store.close().await;
-    let store = DurableStore::open(root).await.unwrap();
-    assert!(store.claim_start(id, &owner()).await.is_err());
+    let store = JobStore::open(root).await.unwrap();
+    assert!(store.claim_fixture(id, &owner()).await.is_err());
     store.recover_nonterminal().await.unwrap();
     assert_eq!(
         store.lookup(id, &owner()).await.unwrap().state,
         JobState::Interrupted
     );
-    assert!(store.claim_start(id, &owner()).await.is_err());
+    assert!(store.claim_fixture(id, &owner()).await.is_err());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_independent_pools_admit_and_claim_exactly_once() {
     let (_temp, store) = fixture().await;
-    let second = DurableStore::open(&store.root).await.unwrap();
+    let second = JobStore::open(&store.root).await.unwrap();
     let id = JobId::new();
     let owner = owner();
     let spec = sample();
@@ -324,14 +331,20 @@ async fn concurrent_independent_pools_admit_and_claim_exactly_once() {
         store.admit(id, &owner, &spec),
         second.admit(id, &owner, &spec)
     );
-    assert!(matches!(
-        (a.unwrap(), b.unwrap()),
-        (Admission::Created(_), Admission::Existing(_))
-            | (Admission::Existing(_), Admission::Created(_))
-    ));
+    assert!(a.is_ok() || b.is_ok());
+    for result in [a, b] {
+        if let Err(error) = result {
+            assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        }
+    }
+    // Explicitly repeating the same ID after contention remains idempotent.
+    assert_eq!(
+        store.admit(id, &owner, &spec).await.unwrap(),
+        second.admit(id, &owner, &spec).await.unwrap()
+    );
     let (a, b) = tokio::join!(
-        store.claim_start(id, &owner),
-        second.claim_start(id, &owner)
+        store.claim_fixture(id, &owner),
+        second.claim_fixture(id, &owner)
     );
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
 }
@@ -359,7 +372,7 @@ async fn full_wal_is_verified_on_replaced_connections_and_reopen() {
     }
     let root = store.root.clone();
     store.close().await;
-    let store = DurableStore::open(root).await.unwrap();
+    let store = JobStore::open(root).await.unwrap();
     assert_eq!(
         sqlx::query_scalar::<_, i64>("PRAGMA synchronous")
             .fetch_one(&store.pool)
@@ -376,57 +389,57 @@ async fn raw_output_offsets_ownership_and_unknown_eof_are_preserved() {
     store.admit(id, &owner(), &sample()).await.unwrap();
     assert!(
         store
-            .read_output(id, &owner(), JobOutput::Stdout, 1)
+            .read_fixture_output(id, &owner(), JobOutput::Stdout, 1)
             .await
             .is_err()
     );
     assert_eq!(
         store
-            .read_output(id, &owner(), JobOutput::Stdout, 0)
+            .read_fixture_output(id, &owner(), JobOutput::Stdout, 0)
             .await
             .unwrap(),
         (Vec::new(), 0, false)
     );
-    store.claim_start(id, &owner()).await.unwrap();
+    store.claim_fixture(id, &owner()).await.unwrap();
     let mut f = open_output_append(&store.output_path(id, JobOutput::Stdout)).unwrap();
     f.write_all(&[0, 255, 128, 7]).unwrap();
     f.sync_all().unwrap();
     assert_eq!(
         store
-            .read_output(id, &owner(), JobOutput::Stdout, 1)
+            .read_fixture_output(id, &owner(), JobOutput::Stdout, 1)
             .await
             .unwrap(),
         (vec![255, 128, 7], 4, false)
     );
     assert!(
         store
-            .read_output(id, &"c".repeat(64), JobOutput::Stdout, 0)
+            .read_fixture_output(id, &"c".repeat(64), JobOutput::Stdout, 0)
             .await
             .is_err()
     );
     store.recover_nonterminal().await.unwrap();
     assert_eq!(
         store
-            .read_output(id, &owner(), JobOutput::Stdout, 4)
+            .read_fixture_output(id, &owner(), JobOutput::Stdout, 4)
             .await
             .unwrap(),
         (vec![], 4, false)
     );
     assert!(
         store
-            .read_output(id, &owner(), JobOutput::Stdout, 5)
+            .read_fixture_output(id, &owner(), JobOutput::Stdout, 5)
             .await
             .is_err()
     );
 }
 
 #[tokio::test]
-async fn canonical_uuid_is_enforced_during_serde_and_private_roots_fail_closed() {
+async fn canonical_ulid_is_enforced_during_serde_and_private_roots_fail_closed() {
     let (temp, store) = fixture().await;
     let id = JobId::new();
     assert!(JobId::parse("../root").is_err());
     assert!(
-        serde_json::from_str::<JobId>(&format!("\"{}\"", id.to_string().to_uppercase())).is_err()
+        serde_json::from_str::<JobId>(&format!("\"{}\"", id.to_string().to_lowercase())).is_err()
     );
     let bad = temp.path().join("public");
     fs::create_dir(&bad).unwrap();
@@ -434,7 +447,7 @@ async fn canonical_uuid_is_enforced_during_serde_and_private_roots_fail_closed()
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&bad, fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(DurableStore::open(&bad).await.is_err());
+        assert!(JobStore::open(&bad).await.is_err());
     }
     let lease = store.acquire_runner().unwrap();
     assert!(store.acquire_runner().is_err());
@@ -451,7 +464,7 @@ async fn windows_private_database_hardlink_fails_closed() {
     let linked = temp.path().join("outside-jobs.db");
     fs::hard_link(jobs.join("jobs.db"), &linked).unwrap();
     assert!(validate_private_path(&jobs.join("jobs.db"), false).is_err());
-    assert!(DurableStore::open(&jobs).await.is_err());
+    assert!(JobStore::open(&jobs).await.is_err());
     assert!(active_ids(&jobs).is_err());
 }
 
@@ -468,7 +481,7 @@ async fn windows_sqlite_sidecar_hardlink_is_rejected_before_acl_hardening() {
     restrict_private_path(&wal, false).unwrap();
     fs::hard_link(&wal, temp.path().join("linked-sidecar")).unwrap();
     assert!(database::secure_sidecars(&jobs).is_err());
-    assert!(DurableStore::open(&jobs).await.is_err());
+    assert!(JobStore::open(&jobs).await.is_err());
 }
 
 #[tokio::test]
@@ -481,7 +494,7 @@ async fn tampered_payload_claim_or_apalis_queue_prevents_updates_and_execution()
         .await
         .unwrap();
     assert!(active_ids(&store.root).is_err());
-    assert!(store.claim_start(id, &owner()).await.is_err());
+    assert!(store.claim_fixture(id, &owner()).await.is_err());
 }
 
 #[cfg(unix)]
@@ -522,7 +535,7 @@ async fn oversized_record_is_rejected_before_admission_and_corrupt_blob_is_bound
 
 #[cfg(unix)]
 #[tokio::test]
-async fn fifo_output_fails_closed_without_blocking_admission_or_updater() {
+async fn fifo_output_fails_closed_on_read_and_update_without_global_admission_scan() {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     let (_temp, store) = fixture().await;
@@ -545,10 +558,15 @@ async fn fifo_output_fails_closed_without_blocking_admission_or_updater() {
     handle.join().unwrap();
     assert!(
         store
-            .admit(JobId::new(), &owner(), &sample())
+            .read_fixture_output(id, &owner(), JobOutput::Stdout, 0)
             .await
             .is_err()
     );
+    // Admission checks its own indexed identity, not every unrelated output file.
+    store
+        .admit(JobId::new(), &owner(), &sample())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -556,7 +574,7 @@ async fn missing_exited_output_is_an_error_and_never_a_fabricated_eof() {
     let (_temp, store) = fixture().await;
     let id = JobId::new();
     store.admit(id, &owner(), &sample()).await.unwrap();
-    store.claim_start(id, &owner()).await.unwrap();
+    store.claim_fixture(id, &owner()).await.unwrap();
     store
         .transition(
             id,
@@ -568,7 +586,7 @@ async fn missing_exited_output_is_an_error_and_never_a_fabricated_eof() {
         .unwrap();
     assert!(
         store
-            .read_output(id, &owner(), JobOutput::Stdout, 0)
+            .read_fixture_output(id, &owner(), JobOutput::Stdout, 0)
             .await
             .is_err()
     );
@@ -580,7 +598,7 @@ async fn claimed_failed_output_loss_is_never_reported_as_empty_eof() {
     let (_temp, store) = fixture().await;
     let id = JobId::new();
     store.admit(id, &owner(), &sample()).await.unwrap();
-    store.claim_start(id, &owner()).await.unwrap();
+    store.claim_fixture(id, &owner()).await.unwrap();
     for stream in [JobOutput::Stdout, JobOutput::Stderr] {
         let mut output = open_output_append(&store.output_path(id, stream)).unwrap();
         output.write_all(b"partial output").unwrap();
@@ -593,7 +611,7 @@ async fn claimed_failed_output_loss_is_never_reported_as_empty_eof() {
     fs::remove_file(store.output_path(id, JobOutput::Stdout)).unwrap();
     assert!(
         store
-            .read_output(id, &owner(), JobOutput::Stdout, 0)
+            .read_fixture_output(id, &owner(), JobOutput::Stdout, 0)
             .await
             .is_err(),
         "a claimed Failed job must not falsely return empty EOF"
@@ -608,20 +626,18 @@ async fn claimed_failed_output_loss_is_never_reported_as_empty_eof() {
 async fn fresh_initialization_refuses_existing_store_and_upgrade_open_preserves_identity() {
     let (_temp, store) = fixture().await;
     let id = JobId::new();
-    let Admission::Created(expected) = store.admit(id, &owner(), &sample()).await.unwrap() else {
-        panic!("new request")
-    };
+    let expected = store.admit(id, &owner(), &sample()).await.unwrap();
     let root = store.root.clone();
     store.close().await;
     let original = fs::read(root.join("jobs.db")).unwrap();
-    assert!(DurableStore::initialize_fresh(&root).await.is_err());
+    assert!(JobStore::initialize_fresh(&root).await.is_err());
     assert_eq!(fs::read(root.join("jobs.db")).unwrap(), original);
-    let reopened = DurableStore::open(&root).await.unwrap();
+    let reopened = JobStore::open(&root).await.unwrap();
     assert_eq!(reopened.lookup(id, &owner()).await.unwrap(), expected);
-    assert!(matches!(
-        reopened.admit(id, &owner(), &sample()).await.unwrap(),
-        Admission::Existing(_)
-    ));
+    assert_eq!(
+        (reopened.admit(id, &owner(), &sample()).await.unwrap()).id,
+        id
+    );
     let mut changed = sample();
     changed.args.push("different".into());
     assert!(reopened.admit(id, &owner(), &changed).await.is_err());
@@ -639,8 +655,8 @@ async fn runtime_rejects_torn_empty_database_without_running_schema_creation() {
     restrict_private_path(&database, false).unwrap();
     fs::create_dir(jobs.join("outputs")).unwrap();
     restrict_private_path(&jobs.join("outputs"), true).unwrap();
-    assert!(DurableStore::open(&jobs).await.is_err());
-    assert!(DurableStore::initialize_fresh(&jobs).await.is_err());
+    assert!(JobStore::open(&jobs).await.is_err());
+    assert!(JobStore::initialize_fresh(&jobs).await.is_err());
     assert_eq!(fs::metadata(database).unwrap().len(), 0);
     assert!(!jobs.join("jobs.db-wal").exists());
     assert!(!jobs.join("jobs.db-shm").exists());
@@ -663,7 +679,7 @@ async fn runtime_validates_migration_history_without_reapplying_missing_migratio
     let root = store.root.clone();
     store.close().await;
     let original = fs::read(root.join("jobs.db")).unwrap();
-    let error = DurableStore::open(&root).await.unwrap_err();
+    let error = JobStore::open(&root).await.unwrap_err();
     assert!(error.to_string().contains("migration history"), "{error}");
     assert_eq!(fs::read(root.join("jobs.db")).unwrap(), original);
     use sqlx::Connection;
@@ -684,4 +700,230 @@ async fn runtime_validates_migration_history_without_reapplying_missing_migratio
         "runtime opening must not repair the ledger"
     );
     connection.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_list_is_owned_bounded_and_paginated_without_lifecycle_copies() {
+    let (_temp, store) = fixture().await;
+    let mut own_ids = Vec::new();
+    for _ in 0..33 {
+        let id = JobId::new();
+        store.admit(id, &owner(), &sample()).await.unwrap();
+        own_ids.push(id.to_string());
+    }
+    store
+        .admit(JobId::new(), &"f".repeat(64), &sample())
+        .await
+        .unwrap();
+    let first = store.list(&owner(), 1, None).await.unwrap();
+    let second = store.list(&owner(), 2, None).await.unwrap();
+    assert_eq!(first.len(), 32);
+    assert_eq!(second.len(), 1);
+    let mut actual: Vec<_> = first
+        .into_iter()
+        .chain(second)
+        .map(|j| j.id.to_string())
+        .collect();
+    actual.sort();
+    own_ids.sort();
+    assert_eq!(actual, own_ids);
+    assert_eq!(
+        store
+            .list(&owner(), 1, Some("Pending"))
+            .await
+            .unwrap()
+            .len(),
+        32
+    );
+    assert!(
+        store
+            .list(&owner(), 1, Some("Done"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for page in [0, 129] {
+        assert!(store.list(&owner(), page, None).await.is_err());
+    }
+    assert!(store.list(&owner(), 1, Some("unknown")).await.is_err());
+}
+
+#[tokio::test]
+async fn old_sqlite_schema_is_preserved_and_rejected_without_migration() {
+    for version in [1, 2] {
+        let (_temp, store) = fixture().await;
+        sqlx::query("UPDATE DurableMeta SET version=?")
+            .bind(version)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let root = store.root.clone();
+        store.close().await;
+        let original = fs::read(root.join("jobs.db")).unwrap();
+        assert!(JobStore::open(&root).await.is_err());
+        assert!(JobStore::initialize_fresh(&root).await.is_err());
+        assert!(active_ids(&root).is_err());
+        assert_eq!(fs::read(root.join("jobs.db")).unwrap(), original);
+    }
+}
+
+impl JobStore {
+    pub(super) async fn claim_fixture(&self, id: JobId, owner: &str) -> io::Result<JobView> {
+        let snapshot = self.lookup(id, owner).await?.job;
+        sqlx::query("INSERT OR IGNORE INTO Workers(id,worker_type,storage_name,last_seen) VALUES('fixture-worker','hostlink-agent','SqliteStorage',0)")
+            .execute(&self.pool).await.map_err(io::Error::other)?;
+        sqlx::query("UPDATE Jobs SET status='Queued',lock_by='fixture-worker',lock_at=CAST(strftime('%s','now') AS INTEGER) WHERE id=? AND status='Pending' AND attempts=0")
+            .bind(id.to_string()).execute(&self.pool).await.map_err(io::Error::other)?;
+        self.claim_dequeued(&snapshot, &id.to_string(), "fixture-worker")
+            .await
+    }
+}
+
+impl JobStore {
+    pub(super) async fn read_fixture_output(
+        &self,
+        id: JobId,
+        owner: &str,
+        stream: JobOutput,
+        offset: u64,
+    ) -> io::Result<(Vec<u8>, u64, bool)> {
+        self.read_output(&self.lookup(id, owner).await?, stream, offset)
+    }
+}
+
+#[test]
+fn ulid_rejects_aliases_overflow_uuid_and_paths() {
+    for good in [
+        "00000000000000000000000000",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "7ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+    ] {
+        assert_eq!(JobId::parse(good).unwrap().to_string(), good);
+    }
+    for bad in [
+        "8ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+        "01arz3ndektsv4rrffq69g5fav",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAI",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAO",
+        "01ARZ3NDEKTSV4RRFFQ69G5FA",
+        "001ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "550e8400-e29b-41d4-a716-446655440000",
+        "../01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    ] {
+        assert!(JobId::parse(bad).is_err(), "{bad}");
+        assert!(serde_json::from_value::<JobId>(serde_json::json!(bad)).is_err());
+    }
+}
+
+#[tokio::test]
+async fn fast_queries_bound_owned_rows_without_scanning_unrelated_jobs() {
+    use sqlx::Row;
+    let (_temp, store) = fixture().await;
+    let broken = JobId::new();
+    let good = JobId::new();
+    let other = "c".repeat(64);
+    store.admit(broken, &owner(), &sample()).await.unwrap();
+    store.admit(good, &other, &sample()).await.unwrap();
+    sqlx::query("UPDATE Jobs SET last_result=CAST(zeroblob(1048576) AS TEXT) WHERE id=?")
+        .bind(broken.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    assert!(store.lookup(broken, &owner()).await.is_err());
+    assert_eq!(
+        store.lookup(broken, &other).await.unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(store.list(&owner(), 1, None).await.is_err());
+    assert_eq!(
+        store.lookup(good, &other).await.unwrap().state,
+        JobState::Prepared
+    );
+    assert_eq!(store.list(&other, 1, None).await.unwrap()[0].id, good);
+    let next = JobId::new();
+    store.admit(next, &other, &sample()).await.unwrap();
+    assert!(
+        active_ids(&store.root).is_err(),
+        "deep update safety scan still fails closed"
+    );
+    let plan = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN QUERY PLAN {} WHERE j.id=?",
+        super::query::ROWS
+    )))
+    .bind(good.to_string())
+    .fetch_all(&store.pool)
+    .await
+    .unwrap();
+    let details: Vec<String> = plan
+        .iter()
+        .map(|row| row.try_get("detail").unwrap())
+        .collect();
+    assert!(
+        details
+            .iter()
+            .any(|s| s.contains("SEARCH j USING INDEX") && s.contains("id=?")),
+        "{details:?}"
+    );
+    assert!(
+        details
+            .iter()
+            .any(|s| s.contains("SEARCH c USING INDEX") && s.contains("task_id=?")),
+        "{details:?}"
+    );
+    let native: (String, String) = sqlx::query_as("SELECT id,idempotency_key FROM Jobs WHERE id=?")
+        .bind(good.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+    assert_eq!(native, (good.to_string(), good.to_string()));
+    store.claim_fixture(good, &other).await.unwrap();
+    let columns: Vec<String> = sqlx::query("PRAGMA table_info(StartedClaims)")
+        .fetch_all(&store.pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.try_get("name").unwrap())
+        .collect();
+    assert_eq!(columns, ["task_id", "owner", "request_sha256"]);
+    sqlx::query("UPDATE StartedClaims SET request_sha256=? WHERE task_id=?")
+        .bind("f".repeat(64))
+        .bind(good.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    assert!(store.lookup(good, &other).await.is_err());
+    assert!(store.list(&other, 1, None).await.is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_new_upload_protects_only_valid_inherited_acl_and_rejects_hardlinks_before_change() {
+    let temp = tempfile::tempdir().unwrap();
+    restrict_private_path(temp.path(), true).unwrap();
+    let valid = temp.path().join("new.upload");
+    fs::write(&valid, b"disposable upload").unwrap();
+    validate_windows_acl_contents(&valid, &fs::symlink_metadata(&valid).unwrap(), false).unwrap();
+    secure_new_upload(&valid).unwrap();
+    validate_private_path(&valid, false).unwrap();
+    assert_eq!(fs::read(&valid).unwrap(), b"disposable upload");
+
+    let linked = temp.path().join("linked.upload");
+    fs::write(&linked, b"preserve bytes and inherited DACL").unwrap();
+    fs::hard_link(&linked, temp.path().join("alias.upload")).unwrap();
+    let metadata = fs::symlink_metadata(&linked).unwrap();
+    validate_windows_acl_contents(&linked, &metadata, false).unwrap();
+    assert!(
+        validate_windows_acl(&linked, &metadata).is_err(),
+        "fixture must have an unprotected inherited DACL"
+    );
+    assert!(secure_new_upload(&linked).is_err());
+    assert!(
+        validate_windows_acl(&linked, &fs::symlink_metadata(&linked).unwrap()).is_err(),
+        "hardlink refusal must not protect/change the DACL"
+    );
+    assert_eq!(
+        fs::read(&linked).unwrap(),
+        b"preserve bytes and inherited DACL"
+    );
 }

@@ -27,23 +27,23 @@ does not certify production or registered Windows updater deployment.
 | Controller CLI and operator command dispatch | `crates/client/src/cli/{mod.rs,args.rs,commands/}`; `main.rs` is the binary entrypoint |
 | Managed Hub HTTP client, routes and trusted SSH pins | `crates/client/src/hub/{mod.rs,client.rs,config.rs,routes.rs}` |
 | Direct and gateway SSH | `crates/client/src/connect/`; `crates/agent/src/ssh/`; `crates/agent/src/tunnel/` |
-| Source-pinned tests / durable jobs | `crates/client/src/run/`; `crates/agent/src/durable/`; `crates/agent/src/ssh/jobs/` |
+| Source-pinned tests / durable jobs | `crates/client/src/run/`; `crates/agent/src/jobs/` |
 | Hub v2 endpoints and authoritative registry | `crates/hub/src/server/`; `crates/hub/src/state.rs` |
 | Fresh enrollment and source-pinned installation | `crates/agent/src/enrollment/`; `crates/client/src/bootstrap/` |
 | Linux service lifecycle | `crates/agent/src/service/linux/` (systemd --user) |
 | Windows user-owned service and maintenance | `crates/agent/src/service/windows/`, with admission, rollback and process ownership |
 | Agent update and ZIP security | `crates/agent/src/update/`, including `archive/`, `windows/` and `update_handoff/` for recovery |
 
-`durable/database.rs` keeps the cohesive private initialization, connection
-and immutable migration-ledger validation contract together; its extra lines
-are a security-contract exception. `durable/persistence.rs` keeps the cohesive
-Apalis payload, immutable claim
-validation and SQL row decoding together. `durable/tests.rs` and
-`ssh/jobs/tests.rs` are larger security/lifecycle regression suites; their
-scenarios exercise real SQLite and processes rather than mock backends.
-`ssh/jobs/engine_tests.rs` is likewise a cohesive worker security/lifecycle
-regression suite covering real dequeue, forged claims, crash windows, retry
-suppression, process limits and failure-driven tree teardown.
+`jobs/database.rs` retains the cohesive private SQLite/WAL/FULL and migration
+ledger contract, whose security checks justify exceeding 200 lines.
+`jobs/private_fs.rs` keeps private permissions/ACLs, source-ancestor trust and
+filesystem durability in one security contract, also exceeding 200 lines.
+`jobs/persistence.rs` owns immutable admission; `jobs/query.rs` decodes one
+bounded native-status/result/claim snapshot for lookup, list and deep inventory. `jobs/lifecycle.rs` holds the one-use execution fence and native result
+publication. `jobs/worker.rs` keeps group ownership, verified teardown and output
+completion in one security contract. `jobs/*tests.rs` and `ssh/tests/wire/` retain larger real SQLite,
+ProcessKit and encrypted SSH regression scenarios. See the
+[minimal jobs contract](AGENT_MINIMAL_JOBS.md).
 
 ## Verification
 

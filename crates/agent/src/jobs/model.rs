@@ -3,19 +3,21 @@ use super::*;
 /// Caller-generated opaque identifier. It is never converted into an unchecked path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct JobId(Uuid);
+pub struct JobId(ulid::Ulid);
 
 impl JobId {
     /// Generate a new unpredictable identifier before the first submission.
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(ulid::Ulid::generate())
     }
 
-    /// Accept only canonical lowercase UUID text; reject path and alternate forms.
+    /// Accept only canonical uppercase ULID text; reject path and alternate forms.
     pub fn parse(value: &str) -> io::Result<Self> {
-        let id = Uuid::parse_str(value).map_err(|_| invalid("job ID must be a canonical UUID"))?;
+        let id = value
+            .parse::<ulid::Ulid>()
+            .map_err(|_| invalid("job ID must be a canonical ULID"))?;
         if id.to_string() != value {
-            return Err(invalid("job ID must use canonical lowercase UUID spelling"));
+            return Err(invalid("job ID must use canonical uppercase ULID spelling"));
         }
         Ok(Self(id))
     }
@@ -64,7 +66,8 @@ impl JobSpec {
     }
 }
 
-/// The persisted state of a single admitted job. Interrupted means uncertain,
+/// Operator projection of native Apalis status/result. Never stored in the payload.
+/// Interrupted means uncertain,
 /// not permission to rerun an operation or replace the Agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -81,38 +84,36 @@ impl JobState {
     pub fn blocks_update(self) -> bool {
         matches!(self, Self::Prepared | Self::Running | Self::Interrupted)
     }
-
-    pub(super) fn can_transition_to(self, next: Self) -> bool {
-        matches!(
-            (self, next),
-            (
-                Self::Prepared,
-                Self::Running | Self::Failed | Self::Interrupted
-            ) | (
-                Self::Running,
-                Self::Exited { .. } | Self::Failed | Self::Interrupted
-            )
-        )
-    }
 }
 
-/// A persisted authenticated identity, exact command digest and lifecycle state.
+/// Immutable authenticated request stored as the Apalis payload. No lifecycle fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct JobRecord {
-    pub version: u32,
+pub struct JobPayload {
+    /// Canonical caller ULID, also the Apalis idempotency key.
     pub id: JobId,
+    /// Fingerprint of the authenticated controller.
     pub controller_key_sha256: String,
+    /// Digest of the exact serialized process specification.
     pub request_sha256: String,
+    /// Source-pinned executable and exact argv/cwd.
     pub spec: JobSpec,
-    pub state: JobState,
 }
 
-/// Admission is idempotent: an already accepted ID never launches another worker.
+/// Read-only view of an immutable request and native Apalis status/result.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Admission {
-    Created(JobRecord),
-    Existing(JobRecord),
+pub struct JobView {
+    pub(crate) job: JobPayload,
+    /// Native lifecycle/result projected for operators; never persisted here.
+    pub state: JobState,
+    pub(crate) started: bool,
+}
+
+impl std::ops::Deref for JobView {
+    type Target = JobPayload;
+    fn deref(&self) -> &Self::Target {
+        &self.job
+    }
 }
 
 impl TryFrom<String> for JobId {
@@ -127,10 +128,10 @@ impl From<JobId> for String {
     }
 }
 
-impl JobRecord {
+impl JobPayload {
     pub(super) fn validate(&self, id: JobId) -> io::Result<()> {
-        if self.version != SCHEMA_VERSION || self.id != id {
-            return Err(invalid("durable job identity/version mismatch"));
+        if self.id != id {
+            return Err(invalid("durable job identity mismatch"));
         }
         validate_digest(&self.controller_key_sha256)?;
         if self.request_sha256 != format!("{:x}", Sha256::digest(self.spec.serialized()?)) {

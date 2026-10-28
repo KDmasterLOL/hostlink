@@ -1,14 +1,16 @@
 #![cfg(unix)]
-//! End-to-end SSH jobs-v1 behavior across the actual Controller and Agent packages.
+//! End-to-end SSH jobs behavior across the actual Controller and Agent packages.
+
+#[path = "../../agent/tests/support/containment.rs"]
+mod containment;
 
 use hostlink::{
     HostSpec,
     connect::HostConnection,
-    run::{Cancel, JobSpec, JobState, JobStream, Output, Start, Status},
+    run::{Cancel, JobState, JobStream, Output, Status},
 };
 use hostlink_agent::{AgentConfig, ssh};
 use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
-use sha2::{Digest as _, Sha256};
 use std::fs;
 use std::time::Duration;
 
@@ -20,13 +22,16 @@ fn private_file(path: &std::path::Path, bytes: &[u8]) {
 
 #[tokio::test]
 async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access() {
+    if !containment::supported() {
+        return;
+    }
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().expect("owned disposable fixture");
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let jobs = root.path().join("jobs");
     fs::create_dir(&jobs).expect("jobs dir");
     fs::set_permissions(&jobs, fs::Permissions::from_mode(0o700)).unwrap();
-    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs)
+    hostlink_agent::jobs::JobStore::initialize_fresh(&jobs)
         .await
         .expect("initialize fresh private Agent SQLite fixture")
         .close()
@@ -92,33 +97,17 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
         identity: second_key,
         ..spec.clone()
     };
-    // The new Agent admits only singly-linked, owner-owned read-only executables.
-    // Stage this fixture under our private directory, never on an installed host.
-    let program = root.path().join("pinned-test-shell");
-    fs::copy(fs::canonicalize("/bin/sh").unwrap(), &program).expect("stage verified shell fixture");
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o500))
-        .expect("lock executable fixture against writes");
-    let digest = format!("{:x}", Sha256::digest(fs::read(&program).unwrap()));
-    let id = uuid::Uuid::new_v4().to_string();
-    let request = Start {
-        id: id.clone(),
-        spec: JobSpec {
-            program: program.to_str().unwrap().to_owned(),
-            args: vec![
-                "-c".into(),
-                r"printf x >> launch-count; sleep 1; printf '\000\377'; printf '\377E' >&2; exit 7"
-                    .into(),
-            ],
-            cwd: Some(root.path().to_str().unwrap().to_owned()),
-            source_sha256: digest,
-        },
-    };
+    let binary = fs::read(fs::canonicalize("/bin/sh").unwrap()).unwrap();
+    let id = ulid::Ulid::generate().to_string();
+    let args = vec!["-c".into(),
+        r#"cd "$1"; printf x >> launch-count; sleep 1; printf '\000\377'; printf '\377E' >&2; exit 7"#.into(),
+        "fixture".into(), root.path().to_str().unwrap().into()];
 
     let mut original = HostConnection::connect(&spec)
         .await
         .expect("pinned SSH connect");
     let accepted = original
-        .job_start(&request)
+        .job_run(&id, &binary, &args)
         .await
         .expect("durable start ACK");
     assert_eq!(accepted.id, id);
@@ -194,15 +183,15 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
     }
 
     let original_result = resumed
-        .job_start(&request)
+        .job_run(&id, &binary, &args)
         .await
         .expect("same ID must be idempotent");
     assert_eq!(original_result.state, JobState::Exited { code: 7 });
-    let mut conflicting = request.clone();
-    conflicting.spec.args.push("conflicting argv".into());
+    let mut conflicting = args.clone();
+    conflicting.push("conflicting argv".into());
     assert!(
-        resumed.job_start(&conflicting).await.is_err(),
-        "different manifest with same UUID must fail closed"
+        resumed.job_run(&id, &binary, &conflicting).await.is_err(),
+        "different manifest with same ULID must fail closed"
     );
     assert_eq!(
         fs::read_to_string(root.path().join("launch-count")).unwrap(),
@@ -213,19 +202,15 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
     // that cancellation terminates the entire process tree and leaves a
     // terminal non-success state rather than an indefinitely blocked update.
     let pid_file = root.path().join("owned-cancel-descendant");
-    let cancel_id = uuid::Uuid::new_v4().to_string();
-    let cancel_request = Start {
-        id: cancel_id.clone(),
-        spec: JobSpec {
-            args: vec![
-                "-c".into(),
-                format!("sleep 300 & echo $! > '{}'; wait", pid_file.display()),
-            ],
-            ..request.spec.clone()
-        },
-    };
+    let cancel_id = ulid::Ulid::generate().to_string();
+    let cancel_args = vec![
+        "-c".into(),
+        "sleep 300 & echo $! > \"$1\"; wait".into(),
+        "fixture".into(),
+        pid_file.to_str().unwrap().into(),
+    ];
     let accepted = resumed
-        .job_start(&cancel_request)
+        .job_run(&cancel_id, &binary, &cancel_args)
         .await
         .expect("start cancellable job");
     assert!(matches!(
@@ -314,7 +299,7 @@ async fn job_resumes_after_ssh_disconnect_without_relaunch_or_cross_key_access()
         "ProcessKit must kill the cancellable job's descendant"
     );
     assert!(
-        hostlink_agent::durable::active_ids(&jobs_probe)
+        hostlink_agent::jobs::active_ids(&jobs_probe)
             .unwrap()
             .is_empty(),
         "completed cancellation must no longer block Agent update"

@@ -1,6 +1,9 @@
 #![cfg(windows)]
 
-use hostlink_agent::durable::{Admission, DurableStore, JobId, JobSpec, JobState};
+#[path = "support/started_job.rs"]
+mod started_job;
+
+use hostlink_agent::jobs::{JobId, JobSpec, JobState, JobStore};
 use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
 use serde_json::{Map, json};
 use sha2::{Digest, Sha256};
@@ -46,7 +49,7 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     for directory in [&root, &state, &bin, &root.join("jobs")] {
         private_windows_path(directory, true);
     }
-    DurableStore::initialize_fresh(root.join("jobs"))
+    JobStore::initialize_fresh(root.join("jobs"))
         .await
         .expect("initialize installed Agent SQLite state")
         .close()
@@ -304,7 +307,7 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     fs::write(&marker_path, original_marker).expect("restore exact disposable ownership marker");
     private_windows_path(&marker_path, false);
 
-    let store = DurableStore::open(root.join("jobs"))
+    let store = JobStore::open(root.join("jobs"))
         .await
         .expect("open durable job store");
     for target_state in [JobState::Prepared, JobState::Running, JobState::Interrupted] {
@@ -323,12 +326,9 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
             )
             .await
             .expect("admit real durable job fixture");
-        assert!(matches!(admission, Admission::Created(_)));
+        assert_eq!(admission.id, job_id);
         if target_state != JobState::Prepared {
-            store
-                .claim_start(job_id, &owner)
-                .await
-                .expect("mark disposable fixture running");
+            started_job::started(&root.join("jobs"), &store, job_id, &owner).await;
         }
         if target_state == JobState::Interrupted {
             store
@@ -355,7 +355,7 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     fs::remove_dir_all(root.join("jobs")).expect("remove exact disposable SQLite fixture");
     fs::create_dir(root.join("jobs")).expect("fresh empty disposable job store");
     private_windows_path(&root.join("jobs"), true);
-    DurableStore::initialize_fresh(root.join("jobs"))
+    JobStore::initialize_fresh(root.join("jobs"))
         .await
         .expect("initialize fresh disposable SQLite state")
         .close()

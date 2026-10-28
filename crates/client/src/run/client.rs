@@ -2,7 +2,7 @@ use russh::ChannelMsg;
 use serde_json::Value;
 
 use super::{
-    model::{Cancel, JobOutput, JobStatus, Output, Seal, SealedArtifact, Start, Status},
+    model::{Cancel, JobOutput, JobStatus, Output, Seal, Start, Status},
     protocol::{
         MAX_FRAME_BYTES, SUBSYSTEM, SealSuccessReply, close_channel, decode_frame, parse_output,
         parse_remote_error, parse_status, protocol_error, protocol_invalid, require_keys,
@@ -13,19 +13,58 @@ use super::{
 use crate::connect::{HostConnection, OPERATION_TIMEOUT, SshClientError};
 
 impl HostConnection {
-    /// Asks the Agent to verify and seal one staged artifact over jobs-v1.
+    /// List one page of at most 32 owned jobs using native Apalis status filtering.
+    ///
+    /// # Errors
+    /// Rejects invalid page/status, malformed replies, remote and transport failures.
+    pub async fn job_list(
+        &mut self,
+        page: u32,
+        status: Option<&str>,
+    ) -> Result<Vec<JobStatus>, SshClientError> {
+        if !(1..=128).contains(&page)
+            || status.is_some_and(|s| {
+                !["Pending", "Queued", "Running", "Done", "Failed", "Killed"].contains(&s)
+            })
+        {
+            return Err(protocol_invalid("invalid jobs list filter"));
+        }
+        let value = self
+            .job_request(serde_json::json!({"op":"list","page":page,"status":status}))
+            .await?;
+        if value.get("ok") == Some(&Value::Bool(false)) {
+            return Err(parse_remote_error(value)?);
+        }
+        require_keys(&value, &["ok", "jobs"])?;
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Reply {
+            ok: bool,
+            jobs: Vec<JobStatus>,
+        }
+        let reply: Reply = serde_json::from_value(value)
+            .map_err(|_| protocol_invalid("invalid jobs list reply"))?;
+        if !reply.ok || reply.jobs.len() > 32 {
+            return Err(protocol_invalid("unbounded jobs list reply"));
+        }
+        for job in &reply.jobs {
+            validate_id(&job.id)?;
+        }
+        Ok(reply.jobs)
+    }
+
+    /// Asks the Agent to verify and seal one staged artifact over jobs.
     ///
     /// # Errors
     /// Returns an error for invalid request values, malformed protocol replies,
     /// a digest mismatch, or transport failure.
-    pub async fn job_seal(&mut self, request: &Seal) -> Result<SealedArtifact, SshClientError> {
+    pub(crate) async fn job_seal(&mut self, request: &Seal) -> Result<String, SshClientError> {
         if request.size > 64 * 1024 * 1024 || request.name != sealed_artifact_name(&request.sha256)?
         {
             return Err(protocol_invalid("invalid Seal request"));
         }
         let value = self
             .job_request(serde_json::json!({
-                "version": 1,
                 "op": "seal",
                 "name": request.name,
                 "sha256": request.sha256,
@@ -35,20 +74,17 @@ impl HostConnection {
         if value.get("ok") == Some(&Value::Bool(false)) {
             return Err(parse_remote_error(value)?);
         }
-        require_keys(&value, &["version", "ok", "program", "sha256"])?;
+        require_keys(&value, &["ok", "program", "sha256"])?;
         let reply: SealSuccessReply = serde_json::from_value(value)
             .map_err(|_| protocol_invalid("Seal reply fields are missing or unknown"))?;
-        if reply.version != 1 || !reply.ok || reply.sha256 != request.sha256 {
+        if !reply.ok || reply.sha256 != request.sha256 {
             return Err(protocol_invalid(
-                "Seal reply version, success flag, or digest mismatch",
+                "Seal reply success flag, or digest mismatch",
             ));
         }
         validate_absolute_path(&reply.program)
             .map_err(|_| protocol_invalid("Seal reply program is not an absolute path"))?;
-        Ok(SealedArtifact {
-            program: reply.program,
-            sha256: reply.sha256,
-        })
+        Ok(reply.program)
     }
 
     /// Starts one Agent-owned durable job request over a fresh SSH channel.
@@ -56,12 +92,11 @@ impl HostConnection {
     /// A transport failure may mean the Agent accepted the request without
     /// delivering its reply. The caller must query this ID after reconnecting;
     /// this method never retries the start request.
-    pub async fn job_start(&mut self, request: &Start) -> Result<JobStatus, SshClientError> {
+    pub(crate) async fn job_start(&mut self, request: &Start) -> Result<JobStatus, SshClientError> {
         validate_id(&request.id)?;
         validate_spec(&request.spec)?;
         let body = serde_json::json!({
-            "version": 1,
-            "op": "start",
+            "op": "run",
             "id": request.id,
             "spec": request.spec,
         });
@@ -73,7 +108,7 @@ impl HostConnection {
     pub async fn job_status(&mut self, request: &Status) -> Result<JobStatus, SshClientError> {
         validate_id(&request.id)?;
         let value = self
-            .job_request(serde_json::json!({ "version": 1, "op": "status", "id": request.id }))
+            .job_request(serde_json::json!({ "op": "status", "id": request.id }))
             .await?;
         parse_status(value, &request.id)
     }
@@ -84,7 +119,7 @@ impl HostConnection {
     pub async fn job_cancel(&mut self, request: &Cancel) -> Result<JobStatus, SshClientError> {
         validate_id(&request.id)?;
         let value = self
-            .job_request(serde_json::json!({ "version": 1, "op": "cancel", "id": request.id }))
+            .job_request(serde_json::json!({ "op": "cancel", "id": request.id }))
             .await?;
         parse_status(value, &request.id)
     }
@@ -94,8 +129,7 @@ impl HostConnection {
         validate_id(&request.id)?;
         let value = self
             .job_request(serde_json::json!({
-                "version": 1,
-                "op": "output",
+                "op": "logs",
                 "id": request.id,
                 "stream": request.stream,
                 "offset": request.offset,

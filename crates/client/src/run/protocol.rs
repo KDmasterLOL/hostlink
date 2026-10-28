@@ -4,13 +4,13 @@ use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
 
-pub(super) const SUBSYSTEM: &str = "hostlink-jobs-v1";
+pub(super) const SUBSYSTEM: &str = "hostlink-jobs";
 const MAX_OUTPUT_CHUNK_BYTES: usize = 24 * 1024;
 pub(super) const MAX_FRAME_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Error)]
 pub(super) enum ProtocolError {
-    #[error("invalid jobs-v1 response: {0}")]
+    #[error("invalid jobs response: {0}")]
     Invalid(&'static str),
 }
 
@@ -42,7 +42,6 @@ pub fn sealed_artifact_name(sha256: &str) -> Result<String, SshClientError> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SealSuccessReply {
-    pub(super) version: u8,
     pub(super) ok: bool,
     pub(super) program: String,
     pub(super) sha256: String,
@@ -66,7 +65,6 @@ pub(super) fn decode_frame(bytes: &[u8]) -> Result<Value, ProtocolError> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SuccessReply {
-    version: u8,
     ok: bool,
     id: String,
     state: JobState,
@@ -78,7 +76,6 @@ struct SuccessReply {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ErrorReply {
-    version: u8,
     ok: bool,
     error: String,
 }
@@ -89,21 +86,13 @@ pub(super) fn parse_status(value: Value, expected_id: &str) -> Result<JobStatus,
     }
     require_keys(
         &value,
-        &[
-            "version",
-            "ok",
-            "id",
-            "state",
-            "data_base64",
-            "next_offset",
-            "eof",
-        ],
+        &["ok", "id", "state", "data_base64", "next_offset", "eof"],
     )?;
     let reply: SuccessReply = serde_json::from_value(value)
         .map_err(|_| protocol_invalid("status reply fields are missing or unknown"))?;
-    if reply.version != 1 || !reply.ok || reply.id != expected_id {
+    if !reply.ok || reply.id != expected_id {
         return Err(protocol_invalid(
-            "status reply version, success flag, or ID mismatch",
+            "status reply success flag, or ID mismatch",
         ));
     }
     if reply.data_base64.is_some() || reply.next_offset.is_some() || reply.eof.is_some() {
@@ -122,21 +111,13 @@ pub(super) fn parse_output(value: Value, request: &Output) -> Result<JobOutput, 
     }
     require_keys(
         &value,
-        &[
-            "version",
-            "ok",
-            "id",
-            "state",
-            "data_base64",
-            "next_offset",
-            "eof",
-        ],
+        &["ok", "id", "state", "data_base64", "next_offset", "eof"],
     )?;
     let reply: SuccessReply = serde_json::from_value(value)
         .map_err(|_| protocol_invalid("output reply fields are missing or unknown"))?;
-    if reply.version != 1 || !reply.ok || reply.id != request.id {
+    if !reply.ok || reply.id != request.id {
         return Err(protocol_invalid(
-            "output reply version, success flag, or ID mismatch",
+            "output reply success flag, or ID mismatch",
         ));
     }
     let data = reply
@@ -174,14 +155,14 @@ pub(super) fn parse_output(value: Value, request: &Output) -> Result<JobOutput, 
 }
 
 pub(super) fn parse_remote_error(value: Value) -> Result<SshClientError, SshClientError> {
-    require_keys(&value, &["version", "ok", "error"])?;
+    require_keys(&value, &["ok", "error"])?;
     let reply: ErrorReply = serde_json::from_value(value)
         .map_err(|_| protocol_invalid("error reply fields are missing or unknown"))?;
-    if reply.version != 1 || reply.ok || reply.error.is_empty() || reply.error.len() > 512 {
+    if reply.ok || reply.error.is_empty() || reply.error.len() > 512 {
         return Err(protocol_invalid("invalid bounded remote error reply"));
     }
     Ok(SshClientError::Invalid(format!(
-        "remote jobs-v1 error: {}",
+        "remote jobs error: {}",
         reply.error
     )))
 }

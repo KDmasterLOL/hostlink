@@ -1,6 +1,5 @@
-use super::jobs::*;
 use super::*;
-use crate::durable::{Admission, DurableStore, JobId, JobSpec, JobState};
+use crate::jobs::{JobId, JobSpec, JobState, JobStore};
 use std::process::{Command, Stdio};
 
 #[test]
@@ -12,7 +11,7 @@ fn timeout_worker_root_fixture() {
         .args([
             "--ignored",
             "--exact",
-            "ssh::windows_durable_job_tests::timeout_worker_descendant_fixture",
+            "jobs::windows_process_tests::timeout_worker_descendant_fixture",
             "--nocapture",
         ])
         .current_dir(&root)
@@ -54,37 +53,38 @@ async fn timeout_cancels_descendants_and_records_failure() {
     std::fs::write(&marker, b"private Agent worker fixture").unwrap();
     private_test_path(&marker, false);
 
-    let executable = temp.path().join("agent-test.exe");
-    std::fs::copy(std::env::current_exe().unwrap(), &executable)
-        .expect("stage source-owned test executable");
-    private_test_path(&executable, false);
-    let source_sha256 = format!(
-        "{:x}",
-        Sha256::digest(std::fs::read(&executable).expect("read staged executable"))
-    );
     let jobs_root = temp.path().join("jobs");
     std::fs::create_dir(&jobs_root).unwrap();
     private_test_path(&jobs_root, true);
-    let store = DurableStore::initialize_fresh(jobs_root)
+    let store = JobStore::initialize_fresh(jobs_root)
         .await
         .expect("open private job store");
     let owner = "e".repeat(64);
+    let artifacts = store.artifacts(&owner).unwrap();
+    let bytes =
+        std::fs::read(std::env::current_exe().unwrap()).expect("read source-owned test executable");
+    let source_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let upload_name = format!("{source_sha256}.upload");
+    let upload = artifacts.upload_root().join(&upload_name);
+    std::fs::write(&upload, &bytes).expect("stage source-owned test executable");
+    private_test_path(&upload, false);
+    let executable = artifacts
+        .seal(&upload_name, &source_sha256, bytes.len() as u64)
+        .expect("seal source-owned test executable");
     let id = JobId::new();
     let spec = JobSpec {
         program: executable.to_string_lossy().into_owned(),
         args: vec![
             "--ignored".into(),
             "--exact".into(),
-            "ssh::windows_durable_job_tests::timeout_worker_root_fixture".into(),
+            "jobs::windows_process_tests::timeout_worker_root_fixture".into(),
             "--nocapture".into(),
         ],
         cwd: Some(temp.path().to_path_buf()),
         source_sha256,
     };
-    let Admission::Created(_) = store.admit(id, &owner, &spec).await.unwrap() else {
-        panic!("new test job ID must be created");
-    };
-    let record = store.claim_start(id, &owner).await.unwrap();
+    store.admit(id, &owner, &spec).await.unwrap();
+    let record = store.claim_fixture(id, &owner).await.unwrap();
     let runner = store.acquire_runner().expect("exclusive runtime lease");
     let runtime = Arc::new(JobRuntime {
         store,
@@ -97,10 +97,7 @@ async fn timeout_cancels_descendants_and_records_failure() {
         active_jobs: std::sync::Mutex::new(HashMap::new()),
         unknown_permits: std::sync::Mutex::new(Vec::new()),
     });
-    let active = Arc::new(JobCancellation {
-        process: runtime.shutdown.child_token(),
-        requested: AtomicBool::new(false),
-    });
+    let active = runtime.shutdown.child_token();
     let worker = tokio::spawn(run_job(
         runtime.clone(),
         owner.clone(),
@@ -124,8 +121,7 @@ async fn timeout_cancels_descendants_and_records_failure() {
         // Give the process tree an explicit cancellation request before waiting for cleanup.
         // This bounds a broken readiness path without detaching a live test worker.
         if !worker.is_finished() {
-            active.requested.store(true, Ordering::Release);
-            active.process.cancel();
+            active.cancel();
         }
         let cleanup = tokio::time::timeout(Duration::from_secs(10), worker).await;
         let cleanup_status = match cleanup {
@@ -169,9 +165,9 @@ async fn timeout_cancels_descendants_and_records_failure() {
 }
 
 fn timeout_fixture_output(
-    store: &DurableStore,
+    store: &JobStore,
     id: JobId,
-    stream: crate::durable::JobOutput,
+    stream: crate::jobs::JobOutput,
     private_root: &Path,
 ) -> String {
     const MAX_DIAGNOSTIC_BYTES: usize = 4096;

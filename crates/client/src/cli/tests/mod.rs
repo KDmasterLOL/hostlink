@@ -1,52 +1,12 @@
 use super::*;
 use crate::cli::{
     args::{Cli, Command, JobCommand},
-    commands::{
-        job::{validate_job_id, validate_job_spec, write_job_status},
-        run::{PreparedRun, sftp_failure_may_be_existing_file},
-    },
+    commands::job::{validate_job_id, write_job_status},
 };
 use clap::Parser;
-use hostlink::{
-    connect::SshClientError,
-    run::{JobSpec, JobState, JobStatus, sealed_artifact_name},
-};
+use hostlink::run::{JobState, JobStatus, sealed_artifact_name};
 use sha2::{Digest as _, Sha256};
 use std::fs::{self, File};
-
-#[test]
-fn job_start_parses_exact_argument_vector_after_separator() {
-    let cli = Cli::try_parse_from([
-        "hostlink",
-        "job",
-        "start",
-        "--config",
-        "host.json",
-        "--program",
-        "/opt/tests/bin",
-        "--source-sha256",
-        &"a".repeat(64),
-        "--",
-        "--list",
-        "suite::test name",
-    ])
-    .unwrap();
-    let Command::Job {
-        command:
-            JobCommand::Start {
-                program,
-                source_sha256,
-                args,
-                ..
-            },
-    } = cli.command
-    else {
-        panic!("expected job start command");
-    };
-    assert_eq!(program, "/opt/tests/bin");
-    assert_eq!(source_sha256, "a".repeat(64));
-    assert_eq!(args, ["--list", "suite::test name"]);
-}
 
 #[test]
 fn migration_preflight_requires_all_local_explicit_inputs() {
@@ -73,23 +33,51 @@ fn migration_preflight_requires_all_local_explicit_inputs() {
 fn run_parses_test_runner_arguments_without_shell_reinterpretation() {
     let cli = Cli::try_parse_from([
         "hostlink",
+        "jobs",
         "run",
         "--config",
         "host.json",
         "--binary",
         "runner",
         "--id",
-        "00000000-0000-4000-8000-000000000000",
+        "01ARZ3NDEKTSV4RRFFQ69G5FA2",
         "--",
         "--list",
         "suite::test name",
         "--exact",
     ])
     .unwrap();
-    let Command::Run { args, .. } = cli.command else {
+    let Command::Jobs {
+        command: JobCommand::Run { args, wait, .. },
+    } = cli.command
+    else {
         panic!("expected run command");
     };
     assert_eq!(args, ["--list", "suite::test name", "--exact"]);
+    assert!(!wait);
+    assert!(
+        Cli::try_parse_from([
+            "hostlink",
+            "run",
+            "--binary",
+            "runner",
+            "--config",
+            "host.json"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "hostlink",
+            "jobs",
+            "run",
+            "--program",
+            "/bin/sh",
+            "--config",
+            "host.json"
+        ])
+        .is_err()
+    );
 }
 
 #[test]
@@ -123,47 +111,6 @@ fn run_staging_name_is_the_digest_bound_seal_name() {
     let artifact_name = sealed_artifact_name(&digest).unwrap();
     assert_eq!(artifact_name.len(), 71);
     assert_eq!(artifact_name, format!("{digest}.upload"));
-    let prepared = PreparedRun {
-        id: "00000000-0000-4000-8000-000000000000".into(),
-        bytes: bytes.to_vec(),
-        digest: digest.clone(),
-        artifact_name: artifact_name.clone(),
-        args: vec!["--list".into()],
-    };
-    assert_eq!(
-        prepared.artifact_name,
-        format!("{}.upload", prepared.digest)
-    );
-    let seal = prepared.seal_request();
-    assert_eq!(seal.name, prepared.artifact_name);
-    assert_eq!(seal.sha256, prepared.digest);
-    assert_eq!(seal.size, bytes.len() as u64);
-    assert_eq!(prepared.bytes, bytes);
-}
-
-#[test]
-fn only_generic_remote_sftp_failure_can_enter_exact_seal_verification() {
-    let failure = || {
-        SshClientError::Sftp(russh_sftp::client::error::Error::Status(
-            russh_sftp::protocol::Status {
-                id: 1,
-                status_code: russh_sftp::protocol::StatusCode::Failure,
-                error_message: "Failure".into(),
-                language_tag: "en-US".into(),
-            },
-        ))
-    };
-    let denied = SshClientError::Sftp(russh_sftp::client::error::Error::Status(
-        russh_sftp::protocol::Status {
-            id: 1,
-            status_code: russh_sftp::protocol::StatusCode::PermissionDenied,
-            error_message: "Permission denied".into(),
-            language_tag: "en-US".into(),
-        },
-    ));
-    assert!(sftp_failure_may_be_existing_file(&failure()));
-    assert!(!sftp_failure_may_be_existing_file(&denied));
-    assert!(!sftp_failure_may_be_existing_file(&SshClientError::Timeout));
 }
 
 #[test]
@@ -171,7 +118,7 @@ fn job_subcommands_reject_invalid_required_values() {
     assert!(
         Cli::try_parse_from([
             "hostlink",
-            "job",
+            "jobs",
             "status",
             "--config",
             "host.json",
@@ -184,12 +131,12 @@ fn job_subcommands_reject_invalid_required_values() {
     assert!(
         Cli::try_parse_from([
             "hostlink",
-            "job",
-            "output",
+            "jobs",
+            "logs",
             "--config",
             "host.json",
             "--id",
-            "00000000-0000-4000-8000-000000000000",
+            "01ARZ3NDEKTSV4RRFFQ69G5FA2",
             "--stream",
             "combined",
             "--offset",
@@ -200,12 +147,12 @@ fn job_subcommands_reject_invalid_required_values() {
     assert!(
         Cli::try_parse_from([
             "hostlink",
-            "job",
-            "output",
+            "jobs",
+            "logs",
             "--config",
             "host.json",
             "--id",
-            "00000000-0000-4000-8000-000000000000",
+            "01ARZ3NDEKTSV4RRFFQ69G5FA2",
             "--stream",
             "stdout",
         ])
@@ -214,23 +161,9 @@ fn job_subcommands_reject_invalid_required_values() {
 }
 
 #[test]
-fn job_start_validation_rejects_non_absolute_program_and_bad_digest() {
-    let mut spec = JobSpec {
-        program: "relative/program".into(),
-        args: Vec::new(),
-        cwd: None,
-        source_sha256: "a".repeat(64),
-    };
-    assert!(validate_job_spec(&spec).is_err());
-    spec.program = "/absolute/program".into();
-    spec.source_sha256 = "A".repeat(64);
-    assert!(validate_job_spec(&spec).is_err());
-}
-
-#[test]
 fn job_status_output_preserves_exit_code_and_omits_unknown_code() {
     let exited = JobStatus {
-        id: "00000000-0000-4000-8000-000000000000".into(),
+        id: "01ARZ3NDEKTSV4RRFFQ69G5FA2".into(),
         state: JobState::Exited { code: 7 },
     };
     let mut bytes = Vec::new();
@@ -274,4 +207,59 @@ fn new_output_never_overwrites_existing_data() {
     create_new_output(&path, b"old").unwrap();
     assert!(create_new_output(&path, b"new").is_err());
     assert_eq!(fs::read(&path).unwrap(), b"old");
+}
+
+#[test]
+fn jobs_list_validates_native_filters_and_page_bounds() {
+    let cli = Cli::try_parse_from([
+        "hostlink",
+        "jobs",
+        "list",
+        "--config",
+        "host.json",
+        "--status",
+        "Done",
+        "--page",
+        "2",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Jobs {
+            command: JobCommand::List {
+                page: 2,
+                status: Some(_),
+                ..
+            }
+        }
+    ));
+    for page in ["0", "129"] {
+        assert!(
+            Cli::try_parse_from([
+                "hostlink",
+                "jobs",
+                "list",
+                "--config",
+                "host.json",
+                "--page",
+                page
+            ])
+            .is_err()
+        );
+    }
+    assert!(
+        Cli::try_parse_from([
+            "hostlink",
+            "jobs",
+            "list",
+            "--config",
+            "host.json",
+            "--status",
+            "unknown"
+        ])
+        .is_err()
+    );
+    assert!(Cli::try_parse_from(["hostlink", "job", "status"]).is_err());
+    assert!(Cli::try_parse_from(["hostlink", "jobs", "start"]).is_err());
+    assert!(Cli::try_parse_from(["hostlink", "jobs", "output"]).is_err());
 }

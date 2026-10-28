@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "support/containment.rs"]
+mod containment;
+
 use hostlink_agent::{AgentConfig, ssh};
 use russh::client::{self, Handler};
 use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
@@ -46,7 +49,7 @@ async fn jobs_request(
 ) -> serde_json::Value {
     let mut channel = session.channel_open_session().await.expect("jobs channel");
     channel
-        .request_subsystem(true, "hostlink-jobs-v1")
+        .request_subsystem(true, "hostlink-jobs")
         .await
         .expect("jobs subsystem request");
     loop {
@@ -129,7 +132,7 @@ async fn controller_scoped_upload_seal_and_durable_exit_seven() {
     std::fs::create_dir(&jobs_root).expect("jobs root");
     std::fs::set_permissions(&jobs_root, std::fs::Permissions::from_mode(0o700))
         .expect("private jobs root");
-    hostlink_agent::durable::DurableStore::initialize_fresh(&jobs_root)
+    hostlink_agent::jobs::JobStore::initialize_fresh(&jobs_root)
         .await
         .expect("initialize fresh private Agent SQLite fixture")
         .close()
@@ -202,7 +205,7 @@ async fn controller_scoped_upload_seal_and_durable_exit_seven() {
     .await;
     let replace_race = jobs_request(
         &mut replacement_session,
-        &serde_json::json!({"version":1,"op":"seal","name":upload_name,"sha256":sha256,"size":bytes.len()}),
+        &serde_json::json!({"op":"seal","name":upload_name,"sha256":sha256,"size":bytes.len()}),
     )
     .await;
     assert_eq!(
@@ -270,7 +273,7 @@ async fn controller_scoped_upload_seal_and_durable_exit_seven() {
     .await;
     let partial = jobs_request(
         &mut owner,
-        &serde_json::json!({"version":1,"op":"seal","name":upload_name,"sha256":sha256,"size":bytes.len()}),
+        &serde_json::json!({"op":"seal","name":upload_name,"sha256":sha256,"size":bytes.len()}),
     )
     .await;
     assert_eq!(
@@ -288,7 +291,7 @@ async fn controller_scoped_upload_seal_and_durable_exit_seven() {
     upload(&owner, &upload_name, &corrupted, "corrupt upload").await;
     let corrupt_ack = jobs_request(
         &mut owner,
-        &serde_json::json!({"version":1,"op":"seal","name":upload_name,"sha256":sha256,"size":bytes.len()}),
+        &serde_json::json!({"op":"seal","name":upload_name,"sha256":sha256,"size":bytes.len()}),
     )
     .await;
     assert_eq!(
@@ -304,7 +307,7 @@ async fn controller_scoped_upload_seal_and_durable_exit_seven() {
     upload(&owner, &upload_name, &bytes, "final valid upload").await;
     let sealed = jobs_request(
         &mut owner,
-        &serde_json::json!({"version":1,"op":"seal","name":upload_name,"sha256":sha256,"size":bytes.len()}),
+        &serde_json::json!({"op":"seal","name":upload_name,"sha256":sha256,"size":bytes.len()}),
     )
     .await;
     assert_eq!(
@@ -313,7 +316,7 @@ async fn controller_scoped_upload_seal_and_durable_exit_seven() {
             .expect("seal response")
             .keys()
             .collect::<Vec<_>>(),
-        vec!["ok", "program", "sha256", "version"]
+        vec!["ok", "program", "sha256"]
     );
     assert_eq!(sealed["ok"], true);
     assert_eq!(sealed["sha256"], sha256);
@@ -333,43 +336,126 @@ async fn controller_scoped_upload_seal_and_durable_exit_seven() {
     );
     let repeated = jobs_request(
         &mut owner,
-        &serde_json::json!({"version":1,"op":"seal","name":upload_name,"sha256":sha256,"size":bytes.len()}),
+        &serde_json::json!({"op":"seal","name":upload_name,"sha256":sha256,"size":bytes.len()}),
     )
     .await;
     assert_eq!(repeated, sealed, "exact repeat seal is stable");
 
-    let id = uuid::Uuid::new_v4().to_string();
+    let rejected_run = |source: &std::path::Path| {
+        serde_json::json!({"op":"run","id":ulid::Ulid::generate().to_string(),"spec":{
+            "program":source,"args":["-c","exit 7"],"cwd":temp.path(),"source_sha256":sha256
+        }})
+    };
+    assert_eq!(
+        jobs_request(&mut other, &rejected_run(std::path::Path::new(program))).await["ok"],
+        false,
+        "another authenticated controller cannot run the owner's sealed source"
+    );
+    let unsafe_parent = temp.path().join("writable-parent");
+    std::fs::create_dir(&unsafe_parent).unwrap();
+    std::fs::set_permissions(&unsafe_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let unsafe_source = unsafe_parent.join(format!("{sha256}.program"));
+    std::fs::write(&unsafe_source, &bytes).unwrap();
+    std::fs::set_permissions(&unsafe_source, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let alias = temp.path().join("sealed-alias");
+    std::os::unix::fs::symlink(program, &alias).unwrap();
+    let unsealed = temp.path().join("unsealed-source");
+    std::fs::write(&unsealed, &bytes).unwrap();
+    std::fs::set_permissions(&unsealed, std::fs::Permissions::from_mode(0o500)).unwrap();
+    for source in [&unsafe_source, &alias, &unsealed] {
+        assert_eq!(
+            jobs_request(&mut owner, &rejected_run(source)).await["ok"],
+            false,
+            "unsafe or aliased source must fail authenticated admission: {}",
+            source.display()
+        );
+    }
+    let sealed_parent = std::path::Path::new(program).parent().unwrap();
+    std::fs::set_permissions(sealed_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(
+        jobs_request(&mut owner, &rejected_run(std::path::Path::new(program))).await["ok"],
+        false,
+        "a writable sealed parent must fail admission"
+    );
+    std::fs::set_permissions(sealed_parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let strong_containment = containment::supported();
+    let id = ulid::Ulid::generate().to_string();
     let start = jobs_request(
         &mut owner,
-        &serde_json::json!({"version":1,"op":"start","id":id,"spec":{"program":program,"args":["-c","exit 7"],"cwd":temp.path(),"source_sha256":sha256}}),
+        &serde_json::json!({"op":"run","id":id,"spec":{"program":program,"args":["-c","printf x > launch-count; exit 7"],"cwd":temp.path(),"source_sha256":sha256}}),
     )
     .await;
     assert_eq!(start["ok"], true);
     for _ in 0..100 {
-        let status = jobs_request(
-            &mut owner,
-            &serde_json::json!({"version":1,"op":"status","id":id}),
-        )
-        .await;
-        if status["state"]["state"] == "exited" {
-            assert_eq!(status["state"]["code"], 7);
+        let status = jobs_request(&mut owner, &serde_json::json!({"op":"status","id":id})).await;
+        if matches!(status["state"]["state"].as_str(), Some("exited" | "failed")) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let status = jobs_request(
-        &mut owner,
-        &serde_json::json!({"version":1,"op":"status","id":id}),
-    )
-    .await;
-    assert_eq!(status["state"]["state"], "exited");
-    assert_eq!(status["state"]["code"], 7);
+    let status = jobs_request(&mut owner, &serde_json::json!({"op":"status","id":id})).await;
+    if strong_containment {
+        assert_eq!(status["state"]["state"], "exited");
+        assert_eq!(status["state"]["code"], 7);
+        assert_eq!(
+            std::fs::read(temp.path().join("launch-count")).unwrap(),
+            b"x"
+        );
+    } else {
+        assert_eq!(
+            status["state"]["state"], "failed",
+            "weak backend must fail before launch"
+        );
+        assert!(
+            !temp.path().join("launch-count").exists(),
+            "unsupported backend must never spawn"
+        );
+    }
     let output = jobs_request(
         &mut owner,
-        &serde_json::json!({"version":1,"op":"output","id":id,"stream":"stdout","offset":0}),
+        &serde_json::json!({"op":"logs","id":id,"stream":"stdout","offset":0}),
     )
     .await;
     assert_eq!(output["ok"], true);
+    assert_eq!(
+        output["eof"], true,
+        "definite prelaunch failure has durable empty output"
+    );
+    if !strong_containment {
+        assert_eq!(output["data_base64"], "");
+        let stderr = jobs_request(
+            &mut owner,
+            &serde_json::json!({"op":"logs","id":id,"stream":"stderr","offset":0}),
+        )
+        .await;
+        assert_eq!(stderr["ok"], true);
+        assert_eq!(stderr["eof"], true);
+        assert_eq!(stderr["data_base64"], "");
+        let duplicate = jobs_request(
+            &mut owner,
+            &serde_json::json!({"op":"run","id":id,"spec":{"program":program,"args":["-c","printf x > launch-count; exit 7"],"cwd":temp.path(),"source_sha256":sha256}}),
+        ).await;
+        assert_eq!(duplicate["state"]["state"], "failed");
+        assert!(
+            !temp.path().join("launch-count").exists(),
+            "failed claim must never replay"
+        );
+    }
+
+    std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut changed = bytes.clone();
+    changed[0] ^= 1;
+    std::fs::write(program, &changed).unwrap();
+    std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert_eq!(
+        jobs_request(&mut owner, &rejected_run(std::path::Path::new(program))).await["ok"],
+        false,
+        "a changed sealed digest must be rejected during admission"
+    );
+    std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(program, &bytes).unwrap();
+    std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o500)).unwrap();
 
     owner
         .disconnect(Disconnect::ByApplication, "test complete", "en")
