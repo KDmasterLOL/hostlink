@@ -44,7 +44,7 @@ impl DurableStore {
         Self::attach(root, pool).await
     }
 
-    async fn attach(root: PathBuf, pool: SqlitePool) -> io::Result<Self> {
+    pub(super) async fn attach(root: PathBuf, pool: SqlitePool) -> io::Result<Self> {
         let backend = SqliteStorage::new(&pool).with_config(
             Config::default()
                 .queue(QUEUE)

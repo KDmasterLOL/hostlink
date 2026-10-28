@@ -126,6 +126,13 @@ closed without modification; see the
 [migration and storage contract](docs/AGENT_DURABLE_SQLITE.md). The isolated
 `experiments/agent-apalis-poc` remains a separate, unchanged reference workspace.
 
+`hostlink-agent durable import-legacy --root PATH --stage PATH` explicitly
+validates a copied legacy jobs snapshot and prepares a quarantined SQLite/output
+stage. **Publication is blocked; this is not a completed cutover importer.**
+It always exits nonzero, preserves the original and never changes services or
+Agent configuration. See the [snapshot staging runbook](docs/AGENT_LEGACY_IMPORT.md)
+for exact limits, restart behavior and the missing legacy process/rollback fence.
+
 
 The client also supports Hub v2 inventory and named host selection while
 keeping explicit `--config PATH` as a mutually exclusive option. Start with

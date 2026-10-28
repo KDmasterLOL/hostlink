@@ -25,6 +25,7 @@ pub const UPDATE_LOCK_FILE: &str = "update.lock";
 mod artifacts;
 mod database;
 mod inventory;
+mod legacy_import;
 mod lifecycle;
 mod model;
 mod output;
@@ -33,6 +34,7 @@ mod private_fs;
 
 pub(crate) use artifacts::ArtifactStore;
 pub use inventory::active_ids;
+pub use legacy_import::stage_legacy_snapshot;
 pub use model::{Admission, JobId, JobRecord, JobSpec, JobState};
 use output::*;
 pub(crate) use output::{JobOutput, open_output_append};

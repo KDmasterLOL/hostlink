@@ -44,6 +44,11 @@ scenarios exercise real SQLite and processes rather than mock backends.
 `ssh/jobs/engine_tests.rs` is likewise a cohesive worker security/lifecycle
 regression suite covering real dequeue, forged claims, crash windows, retry
 suppression, process limits and failure-driven tree teardown.
+`durable/legacy_import/snapshot.rs` keeps the bounded old-format inventory and
+private file access contract together. Its sibling `tests.rs` is a cohesive
+security regression suite for quarantined staging, byte-preserving output,
+lock contention, interrupted stages and source/readback corruption; their
+extra lines are security-contract/test exceptions to the size guideline.
 
 ## Verification
 

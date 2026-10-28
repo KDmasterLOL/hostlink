@@ -26,6 +26,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Offline durable-state tools; never invoked by Agent startup or updater.
+    Durable {
+        #[command(subcommand)]
+        command: DurableCommand,
+    },
     /// Parse and validate a user-owned Agent configuration (does not connect).
     Check {
         #[arg(long)]
@@ -102,6 +107,20 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum DurableCommand {
+    /// Verify a COPIED legacy jobs snapshot into a quarantined stage (NO cutover).
+    /// Always exits nonzero because publication is not implemented safely.
+    ImportLegacy {
+        /// Absolute copied jobs directory; its private parent must include update.lock.
+        #[arg(long)]
+        root: PathBuf,
+        /// Separate absolute destination; parent must already exist and be private.
+        #[arg(long)]
+        stage: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum ServiceCommand {
     /// Register a private user service; the first start is explicit.
     Install {
@@ -142,6 +161,11 @@ async fn main() {
 
 async fn run(cli: Cli) -> io::Result<()> {
     match cli.command {
+        Command::Durable { command } => match command {
+            DurableCommand::ImportLegacy { root, stage } => {
+                hostlink_agent::durable::stage_legacy_snapshot(&root, &stage).await
+            }
+        },
         Command::Check { config } => {
             let _config = load_config(&config)?;
             println!("Agent configuration: valid");

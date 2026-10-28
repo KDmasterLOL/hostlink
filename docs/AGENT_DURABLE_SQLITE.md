@@ -73,8 +73,10 @@ while a process tree may still be alive.
 
 ## Existing filesystem records
 
-This change intentionally implements the task's fail-closed migration option,
-not an automatic importer. Any legacy UUID directory or unknown root entry
+Runtime retains the fail-closed migration boundary. The explicit 1C-1075
+[snapshot staging command](AGENT_LEGACY_IMPORT.md) prepares and verifies a
+quarantined candidate only; safe publication is still blocked by the old
+Agent's missing lifetime process/rollback fence. Any legacy UUID directory or unknown root entry
 aborts Agent opening and updater scans with its path and a migration diagnostic.
 The scan never reads, rewrites or deletes legacy records or output. It does not
 initialize jobs.db around them. Torn/empty databases and orphan output are also
@@ -91,8 +93,9 @@ ledger. Existing connections verify WAL without converting an unknown mode.
 For an existing install, retain a complete private backup and its exact legacy
 Agent binary/config. Reconcile active and UNKNOWN IDs with their controller;
 keep the original root for the legacy Agent's status/output inspection. A
-verified importer must establish identity/state/output equivalence before that
-root can be reused. Until such an importer exists, upgrading a nonempty legacy
+publication importer must establish identity/state/output equivalence and
+exclusive process/rollback ownership before that root can be reused.
+Snapshot staging alone does not authorize cutover. Until publication is verified, upgrading a nonempty legacy
 jobs root is blocked. A separate fresh enrollment/private root can exercise the
 new backend without altering the old root or replaying any legacy UUID.
 Do not delete records or reset IDs to make preflight pass.

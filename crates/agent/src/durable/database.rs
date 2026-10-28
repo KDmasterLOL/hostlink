@@ -236,6 +236,10 @@ pub(super) async fn verify_schema(pool: &SqlitePool) -> io::Result<()> {
     if version != 1 {
         return Err(invalid("unsupported durable SQLite schema version"));
     }
+    verify_migration_history(pool).await
+}
+
+pub(super) async fn verify_migration_history(pool: &SqlitePool) -> io::Result<()> {
     // Validate the ledger read-only; never invoke Migrator::run on old state.
     let applied =
         sqlx::query("SELECT version,success,checksum FROM _sqlx_migrations ORDER BY version")
