@@ -95,6 +95,7 @@ async fn timeout_cancels_descendants_and_records_failure() {
         accepting: AtomicBool::new(true),
         shutdown: processkit::CancellationToken::new(),
         active_jobs: std::sync::Mutex::new(HashMap::new()),
+        unknown_permits: std::sync::Mutex::new(Vec::new()),
     });
     let active = Arc::new(JobCancellation {
         process: runtime.shutdown.child_token(),

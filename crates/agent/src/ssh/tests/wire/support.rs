@@ -45,6 +45,7 @@ impl WireFixture {
             accepting: AtomicBool::new(true),
             shutdown: processkit::CancellationToken::new(),
             active_jobs: std::sync::Mutex::new(HashMap::new()),
+            unknown_permits: std::sync::Mutex::new(Vec::new()),
         });
         let worker = JobWorker::start(jobs.clone());
         Self {

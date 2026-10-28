@@ -72,6 +72,7 @@ where
         accepting: AtomicBool::new(true),
         shutdown: processkit::CancellationToken::new(),
         active_jobs: std::sync::Mutex::new(HashMap::new()),
+        unknown_permits: std::sync::Mutex::new(Vec::new()),
     });
     if config.gateway.is_none() {
         return serve_prepared_until(listener, prepared, jobs, shutdown).await;

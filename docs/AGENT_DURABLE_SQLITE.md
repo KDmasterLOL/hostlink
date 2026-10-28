@@ -37,9 +37,13 @@ Provisioned `jobs_root` is private and contains `jobs.db`, optional SQLite WAL
 and shared-memory sidecars, `runner.lock`, and `outputs/<UUID>/{stdout,stderr}.bin`.
 There are at most 4096 records, 64 KiB per record (largest terminal representation
 must fit), 8 MiB per raw output stream and 24 KiB per output response. Exited
-output must exist; missing output is an error, never fabricated EOF. Unknown
-output directories, FIFO/symlink files, Unix hardlinks or oversized streams fail
-the safety scan. Windows paths retain SID/DACL and reparse checks. Artifacts remain a sibling under the same install root and retain
+and claimed Failed jobs must have both durable output files; missing output
+is an error, never fabricated EOF. Output preparation fails to Interrupted
+if either spool cannot be created, before any OS process starts. Unknown
+output directories, FIFO/symlink files, hardlinks or oversized streams fail
+the safety scan. Windows paths retain SID/DACL and reparse checks; hardlinked
+SQLite sidecars are rejected before any attempt to change their ACL. Artifacts
+remain a sibling under the same install root and retain
 per-controller ownership, exact seal size/SHA and private read-only execution.
 
 Every connection uses WAL and FULL, verified after connect and before acquire;
@@ -62,7 +66,10 @@ holds an exclusive runner lease; new admission and one-use process claims
 still require the update lock. A lock-held candidate startup regression verifies
 this ordering on disposable state.
 Processkit cancellation/timeout waits for tree teardown. Uncertain teardown,
-shutdown or failed output synchronization stays Interrupted.
+shutdown or failed output synchronization stays Interrupted. Unconfirmed
+ProcessKit teardown or persistence errors shut down admission and quarantine
+the worker's capacity permit; the supervisor cannot claim a clean shutdown
+while a process tree may still be alive.
 
 ## Existing filesystem records
 

@@ -27,6 +27,9 @@ pub(in crate::ssh) struct JobRuntime {
     pub(in crate::ssh) accepting: AtomicBool,
     pub(in crate::ssh) shutdown: processkit::CancellationToken,
     pub(in crate::ssh) active_jobs: std::sync::Mutex<HashMap<JobId, Arc<JobCancellation>>>,
+    // An unconfirmed teardown must not return its process slot to the pool.
+    // Admission is closed and updater safety is protected by Interrupted.
+    pub(in crate::ssh) unknown_permits: std::sync::Mutex<Vec<tokio::sync::OwnedSemaphorePermit>>,
 }
 
 /// Process cancellation is Agent-owned and unrelated to SSH channel lifetimes.

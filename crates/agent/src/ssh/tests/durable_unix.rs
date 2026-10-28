@@ -65,6 +65,7 @@ async fn prepared_job(
         accepting: AtomicBool::new(true),
         shutdown: processkit::CancellationToken::new(),
         active_jobs: std::sync::Mutex::new(HashMap::new()),
+        unknown_permits: std::sync::Mutex::new(Vec::new()),
     });
     let _ = record;
     let record = runtime

@@ -8,33 +8,52 @@ pub(in crate::ssh) async fn run_job(
     active: Arc<JobCancellation>,
 ) -> io::Result<()> {
     let id = record.id;
-    if verify_job_source(&record.spec).is_err() {
-        return runtime
-            .store
-            .transition(id, &owner, JobState::Running, JobState::Failed)
-            .await
-            .map(|_| ());
-    }
+    // Once StartedClaims is committed a terminal Failed must have both
+    // durable spool files. Prepare them before any source check can fail.
     let (out, out_sync) = match open_job_output(&runtime, id, JobOutput::Stdout) {
         Ok(files) => files,
-        Err(_) => {
-            return runtime
+        Err(error) => {
+            runtime
                 .store
-                .transition(id, &owner, JobState::Running, JobState::Failed)
-                .await
-                .map(|_| ());
+                .transition(id, &owner, JobState::Running, JobState::Interrupted)
+                .await?;
+            return Err(io::Error::other(format!(
+                "failed to prepare durable stdout; start remains UNKNOWN: {error}"
+            )));
         }
     };
     let (err, err_sync) = match open_job_output(&runtime, id, JobOutput::Stderr) {
         Ok(files) => files,
-        Err(_) => {
-            return runtime
+        Err(error) => {
+            runtime
                 .store
-                .transition(id, &owner, JobState::Running, JobState::Failed)
-                .await
-                .map(|_| ());
+                .transition(id, &owner, JobState::Running, JobState::Interrupted)
+                .await?;
+            return Err(io::Error::other(format!(
+                "failed to prepare durable stderr; start remains UNKNOWN: {error}"
+            )));
         }
     };
+    if verify_job_source(&record.spec).is_err() {
+        let synced =
+            tokio::task::spawn_blocking(move || (out_sync.sync_all(), err_sync.sync_all())).await;
+        let state = if matches!(synced, Ok((Ok(()), Ok(())))) {
+            JobState::Failed
+        } else {
+            JobState::Interrupted
+        };
+        runtime
+            .store
+            .transition(id, &owner, JobState::Running, state)
+            .await?;
+        return if state == JobState::Failed {
+            Ok(())
+        } else {
+            Err(io::Error::other(
+                "source failed verification and durable output could not be synchronized",
+            ))
+        };
+    }
     let output_failed = Arc::new(AtomicBool::new(false));
     let cancel = active.process.clone();
     let mut command = processkit::Command::new(&record.spec.program)
@@ -70,13 +89,23 @@ pub(in crate::ssh) async fn run_job(
                 | processkit::ErrorReason::NotFound { .. } => JobState::Failed,
                 _ => JobState::Interrupted,
             };
-            return runtime
+            runtime
                 .store
                 .transition(id, &owner, JobState::Running, state)
-                .await
-                .map(|_| ());
+                .await?;
+            return if state == JobState::Failed {
+                Ok(())
+            } else {
+                Err(io::Error::other(format!(
+                    "ProcessKit could not confirm launch/teardown: {error}"
+                )))
+            };
         }
     };
+    let unconfirmed_tree = matches!(
+        &outcome,
+        Err(error) if !matches!(error.reason(), processkit::ErrorReason::Cancelled { .. })
+    );
     let sync_results =
         tokio::task::spawn_blocking(move || (out_sync.sync_all(), err_sync.sync_all())).await;
     let has_output_error = output_failed.load(Ordering::Acquire);
@@ -110,6 +139,11 @@ pub(in crate::ssh) async fn run_job(
     runtime
         .store
         .transition(id, &owner, JobState::Running, next)
-        .await
-        .map(|_| ())
+        .await?;
+    if unconfirmed_tree {
+        return Err(io::Error::other(
+            "ProcessKit did not confirm complete process-tree teardown",
+        ));
+    }
+    Ok(())
 }

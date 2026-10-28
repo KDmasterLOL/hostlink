@@ -33,6 +33,7 @@ pub(super) fn runtime(store: DurableStore) -> Arc<JobRuntime> {
         accepting: AtomicBool::new(true),
         shutdown: processkit::CancellationToken::new(),
         active_jobs: std::sync::Mutex::new(HashMap::new()),
+        unknown_permits: std::sync::Mutex::new(Vec::new()),
     })
 }
 
@@ -245,9 +246,18 @@ async fn detached_worker_retains_runner_lease_until_process_teardown() {
         observer.lookup(id, &owner).await.unwrap().state,
         JobState::Interrupted
     );
-    let lease = observer
-        .acquire_runner()
-        .expect("lease released after final worker drop");
+    // Weak::upgrade returns None when the last strong reference reaches zero,
+    // which can precede completion of JobRuntime's File destructor.
+    let lease = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(lease) = observer.acquire_runner() {
+                break lease;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("runner lease is released after its final destructor");
     drop(lease);
     observer.close().await;
 }

@@ -65,6 +65,76 @@ async fn start_only_commits_prepared_and_real_worker_polls_database() {
 }
 
 #[tokio::test]
+async fn source_removed_after_start_ack_has_complete_failed_spools_without_execution() {
+    let (temp, runtime, owner, spec) = fixture("printf forbidden > replay").await;
+    let id = JobId::new();
+    let accepted = handle_job_request(start(id, &spec), &runtime, &owner).await;
+    assert_eq!(accepted.state, Some(JobState::Prepared));
+    // The authenticated request was accepted, but the path no longer has the
+    // originally pinned bytes when Apalis eventually dequeues the task.
+    std::fs::remove_file(&spec.program).unwrap();
+    let mut worker = JobWorker::start(runtime.clone());
+    wait_state(&runtime, id, &owner, JobState::Failed).await;
+    for stream in [JobOutput::Stdout, JobOutput::Stderr] {
+        let path = runtime.store.output_path(id, stream);
+        assert_eq!(std::fs::metadata(path).unwrap().len(), 0);
+        assert_eq!(
+            runtime
+                .store
+                .read_output(id, &owner, stream, 0)
+                .await
+                .unwrap(),
+            (Vec::new(), 0, true)
+        );
+    }
+    assert!(
+        crate::durable::active_ids(&temp.path().join("jobs"))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!temp.path().join("replay").exists());
+    stop(&mut worker, &runtime).await;
+}
+
+#[tokio::test]
+async fn failed_spool_preparation_quarantines_capacity_and_stops_worker() {
+    let (temp, runtime, owner, spec) = fixture("printf forbidden > replay").await;
+    let id = JobId::new();
+    let accepted = handle_job_request(start(id, &spec), &runtime, &owner).await;
+    assert_eq!(accepted.state, Some(JobState::Prepared));
+    let occupied = runtime.store.output_path(id, JobOutput::Stdout);
+    std::fs::write(&occupied, b"invalid pre-existing spool").unwrap();
+    crate::durable::restrict_private_path(&occupied, false).unwrap();
+
+    let mut worker = JobWorker::start(runtime.clone());
+    let result = tokio::time::timeout(Duration::from_secs(10), &mut worker.task)
+        .await
+        .expect("failed worker must stop instead of releasing an unknown process slot")
+        .expect("worker supervisor joined");
+    assert!(result.is_err());
+    assert!(!runtime.accepting.load(Ordering::Acquire));
+    assert_eq!(
+        runtime.store.lookup(id, &owner).await.unwrap().state,
+        JobState::Interrupted
+    );
+    assert_eq!(
+        runtime
+            .unknown_permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "unconfirmed work cannot release its permit"
+    );
+    assert_eq!(runtime.slots.available_permits(), MAX_ACTIVE_JOBS - 1);
+    assert_eq!(
+        crate::durable::active_ids(&temp.path().join("jobs")).unwrap(),
+        vec![id.to_string()]
+    );
+    assert!(!temp.path().join("replay").exists());
+}
+
+#[tokio::test]
 async fn crash_after_actual_dequeue_before_claim_is_unknown_and_blocks_update() {
     let (temp, old, owner, spec) = fixture("printf forbidden > replay").await;
     let id = JobId::new();

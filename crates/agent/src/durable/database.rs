@@ -82,6 +82,7 @@ fn validate_sidecar(path: &Path) -> io::Result<()> {
             return Err(invalid("unsafe SQLite sidecar"));
         }
         validate_windows_acl_contents(path, &metadata, false)?;
+        reject_windows_hardlinks(path)?;
     }
     Ok(())
 }

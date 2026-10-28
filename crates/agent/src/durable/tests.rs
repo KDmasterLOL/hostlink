@@ -455,6 +455,22 @@ async fn windows_private_database_hardlink_fails_closed() {
     assert!(active_ids(&jobs).is_err());
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_sqlite_sidecar_hardlink_is_rejected_before_acl_hardening() {
+    let (temp, store) = fixture().await;
+    let jobs = store.root.clone();
+    store.close().await;
+    // All of these paths belong to this disposable test root. A protected
+    // ACL alone does not make an NTFS hardlink safe to modify.
+    let wal = jobs.join("jobs.db-wal");
+    fs::write(&wal, b"disposable-sidecar").unwrap();
+    restrict_private_path(&wal, false).unwrap();
+    fs::hard_link(&wal, temp.path().join("linked-sidecar")).unwrap();
+    assert!(database::secure_sidecars(&jobs).is_err());
+    assert!(DurableStore::open(&jobs).await.is_err());
+}
+
 #[tokio::test]
 async fn tampered_payload_claim_or_apalis_queue_prevents_updates_and_execution() {
     let (_temp, store) = fixture().await;

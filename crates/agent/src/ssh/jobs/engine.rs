@@ -57,31 +57,69 @@ impl JobWorker {
                         let _start = stopping.start_lock.lock().await;
                         stopping.accepting.store(false, Ordering::Release);
                     }
+                    if !stopping
+                        .unknown_permits
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_empty()
+                    {
+                        return Err(WorkerError::BackendError(Box::new(io::Error::other(
+                            "one or more process trees have an unconfirmed teardown",
+                        ))));
+                    }
                     // Keep Apalis polling until process tasks have persisted
                     // their outcomes. Stopping earlier can park an in-flight
                     // SQLite Fetch transaction while services need that very
                     // connection to finish (CallAll drains before poll_close).
-                    let _trees = stopping
-                        .slots
-                        .clone()
-                        .acquire_many_owned(MAX_ACTIVE_JOBS as u32)
-                        .await
-                        .map_err(|e| WorkerError::BackendError(Box::new(e)))?;
+                    let _trees = tokio::time::timeout(
+                        SHUTDOWN_GRACE,
+                        stopping
+                            .slots
+                            .clone()
+                            .acquire_many_owned(MAX_ACTIVE_JOBS as u32),
+                    )
+                    .await
+                    .map_err(|_| {
+                        WorkerError::BackendError(Box::new(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "unconfirmed process teardown or outstanding durable work",
+                        )))
+                    })?
+                    .map_err(|e| WorkerError::BackendError(Box::new(e)))?;
                     Ok::<(), WorkerError>(())
                 })
                 .await
                 .map_err(io::Error::other);
             runtime.accepting.store(false, Ordering::Release);
             runtime.shutdown.cancel();
+            if !runtime
+                .unknown_permits
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+            {
+                return Err(io::Error::other(
+                    "durable process teardown unconfirmed; preserve UNKNOWN state",
+                ));
+            }
             // Apalis returns immediately on a backend error and drops service
             // futures. Process tasks retain their own permits and runtime, so
             // even this path must drain tree teardown before releasing ownership.
-            let _trees = runtime
-                .slots
-                .clone()
-                .acquire_many_owned(MAX_ACTIVE_JOBS as u32)
-                .await
-                .map_err(io::Error::other)?;
+            let _trees = tokio::time::timeout(
+                SHUTDOWN_GRACE,
+                runtime
+                    .slots
+                    .clone()
+                    .acquire_many_owned(MAX_ACTIVE_JOBS as u32),
+            )
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "unconfirmed process teardown or outstanding durable work",
+                )
+            })?
+            .map_err(io::Error::other)?;
             if failed.load(Ordering::Acquire) {
                 return Err(io::Error::other(
                     "durable Apalis service failed; persisted claims require reconciliation",
@@ -141,13 +179,26 @@ async fn consume(
     // and Agent shutdown both await its permit through confirmed tree teardown.
     let process_runtime = runtime.clone();
     let process = tokio::spawn(async move {
-        let _permit = permit;
         let result = run_job(process_runtime.clone(), owner, record, active).await;
-        process_runtime
-            .active_jobs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&id);
+        if result.is_err() {
+            // Unknown process/persistence outcome: never free a capacity slot
+            // or claim that the tree has been confirmed reaped. Shut down
+            // admission and retain the runner lease until Agent termination.
+            process_runtime
+                .unknown_permits
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(permit);
+            process_runtime.accepting.store(false, Ordering::Release);
+            process_runtime.shutdown.cancel();
+        } else {
+            process_runtime
+                .active_jobs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id);
+            drop(permit);
+        }
         result
     });
     drop(start);

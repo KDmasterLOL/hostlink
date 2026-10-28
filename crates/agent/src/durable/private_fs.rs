@@ -48,23 +48,31 @@ pub(crate) fn validate_private_path(path: &Path, directory: bool) -> io::Result<
     {
         validate_windows_acl(path, &metadata)?;
         if !directory {
-            use std::os::windows::io::AsRawHandle;
-            use windows_sys::Win32::Storage::FileSystem::{
-                BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
-            };
-
-            let file = File::open(path)?;
-            let mut info = BY_HANDLE_FILE_INFORMATION::default();
-            // SAFETY: the handle belongs to an open File and info is writable.
-            if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if info.nNumberOfLinks != 1 {
-                return Err(invalid(
-                    "private file has multiple hard links; exact ownership cannot be proved",
-                ));
-            }
+            reject_windows_hardlinks(path)?;
         }
+    }
+    Ok(())
+}
+
+/// Validate link count before touching a SQLite sidecar's DACL. A sidecar can
+/// inherit a safe private-directory ACL that needs to be hardened, but an
+/// attacker-controlled hardlink must never be modified as part of hardening.
+#[cfg(windows)]
+pub(super) fn reject_windows_hardlinks(path: &Path) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let file = File::open(path)?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle belongs to an open File and info is writable.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if info.nNumberOfLinks != 1 {
+        return Err(invalid(
+            "private file has multiple hard links; exact ownership cannot be proved",
+        ));
     }
     Ok(())
 }

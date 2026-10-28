@@ -1,8 +1,8 @@
 # Agent Apalis WorkerBuilder consumer (1C-1073)
 
-Experimental branch `task/1c-1073-apalis-worker`, based on production-storage
-branch `task/1c-1073-apalis-production@2c8c32d60f1e611e475fd8cf5fe988f210eff787`.
-This is development code for review, with no deployment or promotion authority.
+Originally developed in `task/1c-1073-apalis-worker`, then integrated into
+`task/1c-1073-apalis-production`. This is development code for review,
+with no deployment or release authority.
 
 ## Execution and ownership
 
@@ -69,6 +69,15 @@ including decode/SQL failures. Service errors also stop admission, cancel trees
 and return an explicit failure. The serving shutdown wait is bounded to five
 seconds. On timeout it returns an error and signals cancellation without aborting
 cleanup or releasing the runner lease while retained tasks remain alive.
+
+A dequeued task prepares and syncs stdout/stderr spool files before rechecking
+its source SHA. Missing/changing source may then be recorded as Failed with
+valid empty output. Failure to prepare or sync either spool is UNKNOWN and
+remains Interrupted, blocking updates. An unconfirmed ProcessKit teardown
+or failed outcome publication quarantines the permit in the Agent runtime,
+closes admission and forces worker/shutdown failure; no new task receives that
+capacity slot. The bounded shutdown waits are per stage, not a guarantee
+that the entire operation finishes within a single five-second deadline.
 
 ProcessKit, exact source SHA checks, tree termination, raw capped/synced output,
 private paths, sealed artifacts and updater admission retain their existing
