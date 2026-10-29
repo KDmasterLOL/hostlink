@@ -1,3 +1,62 @@
+# Current HostLink Apalis and redundant-guard audit — 2026-10-29 (1C-1101)
+
+This section supersedes the architecture and lifecycle claims in historical
+snapshots below. Development branch: `task/1c-1101-apalis-state-simplify-20261029`
+based on `dev@a25722e1c44cecc8934ff07cf6ae59053b2bd61f`.
+
+The user explicitly requested removing HostLink-owned safeguards and schema
+inspection for the Agent-local Apalis queue and examining all three crates for
+unnecessary custom guarantees. `jobs/database.rs` now only opens an SQLx
+SQLite pool or runs upstream Apalis migrations during fresh enrollment.
+It no longer scans `jobs/`, WAL/SHM, checks `DurableMeta`, checks
+`_sqlx_migrations` checksums, or executes homegrown jobs lifecycle SQL.
+`active_ids()` and the nested synchronous Tokio runtime are deleted.
+Apalis alone determines job states, retries and results.
+
+The Linux updater uses a lifetime-held Agent process lock `jobs/runner.lock`
+(the Agent supervisor takes it, not the Apalis worker); the separate
+`install_root/update.lock` only serializes concurrent updaters. Linux
+service stop/removal no longer requires the Apalis queue to be empty.
+On Windows, the current-user authenticated control pipe performs stopped
+runtime handoff; service/update no longer inspect Apalis tables.
+Interrupted jobs may replay with repeated side effects; source-exact
+Windows runtime verification is still required. Existing v5 databases,
+including an older `DurableMeta` table, are opened unchanged.
+No automatic v4 conversion or deployment has been attempted.
+
+The whole-repository audit also removed duplicate enrollment manifest
+types and fixed a real compatibility problem (Linux consumer rejected
+producer's `name` field). Unified typed manifest/identity are used by
+Linux/Windows service. All Agent relative gateway paths, including
+alternates, are resolved by one method; Client handles alternate identity
+paths. Client uses library SemVer and OpenSSH public-key parsing rather
+than reimplementing grammars; duplicate SSH key reads, enrollment key
+prevalidation, Hub duplicate gateway validation and typed MachineId
+reparsing are removed. Detailed remaining opportunities and indispensable
+trust-boundary rules are recorded in
+[REDUNDANT_GUARDS_AUDIT.md](REDUNDANT_GUARDS_AUDIT.md).
+
+## Verification — source-identical isolated development tree
+
+- `cargo fmt --all -- --check`: PASS.
+- `cargo check --offline --locked --workspace --all-targets`: PASS.
+- `cargo clippy --offline --locked --workspace --all-targets -- -D warnings`: PASS.
+- `cargo test --offline --locked --workspace -- --test-threads=1`: PASS,
+  including 41 Agent unit tests, 27 updater integration tests, 18 Hub tests,
+  Client/SSH/SFTP, real Apalis Board PUT, worker execution and stored result.
+- `cargo xwin check --offline --locked -p hostlink-agent --target
+  x86_64-pc-windows-msvc --lib --tests` and strict Clippy: PASS.
+- The same Windows target check and strict Clippy for
+  `i686-pc-windows-msvc`: PASS.
+
+Two pre-existing external HTTPS/Caddy/OpenSSH fixture E2E tests are
+`ignored`. Neither Windows 11 nor Windows 7 x64/x86 runtime acceptance
+was performed. No release/main/tag, installed Agent, client machine or
+production database was modified. Source-exact integrated `dev` verification
+and publication are recorded separately after fast-forward.
+
+---
+
 # 1C-1081 simplification and P1 follow-up evidence
 
 ## 2026-10-29 — 1C-1098 replaces SSH jobs with local Apalis Board
