@@ -12,7 +12,6 @@ fn load_host_key(path: &Path) -> io::Result<PrivateKey> {
 }
 
 fn load_private_ed25519_key(path: &Path, purpose: &str) -> io::Result<PrivateKey> {
-    validate_private_file(path)?;
     let bytes = read_bounded(path, HOST_KEY_MAX_BYTES)?;
     let key = PrivateKey::from_openssh(&bytes)
         .map_err(|error| invalid_data(format!("invalid {purpose}: {error}")))?;
@@ -112,10 +111,6 @@ pub(crate) fn validate_private_path(path: &Path) -> io::Result<()> {
     }
     #[cfg(windows)]
     validate_private_acl(path)?;
-    Ok(())
-}
-fn validate_private_file(path: &Path) -> io::Result<()> {
-    let _ = read_bounded(path, HOST_KEY_MAX_BYTES)?;
     Ok(())
 }
 

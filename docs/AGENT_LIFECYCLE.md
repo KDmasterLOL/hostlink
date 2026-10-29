@@ -41,8 +41,8 @@ inside that root. The service marker and generated unit are checked before
 management actions; the unit contents, process uid, `/proc` executable path,
 command line and executable digest are verified before status is reported.
 Different roots get distinct unit names. A unit collision, wrong owner, root
-symlink, changed executable, edited unit, missing enrollment config, or unsafe
-job record fails closed.
+symlink, changed executable, edited unit, or missing enrollment config
+fails closed.
 
 `status` reports the unit state, owning uid, exact main PID when active, source
 executable SHA-256, and whether the loopback listener returns an SSH 2.0 banner. It also
@@ -50,18 +50,18 @@ reports whether local enrollment metadata exists. It never claims Hub
 reachability: use `hostlink list --check` for fresh Hub inventory plus bounded
 pinned SSH checks. Enrollment metadata alone does not mean the Agent is online.
 
-`stop` and `remove` refuse while any durable job is `Prepared`, `Running`, or
-`Interrupted`. Interrupted jobs remain unresolved and are never replayed.
+`stop` cancels the Agent process; Apalis owns its queue and does not require
+jobs to be terminal before stopping. Pending records remain durable, while
+interrupted commands may replay after restart, including side effects.
 `remove` stops and disables only the exact owned user unit, removes the exact
 verified Agent executable, and deletes its unit and service marker. It
 deliberately retains the Agent root, credentials, enrollment metadata and jobs
-for recovery or a separately reviewed data deletion. If shutdown races with
-new job admission, it restarts the service and returns a deferred error.
+for recovery or a separately reviewed data deletion.
 
 Reinstalling is idempotent only when root, config and executable hash match.
-Replacing the Agent binary is not performed while registered as a service;
-remove the user service after jobs are terminal, then use the source-exact
-Agent-only update workflow and install the updated executable before registering
+Replacing the Agent binary is not performed while it is running;
+stop and remove the user service, then use the source-exact Agent-only
+update workflow and install the updated executable before registering
 the service again. Hub revocation and local service removal are independent
 operations.
 
@@ -129,17 +129,16 @@ never proves process exit. Unknown PID, identity mismatch, or failed handle open
 leaves the registration in place. If the pipe is already absent, `stop` and
 `remove` fail closed because no authenticated live PID is available; start the
 owned Agent and invoke `remove` while its lifecycle endpoint is available.
-It refuses any durable job
-that is Prepared, Running, Interrupted or unreadable, and asks the Agent to
-shut down through its normal cancellation path. It waits at most ten seconds
-and never terminates a PID or process tree by guesswork. It rechecks durable
-jobs after shutdown and restarts the Agent if a job was admitted in the narrow
-shutdown race. `remove` performs the same stop/interlock, then removes only the
+It asks the Agent to shut down through its normal cancellation path, without
+inspecting its private Apalis database. It waits at most ten seconds and
+never terminates a PID or process tree by guesswork. `remove` performs the same
+authenticated stop, then removes only the
 exact HKCU value and ownership marker after process exit is proven. Windows
 keeps the executable, config, credentials, enrollment record and jobs in place
-for recovery; Hub revocation remains independent. Remove the lifecycle registration before applying an
-Agent update; the Windows update command refuses to replace a binary while its
-service marker is present. A changed binary, marker, registry value, SID, ACL, or
+for recovery; pending jobs remain in Apalis and interrupted commands may
+replay after restart. Hub revocation remains independent. Managed Windows
+updates use the owner-authenticated stopped-runtime maintenance handoff;
+the updater does not replace a loaded executable. A changed binary, marker, registry value, SID, ACL, or
 reparse path fails closed.
 
 During the separately owned Windows Agent update, maintenance startup is admitted
@@ -196,7 +195,7 @@ the test opt-in is set. The positive fixture tests a LocalAppData root with
 spaces and shell metacharacters, protected ACLs, unrelated-root refusal,
 shared-ancestor rejection, install/reinstall/update refusal, binary and
 launcher tampering, an unrelated process reusing a stale lifecycle PID,
-Prepared/Running/Interrupted/unknown-job stop/remove interlocks, repeated
+preservation of Apalis jobs without direct SQL interlocks, repeated
 authenticated status, SSH banner, graceful stop, exact Run-value removal and
 enrollment-file retention. Its fixture path includes spaces and shell
 metacharacters to exercise Windows command quoting. It never refers to or

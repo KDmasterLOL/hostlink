@@ -38,7 +38,7 @@ pub(crate) fn recover_maintenance_stop(root: &Path) -> io::Result<()> {
         ));
     }
     match unsafe { WaitForSingleObject(process.handle, 10_000) } {
-        WAIT_OBJECT_0 => refuse_active_jobs(&record),
+        WAIT_OBJECT_0 => Ok(()),
         WAIT_TIMEOUT => Err(io::Error::new(
             io::ErrorKind::TimedOut,
             "maintenance recovery Agent did not stop; no process was force-terminated",

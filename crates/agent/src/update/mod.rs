@@ -41,9 +41,6 @@ pub enum AgentUpdateOutcome {
         version: String,
         archive_sha256: String,
     },
-    DeferredActiveJobs {
-        job_ids: Vec<String>,
-    },
     Installed {
         version: String,
         archive_sha256: String,
@@ -69,23 +66,28 @@ pub(in crate::update) struct PublicationJournal {
 
 /// Validate and apply one exact Agent archive.
 ///
-/// The durable-job store beneath `install_root` is read under the same update lock. Any returned
-/// job ID defers the update; corrupt or unreadable job state is propagated as an error by
-/// `jobs::active_ids`.
+/// The updater does not inspect Apalis internals. On Linux it requires the
+/// Agent process to have released its lifetime lock before publication;
+/// Windows uses its authenticated stopped-runtime maintenance handoff.
 pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
     validate_request(request)?;
     private_fs::validate_user_owned_root(&request.install_root)?;
     let archive_path =
         archive::validate_archive_path(&request.install_root, &request.archive_file)?;
-    let _update_lock = crate::jobs::acquire_update_lock(&request.install_root)?;
-
-    let jobs_root = request.install_root.join("jobs");
-    let active_ids = crate::jobs::active_ids(&jobs_root)?;
-    if !active_ids.is_empty() {
-        return Ok(AgentUpdateOutcome::DeferredActiveJobs {
-            job_ids: active_ids,
-        });
-    }
+    let update_file = crate::private_fs::open_lock(&request.install_root.join("update.lock"))?;
+    update_file.lock()?;
+    #[cfg(not(windows))]
+    let _stopped_agent = {
+        // This lock describes the Agent process, not any SQLite state.
+        let file = crate::private_fs::open_lock(&request.install_root.join("jobs/runner.lock"))?;
+        file.try_lock().map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("stop the running Agent before updating it: {error}"),
+            )
+        })?;
+        file
+    };
     #[cfg(windows)]
     windows::ensure_windows_separate_updater(&request.install_root)?;
     #[cfg(windows)]

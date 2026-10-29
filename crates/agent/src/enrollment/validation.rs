@@ -43,7 +43,6 @@ pub(super) fn validate_response(
     }
     let mut seen_keys = std::collections::BTreeSet::new();
     for key in &response.operator_ssh_public_keys {
-        hostlink_hub::validate_ed25519_public_key(key).map_err(invalid_data)?;
         let canonical = hostlink_hub::canonical_ed25519_public_key(key).map_err(invalid_data)?;
         if !seen_keys.insert(canonical) {
             return Err(invalid("Hub returned duplicate authorized Controller keys"));

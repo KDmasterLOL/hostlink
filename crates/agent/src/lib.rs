@@ -1,5 +1,5 @@
 //! Embedded SSH Agent: authenticated transport, execution, and durable jobs.
-//! The former Agent JSONL listener, OpenSSH process and updater are absent.
+//! The former Agent JSONL listener and external OpenSSH process are absent.
 
 pub mod enrollment;
 pub mod exec;
@@ -16,7 +16,7 @@ mod update_handoff;
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Configuration for a loopback-bound SSH Agent running as an unprivileged user.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -47,6 +47,31 @@ pub struct ReverseGateway {
     pub remote_port: u16,
 }
 impl AgentConfig {
+    /// Resolve enrollment paths relative to the configuration file, including
+    /// every Hub-approved alternate gateway.
+    pub fn resolve_relative_paths(&mut self, base: &Path) {
+        for path in [
+            &mut self.host_key,
+            &mut self.authorized_keys,
+            &mut self.jobs_root,
+        ] {
+            if path.is_relative() {
+                *path = base.join(&*path);
+            }
+        }
+        for gateway in self
+            .gateway
+            .iter_mut()
+            .chain(self.gateway_alternates.iter_mut())
+        {
+            for path in [&mut gateway.identity, &mut gateway.host_public_key] {
+                if path.is_relative() {
+                    *path = base.join(&*path);
+                }
+            }
+        }
+    }
+
     /// Validate network exposure and credentials before performing any effects.
     pub fn validate(&self) -> io::Result<()> {
         if !self.listen.ip().is_loopback() || self.listen.port() == 0 {
@@ -184,5 +209,42 @@ mod tests {
         .expect("legacy single-gateway configuration");
         assert!(config.gateway.is_none());
         assert!(config.gateway_alternates.is_empty());
+    }
+
+    #[test]
+    fn relative_paths_include_each_alternate_gateway() {
+        let mut config: AgentConfig = serde_json::from_str(
+            r#"{
+            "listen":"127.0.0.1:2200",
+            "user":"agent",
+            "host_key":"host",
+            "authorized_keys":"authorized",
+            "jobs_root":"jobs",
+            "gateway":{"host":"gateway.example","port":22,"user":"operator",
+                "identity":"gateway-key","host_public_key":"gateway-pin","remote_port":23000},
+            "gateway_alternates":[
+                {"host":"fallback.example","port":23,"user":"operator",
+                 "identity":"gateway-key","host_public_key":"fallback-pin","remote_port":23000}
+            ]
+        }"#,
+        )
+        .unwrap();
+        let base = Path::new("/example/state");
+        config.resolve_relative_paths(base);
+        assert_eq!(config.host_key, base.join("host"));
+        assert_eq!(config.jobs_root, base.join("jobs"));
+        assert_eq!(
+            config.gateway.as_ref().unwrap().identity,
+            base.join("gateway-key")
+        );
+        assert_eq!(
+            config.gateway_alternates[0].host_public_key,
+            base.join("fallback-pin")
+        );
+        assert_eq!(
+            config.gateway_alternates[0].identity,
+            base.join("gateway-key")
+        );
+        config.validate().unwrap();
     }
 }

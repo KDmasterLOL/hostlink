@@ -162,9 +162,6 @@ pub(super) fn validate_sha256(value: &str) -> io::Result<()> {
     }
     Ok(())
 }
-pub(super) fn active_jobs(record: &InstallRecord) -> io::Result<Vec<String>> {
-    jobs::active_ids(&load_config(&record.config)?.jobs_root)
-}
 pub(super) fn load_config(path: &Path) -> io::Result<crate::AgentConfig> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() || is_reparse(&metadata) || metadata.len() > 64 * 1024 {
@@ -175,23 +172,7 @@ pub(super) fn load_config(path: &Path) -> io::Result<crate::AgentConfig> {
     let mut config: crate::AgentConfig =
         serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     let base = path.parent().unwrap_or_else(|| Path::new("."));
-    if config.host_key.is_relative() {
-        config.host_key = base.join(config.host_key);
-    }
-    if config.authorized_keys.is_relative() {
-        config.authorized_keys = base.join(config.authorized_keys);
-    }
-    if config.jobs_root.is_relative() {
-        config.jobs_root = base.join(config.jobs_root);
-    }
-    if let Some(gateway) = &mut config.gateway {
-        if gateway.identity.is_relative() {
-            gateway.identity = base.join(&gateway.identity);
-        }
-        if gateway.host_public_key.is_relative() {
-            gateway.host_public_key = base.join(&gateway.host_public_key);
-        }
-    }
+    config.resolve_relative_paths(base);
     let state = path.parent().unwrap_or_else(|| Path::new("."));
     let root = state
         .parent()
@@ -250,27 +231,24 @@ pub(super) fn verify_enrollment_root(root: &Path) -> io::Result<()> {
     }
     let manifest_bytes = read_private(&state.join("manifest.json"), 64 * 1024)?;
     let machine_bytes = read_private(&state.join("machine.json"), 16 * 1024)?;
-    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
-        .map_err(|_| invalid("Agent enrollment manifest is invalid"))?;
-    let machine: serde_json::Value = serde_json::from_slice(&machine_bytes)
+    let manifest: crate::enrollment::EnrollmentManifest =
+        serde_json::from_slice(&manifest_bytes)
+            .map_err(|_| invalid("Agent enrollment manifest is invalid"))?;
+    let machine: crate::enrollment::EnrollmentIdentity = serde_json::from_slice(&machine_bytes)
         .map_err(|_| invalid("Agent enrollment identity is invalid"))?;
-    if manifest["format"].as_u64() != Some(1)
-        || machine["format"].as_u64() != Some(1)
-        || manifest["machine_id"] != machine["machine_id"]
-        || machine["machine_id"].as_str().is_none_or(str::is_empty)
-        || machine["name"].as_str().is_none_or(str::is_empty)
-        || machine["ssh_public_key"].as_str().is_none_or(str::is_empty)
-        || machine["ssh_host_public_key"]
-            .as_str()
-            .is_none_or(str::is_empty)
+    if manifest.format != 1
+        || machine.format != 1
+        || manifest.machine_id != machine.machine_id
+        || manifest.name != machine.name
+        || machine.name.is_empty()
+        || machine.ssh_public_key.is_empty()
+        || machine.ssh_host_public_key.is_empty()
     {
         return Err(invalid(
             "Agent enrollment identity and manifest do not match",
         ));
     }
-    let files = manifest["files"]
-        .as_object()
-        .ok_or_else(|| invalid("Agent enrollment manifest files are missing"))?;
+    let files = manifest.files;
     for required in [
         "agent.json",
         "machine.json",
@@ -291,9 +269,7 @@ pub(super) fn verify_enrollment_root(root: &Path) -> io::Result<()> {
         canonical_regular(&path)?;
         let bytes = read_private(&path, 1024 * 1024)?;
         let digest = format!("{:x}", Sha256::digest(&bytes));
-        if expected["size"].as_u64() != Some(bytes.len() as u64)
-            || expected["sha256"].as_str() != Some(&digest)
-        {
+        if expected.size != bytes.len() as u64 || expected.sha256 != digest {
             return Err(invalid("Agent enrollment file does not match its manifest"));
         }
     }

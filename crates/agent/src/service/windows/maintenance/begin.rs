@@ -1,7 +1,7 @@
 use super::*;
 
-/// Enter maintenance while the caller holds jobs::acquire_update_lock(root).
-/// No Run value or marker is changed until owner, image, registration, and jobs verify.
+/// Enter maintenance while the updater holds the exclusive update lock.
+/// No registration or marker is changed until the Agent identity is verified.
 pub(crate) fn begin_maintenance(root: &Path) -> io::Result<MaintenanceReceipt> {
     ensure_user_scope()?;
     let mut record = owned_record(root)?;
@@ -10,7 +10,6 @@ pub(crate) fn begin_maintenance(root: &Path) -> io::Result<MaintenanceReceipt> {
     if record.maintenance || record.maintenance_previous_sha256.is_some() {
         return Err(invalid("service maintenance is already in progress"));
     }
-    refuse_active_jobs(&record)?;
 
     let old_marker = read_marker_bytes(&record.root)?;
     let run_command = render_command(&record);
@@ -35,7 +34,6 @@ pub(crate) fn begin_maintenance(root: &Path) -> io::Result<MaintenanceReceipt> {
             "service ownership state changed before maintenance entry",
         ));
     }
-    refuse_active_jobs(&record)?;
 
     let old_record = record.clone();
     record.maintenance = true;
@@ -68,7 +66,7 @@ pub(crate) fn begin_maintenance(root: &Path) -> io::Result<MaintenanceReceipt> {
         }
         // SAFETY: process.handle is a verified live handle opened with SYNCHRONIZE.
         match unsafe { WaitForSingleObject(process.handle, 10_000) } {
-            WAIT_OBJECT_0 => refuse_active_jobs(&record)?,
+            WAIT_OBJECT_0 => {}
             WAIT_TIMEOUT => {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -78,7 +76,6 @@ pub(crate) fn begin_maintenance(root: &Path) -> io::Result<MaintenanceReceipt> {
             _ => return Err(io::Error::last_os_error()),
         }
     }
-    refuse_active_jobs(&record)?;
     Ok(MaintenanceReceipt {
         old_marker,
         old_record,
@@ -106,7 +103,6 @@ pub(crate) fn begin_recovery_maintenance(
         ));
     }
     verify_registration(&record)?;
-    refuse_active_jobs(&record)?;
     let pid = match pipe_request(&record, "STATUS") {
         Ok(reply) => Some(
             running_pid(&reply)
@@ -135,7 +131,7 @@ pub(crate) fn begin_recovery_maintenance(
             return Err(invalid("recovered candidate refused authenticated stop"));
         }
         match unsafe { WaitForSingleObject(process.handle, 10_000) } {
-            WAIT_OBJECT_0 => refuse_active_jobs(&record)?,
+            WAIT_OBJECT_0 => {}
             WAIT_TIMEOUT => {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,

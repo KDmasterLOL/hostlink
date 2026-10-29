@@ -44,22 +44,26 @@ The worker persists native results, not separate HostLink stdout/stderr
 spools. Upstream event and trace monitoring is distinct from capture of
 arbitrary raw command output.
 
-The SQLite database is an Agent-owned private local file (`jobs/jobs.db`).
-New Agent installations use fresh-only schema marker **v5**. Prior v4,
-legacy `record.json`, unknown output files and torn/corrupt roots are
-rejected and **never automatically erased or migrated**. Installed-root
-migration needs a separate explicit user authorization.
+The SQLite database is a persistent local `jobs/jobs.db`, owned by Apalis
+through SQLx. Fresh enrollment runs the upstream Apalis SQLite migrations.
+Existing databases open without creating or migrating missing/legacy state;
+HostLink no longer manages its own `DurableMeta`, SQLx checksum inspection,
+WAL/SHM permission sweeps, or directory-entry allowlist. Existing v5 data is
+left untouched; an older layout is not imported or deleted automatically.
+SQLx/Apalis errors surface when they open or use incompatible state.
 
 The Board passes native task lifecycle headers, attempt limits and scheduling
 parameters directly to Apalis, without HostLink-specific restrictions.
-The updater still holds `update.lock` and refuses replacement when the
-native database already contains Pending/Queued/Running jobs or retryable
-Failed tasks. **The Board no longer uses this lock for task creation.**
-Consequently, an updater checking an otherwise empty queue may race with
-a new Board submission. Updating a running Agent requires separate HTTP/worker
-quiescence before relying on an empty-queue check; this must be addressed
-before live release acceptance. Read-only jobs inspection fails closed for
-unknown/corrupt roots.
+Neither service nor updater reads Apalis's Jobs table or blocks process
+shutdown on queued tasks. On Linux `ssh::serve_on` holds
+`jobs/runner.lock` throughout the Agent process; the updater fails if that
+lock is held, and serializes separate update invocations with `update.lock`.
+On Windows, registered updates stop through the owner-authenticated service
+control pipe and wait for the process handle; the updater retains its
+transaction/rollback lock. Pending tasks remain in the Apalis database for
+later delivery; a task interrupted by shutdown may execute again after
+restart. Shutdown/proc-tree failure and native Windows 7/11 acceptance
+remain explicit release gates.
 
 SFTP is independent of jobs and stays within private
 `transfers/<controller-fingerprint>` directories. The `hostlink` CLI

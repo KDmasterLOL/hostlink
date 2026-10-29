@@ -25,8 +25,11 @@ Use exact host key pins, controller authorized Ed25519 keys, private owned paths
 bounded concurrency and byte streams, fail-closed security and Windows 7 PS2 support.
 No unmanaged background processes, false success or unbounded retries.
 A minimal Agent-only updater is REQUIRED: exact version/target/SHA, private
-staging, an exclusive update lock, installed-file integrity, active-job deferral,
-recovery on failed publication and explicit safe handoff on Windows. It is NOT
+staging, an exclusive updater lock, Agent process shutdown before Linux
+publication, installed-file integrity, recovery on failed publication and
+explicit owner-authenticated stopped-runtime handoff on Windows. Apalis alone
+owns its SQLite job state; service and updater must not inspect its tables.
+Queued tasks may resume after the Agent restarts. It is NOT
 another SSH transport, not a general release engine and not the Toolkit updater.
 Changes to real servers require independently verified disposable scope; do not
 alter 1C production databases, running services or original OneC Toolkit.

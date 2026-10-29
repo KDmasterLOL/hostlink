@@ -4,8 +4,9 @@
 
 `update::apply` keeps exact local archive SHA, target/version, strict raw ZIP
 central-directory and duplicate-entry validation, manifest/content digests,
-private-root checks, the shared job update lock, and active/unknown job
-deferral. After the complete archive inventory and bounded member contents have
+private-root checks and a dedicated updater serialization lock. No live
+jobs-table inspection is performed; the registered Agent is stopped using
+its authenticated maintenance channel. After archive and bounded member contents have
 been checked, `self_update::Extract` performs extraction into a private
 same-volume staging directory. The extracted file set, normalized ACL or mode,
 sizes, and digests are read back before publication. No HTTP release selection
@@ -77,9 +78,9 @@ also compiles the required `ureq` backend and `self-replace` dependency.
 ## Current implementation boundary
 
 `service.rs` now owns a crate-private maintenance receipt and coordinator
-primitives. The caller must hold the existing `jobs::acquire_update_lock` for
-the full transaction. Entry verifies the current SID/root, marker, exact Run
-command, executable digest, and durable job state, then records maintenance in
+primitives. The caller must hold `install_root/update.lock` for the full
+transaction. Entry verifies the current SID/root, marker, exact Run
+command and executable digest, then records maintenance in
 the owner marker. Managed login startup refuses that marker before it can start
 a listener. The exact current-user Run value is removed, the Agent is asked to
 stop over its owner-authenticated pipe, and the updater waits on the verified
@@ -104,10 +105,11 @@ transaction was run in this profile.
 
 The installed executable cannot replace its own loaded image. The updater must
 be a separate, private, verified process on the install volume. It must use the
-existing owner-bound stop path and shared job lock, prove that no durable job
-is Prepared, Running, Interrupted, corrupt, or unknown, and wait for the
-authenticated Agent process handle to signal before publication. Reconnect
-must never replay a started job.
+existing owner-bound stop path, prevent new registered launches during
+maintenance, and wait for the authenticated Agent process handle to signal
+before publication. Pending jobs are preserved by Apalis; interrupted
+commands may be replayed after restart, so exactly-once execution is not
+promised.
 
 The managed-live helper validates archive SHA, target, semantic version, complete
 manifest and old installed inventory before service mutation. It durably records
@@ -124,10 +126,10 @@ journal and return an error.
 The recovery planner maps validated journal phases plus observed old/new/backup
 executable and metadata hashes to one action. File-level tests exercise exact
 hash observations and fail-closed recovery decisions, but the planner must not
-be treated as having performed filesystem publication. Active, interrupted,
-unreadable, or unknown durable jobs must defer
-before staging, journal recovery, or publication. The update lock must remain
-held across the full operation and startup must not race login registration.
+be treated as having performed filesystem publication. The updater never
+reads Apalis's internal task tables or requires an empty queue. The update
+lock remains held across publication and rollback; startup must not race
+login registration.
 
 ## Windows filesystem and wait constraints
 
@@ -148,9 +150,9 @@ termination, and a second execution transport are forbidden.
 
 Run source-exact, disposable-profile tests on Windows 11 and Windows 7 x64 and
 x86 separately. The tests must cover owner/SID/path/hash mismatch, foreign or
-stale PID, active/Interrupted/unknown jobs with no preceding mutation, reparse
+stale PID, active jobs being stopped with the Agent process, reparse
 paths, backup hash mismatch, locked file, every journal transition and crash
 recovery, failed restart and rollback, idempotent recovery, and no login
-auto-run race or job replay. Windows update tests must never use the real WORK
+auto-run race; replay behavior is owned by Apalis. Windows update tests must never use the real WORK
 profile or an installed service. Cross-compilation and Linux recovery-planner
 tests do not prove Windows publication behavior.

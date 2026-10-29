@@ -57,6 +57,10 @@ where
             "prebound SSH listener must match configured loopback address",
         ));
     }
+    // The Agent owns this process-lifetime lock, not the Apalis job backend.
+    // An updater must not replace its executable while it is running.
+    let lifetime = crate::private_fs::open_lock(&config.jobs_root.join("runner.lock"))?;
+    lifetime.try_lock().map_err(io::Error::other)?;
     let prepared = prepare(config)?;
     let cancellation = processkit::CancellationToken::new();
     let mut ssh = Box::pin(serve_prepared_until(
@@ -102,6 +106,7 @@ where
         },
     );
     outcome = outcome.and(ssh_result).and(jobs_result).and(tunnel_result);
+    lifetime.unlock()?;
     outcome
 }
 

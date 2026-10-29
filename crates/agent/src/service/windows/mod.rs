@@ -1,5 +1,4 @@
 use super::ServiceStatus;
-use crate::jobs;
 use sha2::{Digest, Sha256};
 use std::os::windows::fs::MetadataExt;
 use std::{
@@ -89,11 +88,11 @@ mod registration;
 use admission::*;
 #[cfg(test)]
 use lifecycle::refuse_maintenance;
+use lifecycle::verify_registration;
 pub use lifecycle::{
     control_loop, ensure_update_unregistered, install, remove, start, status, stop,
     validate_managed_run, validate_update_root,
 };
-use lifecycle::{refuse_active_jobs, verify_registration};
 pub(crate) use maintenance::{
     begin_maintenance, begin_recovery_maintenance, has_registration, is_in_maintenance,
     recover_maintenance_after_inventory, recover_maintenance_stop, register_maintenance,

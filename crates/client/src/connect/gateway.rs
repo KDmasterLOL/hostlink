@@ -2,27 +2,19 @@
 
 use std::net::SocketAddr;
 
-use russh::keys::{self, PublicKey};
+use russh::keys::PublicKey;
 
 use super::{SshClientError, identity::load_identity};
 use crate::GatewayHop;
 
 pub(super) fn parse_pin(pin: &str) -> Result<PublicKey, SshClientError> {
-    let fields: Vec<_> = pin.split_whitespace().collect();
-    if !(2..=3).contains(&fields.len())
-        || !fields[0].starts_with("ssh-") && !fields[0].starts_with("ecdsa-")
-    {
+    if pin.contains('\n') || pin.contains('\r') {
         return Err(SshClientError::Invalid(
             "host pin must be one OpenSSH public-key line".into(),
         ));
     }
-    let key = keys::parse_public_key_base64(fields[1])?;
-    if key.algorithm().to_string() != fields[0] {
-        return Err(SshClientError::Invalid(
-            "host pin algorithm does not match its key blob".into(),
-        ));
-    }
-    Ok(key)
+    PublicKey::from_openssh(pin)
+        .map_err(|_| SshClientError::Invalid("invalid OpenSSH host pin".into()))
 }
 
 pub(super) fn validate_user(user: &str) -> Result<(), SshClientError> {

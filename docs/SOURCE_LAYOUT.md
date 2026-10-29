@@ -41,7 +41,8 @@ updater contract. `jobs/store.rs` configures the native Apalis SQLite
 through ProcessKit. `jobs/board.rs` mounts the upstream Apalis Board
 Axum API and embedded UI; `jobs/new.html` is a small form calling the
 upstream task API. `jobs/database.rs` preserves private fresh-only SQLite
-schema v5. Shared `private_fs/mod.rs` enforces owned paths and uses
+schema using upstream Apalis migrations only. Shared `private_fs/mod.rs`
+enforces owned paths and uses
 standard `File::lock` / `File::unlock`; `private_fs/windows.rs`
 centralizes DACL checks for jobs, SSH, SFTP, service and updater while
 preserving their different allowed-principal policies.

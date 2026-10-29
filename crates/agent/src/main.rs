@@ -181,13 +181,11 @@ async fn run(cli: Cli) -> io::Result<()> {
             // the same Agent identity for its uniquely assigned remote port.
             #[cfg(windows)]
             if let Some((pipe, token)) = managed_control {
-                let control_config = config.clone();
                 let control_shutdown = shutdown.clone();
                 let control_finished = tokio_util::sync::CancellationToken::new();
                 let server_shutdown = shutdown.clone();
                 let mut server = Box::pin(ssh::serve(&config, server_shutdown.cancelled_owned()));
                 let control = Box::pin(hostlink_agent::service::control_loop(
-                    &control_config,
                     pipe,
                     token,
                     control_shutdown,
@@ -238,10 +236,6 @@ async fn run(cli: Cli) -> io::Result<()> {
                     println!("Agent package verified and installed");
                     Ok(())
                 }
-                AgentUpdateOutcome::DeferredActiveJobs { job_ids } => Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    format!("Agent update deferred: {} jobs not terminal", job_ids.len()),
-                )),
             }
         }
         Command::Enroll {
@@ -339,23 +333,7 @@ fn load_config(path: &Path) -> io::Result<AgentConfig> {
     }
     let mut config: AgentConfig = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     let base = path.parent().unwrap_or_else(|| Path::new("."));
-    if config.host_key.is_relative() {
-        config.host_key = base.join(config.host_key);
-    }
-    if config.authorized_keys.is_relative() {
-        config.authorized_keys = base.join(config.authorized_keys);
-    }
-    if config.jobs_root.is_relative() {
-        config.jobs_root = base.join(config.jobs_root);
-    }
-    if let Some(gateway) = &mut config.gateway {
-        if gateway.identity.is_relative() {
-            gateway.identity = base.join(&gateway.identity);
-        }
-        if gateway.host_public_key.is_relative() {
-            gateway.host_public_key = base.join(&gateway.host_public_key);
-        }
-    }
+    config.resolve_relative_paths(base);
     config.validate()?;
     Ok(config)
 }

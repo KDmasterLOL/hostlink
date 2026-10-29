@@ -27,10 +27,15 @@ pub(super) fn load_host_spec(path: &Path) -> io::Result<HostSpec> {
     if config.identity.is_relative() {
         config.identity = base.join(config.identity);
     }
-    if let Some(gateway) = &mut config.gateway
-        && gateway.identity.is_relative()
-    {
-        gateway.identity = base.join(&gateway.identity);
+    if let Some(gateway) = &mut config.gateway {
+        if gateway.identity.is_relative() {
+            gateway.identity = base.join(&gateway.identity);
+        }
+        for route in &mut gateway.alternates {
+            if route.identity.is_relative() {
+                route.identity = base.join(&route.identity);
+            }
+        }
     }
     Ok(config)
 }

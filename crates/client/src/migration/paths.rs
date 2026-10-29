@@ -20,15 +20,7 @@ pub(super) fn string_field(value: &Value, name: &str) -> Option<String> {
 const MAX_SNAPSHOT_BYTES: u64 = 1024 * 1024;
 
 pub(super) fn valid_host_pin(pin: &str) -> bool {
-    let fields: Vec<_> = pin.split_ascii_whitespace().collect();
-    if !(2..=3).contains(&fields.len()) {
-        return false;
-    }
-    if !fields[0].starts_with("ssh-") && !fields[0].starts_with("ecdsa-") {
-        return false;
-    }
-    russh::keys::parse_public_key_base64(fields[1])
-        .is_ok_and(|key| key.algorithm().to_string() == fields[0])
+    !pin.contains(['\r', '\n']) && russh::keys::PublicKey::from_openssh(pin).is_ok()
 }
 
 pub(super) fn require_owned_path(

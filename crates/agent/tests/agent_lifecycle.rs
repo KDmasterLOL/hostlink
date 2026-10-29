@@ -125,7 +125,7 @@ fn write_enrollment_fixture(state: &Path) {
             "name": "fixture",
             "ssh_public_key": "ssh-ed25519 AAAA fixture",
             "ssh_host_public_key": "ssh-ed25519 AAAA host",
-            "gateway": {"host": "127.0.0.1", "port": 22, "host_public_key": "ssh-ed25519 AAAA gateway"},
+            "gateway": {"host": "127.0.0.1", "port": 22, "user": "fixture", "host_public_key": "ssh-ed25519 AAAA gateway"},
             "remote_port": 39427
         }).to_string(),
     ).unwrap();
@@ -153,7 +153,7 @@ fn write_enrollment_fixture(state: &Path) {
             }),
         );
     }
-    let manifest = serde_json::json!({"format": 1, "machine_id": machine_id, "files": files});
+    let manifest = serde_json::json!({"format": 1, "machine_id": machine_id, "name": "fixture", "files": files});
     fs::write(state.join("manifest.json"), manifest.to_string()).unwrap();
     fs::set_permissions(
         state.join("manifest.json"),
@@ -204,22 +204,23 @@ async fn service_commands_bind_private_unit_to_root_and_remove_only_service_meta
         &home,
     );
     assert!(!tampered.status.success());
-    assert!(String::from_utf8_lossy(&tampered.stderr).contains("does not match its manifest"));
+    assert!(
+        String::from_utf8_lossy(&tampered.stderr).contains("identity and manifest do not match")
+    );
     fs::write(&machine_file, saved_machine).unwrap();
     fs::set_permissions(&machine_file, fs::Permissions::from_mode(0o600)).unwrap();
 
     let jobs_root = root.join("state/jobs");
     let _store = JobStore::open(&jobs_root).await.unwrap();
     let id = started_job::queued(&jobs_root).await;
-    for cmd in ["stop", "remove"] {
-        let blocked = invoke(
-            &root.join("bin/hostlink-agent"),
-            &[cmd, "--root", root.to_str().unwrap()],
-            &home,
-        );
-        assert!(!blocked.status.success());
-        assert!(String::from_utf8_lossy(&blocked.stderr).contains("durable jobs"));
-    }
+    // Process lifecycle does not inspect the Apalis queue; queued records
+    // remain in the database across service stop.
+    let stopped = invoke(
+        &root.join("bin/hostlink-agent"),
+        &["stop", "--root", root.to_str().unwrap()],
+        &home,
+    );
+    assert!(stopped.status.success());
     started_job::completed(&jobs_root, &id).await;
 
     let status = invoke(
@@ -264,6 +265,10 @@ async fn service_commands_bind_private_unit_to_root_and_remove_only_service_meta
         String::from_utf8_lossy(&remove.stderr)
     );
     assert!(!unit_path.exists());
+    assert!(
+        jobs_root.join("jobs.db").is_file(),
+        "uninstall preserves Apalis state"
+    );
     assert!(!root.join(".hostlink-user-service.json").exists());
     assert!(
         !root.join("bin/hostlink-agent").exists(),

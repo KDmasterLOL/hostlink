@@ -6,6 +6,14 @@ use tempfile::tempdir;
 const PINNED_KEY: &str = "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ";
 const OTHER_KEY: &str = "AAAAC3NzaC1lZDI1NTE5AAAAIA6rWI3G1sz07DnfFlrouTcysQlj2P+jpNSOEWD9OJ3X";
 
+#[test]
+fn openssh_pin_uses_library_parser_for_comment_and_algorithm() {
+    let pin = format!("ssh-ed25519 {PINNED_KEY} two words of comment");
+    assert!(gateway::parse_pin(&pin).is_ok());
+    assert!(gateway::parse_pin(&format!("{pin}\nssh-ed25519 {OTHER_KEY}")).is_err());
+    assert!(gateway::parse_pin(&format!("ssh-rsa {PINNED_KEY}")).is_err());
+}
+
 #[tokio::test]
 async fn server_key_check_accepts_only_the_pinned_key_bytes() {
     let expected = keys::parse_public_key_base64(PINNED_KEY).expect("valid pinned key");

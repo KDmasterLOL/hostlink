@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn unknown_job_store_entry_fails_closed() {
+fn updater_leaves_unrecognized_jobs_files_intact() {
     let (_temp, root) = install_root();
     let (archive, digest) = package(&root, "2.0.0", b"new exact Agent binary");
     let jobs = root.join("jobs");
@@ -13,14 +13,21 @@ fn unknown_job_store_entry_fails_closed() {
     }
     fs::write(jobs.join("not-a-job-record"), b"unknown state").expect("unknown entry");
     let update = request(&root, &archive, "2.0.0", digest);
-    assert!(apply(&update).is_err());
+    assert!(matches!(
+        apply(&update).unwrap(),
+        AgentUpdateOutcome::Installed { .. }
+    ));
     assert_eq!(
-        fs::read(root.join("bin/hostlink-agent")).expect("original binary"),
-        b"old installed Agent binary"
+        fs::read(jobs.join("not-a-job-record")).unwrap(),
+        b"unknown state"
+    );
+    assert_eq!(
+        fs::read(root.join("bin/hostlink-agent")).expect("updated binary"),
+        b"new exact Agent binary"
     );
 }
 #[tokio::test]
-async fn active_job_prevents_recovery_mutations_then_update_recovers_backup() {
+async fn pending_apalis_task_survives_recovery_and_update() {
     let (_temp, root) = install_root();
     let old_metadata: serde_json::Value =
         serde_json::from_slice(&fs::read(root.join("install.json")).expect("old metadata"))
@@ -67,18 +74,26 @@ async fn active_job_prevents_recovery_mutations_then_update_recovers_backup() {
     let id = started_job::queued(&jobs).await;
     let (archive, digest) = package(&root, "2.0.0", b"new exact Agent binary");
     let update = request(&root, &archive, "2.0.0", digest);
-    assert!(matches!(
-        apply(&update).expect("defer while recovery is pending"),
-        AgentUpdateOutcome::DeferredActiveJobs { job_ids } if job_ids == vec![id.clone()]
-    ));
-    assert!(!root.join("bin").exists());
-    assert!(backup.join("hostlink-agent").is_file());
-
-    started_job::completed(&jobs, &id).await;
+    // The updater waits for the Agent process, not for pending Apalis jobs.
+    // A stopped Agent can update while Apalis retains work for the next start.
     assert!(matches!(
         apply(&update).expect("recover and update"),
         AgentUpdateOutcome::Installed { .. }
     ));
+    let reopened = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(jobs.join("jobs.db"))
+            .read_only(true),
+    )
+    .await
+    .unwrap();
+    let saved: String = sqlx::query_scalar("SELECT id FROM Jobs WHERE id=?")
+        .bind(&id)
+        .fetch_one(&reopened)
+        .await
+        .unwrap();
+    assert_eq!(saved, id);
+    reopened.close().await;
     assert_eq!(
         fs::read(root.join("bin/hostlink-agent")).expect("updated binary"),
         b"new exact Agent binary"
@@ -136,7 +151,7 @@ fn recovery_restores_old_install_after_simulated_interrupted_publication() {
 }
 
 #[test]
-fn legacy_records_block_update_without_replacing_or_removing_existing_state() {
+fn legacy_jobs_are_not_interpreted_or_deleted_by_updater() {
     let (_temp, root) = install_root();
     let (archive, digest) = package(&root, "2.0.0", b"new exact Agent binary");
     let jobs = root.join("jobs");
@@ -159,22 +174,23 @@ fn legacy_records_block_update_without_replacing_or_removing_existing_state() {
         fs::set_permissions(&record, fs::Permissions::from_mode(0o600))
             .expect("private legacy record");
     }
-    let error = apply(&request(&root, &archive, "2.0.0", digest))
-        .expect_err("legacy state cannot imply an empty SQLite store");
     assert!(
-        error.to_string().to_ascii_lowercase().contains("legacy"),
-        "existing deployments need an actionable migration report: {error}"
+        matches!(
+            apply(&request(&root, &archive, "2.0.0", digest)).unwrap(),
+            AgentUpdateOutcome::Installed { .. }
+        ),
+        "updater does not need to inspect Apalis job files"
     );
     assert_eq!(fs::read(&record).expect("preserved legacy evidence"), saved);
     assert!(!jobs.join("jobs.db").exists());
     assert_eq!(
-        fs::read(root.join("bin/hostlink-agent")).expect("original Agent"),
-        b"old installed Agent binary"
+        fs::read(root.join("bin/hostlink-agent")).expect("updated Agent"),
+        b"new exact Agent binary"
     );
 }
 
 #[tokio::test]
-async fn unknown_legacy_output_blocks_update_without_modifying_existing_state() {
+async fn unrelated_files_are_left_untouched_by_updater() {
     let (_temp, root) = install_root();
     let (archive, digest) = package(&root, "2.0.0", b"new exact Agent binary");
     let jobs = root.join("jobs");
@@ -190,7 +206,7 @@ async fn unknown_legacy_output_blocks_update_without_modifying_existing_state() 
         .close()
         .await;
     // The new queue uses Apalis results, not HostLink output directories.
-    // Any legacy output tree must be preserved and refused as unknown state.
+    // An unrelated directory must be left alone, not interpreted as jobs state.
     let orphan = jobs.join("outputs");
     fs::create_dir(&orphan).expect("legacy output evidence");
     #[cfg(unix)]
@@ -199,17 +215,19 @@ async fn unknown_legacy_output_blocks_update_without_modifying_existing_state() 
         fs::set_permissions(&orphan, fs::Permissions::from_mode(0o700))
             .expect("private orphan output");
     }
-    assert!(active_ids(&jobs).is_err(), "legacy output is unknown state");
-    assert!(apply(&request(&root, &archive, "2.0.0", digest)).is_err());
+    assert!(matches!(
+        apply(&request(&root, &archive, "2.0.0", digest)).unwrap(),
+        AgentUpdateOutcome::Installed { .. }
+    ));
     assert!(orphan.is_dir(), "unknown evidence must remain intact");
     assert_eq!(
-        fs::read(root.join("bin/hostlink-agent")).expect("original Agent"),
-        b"old installed Agent binary"
+        fs::read(root.join("bin/hostlink-agent")).expect("updated Agent"),
+        b"new exact Agent binary"
     );
 }
 
 #[test]
-fn empty_uninitialized_job_root_does_not_prove_update_safety() {
+fn updater_does_not_initialize_missing_apalis_database() {
     let (_temp, root) = install_root();
     let (archive, digest) = package(&root, "2.0.0", b"new exact Agent binary");
     let jobs = root.join("jobs");
@@ -220,14 +238,16 @@ fn empty_uninitialized_job_root_does_not_prove_update_safety() {
         fs::set_permissions(&jobs, fs::Permissions::from_mode(0o700))
             .expect("private uninitialized job root");
     }
-    assert!(active_ids(&jobs).is_err());
-    assert!(apply(&request(&root, &archive, "2.0.0", digest)).is_err());
+    assert!(matches!(
+        apply(&request(&root, &archive, "2.0.0", digest)).unwrap(),
+        AgentUpdateOutcome::Installed { .. }
+    ));
     assert!(
         !jobs.join("jobs.db").exists(),
-        "safety scan must not recreate lost state"
+        "updater must not create Apalis state"
     );
     assert_eq!(
-        fs::read(root.join("bin/hostlink-agent")).expect("original Agent"),
-        b"old installed Agent binary"
+        fs::read(root.join("bin/hostlink-agent")).expect("updated Agent"),
+        b"new exact Agent binary"
     );
 }

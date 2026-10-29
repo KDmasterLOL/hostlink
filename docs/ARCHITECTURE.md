@@ -56,17 +56,18 @@ on an unauthenticated network listener.
 Fresh enrollment allocates distinct loopback SSH and Board listener
 addresses and writes them to the private Agent configuration. Legacy
 configs without `board_listen` remain valid but do not serve the UI.
-No automatic migration is provided for old jobs data: schema v5 is
-fresh-only and rejects v4/older/torn state without modifying it.
+Existing v5 Apalis databases are reused, but new installs now create only
+upstream Apalis SQLite tables. HostLink does not maintain a separate
+`DurableMeta` version or validate internal migrations/files on every
+connection. No older jobs data is automatically converted or deleted.
 
-The Agent updater still requires a private update lock and read-only
-inspection of Apalis native pending/queued/running tasks before replacing
-an Agent. The Board now exposes the native Apalis task-submission API without
-custom header/attempt limits or an HTTP admission lock, so this inventory
-alone is insufficient to prevent concurrent submission during update.
-Coordinated HTTP/worker quiescence before an installed-Agent replacement is
-an outstanding release gate. Unknown or incompatible jobs roots block an
-update; a finished job is not an active process.
+The updater no longer reads Apalis's Jobs table; the process lifecycle is
+the quiescence boundary. On Linux the Agent holds `jobs/runner.lock` while
+running, so the updater refuses publication until the process has stopped.
+On Windows, owner-authenticated stopped-runtime maintenance is used instead.
+`update.lock` continues to serialize updater invocations and rollback.
+Pending and interrupted Apalis tasks are retained, not interpreted by
+HostLink. A restarted worker may replay an interrupted command.
 
 See [Agent jobs](../crates/agent/src/jobs/README.md),
 [Agent jobs contract](AGENT_MINIMAL_JOBS.md),

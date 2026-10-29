@@ -1,19 +1,14 @@
 //! Agent-local durable command queue and optional loopback board.
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-pub const UPDATE_LOCK_FILE: &str = "update.lock";
 pub(crate) const MAX_ACTIVE_JOBS: usize = 16;
 mod board;
 mod database;
 mod store;
 mod worker;
-use crate::private_fs::{
-    invalid, open_lock, restrict_private_path, sync_directory, validate_private_path,
-};
-pub use store::{JobStore, active_ids};
+pub use store::JobStore;
 pub use worker::serve_until;
 
 /// A direct executable invocation. No shell is implied.
@@ -25,15 +20,5 @@ pub struct CommandJob {
     pub cwd: Option<String>,
 }
 
-/// Lock the install root against concurrent update admission.
-///
-/// # Errors
-/// Returns an error for an unsafe root or a failed lock.
-pub fn acquire_update_lock(root: &Path) -> io::Result<File> {
-    validate_private_path(root, true)?;
-    let file = open_lock(&root.join(UPDATE_LOCK_FILE))?;
-    file.lock()?;
-    Ok(file)
-}
 #[cfg(test)]
 mod tests;

@@ -70,13 +70,12 @@ pub fn status(_: &Path) -> io::Result<ServiceStatus> {
 
 #[cfg(windows)]
 pub async fn control_loop(
-    config: &crate::AgentConfig,
     pipe_name: String,
     token: String,
     shutdown: tokio_util::sync::CancellationToken,
     finished: tokio_util::sync::CancellationToken,
 ) -> io::Result<()> {
-    windows::control_loop(config, pipe_name, token, shutdown, finished).await
+    windows::control_loop(pipe_name, token, shutdown, finished).await
 }
 #[cfg(windows)]
 pub fn validate_managed_run(

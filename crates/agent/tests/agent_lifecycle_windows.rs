@@ -1,8 +1,5 @@
 #![cfg(windows)]
 
-#[path = "support/started_job.rs"]
-mod started_job;
-
 use hostlink_agent::jobs::JobStore;
 use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
 use serde_json::{Map, json};
@@ -102,7 +99,14 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
                 "machine_id": machine_id,
                 "name": "lifecycle-fixture",
                 "ssh_public_key": "ssh-ed25519 AAAA fixture",
-                "ssh_host_public_key": "ssh-ed25519 AAAA host"
+                "ssh_host_public_key": "ssh-ed25519 AAAA host",
+                "gateway": {
+                    "host": "127.0.0.1",
+                    "port": 22,
+                    "user": "fixture",
+                    "host_public_key": "ssh-ed25519 AAAA gateway"
+                },
+                "remote_port": 39427
             })
             .to_string()
             .into_bytes(),
@@ -122,7 +126,7 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     }
     fs::write(
         state.join("manifest.json"),
-        json!({ "format": 1, "machine_id": machine_id, "files": files }).to_string(),
+        json!({ "format": 1, "machine_id": machine_id, "name": "lifecycle-fixture", "files": files }).to_string(),
     )
     .expect("write enrollment manifest");
     private_windows_path(&state.join("manifest.json"), false);
@@ -307,52 +311,8 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     fs::write(&marker_path, original_marker).expect("restore exact disposable ownership marker");
     private_windows_path(&marker_path, false);
 
-    let store = JobStore::open(root.join("jobs"))
-        .await
-        .expect("open durable job store");
-    for running in [false, true] {
-        let job_id = started_job::queued(&root.join("jobs")).await;
-        if running {
-            started_job::started(&root.join("jobs"), &job_id).await;
-        }
-        for action in ["stop", "remove"] {
-            let refused = Command::new(&executable)
-                .args(["service", action, "--root", root.to_str().unwrap()])
-                .output()
-                .expect("invoke lifecycle action with nonterminal job");
-            assert!(
-                !refused.status.success(),
-                "{action} accepted running={running}"
-            );
-            assert!(String::from_utf8_lossy(&refused.stderr).contains("durable jobs"));
-            assert!(root.join(".hostlink-user-service.json").is_file());
-        }
-    }
-    store.close().await;
-    // Both native nonterminal records remain durable until the disposable
-    // test store is removed; crash-recovered work may be replayed by Apalis.
-    fs::remove_dir_all(root.join("jobs")).expect("remove exact disposable SQLite fixture");
-    fs::create_dir(root.join("jobs")).expect("fresh empty disposable job store");
-    private_windows_path(&root.join("jobs"), true);
-    JobStore::initialize_fresh(root.join("jobs"))
-        .await
-        .expect("initialize fresh disposable SQLite state")
-        .close()
-        .await;
-
-    let unknown_job = root.join("jobs/unknown-fixture-entry");
-    fs::create_dir(&unknown_job).expect("create unknown disposable job entry");
-    private_windows_path(&unknown_job, true);
-    for action in ["stop", "remove"] {
-        let refused = Command::new(&executable)
-            .args(["service", action, "--root", root.to_str().unwrap()])
-            .output()
-            .expect("invoke lifecycle action with unknown job entry");
-        assert!(!refused.status.success());
-        assert!(root.join(".hostlink-user-service.json").is_file());
-    }
-    fs::remove_dir_all(&unknown_job).expect("remove exact unknown disposable job fixture");
-
+    // Service lifecycle must not read or mutate the Apalis queue. A missing
+    // authenticated pipe is still insufficient proof that a process exited.
     for action in ["stop", "remove"] {
         let refused = Command::new(&executable)
             .args(["service", action, "--root", root.to_str().unwrap()])

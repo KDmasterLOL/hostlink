@@ -98,9 +98,6 @@ impl HubClient {
         let info: HubInfo = self.get_json("/v2/info").await?;
         info.validate().map_err(|_| HubClientError::Response)?;
         let gateways = info.gateways;
-        for gateway in &gateways {
-            gateway.validate().map_err(HubClientError::Invalid)?;
-        }
         validate_gateway_list(&gateways)?;
         Ok(gateways)
     }

@@ -123,8 +123,6 @@ pub async fn serve_until(
         ));
     }
     let store = JobStore::open(root).await?;
-    let runner = open_lock(&root.join("runner.lock"))?;
-    runner.try_lock().map_err(io::Error::other)?;
     let listener = match board_listen {
         Some(address) => Some(tokio::net::TcpListener::bind(address).await?),
         None => None,
@@ -166,7 +164,6 @@ pub async fn serve_until(
         worker_future.await.map_err(io::Error::other)
     };
     store.close().await;
-    runner.unlock()?;
     if uncertain.load(Ordering::Acquire) {
         return Err(io::Error::other("process teardown unconfirmed"));
     }

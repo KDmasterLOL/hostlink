@@ -80,7 +80,6 @@ pub fn stop(root: &Path) -> io::Result<()> {
     let record = owned_record(root)?;
     verify_record(&record)?;
     verify_registration(&record)?;
-    refuse_active_jobs(&record)?;
     let pid = match pipe_request(&record, "STATUS") {
         Ok(reply) => running_pid(&reply).ok_or_else(|| {
             invalid("Agent lifecycle status did not prove an owned running process")
@@ -95,12 +94,6 @@ pub fn stop(root: &Path) -> io::Result<()> {
     };
     let process = open_owned_process(pid, &record)?;
     let reply = pipe_request(&record, "STOP")?;
-    if reply.starts_with("BUSY ") {
-        return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "Agent refused shutdown because durable jobs are not terminal",
-        ));
-    }
     if reply != format!("STOPPING {pid}") {
         return Err(invalid(
             "Agent lifecycle control returned an invalid stop response",
@@ -111,15 +104,6 @@ pub fn stop(root: &Path) -> io::Result<()> {
     // SAFETY: process.handle is a live handle opened with SYNCHRONIZE.
     match unsafe { WaitForSingleObject(process.handle, 10_000) } {
         WAIT_OBJECT_0 => {
-            let active = active_jobs(&record)?;
-            if !active.is_empty() {
-                if let Err(error) = launch_and_wait(&record) {
-                    return Err(io::Error::other(format!(
-                        "shutdown raced with durable job admission; Agent restart failed: {error}"
-                    )));
-                }
-                return Err(busy(&active));
-            }
             println!("Stopped the authenticated current-user HostLink Agent process");
             Ok(())
         }
@@ -137,7 +121,6 @@ pub fn remove(root: &Path) -> io::Result<()> {
     verify_record(&record)?;
     crate::update::ensure_no_pending_windows_handoff(&record.root)?;
     verify_registration(&record)?;
-    refuse_active_jobs(&record)?;
     match pipe_request(&record, "STATUS") {
         Ok(_) => stop(root)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -285,7 +268,6 @@ pub fn validate_update_root(root: &Path) -> io::Result<()> {
     Ok(())
 }
 pub async fn control_loop(
-    config: &crate::AgentConfig,
     pipe_name: String,
     token: String,
     shutdown: tokio_util::sync::CancellationToken,
@@ -314,13 +296,8 @@ pub async fn control_loop(
                 format!("RUNNING {}\n", std::process::id())
             }
         } else if request == format!("STOP {token}") {
-            let active = jobs::active_ids(&config.jobs_root)?;
-            if active.is_empty() {
-                shutdown.cancel();
-                format!("STOPPING {}\n", std::process::id())
-            } else {
-                format!("BUSY {}\n", active.len())
-            }
+            shutdown.cancel();
+            format!("STOPPING {}\n", std::process::id())
         } else {
             "DENIED\n".to_owned()
         };
@@ -358,14 +335,6 @@ pub(super) fn create_private_pipe(
                 pipe_name,
                 (&mut attributes as *mut SECURITY_ATTRIBUTES).cast(),
             )
-    }
-}
-pub(super) fn refuse_active_jobs(record: &InstallRecord) -> io::Result<()> {
-    let active = active_jobs(record)?;
-    if active.is_empty() {
-        Ok(())
-    } else {
-        Err(busy(&active))
     }
 }
 pub(super) fn verify_registration(record: &InstallRecord) -> io::Result<()> {

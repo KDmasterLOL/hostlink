@@ -28,20 +28,20 @@ pub struct EnrollmentIdentity {
     pub remote_port: u16,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct EnrollmentManifest {
-    format: u32,
-    machine_id: MachineId,
-    name: String,
-    files: std::collections::BTreeMap<String, FileDigest>,
+pub(crate) struct EnrollmentManifest {
+    pub(crate) format: u32,
+    pub(crate) machine_id: MachineId,
+    pub(crate) name: String,
+    pub(crate) files: std::collections::BTreeMap<String, FileDigest>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct FileDigest {
-    size: u64,
-    sha256: String,
+pub(crate) struct FileDigest {
+    pub(crate) size: u64,
+    pub(crate) sha256: String,
 }
 
 #[derive(Serialize)]

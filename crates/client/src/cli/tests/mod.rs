@@ -63,6 +63,35 @@ fn host_config_rejects_unknown_fields_and_symlinks() {
 }
 
 #[test]
+fn host_config_resolves_relative_alternate_identity_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("host.json");
+    fs::write(
+        &config,
+        r#"{
+        "endpoint":"127.0.0.1:2222", "user":"agent",
+        "identity":"agent.key", "host_public_key":"pin",
+        "gateway":{
+            "address":"127.0.0.1:2200", "user":"gateway",
+            "identity":"gateway.key", "host_public_key":"gateway-pin",
+            "reverse_port":23000,
+            "alternates":[{"address":"127.0.0.1:2201", "user":"fallback",
+                "identity":"alternate.key", "host_public_key":"fallback-pin"}]
+        }
+    }"#,
+    )
+    .unwrap();
+    let host = load_host_spec(&config).unwrap();
+    assert_eq!(host.identity, root.path().join("agent.key"));
+    let gateway = host.gateway.unwrap();
+    assert_eq!(gateway.identity, root.path().join("gateway.key"));
+    assert_eq!(
+        gateway.alternates[0].identity,
+        root.path().join("alternate.key")
+    );
+}
+
+#[test]
 fn new_output_never_overwrites_existing_data() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("out");

@@ -73,7 +73,7 @@ pub(crate) fn enroll(
     request: EnrollRequest,
     admission: CommitAdmission,
 ) -> Result<EnrollResponse, HubError> {
-    let id = MachineId::parse(request.machine_id.as_str()).map_err(HubError::bad)?;
+    let id = request.machine_id.clone();
     let name = validate_name(&request.name)?;
     for (field, value) in [
         ("hostname", &request.hostname),

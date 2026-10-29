@@ -139,28 +139,17 @@ pub(super) fn verify_enrollment_root(root: &Path, uid: u32) -> io::Result<()> {
     let manifest_path = state.join("manifest.json");
     let machine_file = private_input(&machine_path, uid, 16 * 1024)?;
     let manifest_file = private_input(&manifest_path, uid, 64 * 1024)?;
-    let machine: serde_json::Value = serde_json::from_slice(&machine_file)
+    let machine: EnrollmentIdentity = serde_json::from_slice(&machine_file)
         .map_err(|_| invalid("Agent enrollment identity is invalid"))?;
     let manifest: EnrollmentManifest = serde_json::from_slice(&manifest_file)
         .map_err(|_| invalid("Agent enrollment manifest is invalid"))?;
-    let machine_id = machine
-        .get("machine_id")
-        .and_then(serde_json::Value::as_str);
-    if machine.get("format").and_then(serde_json::Value::as_u64) != Some(1)
-        || machine_id != Some(manifest.machine_id.as_str())
-        || machine
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .is_none()
-        || machine
-            .get("ssh_public_key")
-            .and_then(serde_json::Value::as_str)
-            .is_none()
-        || machine
-            .get("ssh_host_public_key")
-            .and_then(serde_json::Value::as_str)
-            .is_none()
+    if machine.format != 1
         || manifest.format != 1
+        || machine.machine_id != manifest.machine_id
+        || machine.name != manifest.name
+        || machine.name.is_empty()
+        || machine.ssh_public_key.is_empty()
+        || machine.ssh_host_public_key.is_empty()
     {
         return Err(invalid(
             "Agent enrollment identity and manifest do not match",
@@ -217,23 +206,7 @@ pub(super) fn load_config(path: &Path) -> io::Result<crate::AgentConfig> {
     let mut config: crate::AgentConfig =
         serde_json::from_slice(&bytes).map_err(|_| invalid("Agent config is invalid"))?;
     let base = canonical.parent().unwrap_or_else(|| Path::new("."));
-    if config.host_key.is_relative() {
-        config.host_key = base.join(config.host_key);
-    }
-    if config.authorized_keys.is_relative() {
-        config.authorized_keys = base.join(config.authorized_keys);
-    }
-    if config.jobs_root.is_relative() {
-        config.jobs_root = base.join(config.jobs_root);
-    }
-    if let Some(gateway) = &mut config.gateway {
-        if gateway.identity.is_relative() {
-            gateway.identity = base.join(&gateway.identity);
-        }
-        if gateway.host_public_key.is_relative() {
-            gateway.host_public_key = base.join(&gateway.host_public_key);
-        }
-    }
+    config.resolve_relative_paths(base);
     config.validate()?;
     Ok(config)
 }

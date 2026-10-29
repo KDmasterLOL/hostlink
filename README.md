@@ -128,8 +128,9 @@ Apalis may re-enqueue a task after a crash, including one that had already
 started; the command must tolerate duplicate side effects. ProcessKit controls
 the OS process tree and requires an OS-backed containment mechanism. Standard
 Apalis results contain the actual exit code; this design does not promise full
-raw stdout/stderr replay. New stores use schema **v5**; old v4/legacy databases
-are rejected without migration or deletion. See the
+raw stdout/stderr replay. New stores use upstream Apalis SQLite migrations;
+existing databases are reused without HostLink SQL schema inspection and
+older layouts are not automatically imported or deleted. See the
 [jobs module guide](crates/agent/src/jobs/README.md),
 [Agent jobs contract](docs/AGENT_MINIMAL_JOBS.md) and
 [verification evidence](docs/AGENT_MINIMAL_JOBS_EVIDENCE.md).
@@ -185,8 +186,9 @@ The Hub registry and local Agent process are managed separately. `hostlink remov
 revokes Hub access; it does not uninstall the local Agent. Linux uses a
 root-bound `systemd --user` unit; Windows 7 and Windows 11 use a current-user
 HKCU login-startup entry with an authenticated local control pipe. Both expose
-`hostlink-agent service install/start/stop/status/remove`, preserve enrollment
-data, keys and jobs, and refuse shutdown while durable jobs are unresolved.
+`hostlink-agent service install/start/stop/status/remove`, preserving enrollment
+data, keys and Apalis jobs across stop/removal. Pending jobs do not block
+process shutdown; interrupted commands may replay after restart.
 Linux does not enable login lingering. Windows startup requires the interactive
 user to sign in and rejects HKCU Run commands over the 260-character limit.
 Windows roots must be protected descendants of the current user's OS-resolved

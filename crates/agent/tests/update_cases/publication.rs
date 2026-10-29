@@ -1,52 +1,98 @@
 use super::*;
 
 #[tokio::test]
-async fn active_job_blocks_update_despite_unrelated_empty_jobs_directory() {
+async fn queued_apalis_task_survives_stopped_agent_update() {
     let (_temp, root) = install_root();
     let (archive, digest) = package(&root, "2.0.0", b"new exact Agent binary");
     let jobs = root.join("jobs");
     fs::create_dir(&jobs).expect("jobs root");
-    let unrelated_empty_jobs = root.join("unrelated-empty-jobs");
-    fs::create_dir(&unrelated_empty_jobs).expect("unrelated empty jobs directory");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&jobs, fs::Permissions::from_mode(0o700)).expect("private jobs root");
-        fs::set_permissions(&unrelated_empty_jobs, fs::Permissions::from_mode(0o700))
-            .expect("private unrelated jobs directory");
+        fs::set_permissions(&jobs, fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let _store = JobStore::initialize_fresh(&jobs).await.expect("job store");
+    JobStore::initialize_fresh(&jobs)
+        .await
+        .unwrap()
+        .close()
+        .await;
     let id = started_job::queued(&jobs).await;
 
     let update = request(&root, &archive, "2.0.0", digest);
-    assert!(
-        fs::read_dir(&unrelated_empty_jobs)
-            .expect("unrelated empty jobs directory")
-            .next()
-            .is_none()
-    );
-    assert_eq!(
-        apply(&update).expect("defer update"),
-        AgentUpdateOutcome::DeferredActiveJobs {
-            job_ids: vec![id.clone()],
-        }
-    );
-    assert_eq!(
-        active_ids(&jobs).expect("job stays active"),
-        vec![id.clone()]
-    );
-    started_job::started(&jobs, &id).await;
     assert!(matches!(
-        apply(&update).expect("running job defers update"),
-        AgentUpdateOutcome::DeferredActiveJobs { job_ids } if job_ids == vec![id.clone()]
+        apply(&update).unwrap(),
+        AgentUpdateOutcome::Installed { .. }
     ));
-    // A native Apalis Running task remains active until the worker recovers
-    // it. Recovery may replay it, but an updater must still defer.
+    let reopened = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(jobs.join("jobs.db"))
+            .read_only(true),
+    )
+    .await
+    .unwrap();
+    let stored_id: String = sqlx::query_scalar("SELECT id FROM Jobs WHERE id=?")
+        .bind(&id)
+        .fetch_one(&reopened)
+        .await
+        .unwrap();
     assert_eq!(
-        fs::read(root.join("bin/hostlink-agent")).expect("original binary"),
-        b"old installed Agent binary"
+        stored_id, id,
+        "updater must leave native Apalis tasks untouched"
+    );
+    reopened.close().await;
+    assert_eq!(
+        fs::read(root.join("bin/hostlink-agent")).unwrap(),
+        b"new exact Agent binary"
     );
 }
+
+#[tokio::test]
+async fn running_agent_lifetime_lock_blocks_update_before_publication() {
+    let (_temp, root) = install_root();
+    let (archive, digest) = package(&root, "2.0.0", b"new exact Agent binary");
+    let jobs = root.join("jobs");
+    fs::create_dir(&jobs).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&jobs, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    JobStore::initialize_fresh(&jobs)
+        .await
+        .unwrap()
+        .close()
+        .await;
+
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(jobs.join("runner.lock"))
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(jobs.join("runner.lock"), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    lock.lock().unwrap();
+
+    let update = request(&root, &archive, "2.0.0", digest);
+    assert_eq!(
+        apply(&update).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert_eq!(
+        fs::read(root.join("bin/hostlink-agent")).unwrap(),
+        b"old installed Agent binary"
+    );
+    lock.unlock().unwrap();
+    assert!(matches!(
+        apply(&update).unwrap(),
+        AgentUpdateOutcome::Installed { .. }
+    ));
+}
+
 #[test]
 fn exact_package_updates_files_and_repeat_is_idempotent() {
     let (_temp, root) = install_root();

@@ -280,37 +280,7 @@ pub(super) fn sha256(value: &str) -> bool {
 }
 
 pub(super) fn semver(value: &str) -> bool {
-    let (before_build, build) = match value.split_once('+') {
-        Some((left, right)) => (left, Some(right)),
-        None => (value, None),
-    };
-    if let Some(build) = build
-        && (build.is_empty() || !build.split('.').all(identifier))
-    {
-        return false;
-    }
-    let (core, prerelease) = match before_build.split_once('-') {
-        Some((left, right)) => (left, Some(right)),
-        None => (before_build, None),
-    };
-    if let Some(prerelease) = prerelease
-        && (prerelease.is_empty()
-            || !prerelease.split('.').all(|part| {
-                identifier(part)
-                    && !(part.bytes().all(|byte| byte.is_ascii_digit())
-                        && part.len() > 1
-                        && part.starts_with('0'))
-            }))
-    {
-        return false;
-    }
-    let parts = core.split('.').collect::<Vec<_>>();
-    parts.len() == 3
-        && parts.iter().all(|part| {
-            !part.is_empty()
-                && part.bytes().all(|byte| byte.is_ascii_digit())
-                && (*part == "0" || !part.starts_with('0'))
-        })
+    semver::Version::parse(value).is_ok()
 }
 
 pub(super) fn canonical_name(value: &str) -> bool {
@@ -321,13 +291,6 @@ pub(super) fn canonical_name(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
         })
-}
-
-pub(super) fn identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 pub(super) fn has_version_segment(segments: &[&str], version: &str) -> bool {

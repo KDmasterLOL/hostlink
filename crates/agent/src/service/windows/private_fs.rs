@@ -336,15 +336,6 @@ pub(super) fn ssh_banner(addr: std::net::SocketAddr) -> io::Result<bool> {
         Err(error) => Err(error),
     }
 }
-pub(super) fn busy(ids: &[String]) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::WouldBlock,
-        format!(
-            "Agent lifecycle refused while durable jobs are not terminal ({} job(s))",
-            ids.len()
-        ),
-    )
-}
 pub(super) fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }

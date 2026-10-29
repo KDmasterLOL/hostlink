@@ -51,15 +51,6 @@ pub(super) fn sha256_file(path: &Path) -> io::Result<String> {
     }
     Ok(hex(&h.finalize()))
 }
-pub(super) fn busy(ids: &[String]) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::WouldBlock,
-        format!(
-            "Agent lifecycle deferred: {} durable jobs are Prepared, Running or Interrupted; inspect jobs before stopping or removing service",
-            ids.len()
-        ),
-    )
-}
 pub(super) fn invalid(s: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, s)
 }

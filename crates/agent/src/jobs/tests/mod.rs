@@ -1,8 +1,10 @@
 use super::*;
+use crate::private_fs::restrict_private_path;
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
+use std::fs;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -76,7 +78,11 @@ async fn board_creates_and_lists_typed_tasks_and_serves_assets() {
         app.oneshot(request).await.unwrap().status(),
         StatusCode::FORBIDDEN
     );
-    assert!(!active_ids(&root).unwrap().is_empty());
+    let task_count: i64 = sqlx::query_scalar("SELECT count(*) FROM Jobs")
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+    assert_eq!(task_count, 1);
     store.close().await;
 }
 
@@ -124,7 +130,6 @@ async fn board_host_header_uses_exact_tower_validation() {
             "host={host:?}, origin={origin:?}"
         );
     }
-    assert!(active_ids(&root).unwrap().is_empty());
     store.close().await;
 }
 
@@ -176,21 +181,90 @@ async fn board_preserves_upstream_task_headers_without_hostlink_overrides() {
 }
 
 #[tokio::test]
-async fn old_version_is_refused_without_modification() {
+async fn opening_existing_store_never_creates_a_missing_database() {
     let parent = tempfile::tempdir().unwrap();
     restrict_private_path(parent.path(), true).unwrap();
     let root = parent.path().join("jobs");
     fs::create_dir(&root).unwrap();
     restrict_private_path(&root, true).unwrap();
+    assert!(JobStore::open(&root).await.is_err());
+    assert!(!root.join("jobs.db").exists());
+}
+
+#[tokio::test]
+async fn native_apalis_schema_is_reused_without_hostlink_migrations() {
+    let parent = tempfile::tempdir().unwrap();
+    restrict_private_path(parent.path(), true).unwrap();
+    let root = parent.path().join("jobs");
+    fs::create_dir(&root).unwrap();
+    restrict_private_path(&root, true).unwrap();
+
     let store = JobStore::initialize_fresh(&root).await.unwrap();
-    sqlx::query("UPDATE DurableMeta SET version=4")
-        .execute(&store.pool)
+    let migrations: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations")
+        .fetch_one(&store.pool)
         .await
         .unwrap();
+    assert!(migrations > 0);
+    let extra: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='DurableMeta'",
+    )
+    .fetch_one(&store.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        extra, 0,
+        "only upstream Apalis migrations should create tables"
+    );
     store.close().await;
-    let before = fs::read(root.join("jobs.db")).unwrap();
-    assert!(JobStore::open(&root).await.is_err());
-    assert_eq!(before, fs::read(root.join("jobs.db")).unwrap());
+
+    let reopened = JobStore::open(&root).await.unwrap();
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations")
+        .fetch_one(&reopened.pool)
+        .await
+        .unwrap();
+    assert_eq!(after, migrations);
+    reopened.close().await;
+}
+
+#[tokio::test]
+async fn preexisting_v5_database_keeps_legacy_marker_and_native_tasks() {
+    let parent = tempfile::tempdir().unwrap();
+    restrict_private_path(parent.path(), true).unwrap();
+    let root = parent.path().join("jobs");
+    fs::create_dir(&root).unwrap();
+    restrict_private_path(&root, true).unwrap();
+
+    let old = JobStore::initialize_fresh(&root).await.unwrap();
+    sqlx::query("CREATE TABLE DurableMeta(id INTEGER PRIMARY KEY, version INTEGER NOT NULL)")
+        .execute(&old.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO DurableMeta(id,version) VALUES(1,5)")
+        .execute(&old.pool)
+        .await
+        .unwrap();
+    let app = board::router(&old, "127.0.0.1:4040".parse().unwrap());
+    let request = Request::builder()
+        .method("PUT")
+        .uri("/api/v1/queues/commands/tasks")
+        .header("host", "127.0.0.1:4040")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"program":"example","args":[],"cwd":null}"#))
+        .unwrap();
+    assert!(app.oneshot(request).await.unwrap().status().is_success());
+    old.close().await;
+
+    let reopened = JobStore::open(&root).await.unwrap();
+    let version: i64 = sqlx::query_scalar("SELECT version FROM DurableMeta WHERE id=1")
+        .fetch_one(&reopened.pool)
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM Jobs")
+        .fetch_one(&reopened.pool)
+        .await
+        .unwrap();
+    assert_eq!((version, count), (5, 1));
+    reopened.close().await;
 }
 
 #[tokio::test]

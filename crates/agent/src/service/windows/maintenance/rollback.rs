@@ -39,7 +39,7 @@ pub(crate) fn stop_for_maintenance_rollback(receipt: &MaintenanceReceipt) -> io:
             return Err(invalid("authenticated candidate refused rollback stop"));
         }
         return match unsafe { WaitForSingleObject(process.handle, 10_000) } {
-            WAIT_OBJECT_0 => refuse_active_jobs(&record),
+            WAIT_OBJECT_0 => Ok(()),
             WAIT_TIMEOUT => Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "candidate Agent did not stop for rollback; no process was force-terminated",
@@ -60,7 +60,6 @@ pub(crate) fn stop_for_maintenance_rollback(receipt: &MaintenanceReceipt) -> io:
             "rollback service identity differs from the maintenance receipt",
         ));
     }
-    refuse_active_jobs(&record)?;
     let pid = running_pid(&pipe_request(&record, "STATUS")?)
         .ok_or_else(|| invalid("rollback requires authenticated running Agent status"))?;
     let process = open_owned_process(pid, &record)?;
@@ -80,7 +79,7 @@ pub(crate) fn stop_for_maintenance_rollback(receipt: &MaintenanceReceipt) -> io:
         return Err(invalid("authenticated Agent refused rollback stop"));
     }
     match unsafe { WaitForSingleObject(process.handle, 10_000) } {
-        WAIT_OBJECT_0 => refuse_active_jobs(&record),
+        WAIT_OBJECT_0 => Ok(()),
         WAIT_TIMEOUT => Err(io::Error::new(
             io::ErrorKind::TimedOut,
             "candidate Agent did not stop for rollback; no process was force-terminated",

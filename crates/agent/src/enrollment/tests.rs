@@ -348,10 +348,6 @@ async fn fresh_enrollment_publishes_private_config_once_against_local_hub_v2() {
     assert!(config.jobs_root.is_dir());
     assert!(config.jobs_root.join("jobs.db").is_file());
     assert!(
-        jobs::active_ids(&config.jobs_root).unwrap().is_empty(),
-        "fresh enrolled Agent and updater must share the same owned job store"
-    );
-    assert!(
         !published
             .config_path
             .parent()

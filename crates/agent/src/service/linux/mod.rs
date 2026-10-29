@@ -1,5 +1,4 @@
 use super::ServiceStatus;
-use crate::jobs;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
@@ -25,19 +24,7 @@ pub(super) struct InstallRecord {
     config: PathBuf,
     unit_name: String,
 }
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct EnrollmentManifest {
-    format: u32,
-    machine_id: String,
-    files: std::collections::BTreeMap<String, EnrollmentFile>,
-}
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct EnrollmentFile {
-    size: u64,
-    sha256: String,
-}
+use crate::enrollment::{EnrollmentIdentity, EnrollmentManifest};
 
 mod lifecycle;
 mod private_fs;

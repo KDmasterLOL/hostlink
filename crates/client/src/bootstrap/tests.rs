@@ -148,6 +148,9 @@ fn installer_contract_is_platform_specific_and_version_is_exact_semver() {
     assert!(!semver("1.2.3-"));
     assert!(!semver("01.2.3"));
     assert!(!semver("latest"));
+    assert!(!semver("18446744073709551616.0.0"));
+    assert!(!semver("1.2.3-01"));
+    assert!(semver("0.0.0+sha.aa11"));
     assert!(validate_installer_contract("HubUrl Name SshUser AgentUri AgentSha256 ArchiveUri ArchiveSha256 AgentVersion Target Read-Host -AsSecureString", Target::Win11X64).is_ok());
     assert!(validate_installer_contract("--hub-url --name --ssh-user --agent-url --agent-sha256 --archive-url --archive-sha256 --agent-version --target stty -echo", Target::LinuxX64).is_ok());
     assert!(validate_installer_contract("--hub-url --name", Target::LinuxX64).is_err());
