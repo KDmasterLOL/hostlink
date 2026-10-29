@@ -42,8 +42,8 @@ impl JobWorker {
                     }
                 })
                 .build(consume);
-            // No retry layer. Backend Lock/Complete events are disabled: only
-            // atomic HostLink transactions may publish lifecycle and attempts.
+            // Native Apalis Lock/Complete events own status and result
+            // publication; no separate HostLink lifecycle or retry layer.
             let result = worker
                 .run_until(async move {
                     stopping.shutdown.cancelled().await;

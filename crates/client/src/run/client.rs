@@ -115,7 +115,8 @@ impl HostConnection {
 
     /// Requests cancellation without claiming a running process is already terminated.
     ///
-    /// On a lost ACK, query status after reconnecting; never replay a start.
+    /// On a lost ACK, query the same ID instead of submitting a new one.
+    /// Native Apalis crash recovery may independently repeat an execution.
     pub async fn job_cancel(&mut self, request: &Cancel) -> Result<JobStatus, SshClientError> {
         validate_id(&request.id)?;
         let value = self
