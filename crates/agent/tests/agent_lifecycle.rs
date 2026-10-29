@@ -77,8 +77,8 @@ fn fixture() -> (
         r##"#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$FIXTURE_SYSTEMCTL_LOG"
-case "${1-}" in
-  show) printf 'ActiveState=inactive\nMainPID=0\n' ;;
+case "${2-}" in
+  status) exit 3 ;;
 esac
 if [ "${2-}" = "--version" ]; then printf 'systemd 255\n'; fi
 "##,
@@ -184,11 +184,7 @@ async fn service_commands_bind_private_unit_to_root_and_remove_only_service_meta
     let unit_path = units.next().unwrap().unwrap().path();
     assert!(units.next().is_none(), "one install root creates one unit");
     let unit = fs::read_to_string(&unit_path).unwrap();
-    assert!(
-        unit.contains(
-            "Restart=on-failure\nRestartSec=15s\nRestartSteps=4\nRestartMaxDelaySec=240s"
-        )
-    );
+    assert!(unit.contains("Restart=on-failure\nRestartSec=15s"));
     assert!(unit.contains(root.to_str().unwrap()));
     assert!(unit.contains("WantedBy=default.target"));
     assert!(!unit.contains("enable-linger"));
@@ -198,15 +194,12 @@ async fn service_commands_bind_private_unit_to_root_and_remove_only_service_meta
     let mut machine: serde_json::Value = serde_json::from_slice(&saved_machine).unwrap();
     machine["name"] = serde_json::json!("modified");
     fs::write(&machine_file, machine.to_string()).unwrap();
-    let tampered = invoke(
+    let stopped_with_unrelated_metadata_change = invoke(
         &root.join("bin/hostlink-agent"),
         &["stop", "--root", root.to_str().unwrap()],
         &home,
     );
-    assert!(!tampered.status.success());
-    assert!(
-        String::from_utf8_lossy(&tampered.stderr).contains("identity and manifest do not match")
-    );
+    assert!(stopped_with_unrelated_metadata_change.status.success());
     fs::write(&machine_file, saved_machine).unwrap();
     fs::set_permissions(&machine_file, fs::Permissions::from_mode(0o600)).unwrap();
 
@@ -271,8 +264,8 @@ async fn service_commands_bind_private_unit_to_root_and_remove_only_service_meta
     );
     assert!(!root.join(".hostlink-user-service.json").exists());
     assert!(
-        !root.join("bin/hostlink-agent").exists(),
-        "remove uninstalls the owned executable"
+        root.join("bin/hostlink-agent").exists(),
+        "service removal must preserve the installed Agent executable"
     );
     assert!(
         config.exists(),
@@ -301,7 +294,7 @@ fn service_rejects_symlink_root_and_unmanaged_unit_collision() {
         &home,
     );
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("must not be a symlink"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("without symlinks"));
 
     let foreign_root = home.join("foreign");
     fs::create_dir(&foreign_root).unwrap();

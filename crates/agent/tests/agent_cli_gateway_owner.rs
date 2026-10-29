@@ -181,7 +181,15 @@ async fn cli_run_starts_only_one_agent_owned_reverse_tunnel() {
     let observed = requests.load(Ordering::SeqCst);
     let status = agent.try_wait().expect("check Agent process");
     if status.is_none() {
-        agent.kill().await.expect("stop disposable Agent");
+        let pid = agent.id().expect("running Agent PID");
+        // systemd --user sends SIGTERM on stop, not terminal Ctrl+C (SIGINT).
+        // The Agent must take its normal cancellation path and exit cleanly.
+        assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGTERM) }, 0);
+        let exited = tokio::time::timeout(Duration::from_secs(10), agent.wait())
+            .await
+            .expect("Agent did not shut down after SIGTERM")
+            .expect("wait for SIGTERM shutdown");
+        assert!(exited.success(), "Agent shutdown failed: {exited}");
     }
     gateway_server.abort();
     let _ = gateway_server.await;
