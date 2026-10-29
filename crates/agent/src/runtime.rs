@@ -38,6 +38,10 @@ where
     // An updater must not replace its executable while it is running.
     let lifetime = crate::private_fs::open_lock(&config.jobs_root.join("runner.lock"))?;
     lifetime.try_lock().map_err(io::Error::other)?;
+    #[cfg(windows)]
+    if let Some(root) = config.jobs_root.parent() {
+        crate::update::ensure_no_pending_windows_handoff(root)?;
+    }
     let prepared = ssh::prepare(config)?;
     let cancellation = processkit::CancellationToken::new();
     let mut ssh = Box::pin(ssh::serve_prepared_until(

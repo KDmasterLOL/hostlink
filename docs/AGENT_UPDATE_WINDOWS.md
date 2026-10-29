@@ -1,158 +1,53 @@
-# Windows Agent stopped-runtime updater
+# Windows Agent offline update (1C-1114)
 
-## Current implementation status
+Windows updates require a fully stopped, unregistered Agent. Live update,
+maintenance mode, one-use candidate admission, automatic restart and health
+handoff have been removed. The updater never changes Task Scheduler or HKCU.
+An installed task (even stopped), legacy service marker/launcher/admission or
+Run registration is an error. Remove the task before updating and explicitly
+reinstall/start it afterwards. Existing legacy installations require a separately
+authorized removal using their matching old executable.
 
-`update::apply` keeps exact local archive SHA, target/version, strict raw ZIP
-central-directory and duplicate-entry validation, manifest/content digests,
-private-root checks and a dedicated updater serialization lock. No live
-jobs-table inspection is performed; the registered Agent is stopped using
-its authenticated maintenance channel. After archive and bounded member contents have
-been checked, `self_update::Extract` performs extraction into a private
-same-volume staging directory. The extracted file set, normalized ACL or mode,
-sizes, and digests are read back before publication. No HTTP release selection
-or download API is called; the source remains the exact local archive supplied
-to `AgentUpdateRequest`.
+The supported root remains the exact OS-resolved LocalAppData/HostLink/Agent
+with protected current-user ACLs, verified ancestry and non-reparse paths.
+Run the update command from a separate private executable beneath that root
+on the same volume, not from the executable being replaced. Keep the existing
+CLI syntax: `update --root ROOT --archive ZIP --sha256 SHA --target TARGET
+--version VERSION`. No package lookup, implicit download or version guessing.
+The archive must be beneath ROOT.
 
-Windows publication now uses `self_update::MoveAll` for the executable and
-`install.json` as one ordered move transaction. Its stash is the private
-transaction directory on the install volume. HostLink retains verified old-file
-copies and its identity journal for startup fencing, service coordination,
-interruption recovery, and post-error inventory checks because `MoveAll` only
-offers best-effort rollback for an in-process move failure; it does not promise
-power-loss recovery. HostLink checks both installed digests and the full package
-manifest after a library error and fails closed if the old or new inventory is
-not exactly proven. It never publishes package support files, jobs, enrollment
-state, keys, configuration, or Hub state.
+The updater holds the exclusive update lock and the existing Agent process
+lifetime lock for the entire transaction. The latter is an OS file lock, not
+an Apalis lock/table or a custom PID ownership record. It refuses a running
+Agent and conservatively checks the installed image against the OS process
+snapshot; an unreadable matching image is an error. Registration absence and
+stopped state are checked again before publication. Concurrent official Agent
+startup cannot acquire the runtime lock. Service install/start are serialized
+against update, and foreground/logon startup rejects any pending journal.
 
-The registered current-user path composes the existing `service.rs` maintenance
-receipt and health APIs. It keeps the owner marker and journal through
-cooperative stop, publication, candidate health readback, and restoration of the
-exact login registration. `Installed` is returned only after those APIs report
-the authenticated new executable healthy. The updater must be a separate
-verified executable beneath the same install root; a loaded Agent image is not
-replaced. On Linux, the existing publication and recovery path remains in
-place.
+Archive SHA-256, exact version/target, bounded ZIP structure and member digests,
+installed inventory, private staging/ACLs and hardlink/reparse defenses remain.
+`self_update` Extract/MoveAll remains the publication implementation. Existing
+support scripts must match both old and new manifests; changing package support
+files in this transaction is still unsupported and fails closed.
 
-Dependency tradeoff: `self_update 1.3.1` fails to compile with only
-`archive-zip` and `compression-zip-deflate`, because its library has a compile
-error unless an HTTP client feature is selected. This crate enables `ureq` plus
-its TLS support solely to satisfy that dependency build; HostLink does not call
-the network client. This is additional dependency surface and must be reconsidered
-if a later maintained release exposes the local archive primitives without an
-HTTP backend.
+Before publication, the updater durably records exact old/new executable and
+metadata hashes plus verified private backups under `.updates`. It reads back
+the full published inventory before success. Failed publication restores and
+verifies the old inventory. On interruption, retrying offline uses the journal
+and hashes to finish a fully published installation, restore a partial one, or
+preserve ambiguous state with an error. Recovery never starts an Agent.
+Retired `RESTARTED` live-handoff journals are rejected for manual investigation;
+legacy maintenance state is never silently converted. Unknown artifacts,
+untrusted backups and changed metadata remain errors. Enrollment, credentials
+and Apalis jobs are retained and no SQLite tables are inspected.
 
-The user-scope lifecycle owner in `service.rs` binds the current SID, install
-root, executable digest, named pipe, and login registration. Maintenance
-startup uses an owner-validated launch mode while the marker remains set and
-login startup remains disabled. On interruption, a maintenance marker plus
-validated journal is recovered conservatively: a running owner process is
-stopped through its authenticated pipe, exact old backups are restored, and
-only then is old registration restored. If registration was already restored,
-recovery commits only a `RESTARTED` journal whose registered candidate passes a
-fresh owner-bound health readback. An orphan marker, foreign Run value, unknown
-process, or mismatched journal is preserved and fails closed.
+`service stop` delegates to Task Scheduler termination and does **not** guarantee
+graceful shutdown or descendant cleanup. Interrupted Apalis commands may replay
+with repeated side effects. Prefer foreground Ctrl+C when a cooperative shutdown
+is required; offline update still requires task removal and stopped evidence.
 
-`update_handoff.rs` remains the HostLink-specific bounded identity journal and
-recovery model. Its deterministic ID covers old/new target, version, package,
-executable and metadata digests; readback recomputes the ID. It is not a second
-file publication engine.
-
-Windows service start and ordinary managed login refuse to launch when
-`.updates/handoff.json` exists or is malformed. The narrow maintenance launch
-is coordinated only through the existing service owner API. Native Windows
-runtime acceptance remains separate from Linux checks and source inspection.
-
-## Slice A change size
-
-Baseline at `0d4ab7d597c111c6c4ab87273cd5ef6d1fbfe56c`: 2,151 production lines
-in `update.rs` and 588 in `update_handoff.rs` (2,739 combined), with 51 function
-definitions. Slice A has 2,189 and 588 (2,777 combined), with 50 function
-definitions. This adds 38 lines of production validation/orchestration while
-removing one generic helper and the custom `ReplaceFileW` publish/rollback path.
-The journal's `MoveFileExW` write-through persistence remains because the
-library does not provide crash-durable journal phases. The dependency adds one
-direct crate and 62 new package entries to `Cargo.lock`; most of that lockfile
-delta is optional platform/feature metadata, while the selected local build
-also compiles the required `ureq` backend and `self-replace` dependency.
-
-## Current implementation boundary
-
-`service.rs` now owns a crate-private maintenance receipt and coordinator
-primitives. The caller must hold `install_root/update.lock` for the full
-transaction. Entry verifies the current SID/root, marker, exact Run
-command and executable digest, then records maintenance in
-the owner marker. Managed login startup refuses that marker before it can start
-a listener. The exact current-user Run value is removed, the Agent is asked to
-stop over its owner-authenticated pipe, and the updater waits on the verified
-process handle. No PID is accepted from an argument and no process is
-force-terminated.
-
-The opaque receipt supports updating only the marker executable digest after
-the coordinator has verified the new file, starting a candidate under the
-maintenance fence, restoring the exact Run command after authenticated health
-readback, and restoring old marker/registration only after exact old inventory
-verification. The marker retains the prior digest across interruption. The
-shared update lock remains held throughout the update and rollback paths.
-
-The managed path is implemented but not yet accepted as a Windows runtime
-feature. The disposable Windows lifecycle test remains ignored and requires
-the documented separately verified standard-user profile harness. Linux
-checks and cross-target builds do not prove actual HKCU, process-handle,
-concurrent login, restart, or rollback behavior. No native managed maintenance
-transaction was run in this profile.
-
-## Required helper protocol
-
-The installed executable cannot replace its own loaded image. The updater must
-be a separate, private, verified process on the install volume. It must use the
-existing owner-bound stop path, prevent new registered launches during
-maintenance, and wait for the authenticated Agent process handle to signal
-before publication. Pending jobs are preserved by Apalis; interrupted
-commands may be replayed after restart, so exactly-once execution is not
-promised.
-
-The managed-live helper validates archive SHA, target, semantic version, complete
-manifest and old installed inventory before service mutation. It durably records
-`STAGED`, `BACKED_UP`, `PUBLISHED`, `VERIFIED`, and `RESTARTED`, with exact old
-and new package, executable and metadata identities. Every journal transition
-must be atomic and recoverable; transaction IDs must be recomputed from the
-validated journal contents. It must verify the backup before publication,
-verify the full new installed inventory before restart, and verify the new
-Agent's authenticated lifecycle response before reporting `Installed`. A
-failed publication or bounded restart must restore and verify the old
-executable and metadata. Ambiguous states preserve all candidates and the
-journal and return an error.
-
-The recovery planner maps validated journal phases plus observed old/new/backup
-executable and metadata hashes to one action. File-level tests exercise exact
-hash observations and fail-closed recovery decisions, but the planner must not
-be treated as having performed filesystem publication. The updater never
-reads Apalis's internal task tables or requires an empty queue. The update
-lock remains held across publication and rollback; startup must not race
-login registration.
-
-## Windows filesystem and wait constraints
-
-`self_update::MoveAll` uses same-volume filesystem renames and retains displaced
-files in its private stash. HostLink sets and verifies the current-user-only ACL
-on extracted, staged, installed, backup, and journal files because rename does
-not merge the destination ACL. The source file must be closed before moving.
-`WaitForSingleObject` can
-wait on a process handle with `SYNCHRONIZE` and is supported by Windows 7
-([Microsoft API reference](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject)).
-Do not infer process exit from a missing pipe. Reject reparse points in the
-root, stage, backup, metadata, and journal paths. The staged executable and
-stash must be on the same volume as the installed binary. Reboot-delayed
-replacement, admin/SYSTEM elevation, guessed PID
-termination, and a second execution transport are forbidden.
-
-## Acceptance still required
-
-Run source-exact, disposable-profile tests on Windows 11 and Windows 7 x64 and
-x86 separately. The tests must cover owner/SID/path/hash mismatch, foreign or
-stale PID, active jobs being stopped with the Agent process, reparse
-paths, backup hash mismatch, locked file, every journal transition and crash
-recovery, failed restart and rollback, idempotent recovery, and no login
-auto-run race; replay behavior is owned by Apalis. Windows update tests must never use the real WORK
-profile or an installed service. Cross-compilation and Linux recovery-planner
-tests do not prove Windows publication behavior.
+Native Windows 11 and Win7 SP1 x64/x86 offline update/recovery, task logon,
+termination, concurrency and rollback acceptance is **NOT RUN** for this change.
+Linux tests and generic MSVC check/clippy only establish their stated evidence.
+No installed Agent, real profile or production machine is a permitted test target.

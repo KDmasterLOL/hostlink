@@ -10,11 +10,7 @@ use crate::update::private_fs::{hash_file, validate_path_has_no_reparse_componen
 use std::{fs, io, path::Path};
 
 #[cfg(windows)]
-pub(in crate::update) fn recover_windows_handoff(
-    root: &Path,
-    force_rollback: bool,
-    restarted_new_healthy: bool,
-) -> io::Result<()> {
+pub(in crate::update) fn recover_windows_handoff(root: &Path) -> io::Result<()> {
     use crate::update_handoff::{RecoveryAction, TransactionFiles, UpdatePhase};
     use std::os::windows::fs::MetadataExt;
 
@@ -103,8 +99,7 @@ pub(in crate::update) fn recover_windows_handoff(
         backup_executable: &backup_executable,
         backup_metadata: &backup_metadata,
     };
-    let mut evidence = crate::update_handoff::inspect_files(&paths, &journal.identity)?;
-    evidence.restarted_new_healthy = restarted_new_healthy;
+    let evidence = crate::update_handoff::inspect_files(&paths, &journal.identity)?;
     if !(evidence.installed_old_valid || evidence.installed_new_valid)
         || !(evidence.installed_old_metadata_valid || evidence.installed_new_metadata_valid)
     {
@@ -199,24 +194,7 @@ pub(in crate::update) fn recover_windows_handoff(
             }
             cleanup_windows_transaction(&journal_path, &transaction_dir, &journal.identity)
         }
-        RecoveryAction::VerifyPublished
-        | RecoveryAction::StartVerified
-        | RecoveryAction::CommitNew => {
-            if force_rollback {
-                rollback_windows(
-                    &installed_executable,
-                    &installed_metadata,
-                    &backup_executable,
-                    &backup_metadata,
-                    &journal_path,
-                    &mut journal,
-                )?;
-                return cleanup_windows_transaction(
-                    &journal_path,
-                    &transaction_dir,
-                    &journal.identity,
-                );
-            }
+        RecoveryAction::VerifyPublished | RecoveryAction::CommitNew => {
             let new_metadata = read_install_metadata(&installed_metadata)?;
             if new_metadata.format != 1
                 || new_metadata.target != journal.identity.target

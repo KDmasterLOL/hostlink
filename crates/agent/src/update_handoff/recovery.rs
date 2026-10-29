@@ -41,7 +41,6 @@ pub fn inspect_files(
             paths.installed_metadata,
             &identity.new_metadata_sha256,
         )?,
-        restarted_new_healthy: false,
     })
 }
 
@@ -76,7 +75,7 @@ fn matches_digest(path: &Path, expected: &str) -> io::Result<bool> {
     }
     Ok(format!("{:x}", hash.finalize()) == expected)
 }
-/// Hashes and health facts observed from disk/process handles during recovery.
+/// File hashes observed from the stopped installation during recovery.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RecoveryEvidence {
     pub staged_new_valid: bool,
@@ -87,7 +86,6 @@ pub struct RecoveryEvidence {
     pub backup_old_metadata_valid: bool,
     pub installed_new_valid: bool,
     pub installed_new_metadata_valid: bool,
-    pub restarted_new_healthy: bool,
 }
 
 /// A side-effect-free recovery decision. Callers must execute it only after validating
@@ -95,7 +93,6 @@ pub struct RecoveryEvidence {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryAction {
     VerifyPublished,
-    StartVerified,
     CommitNew,
     RestoreBackup,
     FinishRollback,
@@ -156,29 +153,11 @@ pub fn recovery_action(phase: UpdatePhase, evidence: RecoveryEvidence) -> Recove
             Action::RestoreBackup
         }
         Phase::Verified
-            if evidence.installed_new_valid
-                && evidence.installed_new_metadata_valid
-                && evidence.backup_old_valid
-                && evidence.backup_old_metadata_valid =>
-        {
-            Action::StartVerified
-        }
-        Phase::Verified
             if evidence.installed_new_valid && evidence.installed_new_metadata_valid =>
         {
             Action::CommitNew
         }
         Phase::Verified if evidence.backup_old_valid && evidence.backup_old_metadata_valid => {
-            Action::RestoreBackup
-        }
-        Phase::Restarted
-            if evidence.installed_new_valid
-                && evidence.installed_new_metadata_valid
-                && evidence.restarted_new_healthy =>
-        {
-            Action::CommitNew
-        }
-        Phase::Restarted if evidence.backup_old_valid && evidence.backup_old_metadata_valid => {
             Action::RestoreBackup
         }
         Phase::RollingBack

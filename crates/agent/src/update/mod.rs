@@ -3,7 +3,7 @@
 //! Updates are serialized with an OS file lock, staged under the user-owned install root,
 //! and published only after the selected archive, target, version, and file manifest agree.
 //! Windows publication is limited to a separately invoked, current-user-private updater. A
-//! registered Agent is updated through its authenticated maintenance and health-check handoff.
+//! registered Agent must be stopped and its task removed before an offline update.
 
 #[cfg(not(windows))]
 use manifest::InstallMetadata;
@@ -20,7 +20,7 @@ mod private_fs;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub(crate) use windows::{ensure_no_pending_windows_handoff, reject_running_agent};
+pub(crate) use windows::ensure_no_pending_windows_handoff;
 
 pub use bootstrap::{finalize_fresh_install, verify_fresh_package};
 
@@ -68,15 +68,17 @@ pub(in crate::update) struct PublicationJournal {
 ///
 /// The updater does not inspect Apalis internals. On Linux it requires the
 /// Agent process to have released its lifetime lock before publication;
-/// Windows uses its authenticated stopped-runtime maintenance handoff.
+/// Windows requires removal of the logon task and a separate offline updater.
 pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
     validate_request(request)?;
     private_fs::validate_user_owned_root(&request.install_root)?;
     let archive_path =
         archive::validate_archive_path(&request.install_root, &request.archive_file)?;
     let update_file = crate::private_fs::open_lock(&request.install_root.join("update.lock"))?;
-    update_file.lock()?;
     #[cfg(not(windows))]
+    update_file.lock()?;
+    #[cfg(windows)]
+    update_file.try_lock().map_err(io::Error::other)?;
     let _stopped_agent = {
         // This lock describes the Agent process, not any SQLite state.
         let file = crate::private_fs::open_lock(&request.install_root.join("jobs/runner.lock"))?;
@@ -89,98 +91,9 @@ pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
         file
     };
     #[cfg(windows)]
-    windows::ensure_windows_separate_updater(&request.install_root)?;
-    #[cfg(windows)]
-    let registered_service = crate::service::has_registration(&request.install_root)?;
-    #[cfg(windows)]
-    if registered_service {
-        let pending_journal = crate::update_handoff::read_journal(
-            &request.install_root.join(".updates/handoff.json"),
-        )?;
-        let pending = pending_journal.is_some();
-        if crate::service::is_in_maintenance(&request.install_root)? {
-            if !pending {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "service maintenance marker has no matching update journal; state preserved for manual recovery",
-                ));
-            }
-            crate::service::recover_maintenance_stop(&request.install_root)?;
-            windows::recover_windows_handoff(&request.install_root, true, false)?;
-            crate::service::recover_maintenance_after_inventory(&request.install_root, |root| {
-                let metadata = manifest::read_install_metadata(&root.join(INSTALL_METADATA))?;
-                manifest::validate_installed(&root.join("bin"), &metadata, &metadata.target)
-            })?;
-        } else if pending {
-            let journal = pending_journal.expect("pending journal was checked");
-            match journal.phase {
-                crate::update_handoff::UpdatePhase::Staged => {
-                    crate::service::verify_registered_image(
-                        &request.install_root,
-                        &journal.identity.old_executable_sha256,
-                    )?;
-                    windows::recover_windows_handoff(&request.install_root, false, false)?;
-                }
-                crate::update_handoff::UpdatePhase::RolledBack => {
-                    crate::service::recover_maintenance_after_inventory(
-                        &request.install_root,
-                        |root| {
-                            let metadata =
-                                manifest::read_install_metadata(&root.join(INSTALL_METADATA))?;
-                            manifest::validate_installed(
-                                &root.join("bin"),
-                                &metadata,
-                                &metadata.target,
-                            )
-                        },
-                    )?;
-                    crate::service::verify_registered_image(
-                        &request.install_root,
-                        &journal.identity.old_executable_sha256,
-                    )?;
-                    windows::recover_windows_handoff(&request.install_root, false, false)?;
-                }
-                crate::update_handoff::UpdatePhase::Restarted => {
-                    if let Err(health_error) = crate::service::verify_registered_health(
-                        &request.install_root,
-                        &journal.identity.new_executable_sha256,
-                    ) {
-                        crate::service::begin_recovery_maintenance(
-                            &request.install_root,
-                            &journal.identity.old_executable_sha256,
-                            &journal.identity.new_executable_sha256,
-                        )?;
-                        crate::service::recover_maintenance_stop(&request.install_root)?;
-                        windows::recover_windows_handoff(&request.install_root, true, false)?;
-                        crate::service::recover_maintenance_after_inventory(
-                            &request.install_root,
-                            |root| {
-                                let metadata =
-                                    manifest::read_install_metadata(&root.join(INSTALL_METADATA))?;
-                                manifest::validate_installed(
-                                    &root.join("bin"),
-                                    &metadata,
-                                    &metadata.target,
-                                )
-                            },
-                        )?;
-                        return Err(io::Error::other(format!(
-                            "previous Agent candidate failed health readback ({health_error}); exact old inventory was restored and registered"
-                        )));
-                    }
-                    windows::recover_windows_handoff(&request.install_root, false, true)?;
-                }
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "interrupted Windows update has no consistent owner maintenance state; journal preserved",
-                    ));
-                }
-            }
-        }
-    } else {
+    {
         windows::ensure_windows_offline_caller(&request.install_root)?;
-        windows::recover_windows_handoff(&request.install_root, false, false)?;
+        windows::recover_windows_handoff(&request.install_root)?;
     }
     #[cfg(not(windows))]
     linux::recover_interrupted_publication(&request.install_root)?;
@@ -218,7 +131,6 @@ pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
         manifest,
         old_metadata,
         staged_files,
-        registered_service,
     )?;
 
     #[cfg(windows)]

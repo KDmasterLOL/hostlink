@@ -65,108 +65,66 @@ update workflow and install the updated executable before registering
 the service again. Hub revocation and local service removal are independent
 operations.
 
-## Windows 7 and Windows 11 current-user startup
+## Windows 7 and Windows 11 current-user Task Scheduler task
 
-Windows uses only the current interactive user's
-`HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run` entry. It does not
-create a Windows service, scheduled task, SYSTEM process, machine-wide
-registration, or legacy Agent integration. Login startup runs only after that
-user signs in; no process is claimed to be running while the user is logged
-out. Windows does not restart the Agent after a crash during that login
-session; status reports it inactive and an explicit `start` is required. The
-Run command is capped at 260 UTF-16 characters, so install fails
-before writing either marker or registry value when the selected root cannot
-fit safely.
+Windows uses Task Scheduler 2.0 through Microsoft's `windows` COM bindings.
+It creates one SID/root-derived `HostLinkAgent-v2-...` task with a current-user
+logon trigger, `InteractiveToken`, `LeastPrivilege`, no password, one direct
+Agent executable action and `IgnoreNew` instance policy. It requires an
+interactive sign-in, does not restart on failure and has no execution time
+limit. `install` registers without starting; `start` explicitly runs the task.
+No administrator, SYSTEM, Windows service, HKCU Run writer, VBS launcher,
+private service marker, lifecycle named pipe or PID owner is used.
 
-```powershell
-hostlink-agent.exe check --config ROOT\state\agent.json
-hostlink-agent.exe service install --root ROOT --config ROOT\state\agent.json
-hostlink-agent.exe service start --root ROOT
-hostlink-agent.exe service status --root ROOT
-hostlink-agent.exe service stop --root ROOT
-hostlink-agent.exe service remove --root ROOT
-```
+The public commands above and `ServiceStatus` are retained. Windows `pid` is
+`None`; `active` means Scheduler running/queued state or an extant task instance.
+The SSH banner is a separate health probe, not authenticated process identity.
+`start` waits up to ten seconds for Scheduler activation; it does not certify
+SSH/Hub readiness. `status` fails if the exact expected task XML differs,
+including SID, action/config path, trigger, settings and executable SHA-256 in
+the task description. Both expected and registered XML are normalized through
+the Scheduler's own schema before structural comparison. `TASK_CREATE` refuses
+an occupied task name atomically; install never overwrites a foreign definition.
+Unknown state, COM errors and access denial fail closed without localized text
+parsing. `stop`/`remove` also work when the task is already stopped.
 
-`ROOT` must be a bounded private descendant of the current user's OS-resolved
-`FOLDERID_LocalAppData` directory, including the official installer layout
-`LocalAppData\HostLink\Agent`. The resolver uses `SHGetKnownFolderPath`,
-not `%LOCALAPPDATA%` or another environment variable. The profile boundary
-must be owned by the current SID and its DACL may grant access only to that SID,
-SYSTEM, and local Administrators; every intermediate directory and the install
-root itself require protected current-user-only DACLs. Both profile and
-installed-root paths are canonicalized to avoid ordinary DOS vs verbatim aliases.
-The path chain rejects reparse points. Shared roots such
-as `C:\Temp` are refused even if the final directory appears private.
+**Task Scheduler stop is OS termination, not guaranteed graceful shutdown.**
+`AllowHardTerminate=true` permits Scheduler termination. No bespoke IPC is
+retained to promise grace. Foreground `run` still supports Ctrl+C cancellation.
+Scheduler termination may interrupt commands and their descendants; native
+containment/cleanup must be verified separately. Apalis retains queued state
+and may replay interrupted work with repeated side effects. `remove` stops all
+task instances and deletes only the verified task, preserving the executable,
+enrollment, keys, jobs and every other Agent file.
 
-`install` requires a non-elevated, non-SYSTEM user, the exact executable at
-`ROOT\\bin\\hostlink-agent.exe`, the fresh enrollment config and matching
-manifest, a LocalAppData-contained root with current-user-owned protected ACLs,
-and non-reparse input paths. It stores a private marker with the current SID,
-root, config, binary SHA-256, a
-root-specific named-pipe endpoint, and a random 256-bit control token. It also
-writes a private, source-derived VBScript launcher under `ROOT` so the Run
-entry stays below the registry's command limit even when the executable and
-config paths are long. The launcher is pinned by its content hash and invokes
-the system Windows Script Host with hidden-window settings. The matching
-startup value is written only if the HKCU value is vacant; reinstall or
-collision never overwrites another value. The launcher command line contains
-only `--config` and `--managed-service`; the 256-bit control token stays in the
-private marker and is loaded by the Agent after it verifies its executable,
-marker, root, and config. `install` registers login startup
-but does not start the Agent. `start` verifies the marker, enrollment and exact
-binary hash, then starts one detached current-user process and waits for its
-authenticated pipe handshake. The handshake reports the real process PID;
-status also checks the configured loopback SSH banner and does not claim Hub
-reachability.
+Roots remain protected current-user-only descendants of OS-resolved LocalAppData,
+with protected private ancestors, no reparse points and verified enrollment.
+The installed executable must be `ROOT/bin/hostlink-agent.exe` and config
+`ROOT/state/agent.json`. Legacy `.hostlink-user-service.json`, VBS,
+maintenance/admission/temporary-marker files and the old root-derived HKCU Run
+value are rejected and preserved. Use the matching legacy executable under a
+separately authorized migration to remove the old registration; this version
+cannot adopt or uninstall it. Hidden `run --managed-service` and
+`--maintenance-start` flags are removed and rejected.
 
-The named-pipe listener creates its next protected instance before serving a
-connected client, so it remains available across requests with at most two
-instances. `stop` authenticates to that root's local named pipe, opens a
-synchronized process handle for the reported PID, and verifies its owner SID,
-image path, and executable SHA-256 before requesting shutdown. It waits on that
-handle with the Windows 7-compatible `WaitForSingleObject`; a missing pipe alone
-never proves process exit. Unknown PID, identity mismatch, or failed handle open
-leaves the registration in place. If the pipe is already absent, `stop` and
-`remove` fail closed because no authenticated live PID is available; start the
-owned Agent and invoke `remove` while its lifecycle endpoint is available.
-It asks the Agent to shut down through its normal cancellation path, without
-inspecting its private Apalis database. It waits at most ten seconds and
-never terminates a PID or process tree by guesswork. `remove` performs the same
-authenticated stop, then removes only the
-exact HKCU value and ownership marker after process exit is proven. Windows
-keeps the executable, config, credentials, enrollment record and jobs in place
-for recovery; pending jobs remain in Apalis and interrupted commands may
-replay after restart. Hub revocation remains independent. Managed Windows
-updates use the owner-authenticated stopped-runtime maintenance handoff;
-the updater does not replace a loaded executable. A changed binary, marker, registry value, SID, ACL, or
-reparse path fails closed.
+Windows updates are offline only: stop/remove the task, run the separate private
+updater, then explicitly install/start the task again. See
+[Windows updater](AGENT_UPDATE_WINDOWS.md). Service mutations share the updater
+lock; startup refuses a pending update journal after taking the runtime lock.
+Neither lifecycle nor updater reads Apalis tables.
 
-During the separately owned Windows Agent update, maintenance startup is admitted
-only by a one-use capability issued after the old authenticated process handle
-has signaled exit and the published candidate digest has been verified. The
-capability is delivered over the spawned candidate's inherited private stdin
-pipe; it is never placed in the command line, output, or a listener. The
-candidate atomically consumes a current-user-private admission record bound to
-its exact root, SID, executable SHA-256, and unique maintenance transaction.
-Missing, early, stale, replayed, or competing claims fail closed. Normal login
-startup remains disabled by the owner maintenance marker and absent exact HKCU
-Run value; ordinary `service start` continues to refuse maintenance. This
-admission is independent of updater journal formats and does not authorize
-process termination.
+## Native Windows acceptance gate
 
-## Native Windows 11 acceptance gate
+Native Windows 11 and Windows 7 SP1 x64/x86 acceptance is **NOT RUN** for this
+replacement. Generic MSVC cross-checks do not prove NT6.1 compatibility, actual
+task XML normalization, logon activation, task termination, child containment,
+sharing/ACL behavior or offline update/recovery. Exact Win7 target builds and
+PE import inspection remain mandatory before Win7 release acceptance.
 
-Native lifecycle acceptance has **not** passed yet. The integration test is
-ignored by default because install writes one value to the current user's HKCU
-Run key. Run the positive gate only from a separately created, standard (not
-Administrators) Windows 11 user account after signing into that account. Never
-run it in the WORK profile, from SYSTEM, or in an elevated shell. Windows 7
-NT6.1 x64/x86 is a separate future native gate; neither this script nor a
-cross-compile proves it.
-
-The script defaults to preflight-only and does not set the test opt-in or invoke
-the lifecycle test. Supply independently recorded disposable SID/profile and
-protected WORK SID/profile to the explicit acceptance mode:
+The integration test is ignored by default and requires a disposable standard
+Windows user, matching SID/profile and exact Agent binary SHA. Never run it
+in WORK, SYSTEM, an elevated shell or on a real installed Agent. The Windows 11
+runner defaults to preflight only:
 
 ```powershell
 .\scripts\verify-windows-agent-lifecycle.ps1 `
@@ -177,32 +135,13 @@ protected WORK SID/profile to the explicit acceptance mode:
   -RunAcceptance
 ```
 
-Before setting the opt-in, the script verifies the current token SID and
-OS-resolved profile, excludes SYSTEM and Administrators membership/elevation,
-requires a loaded profile and Windows 11 build 22000+, and confirms the
-disposable identity differs from WORK. It builds the locked Agent and ignored
-integration test, records the exact Agent SHA-256, and passes that hash plus
-identity to the test. The test checks its `CARGO_BIN_EXE` hash and the installed
-copy against that value. Only then does the script set
-`HOSTLINK_WINDOWS_LIFECYCLE_DISPOSABLE=1` for the one targeted ignored test.
-It verifies the source hash stayed fixed, the exact root-derived Run value is
-gone, no test Agent remains under the disposable profile, and all other HKCU
-Run values match the pre-run snapshot. The opt-in is cleared/restored on exit.
+The fixture checks exact task XML, collision/tamper/legacy refusal, idempotent
+install/start, stopped stop/remove, running removal, SSH readiness and enrollment
+retention. The runner checks unchanged HKCU Run values and root-task snapshots.
+A failed cleanup preserves the fixture root and unresolved task for diagnosis.
+Win7 logon and offline update/recovery require separately authorized disposable
+native execution; the Windows 11 runner does not satisfy that gate.
 
-Preflight-only invocation (omit `-RunAcceptance`) and a WORK-profile attempt
-must leave the HKCU Run snapshot unchanged. Any identity mismatch aborts before
-the test opt-in is set. The positive fixture tests a LocalAppData root with
-spaces and shell metacharacters, protected ACLs, unrelated-root refusal,
-shared-ancestor rejection, install/reinstall/update refusal, binary and
-launcher tampering, an unrelated process reusing a stale lifecycle PID,
-preservation of Apalis jobs without direct SQL interlocks, repeated
-authenticated status, SSH banner, graceful stop, exact Run-value removal and
-enrollment-file retention. Its fixture path includes spaces and shell
-metacharacters to exercise Windows command quoting. It never refers to or
-adopts the old OneC Agent. A passing Linux compile or cross-target check is not
-native acceptance.
-
-If native acceptance fails before confirmed removal, the test cleanup never
-starts an Agent or recursively removes an installed root with an unresolved
-owner marker. Investigate the disposable user's exact HKCU Run value, owner
-marker and process handle before any manual recovery or directory deletion.
+API references: [current-user task security](https://learn.microsoft.com/en-us/windows/win32/taskschd/security-contexts-for-running-tasks),
+[Stop](https://learn.microsoft.com/en-us/windows/win32/api/taskschd/nf-taskschd-iregisteredtask-stop),
+[AllowHardTerminate](https://learn.microsoft.com/en-us/windows/win32/taskschd/tasksettings-allowhardterminate).

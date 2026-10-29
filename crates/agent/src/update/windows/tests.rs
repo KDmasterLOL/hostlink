@@ -121,23 +121,15 @@ mod windows_recovery_tests {
                     .advance(UpdatePhase::BackedUp)
                     .expect("backed up phase");
             }
-            if matches!(
-                phase,
-                UpdatePhase::Published | UpdatePhase::Verified | UpdatePhase::Restarted
-            ) {
+            if matches!(phase, UpdatePhase::Published | UpdatePhase::Verified) {
                 journal
                     .advance(UpdatePhase::Published)
                     .expect("published phase");
             }
-            if matches!(phase, UpdatePhase::Verified | UpdatePhase::Restarted) {
+            if matches!(phase, UpdatePhase::Verified) {
                 journal
                     .advance(UpdatePhase::Verified)
                     .expect("verified phase");
-            }
-            if phase == UpdatePhase::Restarted {
-                journal
-                    .advance(UpdatePhase::Restarted)
-                    .expect("restarted phase");
             }
             for (name, bytes) in [
                 ("staged-agent.exe", new_exe.as_slice()),
@@ -189,7 +181,7 @@ mod windows_recovery_tests {
     #[test]
     fn recovery_restores_backed_up_transaction_and_is_idempotent() {
         let fixture = Fixture::new(UpdatePhase::BackedUp, true, false);
-        recover_windows_handoff(&fixture.root, false, false).expect("restore old installation");
+        recover_windows_handoff(&fixture.root).expect("restore old installation");
         assert_eq!(
             fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
             fixture.old_exe
@@ -200,14 +192,13 @@ mod windows_recovery_tests {
         );
         assert!(!fixture.journal.exists());
         assert!(!fixture.transaction.exists());
-        recover_windows_handoff(&fixture.root, false, false).expect("second recovery is a no-op");
+        recover_windows_handoff(&fixture.root).expect("second recovery is a no-op");
     }
 
     #[test]
     fn recovery_commits_published_complete_manifest() {
         let fixture = Fixture::new(UpdatePhase::Published, true, true);
-        recover_windows_handoff(&fixture.root, false, false)
-            .expect("validate and commit new install");
+        recover_windows_handoff(&fixture.root).expect("validate and commit new install");
         assert_eq!(
             fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
             fixture.new_exe
@@ -221,45 +212,9 @@ mod windows_recovery_tests {
     }
 
     #[test]
-    fn managed_interrupted_verified_phase_restores_old_inventory() {
+    fn recovery_commits_verified_inventory_without_starting_agent() {
         let fixture = Fixture::new(UpdatePhase::Verified, true, true);
-        recover_windows_handoff(&fixture.root, true, false)
-            .expect("managed crash before durable health proof rolls back");
-        assert_eq!(
-            fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
-            fixture.old_exe
-        );
-        assert_eq!(
-            fs::read(fixture.root.join(INSTALL_METADATA)).unwrap(),
-            fixture.old_metadata
-        );
-        assert!(!fixture.journal.exists());
-    }
-
-    #[test]
-    fn restarted_phase_without_health_evidence_restores_old_and_is_idempotent() {
-        let fixture = Fixture::new(UpdatePhase::Restarted, true, true);
-        recover_windows_handoff(&fixture.root, false, false)
-            .expect("stopped-runtime recovery restores the verified old inventory");
-        assert_eq!(
-            fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
-            fixture.old_exe
-        );
-        assert_eq!(
-            fs::read(fixture.root.join(INSTALL_METADATA)).unwrap(),
-            fixture.old_metadata
-        );
-        assert!(!fixture.journal.exists());
-        assert!(!fixture.transaction.exists());
-        recover_windows_handoff(&fixture.root, false, false)
-            .expect("second recovery is a no-op after rollback");
-    }
-
-    #[test]
-    fn restarted_phase_commits_only_with_fresh_health_evidence() {
-        let fixture = Fixture::new(UpdatePhase::Restarted, true, true);
-        recover_windows_handoff(&fixture.root, false, true)
-            .expect("fresh owner health evidence permits commit");
+        recover_windows_handoff(&fixture.root).unwrap();
         assert_eq!(
             fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
             fixture.new_exe
@@ -270,44 +225,6 @@ mod windows_recovery_tests {
         );
         assert!(!fixture.journal.exists());
         assert!(!fixture.transaction.exists());
-    }
-
-    #[test]
-    fn restarted_phase_preserves_journal_and_partial_install() {
-        let fixture = Fixture::new(UpdatePhase::Restarted, true, true);
-        let installed = fixture.root.join("bin/hostlink-agent.exe");
-        let metadata = fixture.root.join(INSTALL_METADATA);
-        fs::write(&metadata, b"partial candidate metadata").expect("tamper installed metadata");
-        let executable_before = fs::read(&installed).unwrap();
-        let metadata_before = fs::read(fixture.root.join(INSTALL_METADATA)).unwrap();
-
-        assert!(recover_windows_handoff(&fixture.root, false, false).is_err());
-        assert!(fixture.journal.exists());
-        assert!(fixture.transaction.exists());
-        assert_eq!(fs::read(installed).unwrap(), executable_before);
-        assert_eq!(fs::read(metadata).unwrap(), metadata_before);
-    }
-
-    #[test]
-    fn restarted_phase_preserves_journal_and_install_for_invalid_backup() {
-        let fixture = Fixture::new(UpdatePhase::Restarted, true, true);
-        let backup = fixture.transaction.join("backup-agent.exe");
-        fs::remove_file(&backup).unwrap();
-        write_private_synced(&backup, b"wrong backup").expect("tamper old executable backup");
-        let installed_before = fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap();
-        let metadata_before = fs::read(fixture.root.join(INSTALL_METADATA)).unwrap();
-
-        assert!(recover_windows_handoff(&fixture.root, false, false).is_err());
-        assert!(fixture.journal.exists());
-        assert!(fixture.transaction.exists());
-        assert_eq!(
-            fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
-            installed_before
-        );
-        assert_eq!(
-            fs::read(fixture.root.join(INSTALL_METADATA)).unwrap(),
-            metadata_before
-        );
     }
 
     #[test]
@@ -316,7 +233,7 @@ mod windows_recovery_tests {
         let exe = fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap();
         write_private_synced(&fixture.transaction.join("unexpected.bin"), b"unknown")
             .expect("extra test artifact");
-        assert!(recover_windows_handoff(&fixture.root, false, false).is_err());
+        assert!(recover_windows_handoff(&fixture.root).is_err());
         assert!(fixture.journal.exists());
         assert_eq!(
             fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
@@ -335,7 +252,7 @@ mod windows_recovery_tests {
         )
         .expect("tampered test backup");
         let exe = fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap();
-        assert!(recover_windows_handoff(&fixture.root, false, false).is_err());
+        assert!(recover_windows_handoff(&fixture.root).is_err());
         assert!(fixture.journal.exists());
         assert_eq!(
             fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
@@ -351,7 +268,7 @@ mod windows_recovery_tests {
         value["transaction_sha256"] = serde_json::Value::String("d".repeat(64));
         fs::write(&fixture.journal, serde_json::to_vec(&value).unwrap()).unwrap();
         let exe = fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap();
-        assert!(recover_windows_handoff(&fixture.root, false, false).is_err());
+        assert!(recover_windows_handoff(&fixture.root).is_err());
         assert!(fixture.journal.exists());
         assert_eq!(
             fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),

@@ -1,5 +1,10 @@
 # HostLink managed fleet — mandatory control plane
 
+> 1C-1114 supersedes the historical Windows maintenance/live-handoff details below:
+> Windows now uses a current-user Task Scheduler logon task and offline stopped-only
+> update after task removal. See [lifecycle](AGENT_LIFECYCLE.md) and
+> [updater](AGENT_UPDATE_WINDOWS.md). Native Win7/11 acceptance remains NOT RUN.
+
 **Current source note (Huly 1C-1098):** The sections below were originally the 1C-987 managed-fleet target, but the user replaced the old SSH jobs subsystem with Agent-local Apalis/Board on 2026-10-29. Jobs now use the Agent's separate loopback Board and native SQLite queue; Client jobs CLI and remote binary execution have been removed. See [current architecture](ARCHITECTURE.md). Fleet management and SSH exec/SFTP/forward remain.
 
 Source audit: original independent `dev@5a1f80b4c44c393dd8cc83faacf0a3ebc49de342`; experimental rewrite inspected at `2e95835bf12066368a8a1ae471aaba76387ae5e5`. Follow current Git HEAD and source if either moves. References below are **verified existing** unless explicitly labelled *proposed*.
@@ -92,7 +97,7 @@ For the existing `AgentConfig.gateway: Option<ReverseGateway>`, a multiple-edge 
 | Durable command queue, native status/results and web monitoring | Agent-local Apalis SQLite plus stock Apalis Board on loopback, with `/new` form over its native API |
 | Gateway TCP/RDP forwarding, target TCP probe, scoped owned-artifact cleanup, wait/log convenience | Valuable operator parity; evaluate bounded call sites and restore through existing `russh`/SFTP primitives without generic Agent filesystem RPC |
 | Interactive OpenSSH process / `sync-ssh`, Hub Agent JSONL control secret, entire Nextest attestation and Toolkit release engine | Do **not** reintroduce a second transport or policy engine. Interactive/PTTY only if separately accepted; testing/effect policy remains caller-owned |
-| Agent-only update | **Mandatory**, but Windows stopped-runtime handoff/rollback and Win7 target proof remain separate blockers |
+| Agent-only update | **Mandatory**, but Windows offline update/recovery after task removal and Win7 target proof remain separate acceptance gates |
 
 ### Acceptance and migration gates
 

@@ -27,7 +27,7 @@ No unmanaged background processes, false success or unbounded retries.
 A minimal Agent-only updater is REQUIRED: exact version/target/SHA, private
 staging, an exclusive updater lock, Agent process shutdown before Linux
 publication, installed-file integrity, recovery on failed publication and
-explicit owner-authenticated stopped-runtime handoff on Windows. Apalis alone
+offline stopped-only Windows update after removal of the current-user Task Scheduler task. Apalis alone
 owns its SQLite job state; service and updater must not inspect its tables.
 Queued tasks may resume after the Agent restarts. It is NOT
 another SSH transport, not a general release engine and not the Toolkit updater.

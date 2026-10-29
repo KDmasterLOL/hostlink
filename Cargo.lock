@@ -1502,6 +1502,7 @@ dependencies = [
  "processkit",
  "rand",
  "reqwest 0.12.28",
+ "roxmltree",
  "russh",
  "russh-sftp",
  "secrecy",
@@ -1519,6 +1520,7 @@ dependencies = [
  "tower-http 0.7.1",
  "ulid",
  "uuid",
+ "windows",
  "windows-permissions",
  "windows-sys 0.61.2",
  "zip 6.0.0",
@@ -2719,6 +2721,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

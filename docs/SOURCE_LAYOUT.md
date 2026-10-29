@@ -34,7 +34,7 @@ does not certify production or registered Windows updater deployment.
 | Hub v2 endpoints and authoritative registry | `crates/hub/src/server/`; `crates/hub/src/state.rs` |
 | Fresh enrollment and source-pinned installation | `crates/agent/src/enrollment/`; `crates/client/src/bootstrap/` |
 | Linux service lifecycle | `crates/agent/src/service/linux/` (systemd --user) |
-| Windows user-owned service and maintenance | `crates/agent/src/service/windows/`, with admission, rollback and process ownership |
+| Windows current-user Task Scheduler | `crates/agent/src/service/windows/`, with COM adapter, exact task XML and read-only legacy rejection |
 | Agent update and ZIP security | `crates/agent/src/update/`, including `archive/`, `windows/` and `update_handoff/` for recovery |
 
 `jobs/mod.rs` exposes only the typed `CommandJob`, local queue and private
@@ -62,8 +62,8 @@ requires no shared mutex because the handler owns its session map.
 Agent CLI command argument definitions and execution live together in
 individual modules under `commands/`, including separate service actions.
 The `cli.rs` module only parses and dispatches Clap commands, while
-`shared.rs` owns the bounded Agent configuration loader. The external
-command names, flags, help and status output remain unchanged.
+`shared.rs` owns the bounded Agent configuration loader. Public command syntax and status fields are retained; retired Windows hidden
+`--managed-service` and `--maintenance-start` flags are removed.
 See [jobs README](../crates/agent/src/jobs/README.md) and
 [jobs contract](AGENT_MINIMAL_JOBS.md).
 
@@ -73,5 +73,5 @@ Use `cargo fmt --all -- --check`, `cargo check --locked --workspace
 --all-targets`, `cargo clippy --locked --workspace --all-targets -- -D
 warnings`, and `cargo test --locked --workspace`. Run on both Linux and
 Windows after platform-dependent moves. Windows 7 source-exact execution
-and managed live updater handoff remain separately recorded acceptance gates
+and offline update/recovery remain separately recorded acceptance gates
 under Huly 1C-1004/1008; a Windows 11 compile is not a Win7 native pass.
