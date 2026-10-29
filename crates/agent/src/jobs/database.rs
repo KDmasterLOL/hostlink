@@ -20,22 +20,6 @@ pub(super) async fn update_lock(root: &Path) -> io::Result<FileLease> {
         .map_err(io::Error::other)?
 }
 
-/// Admission/dequeue hold start_lock: never wait for an updater waiting for STOP.
-pub(super) fn try_update_lock(root: &Path) -> io::Result<FileLease> {
-    let parent = root
-        .parent()
-        .ok_or_else(|| invalid("jobs root has no parent"))?;
-    validate_private_path(parent, true)?;
-    let file = open_lock(&parent.join(UPDATE_LOCK_FILE))?;
-    file.try_lock().map_err(|error| match error {
-        std::fs::TryLockError::WouldBlock => {
-            io::Error::new(io::ErrorKind::WouldBlock, "Agent update busy")
-        }
-        std::fs::TryLockError::Error(error) => error,
-    })?;
-    Ok(FileLease(file, true))
-}
-
 pub(super) fn inspect_layout(root: &Path) -> io::Result<bool> {
     validate_private_path(root, true)?;
     validate_private_path(

@@ -26,7 +26,10 @@ all related wire protocol code were deleted.
 `board_listen`, assigned automatically for **fresh enrollment**. Older
 configs default to disabled Board. The router requires exact Host and
 same-origin Origin, prohibits unbounded user-selected attempt counts,
-and blocks PUT admission while the updater holds its lock. Local
+and (at this older source SHA) blocked PUT admission while the updater
+held its lock. Later development changes removed the HTTP-side task
+metadata/retry policy and admission lock, exposing the upstream Apalis
+semantics; the updater now requires a separate quiescence design. Local
 access confers command-execution authority with Agent user permissions.
 Remote operators can use the existing authenticated/pinned SSH
 TCP forward, with equal local and Agent Board port numbers.

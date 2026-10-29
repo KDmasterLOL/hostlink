@@ -50,10 +50,16 @@ legacy `record.json`, unknown output files and torn/corrupt roots are
 rejected and **never automatically erased or migrated**. Installed-root
 migration needs a separate explicit user authorization.
 
-The updater holds `update.lock`; the Board refuses PUT admissions
-during update, and the updater refuses replacement while native
-Pending/Queued/Running jobs or retryable Failed tasks remain. Read-only
-jobs inspection fails closed for unknown/corrupt roots.
+The Board passes native task lifecycle headers, attempt limits and scheduling
+parameters directly to Apalis, without HostLink-specific restrictions.
+The updater still holds `update.lock` and refuses replacement when the
+native database already contains Pending/Queued/Running jobs or retryable
+Failed tasks. **The Board no longer uses this lock for task creation.**
+Consequently, an updater checking an otherwise empty queue may race with
+a new Board submission. Updating a running Agent requires separate HTTP/worker
+quiescence before relying on an empty-queue check; this must be addressed
+before live release acceptance. Read-only jobs inspection fails closed for
+unknown/corrupt roots.
 
 SFTP is independent of jobs and stays within private
 `transfers/<controller-fingerprint>` directories. The `hostlink` CLI

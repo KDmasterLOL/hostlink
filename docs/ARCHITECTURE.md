@@ -61,8 +61,12 @@ fresh-only and rejects v4/older/torn state without modifying it.
 
 The Agent updater still requires a private update lock and read-only
 inspection of Apalis native pending/queued/running tasks before replacing
-an Agent. Unknown or incompatible jobs roots block an update; a finished
-job is not an active process.
+an Agent. The Board now exposes the native Apalis task-submission API without
+custom header/attempt limits or an HTTP admission lock, so this inventory
+alone is insufficient to prevent concurrent submission during update.
+Coordinated HTTP/worker quiescence before an installed-Agent replacement is
+an outstanding release gate. Unknown or incompatible jobs roots block an
+update; a finished job is not an active process.
 
 See [Agent jobs](../crates/agent/src/jobs/README.md),
 [Agent jobs contract](AGENT_MINIMAL_JOBS.md),

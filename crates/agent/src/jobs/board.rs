@@ -13,8 +13,7 @@ use axum::{
 };
 use tower_http::validate_request::ValidateRequestHeaderLayer;
 
-pub(super) fn router(store: &JobStore, address: std::net::SocketAddr, root: &Path) -> Router {
-    let root = root.to_owned();
+pub(super) fn router(store: &JobStore, address: std::net::SocketAddr) -> Router {
     let api = ApiBuilder::new(Router::new())
         .register("commands", store.backend.clone())
         .build();
@@ -24,7 +23,7 @@ pub(super) fn router(store: &JobStore, address: std::net::SocketAddr, root: &Pat
         .fallback_service(ServeUI::new())
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(middleware::from_fn(move |request, next| {
-            guard(request, next, address, root.clone())
+            origin_guard(request, next, address)
         }))
         // Require the exact loopback Host before dispatching any Board route.
         .layer(
@@ -36,11 +35,10 @@ pub(super) fn router(store: &JobStore, address: std::net::SocketAddr, root: &Pat
         )
 }
 
-async fn guard(
-    mut request: Request<axum::body::Body>,
+async fn origin_guard(
+    request: Request<axum::body::Body>,
     next: Next,
     address: std::net::SocketAddr,
-    root: PathBuf,
 ) -> Result<Response, StatusCode> {
     // Host is validated by Tower HTTP. Reject cross-origin browser requests;
     // non-browser local clients may omit Origin.
@@ -48,40 +46,6 @@ async fn guard(
         && origin.to_str().ok() != Some(format!("http://{address}").as_str())
     {
         return Err(StatusCode::FORBIDDEN);
-    }
-    if request.method() == axum::http::Method::PUT {
-        // The upstream API accepts task lifecycle headers. A submission must
-        // not fabricate a terminal/running task or request unbounded retries.
-        for name in [
-            "x-task-status",
-            "x-task-attempt",
-            "x-task-done-at",
-            "x-task-lock-at",
-            "x-task-lock-by",
-        ] {
-            if request.headers().contains_key(name) {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-        }
-        match request.headers().get("x-task-max-attempts") {
-            None => {
-                request
-                    .headers_mut()
-                    .insert("x-task-max-attempts", "3".parse().expect("static header"));
-            }
-            Some(value)
-                if value
-                    .to_str()
-                    .ok()
-                    .and_then(|v| v.parse::<u8>().ok())
-                    .is_some_and(|v| (1..=3).contains(&v)) => {}
-            _ => return Err(StatusCode::BAD_REQUEST),
-        }
-        let lock = database::try_update_lock(&root).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-        let response = next.run(request).await;
-        lock.unlock()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        return Ok(response);
     }
     Ok(next.run(request).await)
 }

@@ -151,7 +151,7 @@ pub async fn serve_until(
     tokio::pin!(worker_future);
     let result = if let (Some(listener), Some(address)) = (listener, board_listen) {
         let stop = shutdown.clone();
-        let router = super::board::router(&store, address, root);
+        let router = super::board::router(&store, address);
         let server = async move {
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move { stop.cancelled().await })

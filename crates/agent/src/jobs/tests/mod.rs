@@ -14,7 +14,7 @@ async fn board_creates_and_lists_typed_tasks_and_serves_assets() {
     restrict_private_path(&root, true).unwrap();
     let store = JobStore::initialize_fresh(&root).await.unwrap();
     let address = "127.0.0.1:4040".parse().unwrap();
-    let app = board::router(&store, address, &root);
+    let app = board::router(&store, address);
     let request = Request::builder()
         .method("PUT")
         .uri("/api/v1/queues/commands/tasks")
@@ -88,7 +88,7 @@ async fn board_host_header_uses_exact_tower_validation() {
     fs::create_dir(&root).unwrap();
     restrict_private_path(&root, true).unwrap();
     let store = JobStore::initialize_fresh(&root).await.unwrap();
-    let app = board::router(&store, "127.0.0.1:4040".parse().unwrap(), &root);
+    let app = board::router(&store, "127.0.0.1:4040".parse().unwrap());
 
     for (host, origin, expected) in [
         (None, None, StatusCode::FORBIDDEN),
@@ -125,6 +125,53 @@ async fn board_host_header_uses_exact_tower_validation() {
         );
     }
     assert!(active_ids(&root).unwrap().is_empty());
+    store.close().await;
+}
+
+#[tokio::test]
+async fn board_preserves_upstream_task_headers_without_hostlink_overrides() {
+    let parent = tempfile::tempdir().unwrap();
+    restrict_private_path(parent.path(), true).unwrap();
+    let root = parent.path().join("jobs");
+    fs::create_dir(&root).unwrap();
+    restrict_private_path(&root, true).unwrap();
+    let store = JobStore::initialize_fresh(&root).await.unwrap();
+    let app = board::router(&store, "127.0.0.1:4040".parse().unwrap());
+
+    for max_attempts in [None, Some("99")] {
+        let id = ulid::Ulid::generate().to_string();
+        let mut request = Request::builder()
+            .method("PUT")
+            .uri("/api/v1/queues/commands/tasks")
+            .header("host", "127.0.0.1:4040")
+            .header("content-type", "application/json")
+            .header("x-task-id", &id)
+            .header("x-task-status", "Pending")
+            .header("x-task-attempt", "2");
+        if let Some(max_attempts) = max_attempts {
+            request = request.header("x-task-max-attempts", max_attempts);
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                request
+                    .body(Body::from(r#"{"program":"example","args":[],"cwd":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "upstream Apalis must accept native task metadata: {}",
+            response.status()
+        );
+        let stored: i64 = sqlx::query_scalar("SELECT max_attempts FROM Jobs WHERE id=?")
+            .bind(&id)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, max_attempts.map_or(25, |v| v.parse().unwrap()));
+    }
     store.close().await;
 }
 
