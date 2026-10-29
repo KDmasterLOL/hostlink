@@ -12,12 +12,15 @@ without restoring the old Agent RPC or a second execution transport. The target 
 Agent, Client and a focused Hub; see docs/MANAGED_FLEET_ARCHITECTURE.md. Keep russh + russh-sftp
 as the sole Agent/Controller execution and file-transfer carrier.
 
-Short SSH exec cancels on channel close; durable jobs have an Agent-owned lifetime
-independent of their SSH channel. The user explicitly approved Apalis's native
-crash recovery on 2026-10-29: a job may be run again after an Agent/worker crash,
-even when a previous execution already started. Do NOT add a custom start-claim
-ledger or assert exactly-once side effects. Clearly expose that automatic replay
-may repeat side effects; explicit same-ID submission remains idempotent.
+Short SSH exec cancels on channel close. Agent-local commands are independent
+Apalis SQLite jobs, managed through upstream apalis-board (loopback HTTP UI/API),
+not through SSH/SFTP jobs commands. The user approved replacing the old remote
+jobs carrier on 2026-10-29. Never reintroduce a bespoke SSH jobs protocol,
+local scheduler, start-claim ledger or duplicate result store. Apalis may
+automatically replay commands after a crash, repeating side effects. Board
+HTTP accepts arbitrary commands with Agent user privileges: bind only to a
+nonzero loopback port, reject unsafe hosts/origins, and use authenticated SSH
+forwarding for remote browser access. No unauthenticated public bind.
 Use exact host key pins, controller authorized Ed25519 keys, private owned paths,
 bounded concurrency and byte streams, fail-closed security and Windows 7 PS2 support.
 No unmanaged background processes, false success or unbounded retries.

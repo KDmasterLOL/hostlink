@@ -9,9 +9,9 @@ a different SHA and does not change the tested executable source.
 
 Target packages:
 - hostlink-agent: embedded SSH server, outbound reverse tunnel, SFTP,
-  short exec, durable jobs, secure fresh enrollment and Agent-only updater.
+  short exec, Agent-local Apalis jobs/Board, fresh enrollment and Agent-only updater.
 - hostlink: Hub-managed host selection/invite/list/revoke plus pinned SSH
-  client, exec, transfer, forwarding and resumable test execution.
+  client, exec, transfer and forwarding. Jobs are Agent-local.
 - hostlink-hub: authoritative identity, route/gateway registry, invitations,
   enrollment, SSH authorization and revocation; **no execution RPC**. See
   [crates/hub/README.md](crates/hub/README.md) for server configuration/API.
@@ -101,42 +101,38 @@ bootstrap receipt before the token prompt. See
 [docs/ENROLLMENT.md](docs/ENROLLMENT.md) for the full bootstrap contract and
 native acceptance limits.
 
-Durable jobs use `hostlink jobs run/list/status/logs/cancel` over the authenticated
-`hostlink-jobs` SSH subsystem. `hostlink jobs run --binary ./runner --config
-host.json -- [argv...]` uploads, seals and enqueues; `--wait` streams raw output
-and returns the exact exit code. The canonical ULID prints before connecting
-and is also the Apalis TaskId. After a lost acknowledgement, query that same
-ULID. Top-level `hostlink run` and low-level run flags are removed. Ordinary SSH
-exec is channel-owned.
+Agent-local commands use **Apalis SQLite 1.0.0** for queue/state/results and
+the official **apalis-board-api 1.0.0** (Axum) for the browser UI and HTTP API.
+The Agent accepts direct program + argv jobs, not a shell string by default.
+The old SSH `hostlink-jobs` subsystem, Client `hostlink jobs` CLI, binary
+upload/seal, bespoke state/protocol and raw spool log files are removed.
 
-One Agent-owned Apalis SQLite 1.0.0 WorkerBuilder polls the queue and runs at
-most 16 ProcessKit trees. Apalis owns worker locks, native status, persisted
-results and automatic recovery. **After Agent/worker failure an already-started
-job may execute again**; repeated side effects are an accepted trade-off,
-not an exactly-once guarantee. An explicit duplicate ULID admission is still
-idempotent. The old custom start-claim ledger and manual completion/recovery
-engine were removed. Cancelled or failed jobs do not stop an otherwise healthy
-worker. Private output can append across crash-recovered attempts. SHA checks
-and per-controller sealed artifacts retain their bounds. Fresh private roots
-use jobs schema v4; older schemas/record.json are rejected, not migrated.
-New runs require the authenticated controller's exact canonical sealed source,
-with private-parent and digest checks repeated immediately before launch.
-On Unix, the managed install/artifact roots must be Agent-owned and private.
-Source paths must be canonical (no ancestor symlink aliases), but we no longer
-walk the host filesystem enforcing owner/mode policy on every ancestor above
-the managed install root. This assumes trusted SSH controllers and the
-non-privileged Agent's filesystem boundary.
-Job execution requires actual cgroup v2 containment on Linux (delegation required),
-Job Objects on Windows, or a process reaper on FreeBSD. POSIX fallback is rejected
-before spawn; after empty spool sync this is a definite Failed job, not a
-successful process execution.
-Native-positive acceptance uses `HOSTLINK_REQUIRE_NATIVE_CONTAINMENT=1`; missing
-strong containment then fails tests instead of reporting an optional skip.
-The CLI/protocol change is breaking, with no v1 compatibility. See the
+**For a freshly enrolled Agent**, its private `agent.json` includes an independent
+`board_listen` (loopback-only) port; older manual configs may leave this
+`null`, disabling the UI until a separately authorized config update. On
+the Agent computer open `http://127.0.0.1:BOARD_PORT/new` to enqueue a command,
+or `http://127.0.0.1:BOARD_PORT/` for the stock Apalis Board. The native API
+accepts JSON at `PUT /api/v1/queues/commands/tasks` and exposes tasks/workers
+under `/api/v1`. There is no separate jobs connection or job-specific Client API.
+
+To open the Board from another trusted computer use **pinned authenticated
+SSH TCP forwarding**, keeping the same local port number as the Agent:
+```sh
+hostlink forward --host lab-win7   --listen 127.0.0.1:BOARD_PORT --target 127.0.0.1:BOARD_PORT
+```
+The Board intentionally checks the exact HTTP Host/Origin, and **does not
+bind publicly**. Anyone with local access to the Board can execute commands
+as the Agent user; do not publish this HTTP port through a public proxy.
+
+Apalis may re-enqueue a task after a crash, including one that had already
+started; the command must tolerate duplicate side effects. ProcessKit controls
+the OS process tree and requires an OS-backed containment mechanism. Standard
+Apalis results contain the actual exit code; this design does not promise full
+raw stdout/stderr replay. New stores use schema **v5**; old v4/legacy databases
+are rejected without migration or deletion. See the
 [jobs module guide](crates/agent/src/jobs/README.md),
-[minimal jobs contract](docs/AGENT_MINIMAL_JOBS.md) and
+[Agent jobs contract](docs/AGENT_MINIMAL_JOBS.md) and
 [verification evidence](docs/AGENT_MINIMAL_JOBS_EVIDENCE.md).
-
 
 The client also supports Hub v2 inventory and named host selection while
 keeping explicit `--config PATH` as a mutually exclusive option. Start with
@@ -153,7 +149,7 @@ concurrency limits and security behavior.
 The opt-in process-level managed gateway fixture runs a real child Hub over
 trusted local HTTPS, enrolls an Agent, and uses a temporary OpenSSH gateway
 whose `AuthorizedKeysFile` includes the Hub-owned v2 projection. It exercises
-managed exec, SFTP, durable jobs, forwarding and revocation without touching
+managed exec, SFTP, forwarding and revocation without touching
 user SSH configuration or system services. See
 [docs/ISOLATED_GATEWAY.md](docs/ISOLATED_GATEWAY.md) for prerequisites and
 limits.
@@ -165,8 +161,9 @@ and reverse-port authorization failures stop without fallback. See
 [docs/MULTI_GATEWAY.md](docs/MULTI_GATEWAY.md) for the route and gateway
 authorization contract.
 
-A real Linux HOME Agent↔Client SSH test verifies accepted-once execution,
-disconnect/reconnect, binary stdout/stderr and exit code `7`. The Win7 evidence
+A real Linux HOME Agent↔Client SSH test verifies channel-owned exec,
+binary stdout/stderr and exact nonzero exit codes; the separate Apalis Board
+integration tests cover persistent Agent-local commands. The Win7 evidence
 and remaining gates are recorded in [the release plan](docs/REWRITE_RELEASE_PLAN.md):
 WOW64 does not substitute for a native 32-bit Windows 7 OS, and a full registered
 Agent live-update run remains untested.

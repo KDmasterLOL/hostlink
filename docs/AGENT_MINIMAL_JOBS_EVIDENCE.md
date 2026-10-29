@@ -1,5 +1,59 @@
 # 1C-1081 simplification and P1 follow-up evidence
 
+## 2026-10-29 — 1C-1098 replaces SSH jobs with local Apalis Board
+
+**Current design, superseding every earlier section of this historical
+evidence file:** the user approved deleting the whole Client↔Agent SSH jobs
+protocol and binary upload/seal flow. Jobs now belong exclusively to the
+Agent's native Apalis SQLite queue and are created/observed through
+`apalis-board-api 1.0.0` (Axum, built-in Web UI). A minimal local `/new`
+form submits `CommandJob { program, args, cwd? }` through the **upstream**
+`PUT /api/v1/queues/commands/tasks`; no HostLink job enqueue or listing
+API is reimplemented.
+
+**Implementation:** source commit
+`debe594796581d8e8e4742830c82192121bb1baf`, based on
+`dev@9b07ebb623b378348042b32c1bb7f927815200ea`.
+This introduces schema **v5**; prior v4/legacy roots are rejected without
+migration or deletion. Existing installations and customer data were not
+modified. Native Apalis orphan retry may repeat side effects. ProcessKit
+owns command execution/OS group teardown; no custom result or raw spool
+storage. The SSH server remains for ordinary exec/SFTP/TCP forwarding
+and no longer offers `hostlink-jobs`. Client `hostlink jobs` commands and
+all related wire protocol code were deleted.
+
+**Web security:** Board binds only on a distinct Agent loopback port
+`board_listen`, assigned automatically for **fresh enrollment**. Older
+configs default to disabled Board. The router requires exact Host and
+same-origin Origin, prohibits unbounded user-selected attempt counts,
+and blocks PUT admission while the updater holds its lock. Local
+access confers command-execution authority with Agent user permissions.
+Remote operators can use the existing authenticated/pinned SSH
+TCP forward, with equal local and Agent Board port numbers.
+
+| Source/verification, candidate `debe594` | Result |
+| --- | --- |
+| Agent jobs production Rust files | **6 files, 918 physical lines**, down from 2,390 |
+| Agent jobs private tests | **1 file, 239 physical lines**, down from 1,845 |
+| Overall diff | **80 source/config files, 1,199 insertions and 9,199 deletions** (includes removal of obsolete tests) |
+| `cargo fmt --all -- --check` | PASS |
+| `cargo check --offline --locked --workspace --all-targets` | PASS |
+| `cargo clippy --offline --locked --workspace --all-targets -- -D warnings` | PASS |
+| `cargo test --offline --locked --workspace -- --test-threads=1` | **PASS, exit 0**, Agent/Client/Hub unit and available integrations |
+| Board UI, REST enqueue/list, embedded WASM, HTTP shutdown | PASS in Agent unit tests |
+| **Real native ProcessKit command** via Board REST; `/bin/sh -c 'exit 7'` → Apalis `Done`, result `Ok(7)` | PASS on HOME Linux with CgroupV2 |
+| Enrollment generates board address distinct from SSH; old v4 refused untouched | PASS |
+| SSH exec/SFTP/controller isolation, gateway/forwarding and Agent updater active-job/recovery | PASS in workspace tests |
+
+Two external HTTPS/Caddy/OpenSSH fixture tests remain explicitly ignored
+because their prerequisites are not provisioned. Native Windows 11 and
+Windows 7 x86/x64 acceptance for **this new source SHA** is **not run**.
+The new v5 format does **not** migrate installed v4 roots; that is a
+separately authorized deployment/migration concern. `main`, tags,
+releases, customer hosts, installed Agents and production databases were
+untouched. The earlier 1C-1081/legacy evidence below refers solely to
+its older code and must not be used as source-exact acceptance for 1C-1098.
+
 ## 2026-10-29 — native Apalis lifecycle and approved crash replay
 
 **User-approved contract change:** an already-started remote process may be

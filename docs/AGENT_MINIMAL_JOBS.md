@@ -1,129 +1,74 @@
-# Agent jobs contract (Huly 1C-1081)
+# Agent-local Apalis jobs — contract
 
-Source: `crates/agent/src/jobs/`. For architecture and the file map, see the
-[module README](../crates/agent/src/jobs/README.md). For exact test receipts,
-see [verification evidence](AGENT_MINIMAL_JOBS_EVIDENCE.md).
+Huly 1C-1098 supersedes the SSH `hostlink-jobs` protocol, Client jobs
+CLI, SFTP binary sealing and HostLink's custom jobs lifecycle.
 
-## Queue and recovery
+## Upstream ownership
 
-The Agent uses the **pinned Apalis SQLite 1.0.0** backend, its native
-`TaskSink`, `WorkerBuilder`, task locks, and persisted results. No
-HostLink-specific `StartedClaims` table, one-shot execution fence,
-manual completion ACK or custom restart replay blocker exists.
+`apalis-core` and `apalis-sqlite` **1.0.0** own the `commands`
+queue, delivery, locking, native task status and result, worker heartbeat
+and orphan recovery. `apalis-board-api` **1.0.0** provides the stock
+HTTP tasks/queues/workers API and embedded browser UI. No parallel queue,
+job listing SQL, custom result model, or job-specific SSH transport.
 
-**Approved behavior (2026-10-29): Apalis may repeat a task that already
-started if its worker/Agent crashes.** Retrying may duplicate side effects.
-Do not advertise at-most-once or exactly-once execution. Explicit admission
-of an identical ULID/spec is idempotent; Apalis automatic crash recovery is
-independent from a second admission request.
+Commands are `CommandJob { program: String, args: Vec<String>,
+cwd: Option<String> }`. They execute directly as the unprivileged
+Agent OS user using ProcessKit. No implicit shell. Task outcomes are
+recorded by Apalis: `Done + Ok(exit_code)` or `Failed + Err(error)`.
+The Board's own API at `PUT /api/v1/queues/commands/tasks` accepts
+JSON payloads, and `GET /api/v1/queues/commands/tasks` lists tasks.
+`/new` is a tiny form which calls the upstream API; `/` is the
+upstream Board app. No separate endpoint or custom tasks service.
 
-Apalis's `reenqueue_orphaned.sql` changes stale Running/Queued tasks to
-Pending, increments attempts and can enqueue them even with
-`max_attempts(1)`. That setting limits ordinary failed-attempt retries;
-it does **not** prevent orphan replay. The worker handler returns
-`io::Result<i32>`: `Ok(exit_code)` (including nonzero codes) becomes
-native `Done` + `Ok(code)`, and `Err` becomes native `Failed` + error.
-Normal job errors are not fatal to the entire Agent.
+Apalis may replay a task that was already started after worker/Agent
+failure. This can repeat side effects. The result is **not** proof of
+exactly-once execution; a crashed OS process cannot be recovered.
 
-There is one canonical uppercase caller-generated ULID for the Apalis ID,
-idempotency key, and filesystem output path; no UUID compatibility.
-`JobPayload` stores immutable owner fingerprint/request digest/program/argv/
-cwd/source digest. Native Apalis `Jobs.status`, `attempts`, and
-`last_result` are the durable lifecycle source, not a copied JobState.
+## Security and lifecycle
 
-`JobStore::lookup` and `list` use bounded authenticated native-row queries.
-`FetchById` / `ListTasks` in pinned Apalis do not expose the combination
-of owner-filtered payload/status/result and paginated all-status listing.
-These queries do not manage state. A tiny guarded pending-cancel SQL update
-remains because the pinned backend has no public atomic cancel-by-ID API.
+A loopback-only `board_listen: Option<SocketAddr>` is explicitly
+configured. Non-loopback or zero-port addresses are refused. Fresh
+enrollment writes an allocated Board loopback port distinct from SSH.
+Existing configs with a missing/null field keep serving SSH without
+Board until configured. HTTP requests require the expected Host and
+same-origin Origin header when present. This is a local code-execution
+service, not authenticated HTTP for public deployment. Remote access
+is via pinned SSH local TCP forwarding **on the same port**.
 
-| Native Apalis | Operator state | Updater |
-| --- | --- | --- |
-| Pending / Queued | prepared | defer |
-| Running | running | defer |
-| Done + `Ok(i32)` | exited(code) | may proceed after output checks |
-| Failed + `Err` | failed | may proceed after output checks |
-| Killed with zero attempts | failed (cancelled before start) | may proceed |
-| Killed after an attempt | interrupted / unknown | defer |
-| Missing/torn/invalid data | error | reject |
+At most 16 ProcessKit processes execute concurrently. Linux requires
+CgroupV2, Windows requires JobObject, and FreeBSD requires ProcessReaper;
+weak POSIX fallback is refused. Worker shutdown stops active jobs and
+waits for ProcessKit to confirm the process tree emptied; unconfirmed
+teardown remains a failure. Program and argv inputs are bounded.
+The worker persists native results, not separate HostLink stdout/stderr
+spools. Upstream event and trace monitoring is distinct from capture of
+arbitrary raw command output.
 
-## SSH, binaries and process handling
+The SQLite database is an Agent-owned private local file (`jobs/jobs.db`).
+New Agent installations use fresh-only schema marker **v5**. Prior v4,
+legacy `record.json`, unknown output files and torn/corrupt roots are
+rejected and **never automatically erased or migrated**. Installed-root
+migration needs a separate explicit user authorization.
 
-The authenticated SSH subsystem is `hostlink-jobs` (no jobs-v1 adapter).
-Each bounded channel carries one length-prefixed JSON request and response.
-The operations are `seal` (internal), `run`, `list`, `status`, `logs`,
-and `cancel`. Closing an SSH jobs channel does **not** cancel the job.
-Ordinary short SSH `exec` is channel-owned, not durable.
+The updater holds `update.lock`; the Board refuses PUT admissions
+during update, and the updater refuses replacement while native
+Pending/Queued/Running jobs or retryable Failed tasks remain. Read-only
+jobs inspection fails closed for unknown/corrupt roots.
 
-The Client's `HostConnection::job_run(id, bytes, args)` uploads a binary via
-SFTP, verifies/seals its SHA-256 within the authenticated controller's
-private artifact root, then admits its ULID/spec via Apalis. Only the
-managed exact sealed source can be executed; no arbitrary remote program
-path is accepted through jobs. A lost ACK should be resolved by querying
-the same ULID, not by inventing a new identity.
+SFTP is independent of jobs and stays within private
+`transfers/<controller-fingerprint>` directories. The `hostlink` CLI
+retains SSH exec and forwarding, but provides no `hostlink jobs`
+commands. The SSH channel lifetime has no special relationship to
+Agent-local Apalis jobs.
 
-`ProcessKit` starts, stops and drains a real OS-backed process group.
-Only Linux CgroupV2, Windows JobObject and FreeBSD ProcessReaper are
-accepted for durable execution; the POSIX process-group fallback is
-rejected. The Agent must not assert successful completion until the process
-tree is empty, both raw output pumps reached EOF and the spools synced.
-Cancelled/failed processes return native errors; unconfirmed tree teardown
-stops admission until the Agent is recovered. Linux parent-death cleanup
-on abrupt Agent termination is not a guarantee for every descendant:
-the service supervisor and OS containment remain relevant. Duplicate
-effects after crash are an accepted consequence of native Apalis replay.
+## Acceptance
 
-stdout/stderr are private raw byte files. Reattempts append existing
-output and the per-stream size limit covers all attempts combined. The
-output may contain partial data or multiple attempts. EOF is reported
-only once a terminal native status and the captured file bounds permit
-it; a lost output file is not silently interpreted as complete empty
-output after a started attempt.
+Before any release: format, workspace check, strict Clippy and tests;
+actual board HTTP task creation/execution and native stored result;
+SSH exec/SFTP/TCP forwarding and updater regressions; native Windows 11
+and Windows 7 x86/x64; process-tree shutdown, launch/cancel and
+deployment/migration gates. Never infer native Windows acceptance from
+Linux tests.
 
-## Storage, service and migration policy
-
-- `JobStore::initialize_fresh` is explicit fresh provisioning only.
-  Native Apalis migrations initialize the new store once.
-- The private database schema marker is **version 4**; no
-  `StartedClaims`. Version 3, legacy `record.json` or torn/unknown roots
-  are **rejected without modification**. Import/migration stays Huly
-  1C-1080 and requires separate authorization for existing installations.
-- `JobRuntime::open` opens only an existing root and holds the exclusive
-  `runner.lock` for the serving lifetime. Never create replacement state
-  on recovery.
-- SQLite remains WAL with verified synchronous FULL and bounded
-  owner-only paths; updater scanning opens a read-only pool. Corruption
-  fails closed.
-- `update.lock` excludes admission/start during an update. The updater
-  and OS service lifecycle use `jobs::active_ids` and refuse replacement
-  when native tasks are Pending/Queued/Running or state cannot be
-  validated. A server crash does **not** establish that a task has completed.
-- `start_lock` coordinates cancellation and spawn; Apalis's own
-  ConcurrencyLimit bounds dequeue handlers and the OS-process semaphore
-  bounds actual tree lifetimes. A delayed Apalis lock publication must not
-  cause a cancelled task to execute.
-
-Resource limits: 16 concurrent job processes, 32 jobs SSH channels,
-4,096 jobs per store, 64 MiB per uploaded artifact, 128 artifacts per
-controller, 8 MiB per output stream, 24 KiB per log chunk and 64 KiB per
-job frame. No service may silently expand these bounds.
-
-This is a development-only breaking source change. **Do not deploy to
-installed Agents with schema-v3 jobs roots or reset their state** to
-work around the version gate. Native Windows 11 and Windows 7 x86/x64
-acceptance must be recorded separately before release.
-
-## Verification
-
-```sh
-cargo fmt --all -- --check
-cargo check --offline --locked --workspace --all-targets
-cargo clippy --offline --locked --workspace --all-targets -- -D warnings
-cargo test --offline --locked --workspace -- --test-threads=1
-```
-
-Focused regressions: native orphan reenqueue/handler retry, ordinary
-nonzero exit code, pending cancellation vs dequeued/locked task,
-update.lock vs run, SSH disconnect/reconnect, SFTP artifact scope,
-ProcessKit cancellation/output EOF, updater/service active-job deferral,
-old schema preservation, and native Windows containment.
+For the source module map see [jobs README](../crates/agent/src/jobs/README.md);
+for executed checks see [evidence](AGENT_MINIMAL_JOBS_EVIDENCE.md).

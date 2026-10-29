@@ -1,6 +1,6 @@
 # Hub-managed HostLink client
 
-The Client uses Hub v2 for inventory and current host routing, then uses the same pinned `russh` transport for SSH exec, SFTP and durable jobs. Hub does not execute commands or proxy Agent RPC.
+The Client uses Hub v2 for inventory and current host routing, then uses pinned `russh` for short SSH exec, SFTP and local TCP forwarding. Hub does not execute commands or proxy Agent RPC. **Agent-local Apalis jobs are managed through the Agent's loopback-only Board UI/API, not via a Client jobs command.**
 
 ## Configure the controller
 
@@ -44,11 +44,32 @@ hostlink check --host lab-win7
 hostlink exec --host lab-win7 --command 'hostname'
 hostlink upload --host lab-win7 --local ./input.bin --remote input.bin
 hostlink download --host lab-win7 --remote output.bin --local ./output.bin
-hostlink jobs run --host lab-win7 --binary ./tests --wait -- --list
-hostlink job status --host lab-win7 --id <uuid>
 ```
 
-The existing `--config PATH` form remains available and cannot be combined with `--host`. Managed selection fetches fresh Hub records and builds the existing `HostSpec`; all execution remains on `HostConnection::connect`. A lost job-start acknowledgement remains `UNKNOWN`; query its printed ULID and do not repeat the start request.
+The existing `--config PATH` form remains available and cannot be combined with `--host`. Managed selection fetches fresh Hub records and builds the existing `HostSpec`; short execution remains on `HostConnection::connect`.
+
+## Agent-local jobs through Apalis Board
+
+Freshly enrolled Agents have a private `board_listen` such as
+`127.0.0.1:25431` in their `agent.json`. On that computer, open
+`http://127.0.0.1:25431/new` to submit a program and argv, or
+`http://127.0.0.1:25431/` for the built-in Apalis Board. The port shown
+here is an illustration; use the exact configured port.
+
+From an authorized controller, forward the **same local port** over pinned
+SSH (example port 25431):
+
+```sh
+hostlink forward --host lab-win7 --listen 127.0.0.1:25431 --target 127.0.0.1:25431
+```
+
+Use the forwarded localhost URL in a browser. The stock Board API accepts
+`PUT /api/v1/queues/commands/tasks` with a JSON command payload and
+provides task/worker listing endpoints. Board HTTP is not published to a
+public network; local access grants code execution under the Agent user.
+Apalis can retry a previously started command after a worker crash, so
+side effects may repeat. The old `hostlink jobs` CLI and SSH jobs
+subsystem were intentionally removed.
 
 ## Invitations
 
@@ -86,13 +107,13 @@ transient connect refusal, reset, timeout, or disconnect. Pin mismatch,
 public-key authentication failure, reverse-port channel refusal, and nested
 Agent host-key mismatch stop immediately. A failed gateway is cleaned up
 before the next route is attempted. Once the nested Agent session has started,
-operations are never replayed on another route; in particular, a job start
-whose acknowledgement is lost remains an unknown outcome for the caller.
+short SSH operations are not retried on another route after connection setup.
+Agent-local Apalis jobs do not use these Client routes.
 
 The old manual `HostSpec` JSON with one `gateway` remains valid. Its optional
 `alternates` field defaults to an empty list. Direct unmanaged configs remain
 separate from Hub route selection.
 
-CLI command callers use `--host` for managed routing: `check`, `exec`, `run`,
-`jobs run/list/status/cancel/logs`, `forward`, `rdp`, and `probe`. `--config PATH`
+CLI command callers use `--host` for managed routing: `check`, `exec`,
+`upload`, `download`, `forward`, `rdp`, and `probe`. `--config PATH`
 continues to load a manual `HostSpec` and does not consult Hub settings.

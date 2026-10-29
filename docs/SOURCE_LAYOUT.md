@@ -27,32 +27,26 @@ does not certify production or registered Windows updater deployment.
 | Controller CLI and operator command dispatch | `crates/client/src/cli/{mod.rs,args.rs,commands/}`; `main.rs` is the binary entrypoint |
 | Managed Hub HTTP client, routes and trusted SSH pins | `crates/client/src/hub/{mod.rs,client.rs,config.rs,routes.rs}` |
 | Direct and gateway SSH | `crates/client/src/connect/`; `crates/agent/src/ssh/`; `crates/agent/src/tunnel/` |
-| Source-pinned tests / durable jobs | `crates/client/src/run/`; `crates/agent/src/jobs/` |
+| Agent-local Apalis command queue and Board UI/API | `crates/agent/src/jobs/` (no Client jobs subsystem) |
 | Hub v2 endpoints and authoritative registry | `crates/hub/src/server/`; `crates/hub/src/state.rs` |
 | Fresh enrollment and source-pinned installation | `crates/agent/src/enrollment/`; `crates/client/src/bootstrap/` |
 | Linux service lifecycle | `crates/agent/src/service/linux/` (systemd --user) |
 | Windows user-owned service and maintenance | `crates/agent/src/service/windows/`, with admission, rollback and process ownership |
 | Agent update and ZIP security | `crates/agent/src/update/`, including `archive/`, `windows/` and `update_handoff/` for recovery |
 
-`jobs/database.rs` retains the cohesive private SQLite/WAL/FULL and migration
-ledger contract, whose security checks justify exceeding 200 lines.
-`jobs/private_fs.rs` keeps private permissions/ACLs, canonical source paths and
-filesystem durability in one security contract, also exceeding 200 lines.
-`jobs/persistence.rs` owns Apalis-native task admission; `jobs/query.rs` decodes
-bounded owner-filtered native status/result for lookup and list.
-`jobs/lifecycle.rs` is limited to guarded cancellation of a pending native
-task (not manual lifecycle completion). `jobs/engine.rs` hosts the native
-`WorkerBuilder` handler and ProcessKit runtime handoff. There is no
-`StartedClaims` table or custom crash replay blocker.
-`jobs/mod.rs::JobRuntime::open` owns existing-store opening, runner lease,
-recovery and runtime construction; `ssh/server.rs` never assembles the job
-engine. `jobs/inventory.rs` performs updater safety scans directly against a
-read-only SQLite pool, without constructing a queue backend.
-`jobs/worker.rs` keeps group ownership, verified teardown and output
-completion in one security contract. `jobs/tests/` and `ssh/tests/wire/` retain larger real SQLite,
-ProcessKit and encrypted SSH regression scenarios. See the
-[jobs module guide](../crates/agent/src/jobs/README.md) for the architecture and
-file map, then the [minimal jobs contract](AGENT_MINIMAL_JOBS.md) for invariants.
+`jobs/mod.rs` exposes only the typed `CommandJob`, local queue and private
+updater contract. `jobs/store.rs` configures the native Apalis SQLite
+`commands` queue; `jobs/worker.rs` uses `WorkerBuilder` to execute it
+through ProcessKit. `jobs/board.rs` mounts the upstream Apalis Board
+Axum API and embedded UI; `jobs/new.html` is a small form calling the
+upstream task API. `jobs/database.rs` preserves private fresh-only SQLite
+schema v5; `private_fs.rs` maintains local filesystem/ACL safety.
+`jobs/tests/` contains the focused API and worker tests. There are no
+SSH jobs frames, SFTP binary artifacts, custom lifecycle or Client jobs
+module. `ssh/server.rs` supervises Agent-local jobs independently of SSH
+connections; `sftp/` owns controller-scoped generic transfers.
+See [jobs README](../crates/agent/src/jobs/README.md) and
+[jobs contract](AGENT_MINIMAL_JOBS.md).
 
 ## Verification
 
