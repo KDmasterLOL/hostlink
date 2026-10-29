@@ -10,12 +10,12 @@ pub(super) const DATABASE: &str = "jobs.db";
 
 /// Never wait for a filesystem lock on a Tokio executor thread: another task
 /// on that executor may need to commit SQLite before releasing the same lock.
-pub(super) async fn update_lock(root: &Path) -> io::Result<FileLease> {
+pub(super) async fn update_lock(root: &Path) -> io::Result<File> {
     let parent = root
         .parent()
         .ok_or_else(|| invalid("jobs root has no parent"))?
         .to_owned();
-    tokio::task::spawn_blocking(move || private_fs::acquire_update_lock(&parent))
+    tokio::task::spawn_blocking(move || acquire_update_lock(&parent))
         .await
         .map_err(io::Error::other)?
 }
@@ -68,8 +68,13 @@ fn validate_sidecar(path: &Path) -> io::Result<()> {
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(invalid("unsafe SQLite sidecar"));
         }
-        validate_windows_acl_contents(path, &metadata, false)?;
-        reject_windows_hardlinks(path)?;
+        crate::private_fs::windows::validate_acl(
+            path,
+            &metadata,
+            crate::private_fs::windows::AllowedPrincipals::OwnerSystemAdministrators,
+            false,
+        )?;
+        crate::private_fs::windows::reject_hardlinks(path)?;
     }
     Ok(())
 }

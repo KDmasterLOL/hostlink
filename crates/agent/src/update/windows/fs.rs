@@ -273,87 +273,17 @@ pub(in crate::update) fn validate_windows_private_acl(
     path: &Path,
     metadata: &fs::Metadata,
 ) -> io::Result<()> {
-    use std::os::windows::fs::MetadataExt;
-    use windows_permissions::constants::{AceType, SeObjectType, SecurityInformation};
-    use windows_permissions::wrappers::GetNamedSecurityInfo;
-
-    if metadata.file_attributes() & 0x400 != 0 {
-        return Err(invalid("Windows updater path is a reparse point"));
-    }
-    let descriptor = GetNamedSecurityInfo(
-        path.as_os_str(),
-        SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Dacl | SecurityInformation::Owner,
+    crate::private_fs::windows::validate_acl(
+        path,
+        metadata,
+        crate::private_fs::windows::AllowedPrincipals::OwnerOnly,
+        true,
     )
-    .map_err(io::Error::other)?;
-    let current =
-        windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
-    if descriptor.owner() != Some(current.as_ref()) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Windows updater path is not owned by the current user",
-        ));
-    }
-    let sddl = windows_permissions::wrappers::ConvertSecurityDescriptorToStringSecurityDescriptor(
-        &descriptor,
-        SecurityInformation::Dacl,
-    )
-    .map_err(io::Error::other)?;
-    if !sddl.to_string_lossy().starts_with("D:P") {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Windows updater ACL inherits permissions",
-        ));
-    }
-    let dacl = descriptor
-        .dacl()
-        .ok_or_else(|| invalid("Windows updater path has no DACL"))?;
-    for index in 0..dacl.len() {
-        let ace = dacl
-            .get_ace(index)
-            .ok_or_else(|| invalid("Windows updater DACL entry is unreadable"))?;
-        if matches!(
-            ace.ace_type(),
-            AceType::ACCESS_ALLOWED_ACE_TYPE
-                | AceType::ACCESS_ALLOWED_CALLBACK_ACE_TYPE
-                | AceType::ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
-                | AceType::ACCESS_ALLOWED_OBJECT_ACE_TYPE
-        ) && ace.sid() != Some(current.as_ref())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Windows updater ACL grants access to a foreign owner",
-            ));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(windows)]
 pub(in crate::update) fn set_windows_private_acl(path: &Path, directory: bool) -> io::Result<()> {
-    use windows_permissions::constants::{SeObjectType, SecurityInformation};
-    use windows_permissions::wrappers::{ConvertSidToStringSid, SetNamedSecurityInfo};
-    use windows_permissions::{LocalBox, SecurityDescriptor};
-
-    let current =
-        windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
-    let current = ConvertSidToStringSid(&current).map_err(io::Error::other)?;
-    let inheritance = if directory { "OICI" } else { "" };
-    let sddl = format!("D:P(A;{inheritance};FA;;;{})", current.to_string_lossy());
-    let descriptor: LocalBox<SecurityDescriptor> = sddl.parse().map_err(io::Error::other)?;
-    let dacl = descriptor
-        .dacl()
-        .ok_or_else(|| invalid("cannot create private Windows updater DACL"))?;
-    SetNamedSecurityInfo(
-        path.as_os_str(),
-        SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-        None,
-        None,
-        Some(dacl),
-        None,
-    )
-    .map_err(io::Error::other)?;
+    crate::private_fs::windows::set_acl(path, directory)?;
     let metadata = fs::symlink_metadata(path)?;
     validate_windows_private_acl(path, &metadata)
 }

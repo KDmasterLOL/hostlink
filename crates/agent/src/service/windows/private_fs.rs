@@ -78,51 +78,12 @@ pub(super) fn verify_install_root(path: &Path) -> io::Result<PathBuf> {
     // The official installer uses LocalAppData/HostLink/Agent. Verify
     // every intermediate directory's private owner-only ACL rather than
     // rejecting the valid two-level layout or trusting shared parents.
-    let descriptor = windows_permissions::wrappers::GetNamedSecurityInfo(
-        local_app_data.as_os_str(),
-        windows_permissions::constants::SeObjectType::SE_FILE_OBJECT,
-        windows_permissions::constants::SecurityInformation::Owner
-            | windows_permissions::constants::SecurityInformation::Dacl,
-    )
-    .map_err(io::Error::other)?;
-    let current =
-        windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
-    if descriptor.owner() != Some(current.as_ref()) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Windows LocalAppData profile boundary is not owned by the current user",
-        ));
-    }
-    let system: windows_permissions::LocalBox<windows_permissions::Sid> =
-        "S-1-5-18".parse().map_err(io::Error::other)?;
-    let administrators: windows_permissions::LocalBox<windows_permissions::Sid> =
-        "S-1-5-32-544".parse().map_err(io::Error::other)?;
-    let dacl = descriptor
-        .dacl()
-        .ok_or_else(|| invalid("Windows LocalAppData profile boundary has no DACL"))?;
-    for index in 0..dacl.len() {
-        let ace = dacl
-            .get_ace(index)
-            .ok_or_else(|| invalid("Windows LocalAppData DACL entry is unreadable"))?;
-        if matches!(
-            ace.ace_type(),
-            windows_permissions::constants::AceType::ACCESS_ALLOWED_ACE_TYPE
-                | windows_permissions::constants::AceType::ACCESS_ALLOWED_CALLBACK_ACE_TYPE
-                | windows_permissions::constants::AceType::ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
-                | windows_permissions::constants::AceType::ACCESS_ALLOWED_OBJECT_ACE_TYPE
-        ) && ![
-            Some(current.as_ref()),
-            Some(system.as_ref()),
-            Some(administrators.as_ref()),
-        ]
-        .contains(&ace.sid())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Windows LocalAppData profile boundary grants access to an untrusted SID",
-            ));
-        }
-    }
+    crate::private_fs::windows::validate_acl(
+        &local_app_data,
+        &profile_metadata,
+        crate::private_fs::windows::AllowedPrincipals::OwnerSystemAdministrators,
+        false,
+    )?;
     // Canonicalize both sides: Windows typically returns a \\?\ path for
     // fs::canonicalize but SHGetKnownFolderPath yields an ordinary C:\ path.
     let profile = fs::canonicalize(&local_app_data)?;
@@ -220,55 +181,13 @@ pub(super) fn canonical_regular(path: &Path) -> io::Result<PathBuf> {
     path.canonicalize()
 }
 pub(super) fn verify_private_acl(path: &Path) -> io::Result<()> {
-    use windows_permissions::{
-        constants::{AceType, SeObjectType, SecurityInformation},
-        wrappers::{ConvertSecurityDescriptorToStringSecurityDescriptor, GetNamedSecurityInfo},
-    };
-    let descriptor = GetNamedSecurityInfo(
-        path.as_os_str(),
-        SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Dacl | SecurityInformation::Owner,
+    let metadata = fs::symlink_metadata(path)?;
+    crate::private_fs::windows::validate_acl(
+        path,
+        &metadata,
+        crate::private_fs::windows::AllowedPrincipals::OwnerOnly,
+        true,
     )
-    .map_err(io::Error::other)?;
-    let current =
-        windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
-    if descriptor.owner() != Some(current.as_ref()) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Agent service path is not owned by the current user",
-        ));
-    }
-    let sddl =
-        ConvertSecurityDescriptorToStringSecurityDescriptor(&descriptor, SecurityInformation::Dacl)
-            .map_err(io::Error::other)?;
-    if !sddl.to_string_lossy().starts_with("D:P") {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Agent service path ACL must be protected from inheritance",
-        ));
-    }
-    let dacl = descriptor
-        .dacl()
-        .ok_or_else(|| invalid("Agent service path has no DACL"))?;
-    for index in 0..dacl.len() {
-        let ace = dacl
-            .get_ace(index)
-            .ok_or_else(|| invalid("Agent service DACL entry is unreadable"))?;
-        if matches!(
-            ace.ace_type(),
-            AceType::ACCESS_ALLOWED_ACE_TYPE
-                | AceType::ACCESS_ALLOWED_CALLBACK_ACE_TYPE
-                | AceType::ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
-                | AceType::ACCESS_ALLOWED_OBJECT_ACE_TYPE
-        ) && ace.sid() != Some(current.as_ref())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Agent service ACL grants access to a different user",
-            ));
-        }
-    }
-    Ok(())
 }
 pub(super) fn is_reparse(metadata: &fs::Metadata) -> bool {
     metadata.file_attributes() & 0x400 != 0
@@ -362,30 +281,7 @@ pub(super) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 pub(super) fn set_private_acl(path: &Path) -> io::Result<()> {
-    use windows_permissions::constants::{SeObjectType, SecurityInformation};
-    use windows_permissions::wrappers::SetNamedSecurityInfo;
-    use windows_permissions::{LocalBox, SecurityDescriptor};
-
-    let current =
-        windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
-    let sid =
-        windows_permissions::wrappers::ConvertSidToStringSid(&current).map_err(io::Error::other)?;
-    let sddl = format!("D:P(A;;FA;;;{})", sid.to_string_lossy());
-    let descriptor: LocalBox<SecurityDescriptor> = sddl.parse().map_err(io::Error::other)?;
-    SetNamedSecurityInfo(
-        path.as_os_str(),
-        SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-        None,
-        None,
-        Some(
-            descriptor
-                .dacl()
-                .ok_or_else(|| invalid("cannot create private service DACL"))?,
-        ),
-        None,
-    )
-    .map_err(io::Error::other)
+    crate::private_fs::windows::set_acl(path, false)
 }
 pub(super) fn sha256_file(path: &Path) -> io::Result<String> {
     let mut file = File::open(path)?;

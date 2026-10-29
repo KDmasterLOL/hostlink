@@ -121,70 +121,13 @@ fn validate_private_file(path: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn validate_private_acl(path: &Path) -> io::Result<()> {
-    use windows_permissions::constants::{AceType, SeObjectType, SecurityInformation};
-    use windows_permissions::wrappers::{
-        ConvertSecurityDescriptorToStringSecurityDescriptor, GetNamedSecurityInfo,
-    };
-    use windows_permissions::{LocalBox, Sid};
-
-    let descriptor = GetNamedSecurityInfo(
-        path.as_os_str(),
-        SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Dacl | SecurityInformation::Owner,
-    )?;
-    let current = windows_permissions::utilities::current_process_sid()?;
-    if descriptor.owner() != Some(current.as_ref()) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "private path owner must be the current Windows user",
-        ));
-    }
-    let sddl = ConvertSecurityDescriptorToStringSecurityDescriptor(
-        &descriptor,
-        SecurityInformation::Dacl,
-    )?;
-    if !sddl.to_string_lossy().starts_with("D:P") {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "private path DACL must be protected from inherited permissions",
-        ));
-    }
-    let system: LocalBox<Sid> = "S-1-5-18".parse()?;
-    let administrators: LocalBox<Sid> = "S-1-5-32-544".parse()?;
-    let dacl = descriptor.dacl().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::PermissionDenied, "private path has no DACL")
-    })?;
-    for index in 0..dacl.len() {
-        let ace = dacl.get_ace(index).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "private path has an unreadable ACE",
-            )
-        })?;
-        let allows = matches!(
-            ace.ace_type(),
-            AceType::ACCESS_ALLOWED_ACE_TYPE
-                | AceType::ACCESS_ALLOWED_CALLBACK_ACE_TYPE
-                | AceType::ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
-                | AceType::ACCESS_ALLOWED_OBJECT_ACE_TYPE
-        );
-        if !allows {
-            continue;
-        }
-        let sid = ace.sid().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "private path has an allow ACE without a verifiable SID",
-            )
-        })?;
-        if sid != current.as_ref() && sid != system.as_ref() && sid != administrators.as_ref() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "private path DACL grants access to an unexpected principal",
-            ));
-        }
-    }
-    Ok(())
+    let metadata = std::fs::symlink_metadata(path)?;
+    crate::private_fs::windows::validate_acl(
+        path,
+        &metadata,
+        crate::private_fs::windows::AllowedPrincipals::OwnerSystemAdministrators,
+        true,
+    )
 }
 
 pub(super) fn invalid_data(message: impl Into<String>) -> io::Error {

@@ -8,6 +8,9 @@ use std::path::{Component, Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::OwnedSemaphorePermit;
 
+#[cfg(windows)]
+use crate::private_fs::windows::set_acl as set_private_acl;
+
 const MAX_READ_BYTES: usize = 1024 * 1024;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
 const MAX_OPEN_FILES: usize = 64;
@@ -198,7 +201,10 @@ fn validate_directory(path: &Path) -> io::Result<()> {
 }
 
 fn create_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
     let mut builder = std::fs::DirBuilder::new();
+    #[cfg(not(unix))]
+    let builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -213,32 +219,4 @@ fn create_directory(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => validate_directory(path),
         Err(error) => Err(error),
     }
-}
-
-#[cfg(windows)]
-fn set_private_acl(path: &Path, directory: bool) -> io::Result<()> {
-    use windows_permissions::constants::{SeObjectType, SecurityInformation};
-    use windows_permissions::wrappers::{ConvertSidToStringSid, SetNamedSecurityInfo};
-    use windows_permissions::{LocalBox, SecurityDescriptor};
-    let current =
-        windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
-    let current = ConvertSidToStringSid(&current).map_err(io::Error::other)?;
-    let flags = if directory { "OICI" } else { "" };
-    let descriptor: LocalBox<SecurityDescriptor> =
-        format!("D:P(A;{flags};FA;;;{})", current.to_string_lossy())
-            .parse()
-            .map_err(io::Error::other)?;
-    let dacl = descriptor
-        .dacl()
-        .ok_or_else(|| io::Error::other("private ACL missing"))?;
-    SetNamedSecurityInfo(
-        path.as_os_str(),
-        SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-        None,
-        None,
-        Some(dacl),
-        None,
-    )
-    .map_err(io::Error::other)
 }

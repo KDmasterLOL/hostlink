@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn read_token(path: &Path) -> io::Result<SecretString> {
-    jobs::validate_private_path(path, false)?;
+    private_fs::validate_private_path(path, false)?;
     let mut bytes = Vec::new();
     File::open(path)?
         .take(MAX_TOKEN_BYTES + 1)
@@ -47,7 +47,7 @@ pub(super) fn write_private_new(path: &Path, contents: &[u8]) -> io::Result<()> 
             ),
         )
     })?;
-    jobs::restrict_private_path(path, false).map_err(|error| {
+    private_fs::restrict_private_path(path, false).map_err(|error| {
         io::Error::new(
             error.kind(),
             format!(
@@ -106,7 +106,7 @@ pub(super) fn ensure_fresh_root_parent(root: &Path) -> io::Result<()> {
         }
     }
     #[cfg(windows)]
-    jobs::validate_private_path(parent, true)?;
+    private_fs::validate_private_path(parent, true)?;
     Ok(())
 }
 
@@ -152,12 +152,4 @@ pub(super) fn available_loopback_addr_from(
             LISTENER_PORT_ATTEMPTS
         ),
     ))
-}
-
-pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    File::open(path)?.sync_all()?;
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
 }

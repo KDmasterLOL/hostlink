@@ -184,9 +184,7 @@ pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 #[cfg(not(windows))]
-pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
-}
+pub(super) use crate::private_fs::sync_directory;
 
 #[cfg(not(windows))]
 pub(super) fn create_private_directory(path: &Path) -> io::Result<()> {

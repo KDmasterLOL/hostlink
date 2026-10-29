@@ -8,11 +8,11 @@ pub const UPDATE_LOCK_FILE: &str = "update.lock";
 pub(crate) const MAX_ACTIVE_JOBS: usize = 16;
 mod board;
 mod database;
-mod private_fs;
 mod store;
 mod worker;
-use private_fs::*;
-pub(crate) use private_fs::{restrict_private_path, validate_private_path};
+use crate::private_fs::{
+    invalid, open_lock, restrict_private_path, sync_directory, validate_private_path,
+};
 pub use store::{JobStore, active_ids};
 pub use worker::serve_until;
 

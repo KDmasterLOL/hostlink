@@ -28,6 +28,7 @@ does not certify production or registered Windows updater deployment.
 | Managed Hub HTTP client, routes and trusted SSH pins | `crates/client/src/hub/{mod.rs,client.rs,config.rs,routes.rs}` |
 | Direct and gateway SSH | `crates/client/src/connect/`; `crates/agent/src/ssh/`; `crates/agent/src/tunnel/` |
 | Agent-local Apalis command queue and Board UI/API | `crates/agent/src/jobs/` (no Client jobs subsystem) |
+| Shared Agent-private files, locks and Windows DACL | `crates/agent/src/private_fs/` |
 | Hub v2 endpoints and authoritative registry | `crates/hub/src/server/`; `crates/hub/src/state.rs` |
 | Fresh enrollment and source-pinned installation | `crates/agent/src/enrollment/`; `crates/client/src/bootstrap/` |
 | Linux service lifecycle | `crates/agent/src/service/linux/` (systemd --user) |
@@ -40,7 +41,10 @@ updater contract. `jobs/store.rs` configures the native Apalis SQLite
 through ProcessKit. `jobs/board.rs` mounts the upstream Apalis Board
 Axum API and embedded UI; `jobs/new.html` is a small form calling the
 upstream task API. `jobs/database.rs` preserves private fresh-only SQLite
-schema v5; `private_fs.rs` maintains local filesystem/ACL safety.
+schema v5. Shared `private_fs/mod.rs` enforces owned paths and uses
+standard `File::lock` / `File::unlock`; `private_fs/windows.rs`
+centralizes DACL checks for jobs, SSH, SFTP, service and updater while
+preserving their different allowed-principal policies.
 `jobs/tests/` contains the focused API and worker tests. There are no
 SSH jobs frames, SFTP binary artifacts, custom lifecycle or Client jobs
 module. `ssh/server.rs` supervises Agent-local jobs independently of SSH
