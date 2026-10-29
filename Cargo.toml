@@ -31,6 +31,7 @@ processkit = "=3.3.4"
 rand = "0.10.2"
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 tower = { version = "=0.5.3", features = ["util", "limit"] }
+tower-http = { version = "=0.7.1", default-features = false, features = ["validate-request"] }
 ssh-key = { version = "=0.7.0-rc.11", default-features = false, features = ["alloc"] }
 getrandom = "=0.4.3"
 hex = "=0.4.3"

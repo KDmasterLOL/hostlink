@@ -81,6 +81,54 @@ async fn board_creates_and_lists_typed_tasks_and_serves_assets() {
 }
 
 #[tokio::test]
+async fn board_host_header_uses_exact_tower_validation() {
+    let parent = tempfile::tempdir().unwrap();
+    restrict_private_path(parent.path(), true).unwrap();
+    let root = parent.path().join("jobs");
+    fs::create_dir(&root).unwrap();
+    restrict_private_path(&root, true).unwrap();
+    let store = JobStore::initialize_fresh(&root).await.unwrap();
+    let app = board::router(&store, "127.0.0.1:4040".parse().unwrap(), &root);
+
+    for (host, origin, expected) in [
+        (None, None, StatusCode::FORBIDDEN),
+        (Some("evil.example:4040"), None, StatusCode::FORBIDDEN),
+        (Some("localhost:4040"), None, StatusCode::FORBIDDEN),
+        (Some("127.0.0.1:4040"), None, StatusCode::OK),
+        (
+            Some("127.0.0.1:4040"),
+            Some("http://evil.example"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Some("127.0.0.1:4040"),
+            Some("http://127.0.0.1:4040"),
+            StatusCode::OK,
+        ),
+    ] {
+        let mut request = Request::builder().uri("/new");
+        if let Some(host) = host {
+            request = request.header("host", host);
+        }
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            expected,
+            "host={host:?}, origin={origin:?}"
+        );
+    }
+    assert!(active_ids(&root).unwrap().is_empty());
+    store.close().await;
+}
+
+#[tokio::test]
 async fn old_version_is_refused_without_modification() {
     let parent = tempfile::tempdir().unwrap();
     restrict_private_path(parent.path(), true).unwrap();

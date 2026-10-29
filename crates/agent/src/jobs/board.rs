@@ -11,6 +11,7 @@ use axum::{
     response::{Html, Response},
     routing::get,
 };
+use tower_http::validate_request::ValidateRequestHeaderLayer;
 
 pub(super) fn router(store: &JobStore, address: std::net::SocketAddr, root: &Path) -> Router {
     let root = root.to_owned();
@@ -25,6 +26,14 @@ pub(super) fn router(store: &JobStore, address: std::net::SocketAddr, root: &Pat
         .layer(middleware::from_fn(move |request, next| {
             guard(request, next, address, root.clone())
         }))
+        // Require the exact loopback Host before dispatching any Board route.
+        .layer(
+            ValidateRequestHeaderLayer::has_header_value(
+                header::HOST.as_str(),
+                &address.to_string(),
+            )
+            .expect("static HTTP Host header name"),
+        )
 }
 
 async fn guard(
@@ -33,18 +42,10 @@ async fn guard(
     address: std::net::SocketAddr,
     root: PathBuf,
 ) -> Result<Response, StatusCode> {
-    // Reject DNS rebinding and cross-site browser requests. Non-browser local
-    // clients may omit Origin; browsers performing a cross-origin PUT cannot.
-    let expected = address.to_string();
-    let host = request
-        .headers()
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok());
-    if host != Some(expected.as_str()) {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    // Host is validated by Tower HTTP. Reject cross-origin browser requests;
+    // non-browser local clients may omit Origin.
     if let Some(origin) = request.headers().get(header::ORIGIN)
-        && origin.to_str().ok() != Some(format!("http://{expected}").as_str())
+        && origin.to_str().ok() != Some(format!("http://{address}").as_str())
     {
         return Err(StatusCode::FORBIDDEN);
     }
