@@ -1,5 +1,10 @@
 # HostLink architecture — Agent-local jobs
 
+> 1C-1114 supersedes the historical Windows maintenance/live-handoff details below:
+> Windows now uses a current-user Task Scheduler logon task and offline stopped-only
+> update after task removal. See [lifecycle](AGENT_LIFECYCLE.md) and
+> [updater](AGENT_UPDATE_WINDOWS.md). Native Win7/11 acceptance remains NOT RUN.
+
 Development architecture for Huly 1C-1098. This replaces the old SSH jobs
 design; earlier source snapshots and rollout notes are historical, not a
 description of current `dev`.
@@ -66,7 +71,8 @@ connection. No older jobs data is automatically converted or deleted.
 The updater no longer reads Apalis's Jobs table; the process lifecycle is
 the quiescence boundary. On Linux the Agent holds `jobs/runner.lock` while
 running, so the updater refuses publication until the process has stopped.
-On Windows, owner-authenticated stopped-runtime maintenance is used instead.
+Windows uses the same runtime lock plus offline stopped-image checks and requires
+removal of its current-user Task Scheduler task before update.
 `update.lock` continues to serialize updater invocations and rollback.
 Pending and interrupted Apalis tasks are retained, not interpreted by
 HostLink. A restarted worker may replay an interrupted command.

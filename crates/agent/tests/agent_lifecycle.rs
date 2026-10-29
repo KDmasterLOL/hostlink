@@ -356,3 +356,29 @@ fn service_rejects_symlink_root_and_unmanaged_unit_collision() {
     );
     assert_eq!(fs::read_to_string(collision).unwrap(), "foreign unit\n");
 }
+
+#[test]
+fn legacy_service_registration_is_preserved_and_not_adopted() {
+    let (_temp, home, root, config) = fixture();
+    let legacy = root.join(".hostlink-user-service.json");
+    fs::write(&legacy, b"legacy owner marker\n").unwrap();
+    let result = invoke(
+        &root.join("bin/hostlink-agent"),
+        &[
+            "install",
+            "--root",
+            root.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+        ],
+        &home,
+    );
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("legacy HostLink"));
+    assert_eq!(fs::read(&legacy).unwrap(), b"legacy owner marker\n");
+    let user_units = home.join(".config/systemd/user");
+    assert!(
+        !user_units.exists() || fs::read_dir(user_units).unwrap().next().is_none(),
+        "legacy refusal must not create or replace a user unit"
+    );
+}

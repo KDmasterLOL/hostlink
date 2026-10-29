@@ -7,8 +7,7 @@ use super::super::super::private_fs::{
     hash_file, is_reparse_point, set_private_directory, validate_path_has_no_reparse_components,
 };
 use super::super::super::{
-    AgentUpdateRequest, INSTALL_METADATA, MAX_ENTRY_BYTES, MAX_MANIFEST_BYTES, invalid,
-    invalid_owned,
+    AgentUpdateRequest, MAX_ENTRY_BYTES, MAX_MANIFEST_BYTES, invalid, invalid_owned,
 };
 use super::super::fs::{
     copy_private_synced, create_private_directory, reject_running_agent, same_windows_file,
@@ -26,20 +25,10 @@ pub(in crate::update) fn publish_windows(
     manifest: PackageManifest,
     old_metadata: InstallMetadata,
     staged: tempfile::TempDir,
-    managed_service: bool,
 ) -> io::Result<()> {
     let bin_root = root.join("bin");
     let installed_executable = bin_root.join("hostlink-agent.exe");
-    if managed_service {
-        if same_windows_file(&std::env::current_exe()?, &installed_executable)? {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "managed update must be invoked by a separate updater executable",
-            ));
-        }
-    } else {
-        ensure_windows_offline_caller(root)?;
-    }
+    ensure_windows_offline_caller(root)?;
 
     let updates = root.join(".updates");
     create_private_directory(&updates)?;
@@ -146,20 +135,11 @@ pub(in crate::update) fn publish_windows(
     })();
     prepare?;
 
-    // The durable journal and both verified backups precede service quiescence. A crash from
-    // this point onward therefore leaves enough exact file evidence for conservative recovery.
-    let maintenance = if managed_service {
-        Some(crate::service::begin_maintenance(root)?)
-    } else {
-        None
-    };
-
+    // Journal and verified backups precede publication. No task is registered and
+    // the caller holds the Agent lifetime lock throughout publication and recovery.
     let mut journal = journal;
     let publish = (|| {
-        if maintenance.is_none() {
-            crate::service::ensure_update_unregistered(root)?;
-            ensure_windows_offline_caller(root)?;
-        }
+        ensure_windows_offline_caller(root)?;
         journal.advance(crate::update_handoff::UpdatePhase::BackedUp)?;
         crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
         let mut moves = self_update::MoveAll::from_temp(&transaction_dir);
@@ -201,31 +181,10 @@ pub(in crate::update) fn publish_windows(
         validate_installed(&bin_root, &installed, &request.target)?;
         journal.advance(crate::update_handoff::UpdatePhase::Verified)?;
         crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
-        if let Some(receipt) = maintenance.as_ref() {
-            crate::service::update_maintenance_executable(
-                receipt,
-                &journal.identity.new_executable_sha256,
-            )?;
-            crate::service::start_maintenance_candidate(
-                receipt,
-                &journal.identity.new_executable_sha256,
-            )?;
-            journal.advance(crate::update_handoff::UpdatePhase::Restarted)?;
-            crate::update_handoff::write_journal_atomic(&journal_path, &journal)?;
-            crate::service::register_maintenance(receipt)?;
-        }
         cleanup_windows_transaction(&journal_path, &transaction_dir, &journal.identity)
     })();
 
     if let Err(error) = publish {
-        if let Some(receipt) = maintenance.as_ref()
-            && let Err(stop_error) = crate::service::stop_for_maintenance_rollback(receipt)
-        {
-            return Err(io::Error::other(format!(
-                "Windows Agent update failed ({error}); candidate stop could not be proven ({stop_error}); journal and transaction at {} preserved",
-                transaction_dir.display()
-            )));
-        }
         if let Err(rollback_error) = rollback_windows(
             &installed_executable,
             metadata_path,
@@ -237,17 +196,6 @@ pub(in crate::update) fn publish_windows(
             return Err(io::Error::other(format!(
                 "Windows Agent publication failed ({error}); rollback failed ({rollback_error}); preserve transaction at {}",
                 transaction_dir.display()
-            )));
-        }
-        if let Some(receipt) = maintenance.as_ref()
-            && let Err(restore_error) = crate::service::restore_maintenance(receipt, |root| {
-                let old_metadata = read_install_metadata(&root.join(INSTALL_METADATA))?;
-                validate_installed(&root.join("bin"), &old_metadata, &request.target)
-            })
-        {
-            return Err(io::Error::other(format!(
-                "Windows Agent update failed ({error}); old files are restored but owner registration recovery failed ({restore_error}); journal preserved at {}",
-                journal_path.display()
             )));
         }
         if let Err(cleanup_error) =
@@ -266,6 +214,7 @@ pub(in crate::update) fn publish_windows(
 
 #[cfg(windows)]
 pub(in crate::update) fn ensure_windows_offline_caller(root: &Path) -> io::Result<()> {
+    crate::service::ensure_update_unregistered(root)?;
     ensure_windows_separate_updater(root)?;
     reject_running_agent(&root.join("bin").join("hostlink-agent.exe"))
 }

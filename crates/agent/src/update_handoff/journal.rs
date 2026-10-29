@@ -34,7 +34,6 @@ pub enum UpdatePhase {
     BackedUp,
     Published,
     Verified,
-    Restarted,
     RollingBack,
     RolledBack,
 }
@@ -88,8 +87,6 @@ impl UpdateJournal {
                 | (UpdatePhase::Staged, UpdatePhase::RollingBack)
                 | (UpdatePhase::BackedUp, UpdatePhase::Published)
                 | (UpdatePhase::Published, UpdatePhase::Verified)
-                | (UpdatePhase::Verified, UpdatePhase::Restarted)
-                | (UpdatePhase::Restarted, UpdatePhase::RollingBack)
                 | (UpdatePhase::BackedUp, UpdatePhase::RollingBack)
                 | (UpdatePhase::Published, UpdatePhase::RollingBack)
                 | (UpdatePhase::Verified, UpdatePhase::RollingBack)

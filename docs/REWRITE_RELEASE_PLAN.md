@@ -1,5 +1,10 @@
 # HostLink russh execution rewrite: staged integration and managed-fleet migration
 
+> 1C-1114 supersedes the historical Windows maintenance/live-handoff details below:
+> Windows now uses a current-user Task Scheduler logon task and offline stopped-only
+> update after task removal. See [lifecycle](AGENT_LIFECYCLE.md) and
+> [updater](AGENT_UPDATE_WINDOWS.md). Native Win7/11 acceptance remains NOT RUN.
+
 Status date: 2026-10-27. Parent Huly: 1C-987.
 Code-verified source SHA: `37fd3663f91dad0ceefd933862a4ec595e4765ce`.
 The source at this SHA is authorized for development integration into HostLink `dev`
@@ -7,7 +12,7 @@ for testing. This document's commit is documentation-only and has a different SH
 it does not identify a separately tested executable. Main, tags, releases, deployment,
 installed agents, gateways and 1C databases remain outside this authorization.
 
-## Current implementation and verified evidence (2026-10-27)
+## Historical implementation and evidence (2026-10-27, superseded for Windows)
 
 The workspace has three crates: Agent, Client and the required HostLink Hub.
 The table records implementation and the source-exact evidence available for

@@ -16,12 +16,12 @@ Target packages:
   enrollment, SSH authorization and revocation; **no execution RPC**. See
   [crates/hub/README.md](crates/hub/README.md) for server configuration/API.
 
-Updates must pin the exact Agent artifact SHA-256/version/target, defer active
-jobs and reject unsafe roots. The Agent-only local ZIP updater is integrated:
-Windows uses `self_update 1.3.1` extraction and `MoveAll`, private durable crash
-recovery, and single-use maintenance-candidate admission. The registered/live
-Windows update, health and rollback flow has not yet passed a real managed-live
-acceptance run; this code status is not release acceptance. See
+Updates pin the exact Agent archive SHA-256/version/target and reject unsafe
+roots. Windows uses `self_update 1.3.1` extraction/MoveAll and private durable
+crash recovery, **offline only**: stop/remove its Task Scheduler task, run the
+separate private updater, then explicitly install/start the task again.
+Archive/manifest/inventory verification and rollback remain required. Native
+Windows 11/Win7 acceptance for this replacement remains unrun. See
 [docs/AGENT_UPDATE_WINDOWS.md](docs/AGENT_UPDATE_WINDOWS.md).
 
 The rewrite is being integrated into HostLink `dev` for testing. It is **not
@@ -166,8 +166,8 @@ A real Linux HOME Agent↔Client SSH test verifies channel-owned exec,
 binary stdout/stderr and exact nonzero exit codes; the separate Apalis Board
 integration tests cover persistent Agent-local commands. The Win7 evidence
 and remaining gates are recorded in [the release plan](docs/REWRITE_RELEASE_PLAN.md):
-WOW64 does not substitute for a native 32-bit Windows 7 OS, and a full registered
-Agent live-update run remains untested.
+WOW64 does not substitute for a native 32-bit Windows 7 OS. The replacement
+Task Scheduler lifecycle and offline update/recovery require fresh native acceptance.
 
 ## Local Agent artifact packages
 
@@ -184,15 +184,14 @@ instances. Native Windows 11 and Win7 PowerShell 2 acceptance remain separate.
 
 The Hub registry and local Agent process are managed separately. `hostlink remove`
 revokes Hub access; it does not uninstall the local Agent. Linux uses a
-root-bound `systemd --user` unit; Windows 7 and Windows 11 use a current-user
-HKCU login-startup entry with an authenticated local control pipe. Both expose
-`hostlink-agent service install/start/stop/status/remove`, preserving enrollment
-data, keys and Apalis jobs across stop/removal. Pending jobs do not block
-process shutdown; interrupted commands may replay after restart.
-Linux does not enable login lingering. Windows startup requires the interactive
-user to sign in and rejects HKCU Run commands over the 260-character limit.
-Windows roots must be protected descendants of the current user's OS-resolved
-LocalAppData folder. Every intermediate directory must have a protected
-owner-only ACL; the control token remains out of launcher arguments.
+root-bound `service-manager` systemd user unit; Windows 7 and Windows 11 use a current-user
+Task Scheduler logon task using limited interactive-user rights and no password.
+Both expose `hostlink-agent service install/start/stop/status/remove`, preserving
+enrollment, keys and Apalis jobs. Windows stop uses Scheduler termination;
+graceful shutdown and descendant cleanup are not guaranteed. Interrupted
+commands may replay after restart, repeating side effects.
+Linux handles systemd SIGTERM gracefully and does not enable login lingering. Windows requires interactive sign-in.
+Roots must be protected descendants of OS-resolved LocalAppData with private
+ancestors. Legacy Run/VBS/pipe/maintenance registrations are rejected, not adopted.
 See [docs/AGENT_LIFECYCLE.md](docs/AGENT_LIFECYCLE.md) for commands, platform
 limits and safety behavior. Windows native acceptance remains unrun.

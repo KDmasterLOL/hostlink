@@ -40,6 +40,14 @@ fn journal_rejects_wrong_target_and_malformed_digest() {
 }
 
 #[test]
+fn legacy_live_update_journal_is_rejected() {
+    let journal = UpdateJournal::new(identity()).unwrap();
+    let mut value = serde_json::to_value(journal).unwrap();
+    value["phase"] = serde_json::json!("RESTARTED");
+    assert!(serde_json::from_value::<UpdateJournal>(value).is_err());
+}
+
+#[test]
 fn transitions_are_linear_and_reject_skipped_phases() {
     let mut journal = UpdateJournal::new(identity()).expect("journal");
     assert!(journal.advance(UpdatePhase::Published).is_err());
@@ -47,13 +55,12 @@ fn transitions_are_linear_and_reject_skipped_phases() {
         UpdatePhase::BackedUp,
         UpdatePhase::Published,
         UpdatePhase::Verified,
-        UpdatePhase::Restarted,
     ] {
         journal.advance(phase).expect("valid forward phase");
     }
     journal
         .advance(UpdatePhase::RollingBack)
-        .expect("failed health or registration may roll back after restart");
+        .expect("verification failure may roll back before cleanup");
 }
 
 #[test]
@@ -68,19 +75,18 @@ fn rollback_transitions_are_explicit_and_terminal() {
         .expect("rollback complete");
     assert!(journal.advance(UpdatePhase::BackedUp).is_err());
 
-    let mut restarted = UpdateJournal::new(identity()).expect("journal");
+    let mut verified = UpdateJournal::new(identity()).expect("journal");
     for phase in [
         UpdatePhase::BackedUp,
         UpdatePhase::Published,
         UpdatePhase::Verified,
-        UpdatePhase::Restarted,
     ] {
-        restarted.advance(phase).expect("advance to restarted");
+        verified.advance(phase).expect("advance to verified");
     }
-    restarted
+    verified
         .advance(UpdatePhase::RollingBack)
-        .expect("restart phase can enter rollback");
-    restarted
+        .expect("verified phase can enter rollback");
+    verified
         .advance(UpdatePhase::RolledBack)
         .expect("rollback completes");
 }
@@ -125,18 +131,8 @@ fn crash_recovery_is_hash_and_phase_bound_and_fail_closed() {
         RecoveryAction::PreserveAndError
     );
     assert_eq!(
-        recovery_action(
-            UpdatePhase::Restarted,
-            RecoveryEvidence {
-                installed_new_valid: true,
-                installed_new_metadata_valid: true,
-                restarted_new_healthy: false,
-                backup_old_valid: true,
-                backup_old_metadata_valid: true,
-                ..RecoveryEvidence::default()
-            }
-        ),
-        RecoveryAction::RestoreBackup
+        recovery_action(UpdatePhase::Verified, new_and_backup),
+        RecoveryAction::CommitNew
     );
 }
 

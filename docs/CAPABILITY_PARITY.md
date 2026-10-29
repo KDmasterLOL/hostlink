@@ -1,5 +1,10 @@
 # HostLink rewrite тАФ externally observable capability parity
 
+> 1C-1114 supersedes the historical Windows maintenance/live-handoff details below:
+> Windows now uses a current-user Task Scheduler logon task and offline stopped-only
+> update after task removal. See [lifecycle](AGENT_LIFECYCLE.md) and
+> [updater](AGENT_UPDATE_WINDOWS.md). Native Win7/11 acceptance remains NOT RUN.
+
 Source audit: 2026-10-25. Old HostLink `dev@5a1f80b`, new SSH-only rewrite `e9140457f39324ceabdc893adee0a4cf03bff93c`. This is a behavioral inventory, **not** an instruction to resurrect the retired Agent JSONL/RPC, managed Toolkit release, external OpenSSH or attestations. The final replacement MUST include a separate managed Hub for registry/invitation/revocation, plus a pinned `russh` Client and an unprivileged `russh` Agent. Static SSH host configuration is **not** the same as Hub enrollment.
 
 ## Observable commands/capabilities
@@ -16,7 +21,7 @@ Source audit: 2026-10-25. Old HostLink `dev@5a1f80b`, new SSH-only rewrite `e914
 | `remove-scoped` | SFTP Agent protocol permits scoped operations, but Client CLI exposes only upload/download | **No equivalent public owned-root delete** at this SHA. Any new cleanup must prove identity-bound terminal artifact ownership; never add unconstrained remote delete. |
 | `configure`, `show`, `list`, `display-name`, `invite`, `remove` | Explicit `HostSpec` with exact endpoint/identity/host pin and optional `GatewayHop` | **Required missing Hub capability** (1C-1019/1020/1021): restore authoritative inventory, management CLI, one-use invitations, enrollment and revocation through a separate Hub, not an Agent RPC. Offline 1C-1010 preflight remains a separate migration aid, never a replacement for the live Hub. |
 | `sync-ssh`, `ssh` | Embedded `russh` transport without OpenSSH subprocesses; no interactive PTY | **Deliberate anti-goal** per 1C-987. Standard SSH exec, SFTP and typed jobs replace supported noninteractive workflows. |
-| Managed Agent update | `hostlink-agent update`: exact Agent-only archive/version/target/SHA with job interlock | **Linux implemented**; Windows stopped-runtime handoff and rollback are still required (1C-1004). Do not confuse with the retired OneC Toolkit update engine. |
+| Managed Agent update | `hostlink-agent update`: exact Agent-only archive/version/target/SHA with stopped-runtime lock | Linux updater retained; Windows is offline only after task removal, with verified publication/recovery. Native Win7/11 acceptance remains required (1C-1114). Do not confuse with the retired OneC Toolkit update engine. |
 
 ## Explicit acceptance gaps and ownership
 

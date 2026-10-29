@@ -40,13 +40,32 @@ function Assert-SameRunValues($before, $after) {
     $beforeJson = ConvertTo-Json -InputObject $before -Compress -Depth 4
     $afterJson = ConvertTo-Json -InputObject $after -Compress -Depth 4
     if ($beforeJson -cne $afterJson) {
-        throw 'HKCU Run values changed outside the exact lifecycle test value.'
+        throw 'HKCU Run values changed; Task Scheduler lifecycle must never write Run values.'
     }
 }
 
+# Read-only snapshot of all visible root-folder tasks, including hidden tasks.
+function Get-TaskValues {
+    $scheduler = New-Object -ComObject 'Schedule.Service'
+    $scheduler.Connect()
+    $folder = $scheduler.GetFolder('\')
+    $values = @{}
+    foreach ($task in $folder.GetTasks(1)) { $values[[string]$task.Name] = [string]$task.Xml }
+    return $values
+}
+function Assert-SameTaskValues($before, $after) {
+    if ($before.Count -ne $after.Count) { throw 'Root Task Scheduler task count changed after lifecycle teardown.' }
+    foreach ($name in $before.Keys) {
+        if (-not $after.ContainsKey($name) -or $before[$name] -cne $after[$name]) {
+            throw ('Foreign or unresolved Task Scheduler task changed: ' + $name)
+        }
+    }
+}
+$taskValuesBefore = $null
 $runValuesBefore = $null
 try {
     $runValuesBefore = Get-RunValues
+    $taskValuesBefore = Get-TaskValues
     if (-not $RunAcceptance) {
         Write-Output 'Preflight-only: no test opt-in was set and no lifecycle test was invoked.'
         return
@@ -124,6 +143,7 @@ try {
         }
         if ($remaining) { throw 'A disposable lifecycle Agent process remains after test teardown.' }
         Assert-SameRunValues $runValuesBefore (Get-RunValues)
+        Assert-SameTaskValues $taskValuesBefore (Get-TaskValues)
         Write-Output ("NATIVE WINDOWS 11 ACCEPTANCE PASS; SID={0}; PROFILE={1}; Agent SHA-256={2}" -f $ExpectedDisposableSid, $actualProfile, $agentHash)
     }
     finally { Pop-Location }
@@ -133,5 +153,6 @@ finally {
     foreach ($name in $harnessEnvironment) {
         [Environment]::SetEnvironmentVariable($name, $savedHarnessEnvironment[$name], 'Process')
     }
+    if ($null -ne $taskValuesBefore) { Assert-SameTaskValues $taskValuesBefore (Get-TaskValues) }
     if ($null -ne $runValuesBefore) { Assert-SameRunValues $runValuesBefore (Get-RunValues) }
 }

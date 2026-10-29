@@ -21,7 +21,7 @@ enum Command {
     Check(commands::check::Args),
     /// Serve SSH/SFTP and optional outbound reverse SSH until terminated.
     Run(commands::run::Args),
-    /// Apply a digest-pinned Agent-only package; refuses active jobs and unsafe targets.
+    /// Apply a digest-pinned Agent-only package to a stopped Agent.
     Update(commands::update::Args),
     /// Enroll a fresh user-owned Agent root with a one-use Hub invitation.
     Enroll(commands::enroll::Args),
@@ -54,13 +54,6 @@ mod tests {
         let valid = [
             vec!["check", "--config", "agent.json"],
             vec!["run", "--config", "agent.json"],
-            vec![
-                "run",
-                "--config",
-                "agent.json",
-                "--managed-service",
-                "--maintenance-start",
-            ],
             vec![
                 "update",
                 "--root",
@@ -122,6 +115,16 @@ mod tests {
                 Cli::try_parse_from(std::iter::once("hostlink-agent").chain(args.iter().copied()))
                     .is_ok(),
                 "CLI rejected {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn removed_windows_lifecycle_flags_are_rejected() {
+        for flag in ["--managed-service", "--maintenance-start"] {
+            assert!(
+                Cli::try_parse_from(["hostlink-agent", "run", "--config", "agent.json", flag])
+                    .is_err()
             );
         }
     }

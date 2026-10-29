@@ -1,5 +1,10 @@
 # HostLink redundant-guard and library-first audit
 
+> 1C-1114 supersedes the historical Windows maintenance/live-handoff details below:
+> Windows now uses a current-user Task Scheduler logon task and offline stopped-only
+> update after task removal. See [lifecycle](AGENT_LIFECYCLE.md) and
+> [updater](AGENT_UPDATE_WINDOWS.md). Native Win7/11 acceptance remains NOT RUN.
+
 Review: 2026-10-29. Scope: Agent, Client, Hub, tests and installation/update
 contracts. Development work only; no deployed Agent, Hub, customer host, or
 production data was modified. Root instructions: [AGENTS.md](../AGENTS.md).
@@ -85,9 +90,9 @@ with temporary objects.
   `agent/update/archive/zip_index.rs` protects against contradictory package
   identities that are not safely represented by a filename-keyed map.
 * **Updater SHA/target/installed-inventory verification, journal, rollback,
-  maintenance one-use admission and Windows PID/SID/image checks:**
+  stopped-runtime locks and exact Windows task XML/image checks:**
   `self_update::MoveAll` does not provide crash-durable multi-file
-  publication or an authenticated restart.
+  publication or a stopped Agent. Windows automatic restart/admission is retired.
 * **Hub JSON state writer lock / commit admission:** concurrency and cancelled
   HTTP request futures must not lose or duplicate authoritative invitations,
   enrollments or revocations. SQLite queue locks cannot replace these.
@@ -97,7 +102,7 @@ with temporary objects.
 
 ## Acceptance boundaries
 
-Verified on the isolated integration branch before merging to dev:
+Historical evidence before 1C-1114 on the earlier isolated integration branch:
 
 * `cargo fmt --all -- --check` — PASS.
 * `cargo check --offline --locked --workspace --all-targets` — PASS.

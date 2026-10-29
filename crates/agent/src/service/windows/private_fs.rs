@@ -1,35 +1,5 @@
 use super::*;
 
-pub(super) fn replace_file(target: &Path, replacement: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
-    let target = target
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let replacement = replacement
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    // SAFETY: paths are NUL-terminated and zero flags require ACL preservation to succeed.
-    if unsafe {
-        ReplaceFileW(
-            target.as_ptr(),
-            replacement.as_ptr(),
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-        )
-    } == 0
-    {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
 pub(super) fn read_private(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() || is_reparse(&metadata) || metadata.len() > limit {
@@ -72,7 +42,7 @@ pub(super) fn verify_install_root(path: &Path) -> io::Result<PathBuf> {
             "Windows LocalAppData profile boundary is missing or is a reparse point",
         ));
     }
-    // SHGetKnownFolderPath is used instead of an environment variable, so a
+    // SHGetFolderPathW is used instead of an environment variable, so a
     // caller cannot redirect lifecycle storage to a shared or spoofed tree.
     // The OS-owned profile directory is the trust boundary for ancestors.
     // The official installer uses LocalAppData/HostLink/Agent. Verify
@@ -198,7 +168,9 @@ pub(super) fn current_sid() -> io::Result<String> {
         .to_string())
 }
 pub(super) fn ensure_user_scope() -> io::Result<()> {
-    if crate::private_fs::windows::is_non_elevated_user()? {
+    if crate::private_fs::windows::is_non_elevated_user()?
+        && current_sid()?.starts_with("S-1-5-21-")
+    {
         Ok(())
     } else {
         Err(io::Error::new(
@@ -232,24 +204,6 @@ pub(super) fn windows_quote(value: &str) -> String {
     out.push('"');
     out
 }
-pub(super) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    let mut file = options.open(path)?;
-    let result = (|| {
-        set_private_acl(path)?;
-        verify_private_acl(path)?;
-        file.write_all(bytes)?;
-        file.sync_all()
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(path);
-    }
-    result
-}
-pub(super) fn set_private_acl(path: &Path) -> io::Result<()> {
-    crate::private_fs::windows::set_acl(path, false)
-}
 pub(super) fn sha256_file(path: &Path) -> io::Result<String> {
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
@@ -262,15 +216,6 @@ pub(super) fn sha256_file(path: &Path) -> io::Result<String> {
         hash.update(&buffer[..count]);
     }
     Ok(format!("{:x}", hash.finalize()))
-}
-pub(super) fn random_token() -> String {
-    use rand::RngExt;
-    let mut bytes = [0u8; 32];
-    rand::rng().fill(&mut bytes);
-    hex(&bytes)
-}
-pub(super) fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 pub(super) fn ssh_banner(addr: std::net::SocketAddr) -> io::Result<bool> {
     use std::net::TcpStream;
