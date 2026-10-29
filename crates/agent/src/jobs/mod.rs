@@ -5,8 +5,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::fs::{self, File, OpenOptions};
-#[cfg(test)]
-use std::io::Write;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
@@ -134,15 +132,20 @@ impl Drop for JobRuntime {
 }
 
 #[cfg(all(test, target_os = "linux"))]
+#[path = "tests/engine_tests.rs"]
 mod engine_tests;
 #[cfg(all(test, target_os = "linux"))]
+#[path = "tests/protocol_tests.rs"]
 mod protocol_tests;
 
 #[cfg(all(test, target_os = "linux"))]
+#[path = "tests/process_tests.rs"]
 pub(crate) mod process_tests;
 #[cfg(all(test, unix))]
+#[path = "tests/source_tests.rs"]
 mod source_tests;
 #[cfg(all(test, windows))]
+#[path = "tests/windows_process_tests.rs"]
 mod windows_process_tests;
 
 #[cfg(windows)]

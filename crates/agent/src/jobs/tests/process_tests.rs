@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore};
 
-#[path = "../../tests/support/containment.rs"]
+#[path = "../../../tests/support/containment.rs"]
 mod containment;
 #[path = "containment_mode_tests.rs"]
 mod containment_mode_tests;

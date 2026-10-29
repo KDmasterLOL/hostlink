@@ -222,5 +222,5 @@ async fn finish_job(
 }
 
 #[cfg(all(test, target_os = "linux"))]
-#[path = "worker_tests.rs"]
+#[path = "tests/worker_tests.rs"]
 mod tests;

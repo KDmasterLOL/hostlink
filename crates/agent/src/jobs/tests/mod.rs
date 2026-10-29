@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write;
 
 #[cfg(unix)]
 #[test]

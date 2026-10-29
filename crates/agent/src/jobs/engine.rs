@@ -203,5 +203,5 @@ async fn consume_registered(
 }
 
 #[cfg(all(test, target_os = "linux"))]
-#[path = "busy_tests.rs"]
+#[path = "tests/busy_tests.rs"]
 mod busy_tests;

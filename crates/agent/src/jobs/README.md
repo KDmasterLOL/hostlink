@@ -128,7 +128,11 @@ service operations still validate their own installation/integrity rules.
 | [artifacts.rs](artifacts.rs), [source.rs](source.rs), [private_fs.rs](private_fs.rs) | Private binary/paths |
 | [frame.rs](frame.rs), [protocol.rs](protocol.rs) | SSH frame and operations |
 
-The sibling `*_tests.rs` files and `tests.rs` are tests, not more engines.
+All nine jobs unit-test source files are in [tests/](tests/), rather than
+mixed with the implementation. They retain their original Rust module
+paths so existing test filters and private fixture access still work.
+Agent/Client end-to-end tests remain under their respective crate-level
+`tests/` directories.
 See [SOURCE_LAYOUT](../../../../docs/SOURCE_LAYOUT.md) for module conventions.
 
 ## Validation
