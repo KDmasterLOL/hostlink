@@ -25,6 +25,7 @@ does not certify production or registered Windows updater deployment.
 | Concern | Module |
 | --- | --- |
 | Controller CLI and operator command dispatch | `crates/client/src/cli/{mod.rs,args.rs,commands/}`; `main.rs` is the binary entrypoint |
+| Agent CLI, commands and shared configuration loading | `crates/agent/src/cli.rs`, `crates/agent/src/commands/`, `crates/agent/src/shared.rs`; `main.rs` only initializes the CLI and reports errors |
 | Managed Hub HTTP client, routes and trusted SSH pins | `crates/client/src/hub/{mod.rs,client.rs,config.rs,routes.rs}` |
 | Direct and gateway SSH | `crates/client/src/connect/`; `crates/agent/src/ssh/`; `crates/agent/src/tunnel/` |
 | Agent process supervision (SSH, Apalis, tunnel, updater lifetime lock) | `crates/agent/src/runtime.rs` |
@@ -58,6 +59,11 @@ remain public re-exports of the runtime functions for existing callers.
 `russh` advertises only public-key authentication; channel tracking
 requires no shared mutex because the handler owns its session map.
 `sftp/` owns controller-scoped generic transfers.
+Agent CLI command argument definitions and execution live together in
+individual modules under `commands/`, including separate service actions.
+The `cli.rs` module only parses and dispatches Clap commands, while
+`shared.rs` owns the bounded Agent configuration loader. The external
+command names, flags, help and status output remain unchanged.
 See [jobs README](../crates/agent/src/jobs/README.md) and
 [jobs contract](AGENT_MINIMAL_JOBS.md).
 
