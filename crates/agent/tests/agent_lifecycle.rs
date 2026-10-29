@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-use hostlink_agent::jobs::{JobId, JobSpec, JobState, JobStore};
+use hostlink_agent::jobs::{JobId, JobSpec, JobStore};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 use tempfile::TempDir;
 
@@ -231,10 +231,7 @@ async fn service_commands_bind_private_unit_to_root_and_remove_only_service_meta
         assert!(!blocked.status.success());
         assert!(String::from_utf8_lossy(&blocked.stderr).contains("durable jobs"));
     }
-    store
-        .transition(id, &"a".repeat(64), JobState::Prepared, JobState::Failed)
-        .await
-        .unwrap();
+    store.cancel_pending(id, &"a".repeat(64)).await.unwrap();
 
     let status = invoke(
         &root.join("bin/hostlink-agent"),

@@ -439,7 +439,7 @@ async fn controller_scoped_upload_seal_and_durable_exit_seven() {
         assert_eq!(duplicate["state"]["state"], "failed");
         assert!(
             !temp.path().join("launch-count").exists(),
-            "failed claim must never replay"
+            "resubmitting the same ID must not enqueue a new job"
         );
     }
 

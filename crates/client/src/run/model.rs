@@ -17,7 +17,8 @@ pub struct JobSpec {
     pub source_sha256: String,
 }
 
-/// One idempotent admission request. Reusing this ID never implies a retry.
+/// One idempotent admission request. Submitting the same ID does not enqueue
+/// an extra job; native Apalis crash recovery may independently retry it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Start {
@@ -90,7 +91,7 @@ pub enum JobState {
     /// Agent recorded a worker failure.
     #[serde(deserialize_with = "deserialize_empty_state")]
     Failed,
-    /// Agent restarted or otherwise lost the worker before terminal state.
+    /// Native worker cancellation with an uncertain execution outcome.
     #[serde(deserialize_with = "deserialize_empty_state")]
     Interrupted,
 }

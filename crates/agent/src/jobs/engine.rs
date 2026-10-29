@@ -3,10 +3,7 @@ use apalis_core::{
     backend::ext::BackendExt,
     error::WorkerError,
     task::{data::Data, task_id::TaskId},
-    worker::{
-        builder::WorkerBuilder, context::WorkerContext, event::Event,
-        ext::event_listener::EventListenerExt,
-    },
+    worker::{builder::WorkerBuilder, event::Event, ext::event_listener::EventListenerExt},
 };
 
 /// One supervised queue consumer per Agent, never per SSH request. Dropping the
@@ -28,26 +25,20 @@ impl JobWorker {
         let shutdown = runtime.shutdown.clone();
         let task = tokio::spawn(async move {
             let stopping = runtime.clone();
-            let errors = runtime.clone();
-            let failed = Arc::new(AtomicBool::new(false));
-            let failed_event = failed.clone();
             let backend = runtime
                 .store
                 .worker_backend()
                 .poll_with_interval(Duration::from_millis(100));
-            let worker = WorkerBuilder::new(crate::jobs::WORKER_NAME)
+            // A fresh identity lets native heartbeat recovery see a crashed
+            // predecessor instead of refreshing its stale worker row.
+            let worker_name = format!("{}-{}", crate::jobs::WORKER_NAME, JobId::new());
+            let worker = WorkerBuilder::new(worker_name)
                 .backend(backend)
                 .data(runtime.clone())
-                // Bounds concurrent dequeued consume futures. JobRuntime::slots
-                // separately covers process-tree teardown and retained UNKNOWN
-                // permits, even if this worker future stops early.
                 .layer(tower::limit::ConcurrencyLimitLayer::new(MAX_ACTIVE_JOBS))
                 .on_event(move |_, event| {
-                    if matches!(event, Event::Error(_)) {
-                        failed_event.store(true, Ordering::Release);
-                        eprintln!("hostlink-agent: durable Apalis service failed; stopping admission and process trees");
-                        errors.accepting.store(false, Ordering::Release);
-                        errors.shutdown.cancel();
+                    if let Event::Error(error) = event {
+                        eprintln!("hostlink-agent: durable job service error: {error}");
                     }
                 })
                 .build(consume);
@@ -72,11 +63,6 @@ impl JobWorker {
             // Backend failure can drop the service future. Independent process
             // tasks still hold runtime/permits until teardown and publication.
             drain(&runtime).await?;
-            if failed.load(Ordering::Acquire) {
-                return Err(io::Error::other(
-                    "durable Apalis service failed; persisted claims require reconciliation",
-                ));
-            }
             result
         });
         Self { task, shutdown }
@@ -116,92 +102,104 @@ async fn consume(
     snapshot: crate::jobs::JobPayload,
     runtime: Data<Arc<JobRuntime>>,
     task: TaskId,
-    worker: WorkerContext,
-) -> io::Result<()> {
+) -> io::Result<i32> {
     let runtime = Arc::clone(&runtime);
-    let mut backoff = Duration::from_millis(10);
-    let (start, permit, record) = loop {
-        let start = runtime.start_lock.lock().await;
-        if !runtime.accepting.load(Ordering::Acquire) || runtime.shutdown.is_cancelled() {
-            return Ok(());
+    if task.to_string() != snapshot.id.to_string() {
+        return Err(io::Error::other("durable task identity mismatch"));
+    }
+    let id = snapshot.id;
+    let active = runtime.shutdown.child_token();
+    {
+        let _start = runtime.start_lock.lock().await;
+        let record = runtime
+            .store
+            .lookup(id, &snapshot.controller_key_sha256)
+            .await?;
+        if record.job != snapshot || !matches!(record.state, JobState::Prepared | JobState::Running)
+        {
+            return Err(io::Error::other(
+                "task cancelled or immutable payload mismatch",
+            ));
         }
-        // Cancellation may have durably completed a Prepared job after dequeue.
-        // Re-read rather than launching the stale snapshot delivered by Apalis.
-        let current = runtime
+        runtime
+            .active_jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, active.clone());
+    }
+    let process_runtime = runtime.clone();
+    // A separately owned task retains the runtime and process slot even when
+    // the Apalis service future is dropped during backend shutdown.
+    let process = tokio::spawn(async move {
+        let result = consume_registered(process_runtime.clone(), snapshot, active).await;
+        process_runtime
+            .active_jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id);
+        result
+    });
+    process.await.map_err(io::Error::other)?
+}
+
+async fn consume_registered(
+    runtime: Arc<JobRuntime>,
+    snapshot: JobPayload,
+    active: processkit::CancellationToken,
+) -> io::Result<i32> {
+    let mut backoff = Duration::from_millis(10);
+    let (start, permit, record, update) = loop {
+        let start = runtime.start_lock.lock().await;
+        if !runtime.accepting.load(Ordering::Acquire) || active.is_cancelled() {
+            return Err(io::Error::other("job cancelled or Agent is shutting down"));
+        }
+        let record = runtime
             .store
             .lookup(snapshot.id, &snapshot.controller_key_sha256)
             .await?;
-        if current.started || current.state == JobState::Interrupted {
+        if record.job != snapshot || !matches!(record.state, JobState::Prepared | JobState::Running)
+        {
             return Err(io::Error::other(
-                "started claim blocks replay; operation UNKNOWN",
+                "task cancelled or immutable payload mismatch",
             ));
         }
-        if matches!(current.state, JobState::Failed | JobState::Exited { .. }) {
-            return Ok(());
-        }
+        let update = match database::try_update_lock(&runtime.store.root) {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                drop(start);
+                tokio::select! {
+                    () = active.cancelled() => return Err(io::Error::other("job cancelled or Agent is shutting down")),
+                    () = tokio::time::sleep(backoff) => {}
+                }
+                backoff = (backoff * 2).min(Duration::from_millis(100));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let permit = runtime
             .slots
             .clone()
             .try_acquire_owned()
             .map_err(io::Error::other)?;
-        match runtime
-            .store
-            .claim_dequeued(&snapshot, &task.to_string(), worker.name())
-            .await
-        {
-            Ok(record) => break (start, permit, record),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                // No claim was written. Keep this exact dequeue delivery alive,
-                // but let STOP and Cancel acquire start_lock while the updater
-                // inspects active_ids. Never block a Tokio thread on update.lock.
-                drop(permit);
-                drop(start);
-                tokio::select! {
-                    () = runtime.shutdown.cancelled() => return Ok(()),
-                    () = tokio::time::sleep(backoff) => {}
-                }
-                backoff = (backoff * 2).min(Duration::from_millis(100));
-            }
-            Err(error) => return Err(error),
-        }
+        break (start, permit, record, update);
     };
-    let id = record.id;
-    let owner = record.controller_key_sha256.clone();
-    let active = runtime.shutdown.child_token();
-    runtime
-        .active_jobs
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(id, active.clone());
-    // This task is created ONLY by the fenced Apalis consumer, never by start.
-    // It survives a dropped service future on backend failure. The supervisor
-    // and Agent shutdown both await its permit through confirmed tree teardown.
-    let process_runtime = runtime.clone();
-    let process = tokio::spawn(async move {
-        let result = run_job(process_runtime.clone(), owner, record, active).await;
-        if result.is_err() {
-            // Unknown process/persistence outcome: never free a capacity slot
-            // or claim that the tree has been confirmed reaped. Shut down
-            // admission and retain the runner lease until Agent termination.
-            process_runtime
-                .unknown_permits
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(permit);
-            process_runtime.accepting.store(false, Ordering::Release);
-            process_runtime.shutdown.cancel();
-        } else {
-            process_runtime
-                .active_jobs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&id);
-            drop(permit);
-        }
-        result
-    });
+    drop(update);
     drop(start);
-    process.await.map_err(io::Error::other)?
+    let owner = record.controller_key_sha256.clone();
+    let unconfirmed = Arc::new(AtomicBool::new(false));
+    let result = run_job(runtime.clone(), owner, record, active, unconfirmed.clone()).await;
+    if unconfirmed.load(Ordering::Acquire) {
+        runtime
+            .unknown_permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(permit);
+        runtime.accepting.store(false, Ordering::Release);
+        runtime.shutdown.cancel();
+    } else {
+        drop(permit);
+    }
+    result
 }
 
 #[cfg(all(test, target_os = "linux"))]

@@ -226,7 +226,7 @@ pub(super) async fn initialize_fresh(root: &Path) -> io::Result<SqlitePool> {
         .run(&pool)
         .await
         .map_err(io::Error::other)?;
-    sqlx::raw_sql("CREATE TABLE DurableMeta (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);\nINSERT INTO DurableMeta VALUES(1,3);\nCREATE TABLE StartedClaims (task_id TEXT PRIMARY KEY REFERENCES Jobs(id), owner TEXT NOT NULL, request_sha256 TEXT NOT NULL);")
+    sqlx::raw_sql("CREATE TABLE DurableMeta (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);\nINSERT INTO DurableMeta VALUES(1,4);")
         .execute(&pool).await.map_err(io::Error::other)?;
     artifacts::create_private_directory(&root.join("outputs"))?;
     secure_sidecars(root)?;
@@ -237,7 +237,7 @@ pub(super) async fn initialize_fresh(root: &Path) -> io::Result<SqlitePool> {
 pub(super) async fn verify_schema(pool: &SqlitePool) -> io::Result<()> {
     let version: i64 = sqlx::query_scalar("SELECT version FROM DurableMeta WHERE id=1")
         .fetch_one(pool).await.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("incomplete or unrecognized durable database; preserve it for reconciliation: {e}")))?;
-    if version != 3 {
+    if version != 4 {
         return Err(invalid("unsupported durable SQLite schema version"));
     }
     // Validate the ledger read-only; never invoke Migrator::run on old state.

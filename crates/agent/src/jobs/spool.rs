@@ -20,12 +20,13 @@ pub(super) struct CappedOutputWriter {
 impl CappedOutputWriter {
     pub(super) fn new(
         file: tokio::fs::File,
+        written: u64,
         cancel: processkit::CancellationToken,
         ended: Arc<AtomicBool>,
     ) -> Self {
         Self {
             file,
-            written: 0,
+            written,
             cancel,
             ended,
         }

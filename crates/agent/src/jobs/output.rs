@@ -28,9 +28,28 @@ pub(crate) fn open_output_append(path: &Path) -> io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
-    let file = options.open(path)?;
-    restrict_private_path(path, false)?;
-    sync_directory(parent)?;
+    let file = match options.open(path) {
+        Ok(file) => {
+            restrict_private_path(path, false)?;
+            sync_directory(parent)?;
+            file
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            validate_private_path(path, false)?;
+            let mut existing = OpenOptions::new();
+            existing.append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                existing.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            }
+            existing.open(path)?
+        }
+        Err(error) => return Err(error),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(invalid("output must be a regular file"));
+    }
     if file.metadata()?.len() > MAX_JOB_OUTPUT_BYTES {
         return Err(invalid("job output exceeds configured limit"));
     }

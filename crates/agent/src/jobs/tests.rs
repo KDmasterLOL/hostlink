@@ -105,7 +105,6 @@ async fn registered_replacement_can_open_and_recover_while_updater_holds_lock() 
     let candidate = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         let store = JobStore::open(&root).await?;
         let runner = store.acquire_runner()?;
-        store.recover_nonterminal().await?;
         drop(runner);
         store.close().await;
         Ok::<(), io::Error>(())
@@ -186,7 +185,6 @@ async fn same_identity_is_idempotent_and_owner_or_spec_conflicts_fail() {
     assert!(store.admit(id, &owner(), &conflict).await.is_err());
     assert!(store.admit(id, &"c".repeat(64), &sample()).await.is_err());
     assert!(store.lookup(id, &"c".repeat(64)).await.is_err());
-    assert!(store.claim_fixture(id, &"c".repeat(64)).await.is_err());
     assert_eq!(active_ids(&store.root).unwrap(), vec![id.to_string()]);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM Jobs")
@@ -199,154 +197,20 @@ async fn same_identity_is_idempotent_and_owner_or_spec_conflicts_fail() {
 }
 
 #[tokio::test]
-async fn terminal_nonzero_exit_does_not_block_but_interrupted_stays_unknown() {
+async fn native_queued_cancel_is_terminal_without_process_or_output() {
     let (_temp, store) = fixture().await;
     let id = JobId::new();
     store.admit(id, &owner(), &sample()).await.unwrap();
-    assert!(
-        store
-            .transition(id, &owner(), JobState::Prepared, JobState::Running)
-            .await
-            .is_err()
+    assert!(store.cancel_pending(id, &"c".repeat(64)).await.is_err());
+    let canceled = store.cancel_pending(id, &owner()).await.unwrap();
+    assert_eq!(canceled.state, JobState::Failed);
+    assert!(!canceled.started);
+    assert_eq!(
+        store.read_output(&canceled, JobOutput::Stdout, 0).unwrap(),
+        (Vec::new(), 0, true)
     );
-    store.claim_fixture(id, &owner()).await.unwrap();
-    assert_eq!(active_ids(&store.root).unwrap(), vec![id.to_string()]);
-    for stream in [JobOutput::Stdout, JobOutput::Stderr] {
-        open_output_append(&store.output_path(id, stream))
-            .unwrap()
-            .sync_all()
-            .unwrap();
-    }
-    store
-        .transition(
-            id,
-            &owner(),
-            JobState::Running,
-            JobState::Exited { code: 7 },
-        )
-        .await
-        .unwrap();
     assert!(active_ids(&store.root).unwrap().is_empty());
-    assert!(store.claim_fixture(id, &owner()).await.is_err());
-    assert!(
-        store
-            .transition(
-                id,
-                &owner(),
-                JobState::Exited { code: 7 },
-                JobState::Prepared
-            )
-            .await
-            .is_err()
-    );
-    let next = JobId::new();
-    store.admit(next, &owner(), &sample()).await.unwrap();
-    store.recover_nonterminal().await.unwrap();
-    assert_eq!(
-        store.lookup(next, &owner()).await.unwrap().state,
-        JobState::Prepared
-    );
-    assert_eq!(active_ids(&store.root).unwrap(), vec![next.to_string()]);
-    assert!(
-        store
-            .transition(next, &owner(), JobState::Interrupted, JobState::Failed)
-            .await
-            .is_err()
-    );
-    store.claim_fixture(next, &owner()).await.unwrap();
-}
-
-#[tokio::test]
-async fn actual_apalis_orphan_requeue_cannot_replay_started_command_even_after_restart() {
-    let (_temp, store) = fixture().await;
-    let id = JobId::new();
-    store.admit(id, &owner(), &sample()).await.unwrap();
-    store.claim_fixture(id, &owner()).await.unwrap();
-    // This is the real upstream query that ignores max_attempts for Pending.
-    sqlx::query("INSERT INTO Workers(id,worker_type,storage_name,last_seen) VALUES('crashed-worker','hostlink-agent','SqliteStorage',0)").execute(&store.pool).await.unwrap();
-    sqlx::query("UPDATE Jobs SET lock_at=0,lock_by='crashed-worker' WHERE idempotency_key=?")
-        .bind(id.to_string())
-        .execute(&store.pool)
-        .await
-        .unwrap();
-    let affected = apalis_sqlite::queries::reenqueue_orphaned(
-        &store.pool,
-        1,
-        database::QUEUE,
-        &WorkerFilter::None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(affected, 1);
-    let status: String = sqlx::query_scalar("SELECT status FROM Jobs")
-        .fetch_one(&store.pool)
-        .await
-        .unwrap();
-    assert_eq!(status, "Pending");
-    assert!(store.claim_fixture(id, &owner()).await.is_err());
-    assert_eq!(active_ids(&store.root).unwrap(), vec![id.to_string()]);
-    let root = store.root.clone();
-    store.close().await;
-    let reopened = JobStore::open(root).await.unwrap();
-    reopened.recover_nonterminal().await.unwrap();
-    assert_eq!(
-        reopened.lookup(id, &owner()).await.unwrap().state,
-        JobState::Interrupted
-    );
-    assert_eq!(
-        (reopened.admit(id, &owner(), &sample()).await.unwrap()).id,
-        id
-    );
-    assert!(reopened.claim_fixture(id, &owner()).await.is_err());
-    assert_eq!(active_ids(&reopened.root).unwrap(), vec![id.to_string()]);
-}
-
-#[tokio::test]
-async fn lost_admission_and_claim_ack_never_grants_another_attempt() {
-    let (_temp, store) = fixture().await;
-    let id = JobId::new();
-    let _lost_admission = store.admit(id, &owner(), &sample()).await.unwrap();
-    assert_eq!((store.admit(id, &owner(), &sample()).await.unwrap()).id, id);
-    let _lost_claim = store.claim_fixture(id, &owner()).await.unwrap();
-    let root = store.root.clone();
-    store.close().await;
-    let store = JobStore::open(root).await.unwrap();
-    assert!(store.claim_fixture(id, &owner()).await.is_err());
-    store.recover_nonterminal().await.unwrap();
-    assert_eq!(
-        store.lookup(id, &owner()).await.unwrap().state,
-        JobState::Interrupted
-    );
-    assert!(store.claim_fixture(id, &owner()).await.is_err());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn concurrent_independent_pools_admit_and_claim_exactly_once() {
-    let (_temp, store) = fixture().await;
-    let second = JobStore::open(&store.root).await.unwrap();
-    let id = JobId::new();
-    let owner = owner();
-    let spec = sample();
-    let (a, b) = tokio::join!(
-        store.admit(id, &owner, &spec),
-        second.admit(id, &owner, &spec)
-    );
-    assert!(a.is_ok() || b.is_ok());
-    for result in [a, b] {
-        if let Err(error) = result {
-            assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-        }
-    }
-    // Explicitly repeating the same ID after contention remains idempotent.
-    assert_eq!(
-        store.admit(id, &owner, &spec).await.unwrap(),
-        second.admit(id, &owner, &spec).await.unwrap()
-    );
-    let (a, b) = tokio::join!(
-        store.claim_fixture(id, &owner),
-        second.claim_fixture(id, &owner)
-    );
-    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    assert!(store.cancel_pending(id, &owner()).await.is_err());
 }
 
 #[tokio::test]
@@ -379,57 +243,6 @@ async fn full_wal_is_verified_on_replaced_connections_and_reopen() {
             .await
             .unwrap(),
         2
-    );
-}
-
-#[tokio::test]
-async fn raw_output_offsets_ownership_and_unknown_eof_are_preserved() {
-    let (_temp, store) = fixture().await;
-    let id = JobId::new();
-    store.admit(id, &owner(), &sample()).await.unwrap();
-    assert!(
-        store
-            .read_fixture_output(id, &owner(), JobOutput::Stdout, 1)
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        store
-            .read_fixture_output(id, &owner(), JobOutput::Stdout, 0)
-            .await
-            .unwrap(),
-        (Vec::new(), 0, false)
-    );
-    store.claim_fixture(id, &owner()).await.unwrap();
-    let mut f = open_output_append(&store.output_path(id, JobOutput::Stdout)).unwrap();
-    f.write_all(&[0, 255, 128, 7]).unwrap();
-    f.sync_all().unwrap();
-    assert_eq!(
-        store
-            .read_fixture_output(id, &owner(), JobOutput::Stdout, 1)
-            .await
-            .unwrap(),
-        (vec![255, 128, 7], 4, false)
-    );
-    assert!(
-        store
-            .read_fixture_output(id, &"c".repeat(64), JobOutput::Stdout, 0)
-            .await
-            .is_err()
-    );
-    store.recover_nonterminal().await.unwrap();
-    assert_eq!(
-        store
-            .read_fixture_output(id, &owner(), JobOutput::Stdout, 4)
-            .await
-            .unwrap(),
-        (vec![], 4, false)
-    );
-    assert!(
-        store
-            .read_fixture_output(id, &owner(), JobOutput::Stdout, 5)
-            .await
-            .is_err()
     );
 }
 
@@ -482,19 +295,6 @@ async fn windows_sqlite_sidecar_hardlink_is_rejected_before_acl_hardening() {
     fs::hard_link(&wal, temp.path().join("linked-sidecar")).unwrap();
     assert!(database::secure_sidecars(&jobs).is_err());
     assert!(JobStore::open(&jobs).await.is_err());
-}
-
-#[tokio::test]
-async fn tampered_payload_claim_or_apalis_queue_prevents_updates_and_execution() {
-    let (_temp, store) = fixture().await;
-    let id = JobId::new();
-    store.admit(id, &owner(), &sample()).await.unwrap();
-    sqlx::query("UPDATE Jobs SET job=x'62726f6b656e'")
-        .execute(&store.pool)
-        .await
-        .unwrap();
-    assert!(active_ids(&store.root).is_err());
-    assert!(store.claim_fixture(id, &owner()).await.is_err());
 }
 
 #[cfg(unix)]
@@ -567,59 +367,6 @@ async fn fifo_output_fails_closed_on_read_and_update_without_global_admission_sc
         .admit(JobId::new(), &owner(), &sample())
         .await
         .unwrap();
-}
-
-#[tokio::test]
-async fn missing_exited_output_is_an_error_and_never_a_fabricated_eof() {
-    let (_temp, store) = fixture().await;
-    let id = JobId::new();
-    store.admit(id, &owner(), &sample()).await.unwrap();
-    store.claim_fixture(id, &owner()).await.unwrap();
-    store
-        .transition(
-            id,
-            &owner(),
-            JobState::Running,
-            JobState::Exited { code: 0 },
-        )
-        .await
-        .unwrap();
-    assert!(
-        store
-            .read_fixture_output(id, &owner(), JobOutput::Stdout, 0)
-            .await
-            .is_err()
-    );
-    assert!(active_ids(&store.root).is_err());
-}
-
-#[tokio::test]
-async fn claimed_failed_output_loss_is_never_reported_as_empty_eof() {
-    let (_temp, store) = fixture().await;
-    let id = JobId::new();
-    store.admit(id, &owner(), &sample()).await.unwrap();
-    store.claim_fixture(id, &owner()).await.unwrap();
-    for stream in [JobOutput::Stdout, JobOutput::Stderr] {
-        let mut output = open_output_append(&store.output_path(id, stream)).unwrap();
-        output.write_all(b"partial output").unwrap();
-        output.sync_all().unwrap();
-    }
-    store
-        .transition(id, &owner(), JobState::Running, JobState::Failed)
-        .await
-        .unwrap();
-    fs::remove_file(store.output_path(id, JobOutput::Stdout)).unwrap();
-    assert!(
-        store
-            .read_fixture_output(id, &owner(), JobOutput::Stdout, 0)
-            .await
-            .is_err(),
-        "a claimed Failed job must not falsely return empty EOF"
-    );
-    assert!(
-        active_ids(&store.root).is_err(),
-        "lost claimed output must block update safety checks"
-    );
 }
 
 #[tokio::test]
@@ -750,7 +497,7 @@ async fn native_list_is_owned_bounded_and_paginated_without_lifecycle_copies() {
 
 #[tokio::test]
 async fn old_sqlite_schema_is_preserved_and_rejected_without_migration() {
-    for version in [1, 2] {
+    for version in [1, 2, 3] {
         let (_temp, store) = fixture().await;
         sqlx::query("UPDATE DurableMeta SET version=?")
             .bind(version)
@@ -764,18 +511,6 @@ async fn old_sqlite_schema_is_preserved_and_rejected_without_migration() {
         assert!(JobStore::initialize_fresh(&root).await.is_err());
         assert!(active_ids(&root).is_err());
         assert_eq!(fs::read(root.join("jobs.db")).unwrap(), original);
-    }
-}
-
-impl JobStore {
-    pub(super) async fn claim_fixture(&self, id: JobId, owner: &str) -> io::Result<JobView> {
-        let snapshot = self.lookup(id, owner).await?.job;
-        sqlx::query("INSERT OR IGNORE INTO Workers(id,worker_type,storage_name,last_seen) VALUES('fixture-worker','hostlink-agent','SqliteStorage',0)")
-            .execute(&self.pool).await.map_err(io::Error::other)?;
-        sqlx::query("UPDATE Jobs SET status='Queued',lock_by='fixture-worker',lock_at=CAST(strftime('%s','now') AS INTEGER) WHERE id=? AND status='Pending' AND attempts=0")
-            .bind(id.to_string()).execute(&self.pool).await.map_err(io::Error::other)?;
-        self.claim_dequeued(&snapshot, &id.to_string(), "fixture-worker")
-            .await
     }
 }
 
@@ -816,86 +551,6 @@ fn ulid_rejects_aliases_overflow_uuid_and_paths() {
     }
 }
 
-#[tokio::test]
-async fn fast_queries_bound_owned_rows_without_scanning_unrelated_jobs() {
-    use sqlx::Row;
-    let (_temp, store) = fixture().await;
-    let broken = JobId::new();
-    let good = JobId::new();
-    let other = "c".repeat(64);
-    store.admit(broken, &owner(), &sample()).await.unwrap();
-    store.admit(good, &other, &sample()).await.unwrap();
-    sqlx::query("UPDATE Jobs SET last_result=CAST(zeroblob(1048576) AS TEXT) WHERE id=?")
-        .bind(broken.to_string())
-        .execute(&store.pool)
-        .await
-        .unwrap();
-    assert!(store.lookup(broken, &owner()).await.is_err());
-    assert_eq!(
-        store.lookup(broken, &other).await.unwrap_err().kind(),
-        io::ErrorKind::PermissionDenied
-    );
-    assert!(store.list(&owner(), 1, None).await.is_err());
-    assert_eq!(
-        store.lookup(good, &other).await.unwrap().state,
-        JobState::Prepared
-    );
-    assert_eq!(store.list(&other, 1, None).await.unwrap()[0].id, good);
-    let next = JobId::new();
-    store.admit(next, &other, &sample()).await.unwrap();
-    assert!(
-        active_ids(&store.root).is_err(),
-        "deep update safety scan still fails closed"
-    );
-    let plan = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "EXPLAIN QUERY PLAN {} WHERE j.id=?",
-        super::query::ROWS
-    )))
-    .bind(good.to_string())
-    .fetch_all(&store.pool)
-    .await
-    .unwrap();
-    let details: Vec<String> = plan
-        .iter()
-        .map(|row| row.try_get("detail").unwrap())
-        .collect();
-    assert!(
-        details
-            .iter()
-            .any(|s| s.contains("SEARCH j USING INDEX") && s.contains("id=?")),
-        "{details:?}"
-    );
-    assert!(
-        details
-            .iter()
-            .any(|s| s.contains("SEARCH c USING INDEX") && s.contains("task_id=?")),
-        "{details:?}"
-    );
-    let native: (String, String) = sqlx::query_as("SELECT id,idempotency_key FROM Jobs WHERE id=?")
-        .bind(good.to_string())
-        .fetch_one(&store.pool)
-        .await
-        .unwrap();
-    assert_eq!(native, (good.to_string(), good.to_string()));
-    store.claim_fixture(good, &other).await.unwrap();
-    let columns: Vec<String> = sqlx::query("PRAGMA table_info(StartedClaims)")
-        .fetch_all(&store.pool)
-        .await
-        .unwrap()
-        .iter()
-        .map(|r| r.try_get("name").unwrap())
-        .collect();
-    assert_eq!(columns, ["task_id", "owner", "request_sha256"]);
-    sqlx::query("UPDATE StartedClaims SET request_sha256=? WHERE task_id=?")
-        .bind("f".repeat(64))
-        .bind(good.to_string())
-        .execute(&store.pool)
-        .await
-        .unwrap();
-    assert!(store.lookup(good, &other).await.is_err());
-    assert!(store.list(&other, 1, None).await.is_err());
-}
-
 #[cfg(windows)]
 #[test]
 fn windows_new_upload_protects_only_valid_inherited_acl_and_rejects_hardlinks_before_change() {
@@ -926,4 +581,88 @@ fn windows_new_upload_protects_only_valid_inherited_acl_and_rejects_hardlinks_be
         fs::read(&linked).unwrap(),
         b"preserve bytes and inherited DACL"
     );
+}
+
+#[tokio::test]
+async fn native_orphan_requeue_and_result_projection() {
+    use apalis_core::{backend::TaskResult, task::status::Status};
+    let (_temp, store) = fixture().await;
+    let id = JobId::new();
+    store.admit(id, &owner(), &sample()).await.unwrap();
+    sqlx::query("INSERT INTO Workers(id,worker_type,storage_name,last_seen) VALUES('fixture-worker','hostlink-agent','SqliteStorage',0)")
+        .execute(&store.pool).await.unwrap();
+    let ids = vec![id.to_string()];
+    assert_eq!(
+        apalis_sqlite::queries::lock_tasks(&store.pool, &ids, "fixture-worker")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store.lookup(id, &owner()).await.unwrap().state,
+        JobState::Running
+    );
+    assert_eq!(
+        apalis_sqlite::queries::reenqueue_orphaned(
+            &store.pool,
+            1,
+            database::QUEUE,
+            &WorkerFilter::Only("fixture-worker".into())
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        store.lookup(id, &owner()).await.unwrap().state,
+        JobState::Prepared
+    );
+    assert_eq!(
+        apalis_sqlite::queries::lock_tasks(&store.pool, &ids, "fixture-worker")
+            .await
+            .unwrap(),
+        1
+    );
+    let result = TaskResult {
+        task_id: id.to_string().parse().unwrap(),
+        attempt: 2,
+        status: Status::Done,
+        result: Ok(serde_json::json!(7)),
+    };
+    assert_eq!(
+        apalis_sqlite::queries::ack_tasks(&store.pool, &[&result], "fixture-worker")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store.lookup(id, &owner()).await.unwrap().state,
+        JobState::Exited { code: 7 }
+    );
+}
+
+#[tokio::test]
+async fn cancel_pending_requires_owner_and_prevents_native_lock() {
+    let (_temp, store) = fixture().await;
+    let id = JobId::new();
+    store.admit(id, &owner(), &sample()).await.unwrap();
+    assert_eq!(
+        store
+            .cancel_pending(id, &"c".repeat(64))
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        store.cancel_pending(id, &owner()).await.unwrap().state,
+        JobState::Failed
+    );
+    assert_eq!(
+        apalis_sqlite::queries::lock_tasks(&store.pool, &[id.to_string()], "fixture-worker")
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(store.cancel_pending(id, &owner()).await.is_err());
 }

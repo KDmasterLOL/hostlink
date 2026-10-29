@@ -173,8 +173,9 @@ async fn wait_for_state(
     session: &mut client::Handle<Pin>,
     id: &str,
     expected: &str,
+    budget: Duration,
 ) -> serde_json::Value {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + budget;
     loop {
         let response = status(session, id).await;
         if response["state"]["state"] == expected {
@@ -242,7 +243,7 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
 
     let owner = sha256(&controller.public_key().public_key_bytes());
     // Crash fault injection precedes SSH startup: reproduce the private sealed
-    // layout for this persisted claim only. Live admissions below still upload
+    // layout for a native Apalis orphan. Live admissions below still upload
     // and call the real Seal handler before using its returned canonical path.
     let artifacts = temp.path().join("artifacts");
     let owner_root = artifacts.join(&owner);
@@ -267,8 +268,7 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
         cwd: Some(temp.path().to_path_buf()),
         source_sha256: source_sha256.clone(),
     };
-    // Commit the real one-use start claim before simulating Agent loss.
-    // Recovery must retain UNKNOWN without launching the OS process.
+    // Simulate a crashed worker whose native Running task may be replayed.
     let store = JobStore::initialize_fresh(&jobs)
         .await
         .expect("private SQLite store");
@@ -313,10 +313,15 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
     assert!(authenticate(&mut session, controller.clone()).await);
     let recovered = job_request(&mut session, &start(&unknown_id, &unknown_spec)).await;
     assert_eq!(recovered["ok"], true);
-    assert_eq!(recovered["state"]["state"], "interrupted");
-    assert!(
-        !temp.path().join("launch-count").exists(),
-        "an unknown pre-crash worker must never be replayed during recovery"
+    // Apalis recovers another worker's orphan on heartbeat; the native
+    // default heartbeat is 30 seconds, not an immediate custom recovery.
+    let replayed =
+        wait_for_state(&mut session, &unknown_id, "exited", Duration::from_secs(95)).await;
+    assert_eq!(replayed["state"]["code"], 7);
+    assert_eq!(
+        std::fs::read(temp.path().join("launch-count")).unwrap(),
+        b"x",
+        "native Apalis must re-execute the abandoned task exactly once in this fixture"
     );
     let source_bytes = std::fs::read(&source).unwrap();
     let upload_name = format!("{source_sha256}.upload");
@@ -374,7 +379,7 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
     let retried = job_request(&mut resumed, &start(&success_id, &success)).await;
     assert_eq!(retried["ok"], true);
     assert_eq!(retried["id"], success_id);
-    let exited = wait_for_state(&mut resumed, &success_id, "exited").await;
+    let exited = wait_for_state(&mut resumed, &success_id, "exited", Duration::from_secs(15)).await;
     assert_eq!(exited["state"]["code"], 7);
     let duplicate = job_request(&mut resumed, &start(&success_id, &success)).await;
     assert_eq!(duplicate["state"]["code"], 7);
@@ -508,7 +513,8 @@ async fn windows_agent_jobs_reattach_and_cancel_the_complete_process_tree() {
     )
     .await;
     assert_eq!(cancel["ok"], true);
-    let final_state = wait_for_state(&mut resumed, &tree_id, "failed").await;
+    let final_state =
+        wait_for_state(&mut resumed, &tree_id, "failed", Duration::from_secs(15)).await;
     assert_eq!(final_state["state"]["state"], "failed");
     assert!(
         process_exited(descendant_pid),

@@ -310,7 +310,7 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     let store = JobStore::open(root.join("jobs"))
         .await
         .expect("open durable job store");
-    for target_state in [JobState::Prepared, JobState::Running, JobState::Interrupted] {
+    for target_state in [JobState::Prepared, JobState::Running] {
         let job_id = JobId::new();
         let owner = "a".repeat(64);
         let admission = store
@@ -330,12 +330,6 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
         if target_state != JobState::Prepared {
             started_job::started(&root.join("jobs"), &store, job_id, &owner).await;
         }
-        if target_state == JobState::Interrupted {
-            store
-                .transition(job_id, &owner, JobState::Running, JobState::Interrupted)
-                .await
-                .expect("mark disposable fixture interrupted");
-        }
         for action in ["stop", "remove"] {
             let refused = Command::new(&executable)
                 .args(["service", action, "--root", root.to_str().unwrap()])
@@ -350,8 +344,8 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
         }
     }
     store.close().await;
-    // All three nonterminal records remain durable until this explicitly
-    // disposable test store is removed; Interrupted never becomes runnable.
+    // Both native nonterminal records remain durable until the disposable
+    // test store is removed; crash-recovered work may be replayed by Apalis.
     fs::remove_dir_all(root.join("jobs")).expect("remove exact disposable SQLite fixture");
     fs::create_dir(root.join("jobs")).expect("fresh empty disposable job store");
     private_windows_path(&root.join("jobs"), true);

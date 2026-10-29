@@ -89,9 +89,9 @@ async fn active_job_prevents_recovery_mutations_then_update_recovers_backup() {
     assert!(backup.join("hostlink-agent").is_file());
 
     store
-        .transition(id, &owner, JobState::Prepared, JobState::Failed)
+        .cancel_pending(id, &owner)
         .await
-        .expect("job reaches terminal state");
+        .expect("native queued cancellation reaches terminal state");
     assert!(matches!(
         apply(&update).expect("recover and update"),
         AgentUpdateOutcome::Installed { .. }

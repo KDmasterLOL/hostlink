@@ -22,11 +22,6 @@ async fn inspect_inventory(root: &Path, pool: &SqlitePool) -> io::Result<Vec<Job
     if rows.len() > MAX_JOBS {
         return Err(invalid("too many durable jobs"));
     }
-    let orphan_claims: i64 = sqlx::query_scalar("SELECT count(*) FROM StartedClaims c LEFT JOIN Jobs j ON c.task_id=j.id WHERE j.id IS NULL")
-        .fetch_one(pool).await.map_err(io::Error::other)?;
-    if orphan_claims != 0 {
-        return Err(invalid("orphan started claim prevents update"));
-    }
     let records = rows
         .into_iter()
         .map(|row| super::query::decode(row, None))

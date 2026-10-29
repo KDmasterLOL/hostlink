@@ -152,37 +152,6 @@ async fn lost_ack_retry_keeps_one_execution_raw_output_and_nonzero_exit() {
 }
 
 #[tokio::test]
-async fn restart_after_committed_start_before_spawn_stays_interrupted_and_never_replays() {
-    let (temp, old, owner, spec) = fixture("printf replayed > forbidden").await;
-    let id = JobId::new();
-    assert_eq!(old.store.admit(id, &owner, &spec).await.unwrap().id, id);
-    old.store.claim_fixture(id, &owner).await.unwrap();
-    drop(old);
-    let store = JobStore::open(temp.path().join("jobs")).await.unwrap();
-    store.recover_nonterminal().await.unwrap();
-    let reopened = runtime(store);
-    let response = handle_job_request(start(id, &spec), &reopened, &owner).await;
-    assert!(response.is_ok());
-    assert_eq!(
-        response.unwrap()["state"],
-        serde_json::json!(JobState::Interrupted)
-    );
-    assert!(!temp.path().join("forbidden").exists());
-    assert!(reopened.store.claim_fixture(id, &owner).await.is_err());
-    let cancel = handle_job_request(JobRequest::Cancel { id }, &reopened, &owner).await;
-    assert!(cancel.is_err());
-    assert!(
-        reopened
-            .store
-            .lookup(id, &owner)
-            .await
-            .unwrap()
-            .state
-            .blocks_update()
-    );
-}
-
-#[tokio::test]
 async fn wrong_source_and_noncanonical_id_never_launch() {
     let (temp, runtime, owner, mut spec) = fixture("printf ran > forbidden").await;
     let id = JobId::new();
@@ -240,7 +209,8 @@ async fn detached_worker_retains_runner_lease_until_process_teardown() {
     );
     assert_eq!(
         observer.lookup(id, &owner).await.unwrap().state,
-        JobState::Interrupted
+        JobState::Failed,
+        "native Apalis persists a cancelled, confirmed-reaped process as Failed"
     );
     // Weak::upgrade returns None when the last strong reference reaches zero,
     // which can precede completion of JobRuntime's File destructor.

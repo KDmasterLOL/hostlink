@@ -1,25 +1,14 @@
 use super::*;
 use sqlx::{Row, sqlite::SqliteRow};
 
-// Exact results written by pinned Apalis reenqueue_orphaned/abandoned.sql.
-// These consume native bookkeeping attempts, never HostLink's process claim.
-pub(super) const REQUEUED_RESULTS: [&str; 2] = [
-    r#"{"Err": "Re-enqueued due to worker heartbeat timeout."}"#,
-    r#"{"Err": "Re-enqueued due to worker shutdown"}"#,
-];
-
-// One SQLite statement/snapshot for payload, native lifecycle/result and fence.
-// CASE bounds bytes before they cross the SQLite interface, even on corrupt roots.
+// Bounded owner-aware snapshot of the native task and result.
 pub(super) const ROWS: &str = "SELECT CASE WHEN length(j.id)<=26 THEN j.id END AS id,
  CASE WHEN length(j.idempotency_key)<=26 THEN j.idempotency_key END AS idempotency_key,
  CASE WHEN length(j.job_type)<=32 THEN j.job_type END AS job_type,
  j.max_attempts,CASE WHEN length(j.status)<=16 THEN j.status END AS status,j.attempts,
  CASE WHEN length(CAST(j.job AS BLOB))<=65536 THEN j.job END AS payload,
  CASE WHEN length(CAST(j.last_result AS BLOB))<=1024 THEN j.last_result END AS result,
- length(CAST(j.last_result AS BLOB)) AS result_len,CASE WHEN length(c.task_id)<=26 THEN c.task_id END AS task_id,
- CASE WHEN length(c.owner)=64 THEN c.owner END AS owner,
- CASE WHEN length(c.request_sha256)=64 THEN c.request_sha256 END AS request_sha256
- FROM Jobs j LEFT JOIN StartedClaims c ON c.task_id=j.id";
+ length(CAST(j.last_result AS BLOB)) AS result_len FROM Jobs j";
 
 pub(super) fn decode(row: SqliteRow, owner: Option<&str>) -> io::Result<JobView> {
     let get = |name| row.try_get::<String, _>(name).map_err(io::Error::other);
@@ -47,44 +36,30 @@ pub(super) fn decode(row: SqliteRow, owner: Option<&str>) -> io::Result<JobView>
         return Err(invalid("oversized native result"));
     }
     let result: Option<String> = row.try_get("result").map_err(io::Error::other)?;
-    let requeued = result
-        .as_deref()
-        .is_some_and(|r| REQUEUED_RESULTS.contains(&r));
     let result = result
         .as_deref()
         .map(serde_json::from_str::<Result<i32, String>>)
         .transpose()
         .map_err(io::Error::other)?;
-    let claim: Option<String> = row.try_get("task_id").map_err(io::Error::other)?;
-    if claim.is_some()
-        && (get("owner")? != job.controller_key_sha256
-            || get("request_sha256")? != job.request_sha256)
-    {
-        return Err(invalid("started claim does not match immutable task"));
-    }
     let attempts: i64 = row.try_get("attempts").map_err(io::Error::other)?;
-    let mut state = match (get("status")?.as_str(), &result) {
+    if attempts < 0 {
+        return Err(invalid("invalid native attempt count"));
+    }
+    let state = match (get("status")?.as_str(), &result) {
         ("Pending" | "Queued", _) => JobState::Prepared,
-        ("Running", None) => JobState::Running,
+        ("Running", _) => JobState::Running,
         ("Done", Some(Ok(code))) => JobState::Exited { code: *code },
         ("Failed", Some(Err(_))) => JobState::Failed,
+        // Native cancellation of a never-executed task is terminal. Killed
+        // after at least one attempt instead means the outcome is uncertain.
+        ("Killed", Some(Err(_))) if attempts == 0 => JobState::Failed,
         ("Killed", Some(Err(_))) => JobState::Interrupted,
         _ => return Err(invalid("inconsistent native Apalis status/result")),
     };
-    if state == JobState::Prepared {
-        if claim.is_some() || !((attempts == 0 && result.is_none()) || (attempts > 0 && requeued)) {
-            state = JobState::Interrupted;
-        }
-    } else if attempts != 1 {
-        return Err(invalid("native attempts would permit an unsafe retry"));
-    }
-    if matches!(state, JobState::Running | JobState::Exited { .. }) && claim.is_none() {
-        return Err(invalid("native status lacks its one-use start claim"));
-    }
     Ok(JobView {
         job,
         state,
-        started: claim.is_some(),
+        started: attempts > 0,
     })
 }
 

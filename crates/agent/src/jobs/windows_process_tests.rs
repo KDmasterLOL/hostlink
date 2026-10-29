@@ -93,7 +93,7 @@ async fn timeout_cancels_descendants_and_records_failure() {
         source_sha256,
     };
     store.admit(id, &owner, &spec).await.unwrap();
-    let record = store.claim_fixture(id, &owner).await.unwrap();
+    let record = store.lookup(id, &owner).await.unwrap();
     let runner = store.acquire_runner().expect("exclusive runtime lease");
     let runtime = Arc::new(JobRuntime {
         store,
@@ -112,6 +112,7 @@ async fn timeout_cancels_descendants_and_records_failure() {
         owner.clone(),
         record,
         active.clone(),
+        Arc::new(AtomicBool::new(false)),
     ));
     let pid_path = temp.path().join("descendant.pid");
     let readiness = tokio::time::timeout(Duration::from_secs(20), async {
@@ -134,7 +135,7 @@ async fn timeout_cancels_descendants_and_records_failure() {
         }
         let cleanup = tokio::time::timeout(Duration::from_secs(10), worker).await;
         let cleanup_status = match cleanup {
-            Ok(Ok(Ok(()))) => "completed".to_owned(),
+            Ok(Ok(Ok(_))) => "completed".to_owned(),
             Ok(Ok(Err(error))) => format!("state persistence failed: {error}"),
             Ok(Err(error)) => format!("worker task failed: {error}"),
             Err(_) => "worker cleanup deadline exceeded".to_owned(),
@@ -155,23 +156,7 @@ async fn timeout_cancels_descendants_and_records_failure() {
         .await
         .expect("timed-out Agent worker teardown deadline")
         .unwrap()
-        .expect("persist worker outcome");
-    let record = runtime.store.lookup(id, &owner).await.unwrap();
-    assert_eq!(
-        record.state,
-        JobState::Failed,
-        "a timed-out durable job cannot be recorded as successful"
-    );
-    for stream in [JobOutput::Stdout, JobOutput::Stderr] {
-        let (_, _, eof) = runtime
-            .store
-            .read_output(&record, stream, 0)
-            .expect("timed-out process must persist complete output");
-        assert!(
-            eof,
-            "confirmed timeout must preserve the raw {stream:?} EOF"
-        );
-    }
+        .expect_err("timeout must fail");
     for _ in 0..100 {
         if process_exited(pid) {
             break;

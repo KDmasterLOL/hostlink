@@ -75,28 +75,28 @@ pub(super) async fn handle_job_request(
                 .lookup(id, owner)
                 .await
                 .map_err(|_| "job status unavailable")?;
-            let state = match record.state {
-                JobState::Running => {
-                    let active = runtime
-                        .active_jobs
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .get(&id)
-                        .cloned()
-                        .ok_or("job cancellation unavailable")?;
-                    active.cancel();
-                    JobState::Running // Terminal only after confirmed tree teardown.
+            let active = runtime
+                .active_jobs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&id)
+                .cloned();
+            let state = if let Some(active) = active {
+                active.cancel();
+                record.state
+            } else {
+                match record.state {
+                    JobState::Prepared => {
+                        runtime
+                            .store
+                            .cancel_pending(id, owner)
+                            .await
+                            .map_err(|_| "job cancellation unavailable")?
+                            .state
+                    }
+                    JobState::Running => return Err("job cancellation unavailable"),
+                    state => state,
                 }
-                JobState::Prepared => {
-                    runtime
-                        .store
-                        .transition(id, owner, JobState::Prepared, JobState::Failed)
-                        .await
-                        .map_err(|_| "job cancellation unavailable")?
-                        .state
-                }
-                JobState::Interrupted => return Err("job has no cancellable worker"),
-                state => state,
             };
             Ok(status_reply(id, state))
         }

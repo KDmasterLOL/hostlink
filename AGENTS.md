@@ -12,8 +12,12 @@ without restoring the old Agent RPC or a second execution transport. The target 
 Agent, Client and a focused Hub; see docs/MANAGED_FLEET_ARCHITECTURE.md. Keep russh + russh-sftp
 as the sole Agent/Controller execution and file-transfer carrier.
 
-Short SSH exec cancels on channel close; durable jobs are a different lifetime
-owned by the Agent process. Reconnect must NEVER silently replay a started job.
+Short SSH exec cancels on channel close; durable jobs have an Agent-owned lifetime
+independent of their SSH channel. The user explicitly approved Apalis's native
+crash recovery on 2026-10-29: a job may be run again after an Agent/worker crash,
+even when a previous execution already started. Do NOT add a custom start-claim
+ledger or assert exactly-once side effects. Clearly expose that automatic replay
+may repeat side effects; explicit same-ID submission remains idempotent.
 Use exact host key pins, controller authorized Ed25519 keys, private owned paths,
 bounded concurrency and byte streams, fail-closed security and Windows 7 PS2 support.
 No unmanaged background processes, false success or unbounded retries.

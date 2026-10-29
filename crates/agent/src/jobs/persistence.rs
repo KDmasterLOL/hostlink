@@ -1,11 +1,10 @@
 use super::database::{QUEUE, secure_sidecars, update_lock};
 use super::*;
-use apalis_core::task::builder::TaskBuilder;
+use apalis_core::{backend::TaskSink, task::builder::TaskBuilder};
 use apalis_sqlite::{Config, SqliteStorage};
-use futures::SinkExt;
 use sqlx::SqlitePool;
 
-/// Apalis SQLite jobs with immutable identities and one-use process claims.
+/// Apalis SQLite jobs with immutable identities and native task results.
 /// Clones share one bounded pool; no filesystem JSON record backend exists.
 #[derive(Debug, Clone)]
 pub struct JobStore {
@@ -53,13 +52,8 @@ impl JobStore {
     }
 
     async fn attach(root: PathBuf, pool: SqlitePool) -> io::Result<Self> {
-        let backend = SqliteStorage::new(&pool).with_config(
-            Config::default()
-                .queue(QUEUE)
-                .batch_size(16)
-                .lock_tasks(false)
-                .persist_results(false),
-        );
+        let backend =
+            SqliteStorage::new(&pool).with_config(Config::default().queue(QUEUE).batch_size(16));
         let store = Self {
             root,
             pool,
@@ -125,20 +119,20 @@ impl JobStore {
             };
             let data = serde_json::to_vec(&job).map_err(io::Error::other)?;
             let record = JobView {
-                job,
+                job: job.clone(),
                 state: JobState::Prepared,
                 started: false,
             };
             if data.len() > MAX_RECORD_BYTES {
                 return Err(invalid("durable payload exceeds maximum record size"));
             }
-            let task = TaskBuilder::new(data)
+            let task = TaskBuilder::new(job)
                 .task_id(id.to_string().parse().map_err(io::Error::other)?)
                 .idempotency_key(id.to_string())
                 .max_attempts(1)
                 .build();
             let mut backend = self.backend.clone();
-            backend.send(task).await.map_err(io::Error::other)?;
+            backend.push_task(task).await.map_err(io::Error::other)?;
             // If publication of output storage fails after the commit, the Prepared
             // view stays blocking. Repeating admission cannot dispatch a process.
             fs::create_dir(self.output_dir(id))?;

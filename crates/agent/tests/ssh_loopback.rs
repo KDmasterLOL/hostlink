@@ -460,13 +460,23 @@ async fn jobs_subsystem_survives_disconnect_and_reconnects_without_relaunch() {
     start_channel.eof().await.expect("finish job request");
     // Observe a real side effect while deliberately never consuming the ACK.
     // Reattachment below must return this operation without another launch.
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let launched = tokio::time::timeout(Duration::from_secs(10), async {
         while !temp.path().join("launch-count").exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("job starts before its acknowledgement is lost");
+    .await;
+    if launched.is_err() {
+        let report: serde_json::Value = serde_json::from_slice(
+            &job_request(
+                &mut session,
+                &framed_json(&serde_json::json!({"op":"status","id":id})),
+            )
+            .await,
+        )
+        .expect("explain missing launch");
+        panic!("job did not start after lost ACK; native status: {report}");
+    }
     session
         .disconnect(
             Disconnect::ByApplication,

@@ -3,7 +3,7 @@
 #[path = "support/started_job.rs"]
 mod started_job;
 
-use hostlink_agent::jobs::{JobId, JobSpec, JobState, JobStore, active_ids};
+use hostlink_agent::jobs::{JobId, JobSpec, JobStore, active_ids};
 use hostlink_agent::update::{
     AgentUpdateOutcome, AgentUpdateRequest, apply, finalize_fresh_install, verify_fresh_package,
 };

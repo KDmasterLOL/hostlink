@@ -49,10 +49,6 @@ pub(super) async fn prepared_job(
     };
     let id = JobId::new();
     store.admit(id, &owner, &spec).await.expect("admit job");
-    let record = store
-        .claim_fixture(id, &owner)
-        .await
-        .expect("reserve worker state");
     let runner = store.acquire_runner().expect("exclusive runtime lease");
     let runtime = Arc::new(JobRuntime {
         store,
@@ -65,7 +61,6 @@ pub(super) async fn prepared_job(
         active_jobs: std::sync::Mutex::new(HashMap::new()),
         unknown_permits: std::sync::Mutex::new(Vec::new()),
     });
-    let _ = record;
     let record = runtime
         .store
         .lookup(id, &owner)
@@ -105,9 +100,14 @@ async fn agent_shutdown_cancels_the_owned_process_tree() {
     let script = format!("sleep 300 & echo $! > '{}'; wait", pid_path.display());
     let (temp_root, runtime, owner, record) =
         prepared_job(vec!["-c".into(), script], temp.path()).await;
-    let id = record.id;
     let active = runtime.shutdown.child_token();
-    let worker = tokio::spawn(run_job(runtime.clone(), owner.clone(), record, active));
+    let worker = tokio::spawn(run_job(
+        runtime.clone(),
+        owner.clone(),
+        record,
+        active,
+        Arc::new(AtomicBool::new(false)),
+    ));
     tokio::time::timeout(Duration::from_secs(5), async {
         while !pid_path.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -126,16 +126,7 @@ async fn agent_shutdown_cancels_the_owned_process_tree() {
         .await
         .expect("worker teardown deadline")
         .expect("worker task")
-        .expect("persist worker outcome");
-    assert_eq!(
-        runtime
-            .store
-            .lookup(id, &owner)
-            .await
-            .expect("read final state")
-            .state,
-        JobState::Interrupted
-    );
+        .expect_err("cancelled job must fail");
     for _ in 0..100 {
         if !linux_process_is_running(pid) {
             break;
@@ -168,20 +159,12 @@ async fn output_overflow_kills_the_tree_and_never_records_zero_exit() {
             owner.clone(),
             record,
             runtime.shutdown.child_token(),
+            Arc::new(AtomicBool::new(false)),
         ),
     )
     .await
     .expect("overflow teardown deadline")
-    .expect("persist worker outcome");
-    assert_eq!(
-        runtime
-            .store
-            .lookup(id, &owner)
-            .await
-            .expect("read final state")
-            .state,
-        JobState::Failed
-    );
+    .expect_err("cancelled job must fail");
     assert_eq!(
         std::fs::metadata(runtime.store.output_path(id, JobOutput::Stdout))
             .expect("bounded stdout file")

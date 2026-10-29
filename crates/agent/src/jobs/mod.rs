@@ -108,7 +108,6 @@ impl JobRuntime {
     pub(crate) async fn open(jobs_root: &Path) -> io::Result<Arc<Self>> {
         let store = JobStore::open(jobs_root).await?;
         let runner = store.acquire_runner()?;
-        store.recover_nonterminal().await?;
         Ok(Arc::new(Self {
             store,
             _runner: runner,

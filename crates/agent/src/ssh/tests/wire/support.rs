@@ -203,10 +203,13 @@ impl WireFixture {
                 if response["state"] == state {
                     break;
                 }
-                assert!(matches!(
-                    response["state"]["state"].as_str(),
-                    Some("running" | "prepared")
-                ));
+                assert!(
+                    matches!(
+                        response["state"]["state"].as_str(),
+                        Some("running" | "prepared")
+                    ),
+                    "unexpected native state before {state}: {response}"
+                );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })

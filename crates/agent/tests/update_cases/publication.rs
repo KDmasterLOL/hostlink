@@ -54,14 +54,8 @@ async fn active_job_blocks_update_despite_unrelated_empty_jobs_directory() {
         apply(&update).expect("running job defers update"),
         AgentUpdateOutcome::DeferredActiveJobs { job_ids } if job_ids == vec![id.to_string()]
     ));
-    store
-        .transition(id, &owner, JobState::Running, JobState::Interrupted)
-        .await
-        .expect("job is interrupted");
-    assert!(matches!(
-        apply(&update).expect("interrupted job defers update"),
-        AgentUpdateOutcome::DeferredActiveJobs { job_ids } if job_ids == vec![id.to_string()]
-    ));
+    // A native Apalis Running task remains active until the worker recovers
+    // it. Recovery may replay it, but an updater must still defer.
     assert_eq!(
         fs::read(root.join("bin/hostlink-agent")).expect("original binary"),
         b"old installed Agent binary"
