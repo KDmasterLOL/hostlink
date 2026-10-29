@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use hostlink_agent::{
     AgentConfig,
     enrollment::EnrollmentOptions,
-    ssh,
+    runtime,
     update::{AgentUpdateOutcome, AgentUpdateRequest},
 };
 use std::fs::{self, File};
@@ -184,7 +184,8 @@ async fn run(cli: Cli) -> io::Result<()> {
                 let control_shutdown = shutdown.clone();
                 let control_finished = tokio_util::sync::CancellationToken::new();
                 let server_shutdown = shutdown.clone();
-                let mut server = Box::pin(ssh::serve(&config, server_shutdown.cancelled_owned()));
+                let mut server =
+                    Box::pin(runtime::serve(&config, server_shutdown.cancelled_owned()));
                 let control = Box::pin(hostlink_agent::service::control_loop(
                     pipe,
                     token,
@@ -207,10 +208,10 @@ async fn run(cli: Cli) -> io::Result<()> {
                     }
                 }
             } else {
-                ssh::serve(&config, shutdown.cancelled_owned()).await?;
+                runtime::serve(&config, shutdown.cancelled_owned()).await?;
             }
             #[cfg(not(windows))]
-            ssh::serve(&config, shutdown.cancelled_owned()).await?;
+            runtime::serve(&config, shutdown.cancelled_owned()).await?;
             Ok(())
         }
         Command::Update {

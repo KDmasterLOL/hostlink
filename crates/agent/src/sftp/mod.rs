@@ -180,24 +180,7 @@ fn status_from_io(e: io::Error) -> StatusCode {
 mod tests;
 
 fn validate_directory(path: &Path) -> io::Result<()> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.is_dir() || is_link_or_reparse(&metadata) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "transfer directory is not a real directory",
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "transfer directory is not owned by the Agent user",
-            ));
-        }
-    }
-    crate::ssh::validate_private_path(path)
+    crate::private_fs::validate_private_path(path, true)
 }
 
 fn create_directory(path: &Path) -> io::Result<()> {

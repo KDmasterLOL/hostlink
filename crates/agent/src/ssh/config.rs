@@ -1,5 +1,13 @@
-#![allow(unused_imports)]
-use super::*;
+use crate::AgentConfig;
+use russh::keys::{Algorithm, PrivateKey, PublicKey, ssh_key::authorized_keys::AuthorizedKeys};
+use std::{
+    io::{self, Read},
+    path::Path,
+    sync::Arc,
+};
+
+const HOST_KEY_MAX_BYTES: usize = 64 * 1024;
+const AUTHORIZED_KEYS_MAX_BYTES: usize = 1024 * 1024;
 
 pub(crate) struct PreparedEmbeddedSshConfig {
     pub(super) expected_user: Arc<str>,
@@ -62,7 +70,7 @@ fn load_authorized_keys(path: &Path) -> io::Result<Vec<PublicKey>> {
     Ok(keys)
 }
 
-pub(super) fn prepare(config: &AgentConfig) -> io::Result<PreparedEmbeddedSshConfig> {
+pub(crate) fn prepare(config: &AgentConfig) -> io::Result<PreparedEmbeddedSshConfig> {
     if config.user.trim().is_empty() {
         return Err(invalid_data("SSH user must not be empty"));
     }
@@ -74,55 +82,18 @@ pub(super) fn prepare(config: &AgentConfig) -> io::Result<PreparedEmbeddedSshCon
 }
 fn read_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
     let meta = std::fs::symlink_metadata(path)?;
-    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > limit as u64 {
+    if meta.len() > limit as u64 {
         return Err(invalid_data("SSH key input must be a bounded regular file"));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if meta.permissions().mode() & 0o077 != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "SSH secret file permissions are not private",
-            ));
-        }
+    crate::private_fs::validate_private_path(path, false)?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(invalid_data("SSH key input exceeds size limit"));
     }
-    #[cfg(windows)]
-    {
-        validate_private_acl(path)?;
-    }
-    std::fs::read(path)
-}
-
-pub(crate) fn validate_private_path(path: &Path) -> io::Result<()> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        return Err(invalid_data("private path must not be a symlink"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "private path is group/world accessible",
-            ));
-        }
-    }
-    #[cfg(windows)]
-    validate_private_acl(path)?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn validate_private_acl(path: &Path) -> io::Result<()> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    crate::private_fs::windows::validate_acl(
-        path,
-        &metadata,
-        crate::private_fs::windows::AllowedPrincipals::OwnerSystemAdministrators,
-        true,
-    )
+    Ok(bytes)
 }
 
 pub(super) fn invalid_data(message: impl Into<String>) -> io::Error {

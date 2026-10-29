@@ -27,6 +27,7 @@ does not certify production or registered Windows updater deployment.
 | Controller CLI and operator command dispatch | `crates/client/src/cli/{mod.rs,args.rs,commands/}`; `main.rs` is the binary entrypoint |
 | Managed Hub HTTP client, routes and trusted SSH pins | `crates/client/src/hub/{mod.rs,client.rs,config.rs,routes.rs}` |
 | Direct and gateway SSH | `crates/client/src/connect/`; `crates/agent/src/ssh/`; `crates/agent/src/tunnel/` |
+| Agent process supervision (SSH, Apalis, tunnel, updater lifetime lock) | `crates/agent/src/runtime.rs` |
 | Agent-local Apalis command queue and Board UI/API | `crates/agent/src/jobs/` (no Client jobs subsystem) |
 | Shared Agent-private files, locks and Windows DACL | `crates/agent/src/private_fs/` |
 | Hub v2 endpoints and authoritative registry | `crates/hub/src/server/`; `crates/hub/src/state.rs` |
@@ -48,8 +49,15 @@ centralizes DACL checks for jobs, SSH, SFTP, service and updater while
 preserving their different allowed-principal policies.
 `jobs/tests/` contains the focused API and worker tests. There are no
 SSH jobs frames, SFTP binary artifacts, custom lifecycle or Client jobs
-module. `ssh/server.rs` supervises Agent-local jobs independently of SSH
-connections; `sftp/` owns controller-scoped generic transfers.
+module. `runtime.rs` supervises the independent SSH server, Apalis worker
+and outbound tunnel and owns the Linux updater process-lifetime lock.
+`ssh/server.rs` only runs the `russh` server and handles authenticated
+exec, SFTP and TCP-forward channels. `ssh/config.rs` uses shared
+`private_fs` for key-file validation. `ssh::serve` and `ssh::serve_on`
+remain public re-exports of the runtime functions for existing callers.
+`russh` advertises only public-key authentication; channel tracking
+requires no shared mutex because the handler owns its session map.
+`sftp/` owns controller-scoped generic transfers.
 See [jobs README](../crates/agent/src/jobs/README.md) and
 [jobs contract](AGENT_MINIMAL_JOBS.md).
 

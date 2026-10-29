@@ -1,8 +1,24 @@
-#![allow(unused_imports)]
-use super::config::{PreparedEmbeddedSshConfig, invalid_data, prepare};
-use super::*;
+use super::config::PreparedEmbeddedSshConfig;
+use crate::{exec, sftp::SftpSession};
+use russh::{
+    Channel, ChannelId, MethodKind, MethodSet,
+    keys::{PublicKey, PublicKeyBase64},
+    server::{Auth, Msg, Server as _, Session},
+};
+use sha2::{Digest as _, Sha256};
+use std::{collections::HashMap, future::Future, io, path::PathBuf, sync::Arc, time::Duration};
+use tokio::sync::Semaphore;
 
-struct EmbeddedServer {
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+const DIRECT_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_DIRECT_TCP_CHANNELS: usize = 32;
+const MAX_AUTHENTICATED_SESSIONS: usize = 32;
+const MAX_ACTIVE_SFTP_SESSIONS: usize = 8;
+const MAX_ACTIVE_EXEC_SESSIONS: usize = 4;
+const MAX_PENDING_SESSION_CHANNELS: usize = 16;
+const MAX_EXEC_COMMAND_BYTES: usize = 16 * 1024;
+
+struct SharedState {
     expected_user: Arc<str>,
     authorized_keys: Arc<Vec<PublicKey>>,
     forward_slots: Arc<Semaphore>,
@@ -13,104 +29,19 @@ struct EmbeddedServer {
     connection_slots: Arc<Semaphore>,
 }
 
+struct EmbeddedServer {
+    shared: Arc<SharedState>,
+}
+
 struct EmbeddedSession {
-    expected_user: Arc<str>,
-    authorized_keys: Arc<Vec<PublicKey>>,
-    forward_slots: Arc<Semaphore>,
-    sftp_slots: Arc<Semaphore>,
-    exec_slots: Arc<Semaphore>,
-    exec_shutdown: processkit::CancellationToken,
-    transfer_root: PathBuf,
+    shared: Arc<SharedState>,
     _connection_slot: Option<tokio::sync::OwnedSemaphorePermit>,
     active_exec: Arc<std::sync::Mutex<HashMap<ChannelId, processkit::CancellationToken>>>,
-    session_channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
+    session_channels: HashMap<ChannelId, Channel<Msg>>,
     authenticated_controller: Option<String>,
 }
 
-/// Serves authenticated SSH/SFTP traffic on the configured loopback listener until shutdown.
-pub async fn serve<F>(config: &AgentConfig, shutdown: F) -> io::Result<()>
-where
-    F: Future<Output = ()> + Send,
-{
-    config.validate()?;
-    let listener = tokio::net::TcpListener::bind(config.listen).await?;
-    serve_on(listener, config, shutdown).await
-}
-
-/// Serves on a listener that the caller has already bound.
-///
-/// Prebinding makes the endpoint ready before the serving task is scheduled, which is useful for
-/// deterministic startup coordination and tests.
-pub async fn serve_on<F>(
-    listener: tokio::net::TcpListener,
-    config: &AgentConfig,
-    shutdown: F,
-) -> io::Result<()>
-where
-    F: Future<Output = ()> + Send,
-{
-    config.validate()?;
-    let bound = listener.local_addr()?;
-    if bound != config.listen || !bound.ip().is_loopback() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "prebound SSH listener must match configured loopback address",
-        ));
-    }
-    // The Agent owns this process-lifetime lock, not the Apalis job backend.
-    // An updater must not replace its executable while it is running.
-    let lifetime = crate::private_fs::open_lock(&config.jobs_root.join("runner.lock"))?;
-    lifetime.try_lock().map_err(io::Error::other)?;
-    let prepared = prepare(config)?;
-    let cancellation = processkit::CancellationToken::new();
-    let mut ssh = Box::pin(serve_prepared_until(
-        listener,
-        prepared,
-        config.jobs_root.clone(),
-        cancellation.clone().cancelled_owned(),
-    ));
-    let mut jobs = Box::pin(crate::jobs::serve_until(
-        &config.jobs_root,
-        config.board_listen,
-        cancellation.clone(),
-    ));
-    let mut tunnel = Box::pin(async {
-        if config.gateway.is_some() {
-            crate::tunnel::run(config, cancellation.clone().cancelled_owned()).await
-        } else {
-            std::future::pending::<io::Result<()>>().await
-        }
-    });
-    tokio::pin!(shutdown);
-    let result = tokio::select! {
-        result = &mut ssh => (0, result),
-        result = &mut jobs => (1, result),
-        result = &mut tunnel => (2, result),
-        () = &mut shutdown => (3, Ok(())),
-    };
-    cancellation.cancel();
-    let early = result.0 != 3;
-    let mut outcome = result.1;
-    if early && outcome.is_ok() {
-        outcome = Err(io::Error::other("Agent service stopped before shutdown"));
-    }
-    let (ssh_result, jobs_result, tunnel_result) = tokio::join!(
-        async { if result.0 != 0 { ssh.await } else { Ok(()) } },
-        async { if result.0 != 1 { jobs.await } else { Ok(()) } },
-        async {
-            if result.0 != 2 && config.gateway.is_some() {
-                tunnel.await
-            } else {
-                Ok(())
-            }
-        },
-    );
-    outcome = outcome.and(ssh_result).and(jobs_result).and(tunnel_result);
-    lifetime.unlock()?;
-    outcome
-}
-
-async fn serve_prepared_until<F>(
+pub(crate) async fn serve_prepared_until<F>(
     listener: tokio::net::TcpListener,
     prepared: PreparedEmbeddedSshConfig,
     transfer_root: PathBuf,
@@ -119,19 +50,13 @@ async fn serve_prepared_until<F>(
 where
     F: Future<Output = ()> + Send,
 {
-    let address = listener.local_addr()?;
-    if !address.ip().is_loopback() {
-        return Err(invalid_data(format!(
-            "embedded SSH listener must be loopback-only, got {address}"
-        )));
-    }
-
     let server_config = Arc::new(russh::server::Config {
         keys: vec![prepared.host_key],
+        methods: MethodSet::from(&[MethodKind::PublicKey][..]),
         nodelay: true,
         ..Default::default()
     });
-    let mut server = EmbeddedServer {
+    let shared = Arc::new(SharedState {
         expected_user: prepared.expected_user,
         authorized_keys: prepared.authorized_keys,
         forward_slots: Arc::new(Semaphore::new(MAX_DIRECT_TCP_CHANNELS)),
@@ -140,9 +65,10 @@ where
         exec_shutdown: processkit::CancellationToken::new(),
         transfer_root,
         connection_slots: Arc::new(Semaphore::new(MAX_AUTHENTICATED_SESSIONS)),
-    };
-    let exec_shutdown = server.exec_shutdown.clone();
-    let exec_slots = server.exec_slots.clone();
+    });
+    let exec_shutdown = shared.exec_shutdown.clone();
+    let exec_slots = shared.exec_slots.clone();
+    let mut server = EmbeddedServer { shared };
 
     let running = server.run_on_socket(server_config, &listener);
     let handle = running.handle();
@@ -173,16 +99,15 @@ impl russh::server::Server for EmbeddedServer {
 
     fn new_client(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> Self::Handler {
         EmbeddedSession {
-            expected_user: self.expected_user.clone(),
-            authorized_keys: self.authorized_keys.clone(),
-            forward_slots: self.forward_slots.clone(),
-            sftp_slots: self.sftp_slots.clone(),
-            exec_slots: self.exec_slots.clone(),
-            exec_shutdown: self.exec_shutdown.clone(),
-            transfer_root: self.transfer_root.clone(),
-            _connection_slot: self.connection_slots.clone().try_acquire_owned().ok(),
+            _connection_slot: self
+                .shared
+                .connection_slots
+                .clone()
+                .try_acquire_owned()
+                .ok(),
+            shared: self.shared.clone(),
             active_exec: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_channels: Arc::new(Mutex::new(HashMap::new())),
+            session_channels: HashMap::new(),
             authenticated_controller: None,
         }
     }
@@ -191,19 +116,19 @@ impl russh::server::Server for EmbeddedServer {
 impl EmbeddedSession {
     fn accepts(&self, user: &str, public_key: &PublicKey) -> bool {
         self._connection_slot.is_some()
-            && user == self.expected_user.as_ref()
-            && self.authorized_keys.iter().any(|allowed| {
+            && user == self.shared.expected_user.as_ref()
+            && self.shared.authorized_keys.iter().any(|allowed| {
                 allowed.algorithm() == public_key.algorithm()
                     && allowed.key_data() == public_key.key_data()
             })
     }
 
-    async fn take_session_channel(&self, channel_id: ChannelId) -> Option<Channel<Msg>> {
-        self.session_channels.lock().await.remove(&channel_id)
+    fn take_session_channel(&mut self, channel_id: ChannelId) -> Option<Channel<Msg>> {
+        self.session_channels.remove(&channel_id)
     }
 
-    async fn discard_session_channel(&self, channel_id: ChannelId) {
-        self.session_channels.lock().await.remove(&channel_id);
+    fn discard_session_channel(&mut self, channel_id: ChannelId) {
+        self.session_channels.remove(&channel_id);
     }
 
     fn cancel_exec(&self, channel_id: ChannelId) {
@@ -232,18 +157,6 @@ impl Drop for EmbeddedSession {
 
 impl russh::server::Handler for EmbeddedSession {
     type Error = russh::Error;
-
-    async fn auth_publickey_offered(
-        &mut self,
-        user: &str,
-        public_key: &PublicKey,
-    ) -> Result<Auth, Self::Error> {
-        Ok(if self.accepts(user, public_key) {
-            Auth::Accept
-        } else {
-            Auth::reject()
-        })
-    }
 
     async fn auth_publickey(
         &mut self,
@@ -281,7 +194,7 @@ impl russh::server::Handler for EmbeddedSession {
             return Ok(());
         }
 
-        let Ok(forward_slot) = self.forward_slots.clone().try_acquire_owned() else {
+        let Ok(forward_slot) = self.shared.forward_slots.clone().try_acquire_owned() else {
             reply
                 .reject(russh::ChannelOpenFailure::ResourceShortage)
                 .await;
@@ -310,16 +223,13 @@ impl russh::server::Handler for EmbeddedSession {
         reply: russh::server::ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let mut session_channels = self.session_channels.lock().await;
-        if session_channels.len() >= MAX_PENDING_SESSION_CHANNELS {
-            drop(session_channels);
+        if self.session_channels.len() >= MAX_PENDING_SESSION_CHANNELS {
             reply
                 .reject(russh::ChannelOpenFailure::ResourceShortage)
                 .await;
             return Ok(());
         }
-        session_channels.insert(channel.id(), channel);
-        drop(session_channels);
+        self.session_channels.insert(channel.id(), channel);
         reply.accept().await;
         Ok(())
     }
@@ -330,7 +240,7 @@ impl russh::server::Handler for EmbeddedSession {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.cancel_exec(channel);
-        self.discard_session_channel(channel).await;
+        self.discard_session_channel(channel);
         Ok(())
     }
 
@@ -341,11 +251,11 @@ impl russh::server::Handler for EmbeddedSession {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         if name != "sftp" {
-            self.discard_session_channel(channel_id).await;
+            self.discard_session_channel(channel_id);
             fail_session_channel(channel_id, session)?;
             return Ok(());
         }
-        let Some(channel) = self.take_session_channel(channel_id).await else {
+        let Some(channel) = self.take_session_channel(channel_id) else {
             fail_session_channel(channel_id, session)?;
             return Ok(());
         };
@@ -353,11 +263,11 @@ impl russh::server::Handler for EmbeddedSession {
             fail_session_channel(channel_id, session)?;
             return Ok(());
         };
-        let Ok(slot) = self.sftp_slots.clone().try_acquire_owned() else {
+        let Ok(slot) = self.shared.sftp_slots.clone().try_acquire_owned() else {
             fail_session_channel(channel_id, session)?;
             return Ok(());
         };
-        let Ok(transfer) = SftpSession::new(&self.transfer_root, owner, slot) else {
+        let Ok(transfer) = SftpSession::new(&self.shared.transfer_root, owner, slot) else {
             fail_session_channel(channel_id, session)?;
             return Ok(());
         };
@@ -371,7 +281,7 @@ impl russh::server::Handler for EmbeddedSession {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.discard_session_channel(channel).await;
+        self.discard_session_channel(channel);
         fail_session_channel(channel, session)?;
         Ok(())
     }
@@ -387,7 +297,7 @@ impl russh::server::Handler for EmbeddedSession {
         _modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.discard_session_channel(channel).await;
+        self.discard_session_channel(channel);
         fail_session_channel(channel, session)?;
         Ok(())
     }
@@ -403,21 +313,21 @@ impl russh::server::Handler for EmbeddedSession {
         {
             Ok(command) => command,
             Err(_) => {
-                self.discard_session_channel(channel).await;
+                self.discard_session_channel(channel);
                 fail_session_channel(channel, session)?;
                 return Ok(());
             }
         };
-        let Ok(slot) = self.exec_slots.clone().try_acquire_owned() else {
-            self.discard_session_channel(channel).await;
+        let Ok(slot) = self.shared.exec_slots.clone().try_acquire_owned() else {
+            self.discard_session_channel(channel);
             fail_session_channel(channel, session)?;
             return Ok(());
         };
-        let Some(channel_handle) = self.take_session_channel(channel).await else {
+        let Some(channel_handle) = self.take_session_channel(channel) else {
             fail_session_channel(channel, session)?;
             return Ok(());
         };
-        let cancellation = self.exec_shutdown.child_token();
+        let cancellation = self.shared.exec_shutdown.child_token();
         self.active_exec
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

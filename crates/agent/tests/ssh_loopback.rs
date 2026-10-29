@@ -138,6 +138,25 @@ async fn loopback_auth_and_exec_keep_binary_streams_and_exit_status() {
         wrong_host_pin.is_err(),
         "host-key mismatch must reject the SSH connection"
     );
+    let mut password = connect(listen, &host_public).await;
+    let result = password
+        .authenticate_password("agent", "not-a-password")
+        .await
+        .expect("password authentication response");
+    match result {
+        client::AuthResult::Failure {
+            remaining_methods,
+            partial_success,
+        } => {
+            assert_eq!(&*remaining_methods, &[russh::MethodKind::PublicKey]);
+            assert!(!partial_success);
+        }
+        client::AuthResult::Success => panic!("SSH must use public-key authentication only"),
+    }
+    password
+        .disconnect(Disconnect::ByApplication, "password rejected", "en")
+        .await
+        .expect("disconnect after password rejection");
     let mut session = connect(listen, &host_public).await;
     assert!(
         !session

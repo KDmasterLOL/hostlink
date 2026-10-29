@@ -14,7 +14,9 @@ description of current `dev`.
 - **HostLink Agent:** an unprivileged user process with an embedded `russh`
   server and optional outbound pinned reverse SSH tunnel. Separately, one
   Apalis SQLite `commands` queue and `WorkerBuilder` execute `CommandJob`
-  entries and retain native state and results.
+  entries and retain native state and results. `runtime.rs` owns their
+  common shutdown and process-lifetime lock; the SSH server itself does
+  not own the Apalis queue or reconnect policy.
 - **Apalis Board:** the upstream `apalis-board-api 1.0.0` Axum router and
   embedded UI on an independently configured **loopback-only** listener. A
   tiny `/new` form submits JSON directly to the upstream Board task API;

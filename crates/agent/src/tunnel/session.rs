@@ -297,7 +297,7 @@ async fn tunnel_once(
 }
 
 fn load_gateway_key(path: &Path) -> io::Result<russh::keys::PublicKey> {
-    crate::ssh::validate_private_path(path)?;
+    crate::private_fs::validate_private_path(path, false)?;
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 64 * 1024 {
         return Err(io::Error::new(
@@ -316,7 +316,7 @@ fn load_gateway_key(path: &Path) -> io::Result<russh::keys::PublicKey> {
     Ok(key)
 }
 fn load_identity(path: &Path) -> io::Result<PrivateKey> {
-    crate::ssh::validate_private_path(path)?;
+    crate::private_fs::validate_private_path(path, false)?;
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 64 * 1024 {
         return Err(io::Error::new(
