@@ -1,193 +1,86 @@
 use super::*;
+use russh_sftp::server::Handler;
+use std::sync::Arc;
 
-#[cfg(unix)]
-#[tokio::test]
-async fn rejects_parent_paths_and_symlinks_outside_root() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let temp = tempfile::tempdir().expect("temporary directory");
-    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
-        .expect("private temporary root");
-    let jobs = temp.path().join("jobs");
-    tokio::fs::create_dir(&jobs)
-        .await
-        .expect("create jobs root");
-    let artifacts =
-        crate::jobs::ArtifactStore::open(&jobs, &"d".repeat(64)).expect("controller artifacts");
-    let root = artifacts.upload_root();
-    let outside = temp.path().join("outside");
-    tokio::fs::write(&outside, b"secret")
-        .await
-        .expect("write outside file");
+async fn fixture(owner: &str) -> (tempfile::TempDir, SftpSession) {
+    let temp = tempfile::tempdir().unwrap();
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&outside, root.join(format!("{}.upload", "a".repeat(64))))
-        .expect("create symlink");
-
-    let permit = std::sync::Arc::new(tokio::sync::Semaphore::new(1))
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let permit = Arc::new(tokio::sync::Semaphore::new(1))
         .acquire_owned()
         .await
-        .expect("SFTP slot");
-    let session = SftpSession::new(artifacts, permit);
+        .unwrap();
+    let session = SftpSession::new(&temp.path().join("jobs"), owner, permit).unwrap();
+    (temp, session)
+}
+
+#[tokio::test]
+async fn transfer_paths_are_private_and_reject_traversal_and_symlinks() {
+    use std::os::unix::fs::symlink;
+    let (temp, session) = fixture(&"a".repeat(64)).await;
+    let outside = temp.path().join("outside");
+    std::fs::write(&outside, b"secret").unwrap();
+    symlink(&outside, session.root.join("escape")).unwrap();
     assert_eq!(
         session.resolve("../outside", false).await,
         Err(StatusCode::PermissionDenied)
     );
-    #[cfg(unix)]
     assert_eq!(
         session.resolve("escape", false).await,
         Err(StatusCode::PermissionDenied)
     );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn rejects_upload_growth_past_the_per_file_limit() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let temp = tempfile::tempdir().expect("temporary directory");
-    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
-        .expect("private temporary root");
-    let jobs = temp.path().join("jobs");
-    std::fs::create_dir(&jobs).expect("jobs root");
-    let artifacts =
-        crate::jobs::ArtifactStore::open(&jobs, &"e".repeat(64)).expect("controller artifacts");
-    let upload_path = artifacts
-        .upload_root()
-        .join(format!("{}.upload", "f".repeat(64)));
-    let file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(upload_path)
-        .await
-        .expect("create sparse upload fixture");
-    file.set_len(crate::jobs::MAX_ARTIFACT_BYTES)
-        .await
-        .expect("set exact maximum length");
-    let permit = std::sync::Arc::new(tokio::sync::Semaphore::new(1))
-        .acquire_owned()
-        .await
-        .expect("SFTP slot");
-    let mut session = SftpSession::new(artifacts, permit);
-    session.files.insert(
-        "h".into(),
-        OpenFile {
-            file,
-            write_ranges: Vec::new(),
-            writable: true,
-        },
-    );
-    assert!(matches!(
-        russh_sftp::server::Handler::write(
-            &mut session,
-            1,
-            "h".into(),
-            crate::jobs::MAX_ARTIFACT_BYTES,
-            vec![0],
-        )
-        .await,
-        Err(StatusCode::Failure)
-    ));
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn accepts_pipelined_out_of_order_non_overlapping_writes() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let temp = tempfile::tempdir().expect("temporary directory");
-    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
-        .expect("private temporary root");
-    let jobs = temp.path().join("jobs");
-    std::fs::create_dir(&jobs).expect("jobs root");
-    let artifacts =
-        crate::jobs::ArtifactStore::open(&jobs, &"b".repeat(64)).expect("controller artifacts");
-    let file_path = artifacts
-        .upload_root()
-        .join(format!("{}.upload", "c".repeat(64)));
-    let file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(file_path.clone())
-        .await
-        .expect("create upload");
-    let permit = std::sync::Arc::new(tokio::sync::Semaphore::new(1))
-        .acquire_owned()
-        .await
-        .expect("SFTP slot");
-    let mut session = SftpSession::new(artifacts, permit);
-    session.files.insert(
-        "h".into(),
-        OpenFile {
-            file,
-            write_ranges: Vec::new(),
-            writable: true,
-        },
-    );
-
-    // SFTP clients pipeline WRITE packets; their offsets can arrive out of order.
-    russh_sftp::server::Handler::write(&mut session, 1, "h".into(), 4, b"tail".to_vec())
-        .await
-        .expect("accept later-offset packet before earlier packet");
-    russh_sftp::server::Handler::write(&mut session, 2, "h".into(), 0, b"head".to_vec())
-        .await
-        .expect("accept preceding non-overlapping packet");
+    assert!(session.resolve("normal.txt", true).await.is_ok());
+    std::fs::hard_link(&outside, session.root.join("hardlink")).unwrap();
     assert_eq!(
-        tokio::fs::read(file_path.clone())
-            .await
-            .expect("read upload"),
-        b"headtail"
+        session.resolve("hardlink", false).await,
+        Err(StatusCode::PermissionDenied)
     );
-
-    assert!(matches!(
-        russh_sftp::server::Handler::write(&mut session, 3, "h".into(), 2, b"bad".to_vec()).await,
-        Err(StatusCode::Failure)
-    ));
+    let permit = Arc::new(tokio::sync::Semaphore::new(1))
+        .acquire_owned()
+        .await
+        .unwrap();
+    let other = SftpSession::new(&temp.path().join("jobs"), &"b".repeat(64), permit).unwrap();
+    assert_ne!(session.root, other.root);
     assert_eq!(
-        tokio::fs::read(file_path)
-            .await
-            .expect("read upload after overlap rejection"),
-        b"headtail"
+        other.resolve("normal.txt", false).await,
+        Err(StatusCode::NoSuchFile)
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn total_upload_and_sealed_file_count_is_bounded() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let temp = tempfile::tempdir().expect("temporary directory");
-    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
-        .expect("private temporary root");
-    let jobs = temp.path().join("jobs");
-    std::fs::create_dir(&jobs).expect("jobs root");
-    let artifacts =
-        crate::jobs::ArtifactStore::open(&jobs, &"9".repeat(64)).expect("controller artifacts");
-    for index in 0..crate::jobs::MAX_ARTIFACTS_PER_CONTROLLER - 1 {
-        let path = artifacts.upload_root().join(format!("{index:064x}.upload"));
-        std::fs::write(&path, b"upload").expect("seed upload");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .expect("private upload");
-    }
-    let sealed = artifacts
-        .sealed_root()
-        .join(format!("{:064x}.program", u64::MAX));
-    std::fs::write(&sealed, b"sealed").expect("seed sealed artifact");
-    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o500))
-        .expect("protected sealed artifact");
-    let permit = std::sync::Arc::new(tokio::sync::Semaphore::new(1))
-        .acquire_owned()
-        .await
-        .expect("SFTP slot");
-    let mut session = SftpSession::new(artifacts, permit);
-    assert!(matches!(
-        russh_sftp::server::Handler::open(
-            &mut session,
+async fn transfer_supports_writes_and_enforces_size_limit() {
+    let (_temp, mut session) = fixture(&"c".repeat(64)).await;
+    let handle = session
+        .open(
             1,
-            format!("{}.upload", "a".repeat(64)),
+            "file.txt".into(),
             OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
             FileAttributes::default(),
         )
-        .await,
+        .await
+        .unwrap()
+        .handle;
+    session
+        .write(2, handle.clone(), 4, b"tail".to_vec())
+        .await
+        .unwrap();
+    session
+        .write(3, handle.clone(), 0, b"head".to_vec())
+        .await
+        .unwrap();
+    session
+        .write(4, handle.clone(), 0, b"H".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(session.root.join("file.txt")).unwrap(),
+        b"Headtail"
+    );
+    assert!(matches!(
+        session.write(5, handle, MAX_TRANSFER_BYTES, vec![1]).await,
         Err(StatusCode::Failure)
     ));
 }

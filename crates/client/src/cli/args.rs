@@ -1,9 +1,13 @@
 use clap::{Parser, Subcommand};
-use hostlink::run::JobStream;
 use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Parser)]
-#[command(name = "hostlink", version, about = "Pinned managed-host SSH client")]
+#[command(
+    name = "hostlink",
+    version,
+    about = "Pinned managed-host SSH client",
+    after_help = "Durable jobs are managed through the Agent's Apalis board UI/API. Automatic crash recovery may repeat job side effects."
+)]
 pub(super) struct Cli {
     #[command(subcommand)]
     pub(super) command: Command,
@@ -143,11 +147,6 @@ pub(super) enum Command {
         #[arg(long)]
         local: PathBuf,
     },
-    /// Inspect or reattach to an Agent-owned durable job.
-    Jobs {
-        #[command(subcommand)]
-        command: JobCommand,
-    },
 }
 
 #[derive(Subcommand)]
@@ -164,70 +163,6 @@ pub(super) enum MigrationCommand {
         new_agent: PathBuf,
         #[arg(long)]
         new_host: PathBuf,
-    },
-}
-
-#[derive(Subcommand)]
-pub(super) enum JobCommand {
-    /// List one page (32 jobs) owned by this controller, across all statuses.
-    List {
-        #[arg(long, group = "host_selection", required_unless_present = "host")]
-        config: Option<PathBuf>,
-        #[arg(long, group = "host_selection", required_unless_present = "config")]
-        host: Option<String>,
-        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=128))]
-        page: u32,
-        /// Optional native Apalis status.
-        #[arg(long, value_parser = ["Pending", "Queued", "Running", "Done", "Failed", "Killed"])]
-        status: Option<String>,
-    },
-    /// Upload, seal and enqueue a source-pinned binary with exact argv.
-    Run {
-        #[arg(long, group = "host_selection", required_unless_present = "host")]
-        config: Option<PathBuf>,
-        #[arg(long, group = "host_selection", required_unless_present = "config")]
-        host: Option<String>,
-        #[arg(long)]
-        binary: PathBuf,
-        /// Caller-owned canonical ULID; generated and printed before connecting when omitted.
-        #[arg(long)]
-        id: Option<String>,
-        /// Stream raw output and return the actual process exit code.
-        #[arg(long)]
-        wait: bool,
-        #[arg(last = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Read the persisted state of a durable job.
-    Status {
-        #[arg(long, group = "host_selection", required_unless_present = "host")]
-        config: Option<PathBuf>,
-        #[arg(long, group = "host_selection", required_unless_present = "config")]
-        host: Option<String>,
-        #[arg(long)]
-        id: String,
-    },
-    /// Request cancellation of one owned Agent job; read status to confirm termination.
-    Cancel {
-        #[arg(long, group = "host_selection", required_unless_present = "host")]
-        config: Option<PathBuf>,
-        #[arg(long, group = "host_selection", required_unless_present = "config")]
-        host: Option<String>,
-        #[arg(long)]
-        id: String,
-    },
-    /// Read one raw output stream from a persisted byte offset.
-    Logs {
-        #[arg(long, group = "host_selection", required_unless_present = "host")]
-        config: Option<PathBuf>,
-        #[arg(long, group = "host_selection", required_unless_present = "config")]
-        host: Option<String>,
-        #[arg(long)]
-        id: String,
-        #[arg(long, value_parser = parse_stream)]
-        stream: JobStream,
-        #[arg(long)]
-        offset: u64,
     },
 }
 
@@ -256,14 +191,6 @@ pub(super) enum HubCommand {
     Show,
     /// Check Hub operator API reachability and bearer authorization only.
     Check,
-}
-
-pub(super) fn parse_stream(value: &str) -> Result<JobStream, String> {
-    match value {
-        "stdout" => Ok(JobStream::Stdout),
-        "stderr" => Ok(JobStream::Stderr),
-        _ => Err("stream must be stdout or stderr".into()),
-    }
 }
 
 pub(super) fn parse_socket_addr(value: &str) -> Result<SocketAddr, String> {

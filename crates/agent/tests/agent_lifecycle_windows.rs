@@ -3,7 +3,7 @@
 #[path = "support/started_job.rs"]
 mod started_job;
 
-use hostlink_agent::jobs::{JobId, JobSpec, JobState, JobStore};
+use hostlink_agent::jobs::JobStore;
 use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
 use serde_json::{Map, json};
 use sha2::{Digest, Sha256};
@@ -310,25 +310,10 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     let store = JobStore::open(root.join("jobs"))
         .await
         .expect("open durable job store");
-    for target_state in [JobState::Prepared, JobState::Running] {
-        let job_id = JobId::new();
-        let owner = "a".repeat(64);
-        let admission = store
-            .admit(
-                job_id,
-                &owner,
-                &JobSpec {
-                    program: "disposable lifecycle interlock".into(),
-                    args: Vec::new(),
-                    cwd: None,
-                    source_sha256: "b".repeat(64),
-                },
-            )
-            .await
-            .expect("admit real durable job fixture");
-        assert_eq!(admission.id, job_id);
-        if target_state != JobState::Prepared {
-            started_job::started(&root.join("jobs"), &store, job_id, &owner).await;
+    for running in [false, true] {
+        let job_id = started_job::queued(&root.join("jobs")).await;
+        if running {
+            started_job::started(&root.join("jobs"), &job_id).await;
         }
         for action in ["stop", "remove"] {
             let refused = Command::new(&executable)
@@ -337,7 +322,7 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
                 .expect("invoke lifecycle action with nonterminal job");
             assert!(
                 !refused.status.success(),
-                "{action} accepted {target_state:?}"
+                "{action} accepted running={running}"
             );
             assert!(String::from_utf8_lossy(&refused.stderr).contains("durable jobs"));
             assert!(root.join(".hostlink-user-service.json").is_file());

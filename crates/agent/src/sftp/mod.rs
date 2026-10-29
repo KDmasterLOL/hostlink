@@ -4,19 +4,18 @@ use russh_sftp::protocol::{
 };
 use std::collections::HashMap;
 use std::io::{self, SeekFrom};
-use std::ops::Range;
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::OwnedSemaphorePermit;
 
 const MAX_READ_BYTES: usize = 1024 * 1024;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
 const MAX_OPEN_FILES: usize = 64;
-const MAX_UPLOAD_WRITE_RANGES: usize = 4096;
+const MAX_TRANSFER_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_TRANSFERS: usize = 128;
 
 pub(super) struct OpenFile {
     pub(super) file: tokio::fs::File,
-    pub(super) write_ranges: Vec<Range<u64>>,
     pub(super) writable: bool,
 }
 
@@ -24,19 +23,39 @@ pub(super) struct SftpSession {
     pub(super) files: HashMap<String, OpenFile>,
     pub(super) next_handle: u64,
     pub(super) root: PathBuf,
-    pub(super) sealed_root: PathBuf,
     _session_slot: OwnedSemaphorePermit,
 }
 
 impl SftpSession {
-    pub(super) fn new(artifacts: crate::jobs::ArtifactStore, slot: OwnedSemaphorePermit) -> Self {
-        Self {
+    pub(super) fn new(
+        jobs_root: &Path,
+        owner: &str,
+        slot: OwnedSemaphorePermit,
+    ) -> io::Result<Self> {
+        if owner.len() != 64
+            || !owner
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid controller fingerprint",
+            ));
+        }
+        let install = jobs_root.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "jobs root has no parent")
+        })?;
+        validate_directory(install)?;
+        let transfers = install.join("transfers");
+        create_directory(&transfers)?;
+        let root = transfers.join(owner);
+        create_directory(&root)?;
+        Ok(Self {
             files: HashMap::new(),
             next_handle: 0,
-            root: artifacts.upload_root(),
-            sealed_root: artifacts.sealed_root(),
+            root,
             _session_slot: slot,
-        }
+        })
     }
 
     pub(super) async fn resolve(&self, path: &str, create: bool) -> Result<PathBuf, StatusCode> {
@@ -47,11 +66,6 @@ impl SftpSession {
             || parts
                 .iter()
                 .any(|part| !matches!(part, Component::Normal(_)))
-            || !path.ends_with(".upload")
-            || path.len() != 71
-            || !path.as_bytes()[..64]
-                .iter()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
         {
             return Err(StatusCode::PermissionDenied);
         }
@@ -65,7 +79,21 @@ impl SftpSession {
                 Ok(meta) if is_link_or_reparse(&meta) => {
                     return Err(StatusCode::PermissionDenied);
                 }
-                Ok(_) => {}
+                Ok(meta) => {
+                    if !meta.is_file() || meta.len() > MAX_TRANSFER_BYTES {
+                        return Err(StatusCode::PermissionDenied);
+                    }
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        if meta.uid() != unsafe { libc::geteuid() }
+                            || meta.nlink() != 1
+                            || meta.mode() & 0o077 != 0
+                        {
+                            return Err(StatusCode::PermissionDenied);
+                        }
+                    }
+                }
                 Err(error)
                     if error.kind() == io::ErrorKind::NotFound
                         && create
@@ -79,40 +107,29 @@ impl SftpSession {
     pub(super) async fn upload_count(&self) -> Result<usize, StatusCode> {
         self.validate_roots()?;
         let mut count = 0;
-        for directory in [&self.root, &self.sealed_root] {
-            let mut entries = tokio::fs::read_dir(directory)
+        let mut entries = tokio::fs::read_dir(&self.root)
+            .await
+            .map_err(status_from_io)?;
+        while let Some(entry) = entries.next_entry().await.map_err(status_from_io)? {
+            let metadata = tokio::fs::symlink_metadata(entry.path())
                 .await
                 .map_err(status_from_io)?;
-            while let Some(entry) = entries.next_entry().await.map_err(status_from_io)? {
-                let metadata = tokio::fs::symlink_metadata(entry.path())
-                    .await
-                    .map_err(status_from_io)?;
-                if is_link_or_reparse(&metadata) || !metadata.is_file() {
-                    return Err(StatusCode::PermissionDenied);
-                }
-                count += 1;
-                if count > crate::jobs::MAX_ARTIFACTS_PER_CONTROLLER {
-                    return Err(StatusCode::Failure);
-                }
+            if is_link_or_reparse(&metadata) || !metadata.is_file() {
+                return Err(StatusCode::PermissionDenied);
+            }
+            count += 1;
+            if count > MAX_TRANSFERS {
+                return Err(StatusCode::Failure);
             }
         }
         Ok(count)
     }
 
     pub(super) fn validate_roots(&self) -> Result<(), StatusCode> {
-        let owner_root = self.root.parent().ok_or(StatusCode::PermissionDenied)?;
-        let artifacts_root = owner_root.parent().ok_or(StatusCode::PermissionDenied)?;
-        let install_root = artifacts_root
-            .parent()
-            .ok_or(StatusCode::PermissionDenied)?;
-        for path in [
-            install_root,
-            artifacts_root,
-            owner_root,
-            &self.root,
-            &self.sealed_root,
-        ] {
-            crate::jobs::validate_private_path(path, true).map_err(status_from_io)?;
+        let transfers = self.root.parent().ok_or(StatusCode::PermissionDenied)?;
+        let install = transfers.parent().ok_or(StatusCode::PermissionDenied)?;
+        for path in [install, transfers, &self.root] {
+            validate_directory(path).map_err(status_from_io)?;
         }
         Ok(())
     }
@@ -158,3 +175,70 @@ fn status_from_io(e: io::Error) -> StatusCode {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+fn validate_directory(path: &Path) -> io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || is_link_or_reparse(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "transfer directory is not a real directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "transfer directory is not owned by the Agent user",
+            ));
+        }
+    }
+    crate::ssh::validate_private_path(path)
+}
+
+fn create_directory(path: &Path) -> io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
+        Ok(()) => {
+            #[cfg(windows)]
+            set_private_acl(path, true)?;
+            validate_directory(path)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => validate_directory(path),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn set_private_acl(path: &Path, directory: bool) -> io::Result<()> {
+    use windows_permissions::constants::{SeObjectType, SecurityInformation};
+    use windows_permissions::wrappers::{ConvertSidToStringSid, SetNamedSecurityInfo};
+    use windows_permissions::{LocalBox, SecurityDescriptor};
+    let current =
+        windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
+    let current = ConvertSidToStringSid(&current).map_err(io::Error::other)?;
+    let flags = if directory { "OICI" } else { "" };
+    let descriptor: LocalBox<SecurityDescriptor> =
+        format!("D:P(A;{flags};FA;;;{})", current.to_string_lossy())
+            .parse()
+            .map_err(io::Error::other)?;
+    let dacl = descriptor
+        .dacl()
+        .ok_or_else(|| io::Error::other("private ACL missing"))?;
+    SetNamedSecurityInfo(
+        path.as_os_str(),
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        None,
+        None,
+        Some(dacl),
+        None,
+    )
+    .map_err(io::Error::other)
+}

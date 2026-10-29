@@ -302,6 +302,7 @@ async fn unavailable_primary_fails_over_to_pinned_route_and_controller_reaches_a
         host_key: agent_host_path,
         authorized_keys: authorized,
         jobs_root: jobs,
+        board_listen: None,
         gateway: Some(route(unavailable, &identity, &first_pin, reverse_port)),
         gateway_alternates: vec![route(
             gateway_addr.port(),
@@ -461,6 +462,7 @@ async fn bad_primary_pin_fails_without_trying_healthy_alternate() {
         host_key: root.path().join("unused-host"),
         authorized_keys: root.path().join("unused-authorized"),
         jobs_root: root.path().join("unused-jobs"),
+        board_listen: None,
         gateway: Some(route(address.port(), &identity_path, &pin_path, 40222)),
         gateway_alternates: vec![route(
             address.port().saturating_add(1),
@@ -490,6 +492,7 @@ async fn bad_primary_pin_fails_without_trying_healthy_alternate() {
         host_key: root.path().join("unused-host"),
         authorized_keys: root.path().join("unused-authorized"),
         jobs_root: root.path().join("unused-jobs"),
+        board_listen: None,
         gateway: Some(route(
             address.port(),
             &unauthorized_identity,
@@ -519,6 +522,7 @@ async fn bad_primary_pin_fails_without_trying_healthy_alternate() {
         host_key: root.path().join("unused-host"),
         authorized_keys: root.path().join("unused-authorized"),
         jobs_root: root.path().join("unused-jobs"),
+        board_listen: None,
         gateway: Some(route(
             address.port(),
             &identity_path,
@@ -553,6 +557,7 @@ fn config_rejects_conflicting_routes_and_port_and_key_paths() {
         host_key: PathBuf::from("host"),
         authorized_keys: PathBuf::from("authorized"),
         jobs_root: PathBuf::from("jobs"),
+        board_listen: None,
         gateway: Some(route(
             2200,
             Path::new("identity"),

@@ -1,6 +1,6 @@
 //! Authenticated embedded russh server for short exec, SFTP, and direct TCP forwarding.
 
-use crate::{AgentConfig, exec, jobs::MAX_ACTIVE_JOBS, sftp::SftpSession};
+use crate::{AgentConfig, exec, sftp::SftpSession};
 use russh::keys::ssh_key::authorized_keys::AuthorizedKeys;
 use russh::keys::{Algorithm, PrivateKey, PublicKey, PublicKeyBase64};
 use russh::server::{Auth, Msg, Server as _, Session};
@@ -11,7 +11,6 @@ use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore};
 
@@ -25,7 +24,6 @@ const MAX_ACTIVE_SFTP_SESSIONS: usize = 8;
 const MAX_ACTIVE_EXEC_SESSIONS: usize = 4;
 const MAX_PENDING_SESSION_CHANNELS: usize = 16;
 const MAX_EXEC_COMMAND_BYTES: usize = 16 * 1024;
-const JOB_SUBSYSTEM: &str = "hostlink-jobs";
 
 mod config;
 

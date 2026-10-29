@@ -15,22 +15,8 @@ async fn active_job_blocks_update_despite_unrelated_empty_jobs_directory() {
         fs::set_permissions(&unrelated_empty_jobs, fs::Permissions::from_mode(0o700))
             .expect("private unrelated jobs directory");
     }
-    let store = JobStore::initialize_fresh(&jobs).await.expect("job store");
-    let id = JobId::new();
-    let owner = "1".repeat(64);
-    store
-        .admit(
-            id,
-            &owner,
-            &JobSpec {
-                program: "true".to_owned(),
-                args: Vec::new(),
-                cwd: None,
-                source_sha256: "2".repeat(64),
-            },
-        )
-        .await
-        .expect("admit prepared job");
+    let _store = JobStore::initialize_fresh(&jobs).await.expect("job store");
+    let id = started_job::queued(&jobs).await;
 
     let update = request(&root, &archive, "2.0.0", digest);
     assert!(
@@ -42,17 +28,17 @@ async fn active_job_blocks_update_despite_unrelated_empty_jobs_directory() {
     assert_eq!(
         apply(&update).expect("defer update"),
         AgentUpdateOutcome::DeferredActiveJobs {
-            job_ids: vec![id.to_string()],
+            job_ids: vec![id.clone()],
         }
     );
     assert_eq!(
         active_ids(&jobs).expect("job stays active"),
-        vec![id.to_string()]
+        vec![id.clone()]
     );
-    started_job::started(&jobs, &store, id, &owner).await;
+    started_job::started(&jobs, &id).await;
     assert!(matches!(
         apply(&update).expect("running job defers update"),
-        AgentUpdateOutcome::DeferredActiveJobs { job_ids } if job_ids == vec![id.to_string()]
+        AgentUpdateOutcome::DeferredActiveJobs { job_ids } if job_ids == vec![id.clone()]
     ));
     // A native Apalis Running task remains active until the worker recovers
     // it. Recovery may replay it, but an updater must still defer.

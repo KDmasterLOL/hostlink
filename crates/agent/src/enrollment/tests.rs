@@ -333,6 +333,12 @@ async fn fresh_enrollment_publishes_private_config_once_against_local_hub_v2() {
     assert_eq!(published.machine_id.len(), 36);
     let config: AgentConfig =
         serde_json::from_slice(&fs::read(&published.config_path).unwrap()).unwrap();
+    let board = config
+        .board_listen
+        .expect("new managed Agent has local Apalis board");
+    assert!(board.ip().is_loopback());
+    assert_ne!(board.port(), 0);
+    assert_ne!(board, config.listen, "board and SSH use distinct listeners");
     assert!((32000..=32020).contains(&config.gateway.as_ref().unwrap().remote_port));
     assert_eq!(config.gateway.as_ref().unwrap().host, "127.0.0.2");
     assert_eq!(config.gateway_alternates.len(), 1);

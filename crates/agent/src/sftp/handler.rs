@@ -38,18 +38,8 @@ impl russh_sftp::server::Handler for SftpSession {
         let path = self
             .resolve(&filename, flags.contains(OpenFlags::CREATE))
             .await?;
-        if create {
-            if filename.len() != 71
-                || !filename.ends_with(".upload")
-                || !filename.as_bytes()[..64]
-                    .iter()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
-            {
-                return Err(StatusCode::PermissionDenied);
-            }
-            if self.upload_count().await? >= crate::jobs::MAX_ARTIFACTS_PER_CONTROLLER {
-                return Err(StatusCode::Failure);
-            }
+        if create && self.upload_count().await? >= MAX_TRANSFERS {
+            return Err(StatusCode::Failure);
         }
         let mut options = tokio::fs::OpenOptions::new();
         options
@@ -72,11 +62,11 @@ impl russh_sftp::server::Handler for SftpSession {
         let file = options.open(&path).await.map_err(status_from_io)?;
         #[cfg(windows)]
         if create {
-            crate::jobs::secure_new_upload(&path).map_err(status_from_io)?;
+            set_private_acl(&path, false).map_err(status_from_io)?;
         }
         if create {
             let over_limit = match self.upload_count().await {
-                Ok(count) => count > crate::jobs::MAX_ARTIFACTS_PER_CONTROLLER,
+                Ok(count) => count > MAX_TRANSFERS,
                 Err(error) => {
                     drop(file);
                     let _ = tokio::fs::remove_file(self.root.join(&filename)).await;
@@ -96,7 +86,6 @@ impl russh_sftp::server::Handler for SftpSession {
             handle.clone(),
             OpenFile {
                 file,
-                write_ranges: Vec::new(),
                 writable: write,
             },
         );
@@ -148,34 +137,9 @@ impl russh_sftp::server::Handler for SftpSession {
         let end = offset
             .checked_add(data.len() as u64)
             .ok_or(StatusCode::BadMessage)?;
-        if end > crate::jobs::MAX_ARTIFACT_BYTES
-            || f.write_ranges
-                .iter()
-                .any(|range| offset < range.end && range.start < end)
-        {
+        if end > MAX_TRANSFER_BYTES {
             return Err(StatusCode::Failure);
         }
-        let merged_ranges = if data.is_empty() {
-            None
-        } else {
-            let mut ranges = f.write_ranges.clone();
-            ranges.push(offset..end);
-            ranges.sort_unstable_by_key(|range| range.start);
-            let mut merged: Vec<Range<u64>> = Vec::with_capacity(ranges.len());
-            for range in ranges {
-                if let Some(previous) = merged.last_mut()
-                    && range.start <= previous.end
-                {
-                    previous.end = previous.end.max(range.end);
-                    continue;
-                }
-                merged.push(range);
-            }
-            if merged.len() > MAX_UPLOAD_WRITE_RANGES {
-                return Err(StatusCode::Failure);
-            }
-            Some(merged)
-        };
         f.file
             .seek(SeekFrom::Start(offset))
             .await
@@ -186,9 +150,6 @@ impl russh_sftp::server::Handler for SftpSession {
         // visible to a separately opened handle, including for pipelined
         // out-of-order packet offsets. This is completion, not fsync durability.
         f.file.flush().await.map_err(status_from_io)?;
-        if let Some(ranges) = merged_ranges {
-            f.write_ranges = ranges;
-        }
         Ok(ok(id))
     }
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {

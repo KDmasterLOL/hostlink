@@ -1,6 +1,9 @@
 #![cfg(target_os = "linux")]
 
-use hostlink_agent::jobs::{JobId, JobSpec, JobStore};
+#[path = "support/started_job.rs"]
+mod started_job;
+
+use hostlink_agent::jobs::JobStore;
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 use tempfile::TempDir;
 
@@ -206,22 +209,8 @@ async fn service_commands_bind_private_unit_to_root_and_remove_only_service_meta
     fs::set_permissions(&machine_file, fs::Permissions::from_mode(0o600)).unwrap();
 
     let jobs_root = root.join("state/jobs");
-    let store = JobStore::open(&jobs_root).await.unwrap();
-    let id = JobId::new();
-    let admitted = store
-        .admit(
-            id,
-            &"a".repeat(64),
-            &JobSpec {
-                program: "disposable-fixture".into(),
-                args: Vec::new(),
-                cwd: None,
-                source_sha256: "b".repeat(64),
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!((admitted).id, id);
+    let _store = JobStore::open(&jobs_root).await.unwrap();
+    let id = started_job::queued(&jobs_root).await;
     for cmd in ["stop", "remove"] {
         let blocked = invoke(
             &root.join("bin/hostlink-agent"),
@@ -231,7 +220,7 @@ async fn service_commands_bind_private_unit_to_root_and_remove_only_service_meta
         assert!(!blocked.status.success());
         assert!(String::from_utf8_lossy(&blocked.stderr).contains("durable jobs"));
     }
-    store.cancel_pending(id, &"a".repeat(64)).await.unwrap();
+    started_job::completed(&jobs_root, &id).await;
 
     let status = invoke(
         &root.join("bin/hostlink-agent"),

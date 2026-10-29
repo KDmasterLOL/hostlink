@@ -16,8 +16,7 @@ pub(super) async fn exercise_gateway(
 ) -> String {
     let enrolled_public = verify_gateway_authorization(host, &fixture).await;
     verify_sftp_transfers(host, client_bin, cli_config, &fixture).await;
-    let resumed = gateway_jobs::verify_durable_job(host, &fixture).await;
-    gateway_jobs::verify_local_forwarding(resumed).await;
+    verify_local_forwarding(connect_retry(host).await).await;
     verify_wildcard_reverse_denied(&fixture, ssh_port).await;
     enrolled_public
 }
@@ -166,4 +165,40 @@ async fn verify_wildcard_reverse_denied(fixture: &GatewayFixture<'_>, ssh_port: 
         wildcard_status.is_some_and(|status| !status.success()),
         "gateway projection must deny wildcard reverse listener"
     );
+}
+
+pub(super) async fn verify_local_forwarding(resumed: HostConnection) {
+    // A local loopback probe proves forward channels traverse sshd and the nested Agent.
+    let echo_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let echo_addr = echo_listener.local_addr().unwrap();
+    let echo_task = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = echo_listener.accept().await {
+            tokio::spawn(async move {
+                let mut bytes = [0; 256];
+                while let Ok(n) = socket.read(&mut bytes).await {
+                    if n == 0 {
+                        break;
+                    }
+                    if socket.write_all(&bytes[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    let forward = forward::start_local_forward(resumed, "127.0.0.1:0".parse().unwrap(), echo_addr)
+        .await
+        .expect("start loopback-only forwarding");
+    let mut probe = tokio::net::TcpStream::connect(forward.local_addr())
+        .await
+        .unwrap();
+    probe.write_all(b"tcp-probe").await.unwrap();
+    let mut echoed = [0; 9];
+    probe.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(&echoed, b"tcp-probe");
+    forward
+        .shutdown()
+        .await
+        .expect("close loopback forward cleanly");
+    echo_task.abort();
 }

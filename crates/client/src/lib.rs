@@ -6,7 +6,6 @@ pub mod exec;
 pub mod forward;
 pub mod hub;
 pub mod migration;
-pub mod run;
 pub mod sftp;
 
 use serde::Deserialize;

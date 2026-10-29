@@ -136,6 +136,7 @@ impl Fixture {
             host_key: host_key_path,
             authorized_keys,
             jobs_root,
+            board_listen: None,
             gateway: None,
             gateway_alternates: Vec::new(),
         };

@@ -98,6 +98,7 @@ async fn agent_and_controller_authenticate_stream_execute_and_transfer() {
         host_key,
         authorized_keys,
         jobs_root,
+        board_listen: None,
         gateway: None,
         gateway_alternates: Vec::new(),
     };
@@ -138,26 +139,23 @@ async fn agent_and_controller_authenticate_stream_execute_and_transfer() {
     );
     assert_eq!(result.exit_code, 7, "remote nonzero status was lost");
 
-    // SFTP is now a per-controller, create-only artifact staging area:
-    // filenames are SHA-256-addressed and terminate in .upload.
-    use sha2::{Digest as _, Sha256};
+    // SFTP is now an independent private per-controller transfer directory.
+    // Arbitrary single-component filenames work, but traversal and overwrites do not.
     let contents = b"hostlink-russh-private-sftp\x00\xff";
-    let artifact_name = format!("{:x}.upload", Sha256::digest(contents));
+    let artifact_name = "integration.bin";
     assert!(
-        host.sftp_upload("integration.bin", contents).await.is_err(),
-        "legacy arbitrary SFTP names must not bypass scoped staging",
+        host.sftp_upload("../outside.bin", contents).await.is_err(),
+        "SFTP must not escape the private controller directory",
     );
-    host.sftp_upload(&artifact_name, contents)
+    host.sftp_upload(artifact_name, contents)
         .await
         .expect("scoped SFTP create");
     assert!(
-        host.sftp_upload(&artifact_name, b"overwrite")
-            .await
-            .is_err(),
+        host.sftp_upload(artifact_name, b"overwrite").await.is_err(),
         "exclusive upload must not overwrite an existing artifact"
     );
     let downloaded = host
-        .sftp_download(&artifact_name)
+        .sftp_download(artifact_name)
         .await
         .expect("scoped SFTP download");
     assert_eq!(downloaded, contents);

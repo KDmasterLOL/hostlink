@@ -134,6 +134,7 @@ async fn cli_run_starts_only_one_agent_owned_reverse_tunnel() {
         host_key: host_file,
         authorized_keys: controller_file,
         jobs_root: jobs,
+        board_listen: None,
         gateway: Some(ReverseGateway {
             host: "127.0.0.1".into(),
             port: address.port(),

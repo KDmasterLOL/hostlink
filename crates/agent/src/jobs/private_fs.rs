@@ -1,30 +1,7 @@
 use super::*;
 
-pub(super) fn validate_digest(value: &str) -> io::Result<()> {
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(invalid(
-            "SHA-256 digest must be 64 lowercase hexadecimal characters",
-        ));
-    }
-    Ok(())
-}
-
 pub(super) fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
-}
-
-/// Reject aliases in the caller-provided path; managed roots are independently
-/// private and Agent-owned. No custom host-wide ancestor ownership policy.
-#[cfg(unix)]
-pub(super) fn validate_source_ancestors(directory: &Path) -> io::Result<()> {
-    if !directory.is_absolute() || directory.as_os_str() != directory.canonicalize()?.as_os_str() {
-        return Err(invalid("source ancestors must be canonical absolute paths"));
-    }
-    Ok(())
 }
 
 pub(crate) fn validate_private_path(path: &Path, directory: bool) -> io::Result<()> {
@@ -276,17 +253,4 @@ pub(super) fn set_private_windows_acl(path: &Path, directory: bool) -> io::Resul
         None,
     )
     .map_err(io::Error::other)
-}
-
-/// Harden only a file just created successfully with SFTP CREATE_NEW.
-/// Validate inherited ACL ownership/allow ACEs and link identity BEFORE changing it.
-#[cfg(windows)]
-pub(crate) fn secure_new_upload(path: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(invalid("new upload must be a regular non-symlink file"));
-    }
-    validate_windows_acl_contents(path, &metadata, false)?;
-    reject_windows_hardlinks(path)?;
-    restrict_private_path(path, false)
 }

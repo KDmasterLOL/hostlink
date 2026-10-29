@@ -300,6 +300,7 @@ async fn reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins() {
         host_key: agent_host_file,
         authorized_keys: authorized,
         jobs_root: jobs,
+        board_listen: None,
         gateway: Some(ReverseGateway {
             host: "127.0.0.1".into(),
             port: gw_addr.port(),

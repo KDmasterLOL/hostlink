@@ -119,30 +119,6 @@ fn validate_private_file(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_jobs_root(path: &Path) -> io::Result<PathBuf> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(invalid_data(
-            "SFTP root must be an existing non-symlink directory",
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "SFTP root must not be group/world accessible",
-            ));
-        }
-    }
-    #[cfg(windows)]
-    {
-        validate_private_acl(path)?;
-    }
-    std::fs::canonicalize(path)
-}
-
 #[cfg(windows)]
 fn validate_private_acl(path: &Path) -> io::Result<()> {
     use windows_permissions::constants::{AceType, SeObjectType, SecurityInformation};

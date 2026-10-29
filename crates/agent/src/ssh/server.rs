@@ -1,7 +1,6 @@
 #![allow(unused_imports)]
-use super::config::{PreparedEmbeddedSshConfig, invalid_data, prepare, validate_jobs_root};
+use super::config::{PreparedEmbeddedSshConfig, invalid_data, prepare};
 use super::*;
-use crate::jobs::{JobRuntime, JobWorker, handle_job_channel};
 
 struct EmbeddedServer {
     expected_user: Arc<str>,
@@ -10,7 +9,7 @@ struct EmbeddedServer {
     sftp_slots: Arc<Semaphore>,
     exec_slots: Arc<Semaphore>,
     exec_shutdown: processkit::CancellationToken,
-    jobs: Arc<JobRuntime>,
+    transfer_root: PathBuf,
     connection_slots: Arc<Semaphore>,
 }
 
@@ -21,7 +20,7 @@ struct EmbeddedSession {
     sftp_slots: Arc<Semaphore>,
     exec_slots: Arc<Semaphore>,
     exec_shutdown: processkit::CancellationToken,
-    jobs: Arc<JobRuntime>,
+    transfer_root: PathBuf,
     _connection_slot: Option<tokio::sync::OwnedSemaphorePermit>,
     active_exec: Arc<std::sync::Mutex<HashMap<ChannelId, processkit::CancellationToken>>>,
     session_channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
@@ -59,57 +58,57 @@ where
         ));
     }
     let prepared = prepare(config)?;
-    let jobs_root = validate_jobs_root(&config.jobs_root)?;
-    let jobs = JobRuntime::open(&jobs_root).await?;
-    if config.gateway.is_none() {
-        return serve_prepared_until(listener, prepared, jobs, shutdown).await;
-    }
     let cancellation = processkit::CancellationToken::new();
-    let shutdown_signal = async {
-        shutdown.await;
-        cancellation.cancel();
-    };
-    let tunnel_cancellation = cancellation.clone();
-    let mut server = Box::pin(serve_prepared_until(
+    let mut ssh = Box::pin(serve_prepared_until(
         listener,
         prepared,
-        jobs.clone(),
+        config.jobs_root.clone(),
         cancellation.clone().cancelled_owned(),
     ));
-    let mut tunnel = Box::pin(crate::tunnel::run(
-        config,
-        tunnel_cancellation.cancelled_owned(),
+    let mut jobs = Box::pin(crate::jobs::serve_until(
+        &config.jobs_root,
+        config.board_listen,
+        cancellation.clone(),
     ));
-    tokio::pin!(shutdown_signal);
-    tokio::select! {
-        result = &mut server => {
-            cancellation.cancel();
-            // Keep polling the tunnel until its sessions and forwards shut down.
-            result.and(tunnel.await)
-        },
-        result = &mut tunnel => {
-            let expected_shutdown = cancellation.is_cancelled();
-            cancellation.cancel();
-            // A failed tunnel must still stop and drain Agent-owned process trees.
-            server.await?;
-            match result {
-                Ok(()) if !expected_shutdown => Err(io::Error::other(
-                    "reverse SSH tunnel ended before Agent shutdown",
-                )),
-                result => result,
+    let mut tunnel = Box::pin(async {
+        if config.gateway.is_some() {
+            crate::tunnel::run(config, cancellation.clone().cancelled_owned()).await
+        } else {
+            std::future::pending::<io::Result<()>>().await
+        }
+    });
+    tokio::pin!(shutdown);
+    let result = tokio::select! {
+        result = &mut ssh => (0, result),
+        result = &mut jobs => (1, result),
+        result = &mut tunnel => (2, result),
+        () = &mut shutdown => (3, Ok(())),
+    };
+    cancellation.cancel();
+    let early = result.0 != 3;
+    let mut outcome = result.1;
+    if early && outcome.is_ok() {
+        outcome = Err(io::Error::other("Agent service stopped before shutdown"));
+    }
+    let (ssh_result, jobs_result, tunnel_result) = tokio::join!(
+        async { if result.0 != 0 { ssh.await } else { Ok(()) } },
+        async { if result.0 != 1 { jobs.await } else { Ok(()) } },
+        async {
+            if result.0 != 2 && config.gateway.is_some() {
+                tunnel.await
+            } else {
+                Ok(())
             }
         },
-        () = &mut shutdown_signal => {
-            let (server_result, tunnel_result) = tokio::join!(&mut server, &mut tunnel);
-            server_result.and(tunnel_result)
-        },
-    }
+    );
+    outcome = outcome.and(ssh_result).and(jobs_result).and(tunnel_result);
+    outcome
 }
 
 async fn serve_prepared_until<F>(
     listener: tokio::net::TcpListener,
     prepared: PreparedEmbeddedSshConfig,
-    jobs: Arc<JobRuntime>,
+    transfer_root: PathBuf,
     shutdown: F,
 ) -> io::Result<()>
 where
@@ -134,69 +133,34 @@ where
         sftp_slots: Arc::new(Semaphore::new(MAX_ACTIVE_SFTP_SESSIONS)),
         exec_slots: Arc::new(Semaphore::new(MAX_ACTIVE_EXEC_SESSIONS)),
         exec_shutdown: processkit::CancellationToken::new(),
-        jobs: jobs.clone(),
+        transfer_root,
         connection_slots: Arc::new(Semaphore::new(MAX_AUTHENTICATED_SESSIONS)),
     };
     let exec_shutdown = server.exec_shutdown.clone();
+    let exec_slots = server.exec_slots.clone();
 
     let running = server.run_on_socket(server_config, &listener);
     let handle = running.handle();
     tokio::pin!(running);
     tokio::pin!(shutdown);
 
-    let mut worker = JobWorker::start(jobs.clone());
-    let mut worker_result = None;
     let result = tokio::select! {
         result = &mut running => result,
-        result = &mut worker.task => {
-            worker_result = Some(result.map_err(io::Error::other).and_then(|r| r));
-            handle.shutdown("HostLink durable worker stopped".to_owned());
-            let _ = tokio::time::timeout(SHUTDOWN_GRACE, &mut running).await;
-            Err(io::Error::other("durable Apalis worker stopped before Agent shutdown"))
-        }
         () = &mut shutdown => {
-            handle.shutdown("onec-agent embedded SSH shutdown".to_owned());
+            handle.shutdown("HostLink embedded SSH shutdown".to_owned());
             match tokio::time::timeout(SHUTDOWN_GRACE, &mut running).await {
                 Ok(result) => result,
-                Err(_) => Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "embedded SSH shutdown timed out",
-                )),
+                Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "embedded SSH shutdown timed out")),
             }
         }
     };
     exec_shutdown.cancel();
-    // Close admission and signal trees without awaiting a possibly blocked
-    // admission/claim lock here. The supervised worker serializes its final
-    // drain under start_lock; the outer shutdown deadline must stay bounded.
-    jobs.accepting.store(false, Ordering::Release);
-    jobs.shutdown.cancel();
-    let worker_result = match worker_result {
-        Some(result) => result,
-        None => tokio::time::timeout(SHUTDOWN_GRACE, &mut worker.task)
-            .await
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "durable Apalis worker shutdown timed out",
-                )
-            })?
-            .map_err(io::Error::other)?,
-    };
-    let all_job_slots = jobs
-        .slots
-        .clone()
-        .acquire_many_owned(MAX_ACTIVE_JOBS as u32);
-    if tokio::time::timeout(SHUTDOWN_GRACE, all_job_slots)
+    let slots = exec_slots.acquire_many_owned(MAX_ACTIVE_EXEC_SESSIONS as u32);
+    let _permit = tokio::time::timeout(SHUTDOWN_GRACE, slots)
         .await
-        .is_err()
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "durable job process trees did not finish during Agent shutdown",
-        ));
-    }
-    result.and(worker_result)
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "SSH exec shutdown timed out"))?
+        .map_err(io::Error::other)?;
+    result
 }
 
 impl russh::server::Server for EmbeddedServer {
@@ -210,7 +174,7 @@ impl russh::server::Server for EmbeddedServer {
             sftp_slots: self.sftp_slots.clone(),
             exec_slots: self.exec_slots.clone(),
             exec_shutdown: self.exec_shutdown.clone(),
-            jobs: self.jobs.clone(),
+            transfer_root: self.transfer_root.clone(),
             _connection_slot: self.connection_slots.clone().try_acquire_owned().ok(),
             active_exec: Arc::new(std::sync::Mutex::new(HashMap::new())),
             session_channels: Arc::new(Mutex::new(HashMap::new())),
@@ -371,52 +335,29 @@ impl russh::server::Handler for EmbeddedSession {
         name: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if name != "sftp" && name != JOB_SUBSYSTEM {
+        if name != "sftp" {
             self.discard_session_channel(channel_id).await;
             fail_session_channel(channel_id, session)?;
             return Ok(());
         }
-
         let Some(channel) = self.take_session_channel(channel_id).await else {
             fail_session_channel(channel_id, session)?;
             return Ok(());
         };
-        if name == "sftp" {
-            let Some(owner) = self.authenticated_controller.clone() else {
-                fail_session_channel(channel_id, session)?;
-                return Ok(());
-            };
-            let Ok(session_slot) = self.sftp_slots.clone().try_acquire_owned() else {
-                fail_session_channel(channel_id, session)?;
-                return Ok(());
-            };
-            let artifacts = match self.jobs.store.artifacts(&owner) {
-                Ok(artifacts) => artifacts,
-                Err(_) => {
-                    fail_session_channel(channel_id, session)?;
-                    return Ok(());
-                }
-            };
-            session.channel_success(channel_id)?;
-            russh_sftp::server::run(
-                channel.into_stream(),
-                SftpSession::new(artifacts, session_slot),
-            )
-            .await;
-        } else if let Some(owner) = self.authenticated_controller.clone() {
-            let Ok(channel_slot) = self.jobs.channel_slots.clone().try_acquire_owned() else {
-                fail_session_channel(channel_id, session)?;
-                return Ok(());
-            };
-            session.channel_success(channel_id)?;
-            let jobs = self.jobs.clone();
-            tokio::spawn(async move {
-                let _channel_slot = channel_slot;
-                handle_job_channel(channel, jobs, owner).await;
-            });
-        } else {
+        let Some(owner) = self.authenticated_controller.as_deref() else {
             fail_session_channel(channel_id, session)?;
-        }
+            return Ok(());
+        };
+        let Ok(slot) = self.sftp_slots.clone().try_acquire_owned() else {
+            fail_session_channel(channel_id, session)?;
+            return Ok(());
+        };
+        let Ok(transfer) = SftpSession::new(&self.transfer_root, owner, slot) else {
+            fail_session_channel(channel_id, session)?;
+            return Ok(());
+        };
+        session.channel_success(channel_id)?;
+        russh_sftp::server::run(channel.into_stream(), transfer).await;
         Ok(())
     }
 
@@ -495,7 +436,3 @@ fn fail_session_channel(channel: ChannelId, session: &mut Session) -> Result<(),
     session.channel_failure(channel)?;
     session.close(channel)
 }
-
-#[cfg(all(test, target_os = "linux"))]
-#[path = "tests/wire/mod.rs"]
-mod wire_tests;

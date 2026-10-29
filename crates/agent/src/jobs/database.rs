@@ -5,7 +5,7 @@ use sqlx::{
 };
 use std::time::Duration;
 
-pub(super) const QUEUE: &str = "hostlink-agent";
+pub(super) const QUEUE: &str = "commands";
 pub(super) const DATABASE: &str = "jobs.db";
 
 /// Never wait for a filesystem lock on a Tokio executor thread: another task
@@ -15,7 +15,7 @@ pub(super) async fn update_lock(root: &Path) -> io::Result<FileLease> {
         .parent()
         .ok_or_else(|| invalid("jobs root has no parent"))?
         .to_owned();
-    tokio::task::spawn_blocking(move || acquire_update_lock(&parent))
+    tokio::task::spawn_blocking(move || private_fs::acquire_update_lock(&parent))
         .await
         .map_err(io::Error::other)?
 }
@@ -54,7 +54,6 @@ pub(super) fn inspect_layout(root: &Path) -> io::Result<bool> {
             }
             Some("jobs.db-wal" | "jobs.db-shm") => validate_sidecar(&entry.path())?,
             Some("runner.lock") => validate_private_path(&entry.path(), false)?,
-            Some("outputs") => validate_private_path(&entry.path(), true)?,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -130,6 +129,17 @@ async fn verify_connection(conn: &mut SqliteConnection) -> Result<(), sqlx::Erro
 }
 
 pub(super) async fn connect(root: &Path, read_only: bool) -> io::Result<SqlitePool> {
+    if read_only {
+        return SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(root.join(DATABASE))
+                    .read_only(true),
+            )
+            .await
+            .map_err(io::Error::other);
+    }
     let options = SqliteConnectOptions::new()
         .filename(root.join(DATABASE))
         .create_if_missing(false)
@@ -179,10 +189,11 @@ pub(super) async fn open_existing(root: &Path) -> io::Result<SqlitePool> {
             "durable database is empty or torn; preserve it for reconciliation instead of initializing over it",
         ));
     }
-    validate_private_path(&root.join("outputs"), true)?;
-    let pool = connect(root, false).await?;
-    verify_schema(&pool).await?;
-    Ok(pool)
+    let inspection = connect(root, true).await?;
+    let verified = verify_schema(&inspection).await;
+    inspection.close().await;
+    verified?;
+    connect(root, false).await
 }
 
 /// Provision only an explicitly fresh, empty private jobs root.
@@ -226,9 +237,8 @@ pub(super) async fn initialize_fresh(root: &Path) -> io::Result<SqlitePool> {
         .run(&pool)
         .await
         .map_err(io::Error::other)?;
-    sqlx::raw_sql("CREATE TABLE DurableMeta (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);\nINSERT INTO DurableMeta VALUES(1,4);")
+    sqlx::raw_sql("CREATE TABLE DurableMeta (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);\nINSERT INTO DurableMeta VALUES(1,5);")
         .execute(&pool).await.map_err(io::Error::other)?;
-    artifacts::create_private_directory(&root.join("outputs"))?;
     secure_sidecars(root)?;
     sync_directory(root)?;
     Ok(pool)
@@ -237,7 +247,7 @@ pub(super) async fn initialize_fresh(root: &Path) -> io::Result<SqlitePool> {
 pub(super) async fn verify_schema(pool: &SqlitePool) -> io::Result<()> {
     let version: i64 = sqlx::query_scalar("SELECT version FROM DurableMeta WHERE id=1")
         .fetch_one(pool).await.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("incomplete or unrecognized durable database; preserve it for reconciliation: {e}")))?;
-    if version != 4 {
+    if version != 5 {
         return Err(invalid("unsupported durable SQLite schema version"));
     }
     // Validate the ledger read-only; never invoke Migrator::run on old state.

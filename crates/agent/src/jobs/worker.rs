@@ -1,226 +1,174 @@
-use super::spool::{CappedOutputWriter, open_job_output};
 use super::*;
+use apalis_core::{
+    backend::ext::BackendExt, error::WorkerError, task::data::Data, worker::builder::WorkerBuilder,
+};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
-pub(super) async fn run_job(
-    runtime: Arc<JobRuntime>,
-    owner: String,
-    record: crate::jobs::JobView,
-    active: processkit::CancellationToken,
-    unconfirmed: Arc<AtomicBool>,
-) -> io::Result<i32> {
-    let id = record.id;
-    let ((out, out_sync), (err, err_sync)) = (
-        open_job_output(&runtime, id, JobOutput::Stdout)?,
-        open_job_output(&runtime, id, JobOutput::Stderr)?,
-    );
-    let pump_ends = [
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(AtomicBool::new(false)),
-    ];
-    let cancel = active.clone();
-    let mut command = processkit::Command::new(&record.spec.program)
-        .args(&record.spec.args)
-        .stdin(processkit::Stdin::empty())
-        .stdout_raw_tee(CappedOutputWriter::new(
-            out,
-            out_sync.metadata()?.len(),
-            cancel.clone(),
-            pump_ends[0].clone(),
-        ))
-        .stderr_raw_tee(CappedOutputWriter::new(
-            err,
-            err_sync.metadata()?.len(),
-            cancel.clone(),
-            pump_ends[1].clone(),
-        ))
-        .output_buffer(processkit::OutputBufferPolicy::bounded(256).with_max_bytes(64 * 1024))
-        // The deadline is enforced against the shared ProcessGroup below.
-        // ProcessKit's own timeout only kills the direct child in a shared
-        // group. An inherited pipe can then keep its output pump alive until
-        // the five-second abort, losing the raw tee's EOF flush.
-        // Do not use cancel_on: ProcessKit 3.3.4 reports Cancelled before
-        // checking pump read errors, even when the raw tee flushed successfully.
-        .kill_on_parent_death();
-    if let Some(cwd) = &record.spec.cwd {
-        command = command.current_dir(cwd);
-    }
-    // Keep the group owner after the direct child exits: descendants may have
-    // closed stdio and outlive drain(). Require an OS-backed empty-group report.
-    let group = processkit::ProcessGroup::new().map_err(io::Error::other)?;
-    // Serialize the cancel check AND start with authenticated Cancel. A cancel
-    // acknowledged before this gate must never execute; after start, the select
-    // below stops the group while drain preserves ProcessKit's Io errors.
-    let start = runtime.start_lock.lock().await;
-    let current = runtime.store.lookup(id, &owner).await?;
-    if current.job != record.job || !matches!(current.state, JobState::Prepared | JobState::Running)
+#[derive(Clone)]
+struct ExecutionContext {
+    stop: processkit::CancellationToken,
+    uncertain: Arc<AtomicBool>,
+}
+
+async fn execute(job: CommandJob, ctx: Data<ExecutionContext>) -> io::Result<i32> {
+    if job.program.is_empty()
+        || job.args.len() > 256
+        || job.program.len() > 8192
+        || job.args.iter().any(|arg| arg.len() > 8192)
     {
-        drop(start);
-        return fail_before_launch((out_sync, err_sync)).await;
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid command bounds",
+        ));
     }
-    if active.is_cancelled() {
-        drop(start);
-        return fail_before_launch((out_sync, err_sync)).await;
-    }
-    // Re-authorize the controller's sealed source after queue delay, immediately
-    // before ProcessKit starts. No launch-by-FD guarantee is implied.
-    if verify_job_source(&runtime.store, &owner, &record.spec).is_err() {
-        drop(start);
-        return fail_before_launch((out_sync, err_sync)).await;
-    }
-    // POSIX process groups cannot contain setsid() descendants. Inspect the
-    // actual created backend, never host_containment()'s prediction, BEFORE spawn.
-    if !trusted_mechanism(group.mechanism()) {
-        eprintln!(
-            "hostlink-agent: job {id} rejected before launch: unsupported containment {:?}",
-            group.mechanism()
-        );
-        drop(start);
-        return fail_before_launch((out_sync, err_sync)).await;
-    }
-    let launched = group.start(&command).await;
-    drop(start);
-    let outcome = match launched {
-        Ok(child) => {
-            let drain = child.drain();
-            tokio::pin!(drain);
-            let outcome = tokio::select! {
-                biased;
-                outcome = &mut drain => outcome,
-                () = active.cancelled() => {
-                    // Kill the whole group, then drain every pipe. A failed
-                    // stop or a stalled reap cannot hold the worker forever.
-                    stop_and_drain(&group, &mut drain, Duration::from_secs(10)).await
-                }
-                () = tokio::time::sleep(JOB_TIMEOUT) => {
-                    // A shared ProcessKit command timeout kills only the direct
-                    // child. Stop all descendants before the pump's EOF drain.
-                    active.cancel();
-                    stop_and_drain(&group, &mut drain, Duration::from_secs(10)).await
-                }
-            };
-            if let Err(error) = confirm_group_drained(&group).await {
-                unconfirmed.store(true, Ordering::Release);
-                return Err(error);
-            }
-            outcome
-        }
-        Err(error) => {
-            if let Err(teardown) = confirm_group_drained(&group).await {
-                unconfirmed.store(true, Ordering::Release);
-                return Err(teardown);
-            }
-            let synced =
-                tokio::task::spawn_blocking(move || (out_sync.sync_all(), err_sync.sync_all()))
-                    .await;
-            if !matches!(synced, Ok((Ok(()), Ok(())))) {
-                return Err(io::Error::other(
-                    "failed to synchronize output after launch failure",
-                ));
-            }
-            return Err(io::Error::other(format!(
-                "ProcessKit launch failed: {error}"
-            )));
-        }
-    };
-    finish_job(&active, outcome, &pump_ends, (out_sync, err_sync)).await
-}
-
-// ProcessKit's own drain has no bound while waiting for an unresponsive OS
-// child. A stop failure or stalled reap must propagate UNKNOWN rather than
-// permanently blocking the worker after the active deadline/cancel fired.
-async fn stop_and_drain(
-    group: &processkit::ProcessGroup,
-    drain: impl std::future::Future<Output = processkit::Result<processkit::Outcome>>,
-    budget: Duration,
-) -> processkit::Result<processkit::Outcome> {
-    tokio::time::timeout(budget, async {
-        let (_, outcome) = tokio::try_join!(
-            async { group.stop(Duration::ZERO, true).await.map(|_| ()) },
-            drain,
-        )?;
-        Ok(outcome)
-    })
-    .await
-    .map_err(|_| {
-        processkit::ErrorReason::Io(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "process group stop/reap/output drain unconfirmed",
-        ))
-    })?
-}
-
-pub(super) fn trusted_mechanism(mechanism: processkit::Mechanism) -> bool {
-    match mechanism {
+    let group = processkit::ProcessGroup::new().map_err(io::Error::other)?;
+    let trusted = match group.mechanism() {
         #[cfg(target_os = "linux")]
         processkit::Mechanism::CgroupV2 => true,
         #[cfg(windows)]
         processkit::Mechanism::JobObject => true,
         #[cfg(target_os = "freebsd")]
         processkit::Mechanism::ProcessReaper => true,
-        // Includes POSIX fallback, unsupported OSes and future enum variants.
         _ => false,
+    };
+    if !trusted {
+        return Err(io::Error::other("process containment unavailable"));
     }
-}
-
-// No OS start or output pump existed: synced empty spools prove definite failure.
-async fn fail_before_launch((out_sync, err_sync): (File, File)) -> io::Result<i32> {
-    let synced =
-        tokio::task::spawn_blocking(move || (out_sync.sync_all(), err_sync.sync_all())).await;
-    if !matches!(synced, Ok((Ok(()), Ok(())))) {
-        return Err(io::Error::other("pre-launch output synchronization failed"));
+    let mut command = processkit::Command::new(&job.program)
+        .args(&job.args)
+        .stdin(processkit::Stdin::empty())
+        .output_buffer(processkit::OutputBufferPolicy::bounded(256).with_max_bytes(64 * 1024))
+        .kill_on_parent_death();
+    if let Some(cwd) = job.cwd {
+        command = command.current_dir(cwd);
     }
-    Err(io::Error::other("job cancelled or rejected before launch"))
-}
-
-// stop() returning Ok only confirms signal delivery. Its backend member count
-// must reach zero AFTER the direct child was drained/reaped. Keep ownership while
-// polling: neither an unknown count nor a successful kill is proof of completion.
-async fn confirm_group_drained(group: &processkit::ProcessGroup) -> io::Result<()> {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    if ctx.stop.is_cancelled() {
+        return Err(io::Error::other("Agent stopping"));
+    }
+    let child = group.start(&command).await.map_err(io::Error::other)?;
+    let drain = child.drain();
+    tokio::pin!(drain);
+    let mut timed_out = false;
+    let outcome = tokio::select! {
+        outcome = &mut drain => outcome.map_err(io::Error::other),
+        _ = ctx.stop.cancelled() => stop_and_drain(&group, &mut drain).await,
+        _ = tokio::time::sleep(Duration::from_secs(15 * 60)) => {
+            timed_out = true;
+            stop_and_drain(&group, &mut drain).await
+        }
+    };
+    let confirmed = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let report = group
                 .stop(Duration::ZERO, true)
                 .await
                 .map_err(io::Error::other)?;
             if report.members_after() == Some(0) {
-                return Ok(());
+                return Ok::<(), io::Error>(());
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
-    .await
-    .map_err(|_| io::Error::other("process group not confirmed empty within 5s; UNKNOWN"))?
-}
-
-// A successful ProcessKit drain alone does not confirm raw tee completion:
-// join_pumps can silently abort a straggler, and a read error also flushes.
-// Require an error-free drain, both stream-end flushes AND fsync.
-async fn finish_job(
-    active: &processkit::CancellationToken,
-    outcome: processkit::Result<processkit::Outcome>,
-    pump_ends: &[Arc<AtomicBool>; 2],
-    (out_sync, err_sync): (File, File),
-) -> io::Result<i32> {
-    let pumps_ended = pump_ends.iter().all(|ended| ended.load(Ordering::Acquire));
-    let synced = matches!(
-        tokio::task::spawn_blocking(move || (out_sync.sync_all(), err_sync.sync_all())).await,
-        Ok((Ok(()), Ok(())))
-    );
-    if !pumps_ended || !synced {
-        return Err(io::Error::other(
-            "process output completion could not be confirmed",
-        ));
+    .await;
+    if !matches!(confirmed, Ok(Ok(()))) {
+        ctx.uncertain.store(true, Ordering::Release);
+        ctx.stop.cancel();
+        return Err(io::Error::other("process group teardown not confirmed"));
     }
-    let outcome = outcome.map_err(io::Error::other)?;
-    if active.is_cancelled() {
-        return Err(io::Error::other("job cancelled or timed out"));
+    if ctx.stop.is_cancelled() || timed_out {
+        return Err(io::Error::other("Agent stopping or command timed out"));
     }
-    match outcome {
+    match outcome? {
         processkit::Outcome::Exited(code) => Ok(code),
         _ => Err(io::Error::other("process did not exit normally")),
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
-#[path = "tests/worker_tests.rs"]
-mod tests;
+async fn stop_and_drain(
+    group: &processkit::ProcessGroup,
+    drain: impl std::future::Future<Output = processkit::Result<processkit::Outcome>>,
+) -> io::Result<processkit::Outcome> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (_, result) = tokio::try_join!(
+            async { group.stop(Duration::ZERO, true).await.map(|_| ()) },
+            drain
+        )
+        .map_err(io::Error::other)?;
+        Ok(result)
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+/// Run exactly one worker and optionally the loopback-only board until shutdown.
+///
+/// # Errors
+/// Fails on invalid addresses, private state, bind, worker or serving errors.
+pub async fn serve_until(
+    root: &Path,
+    board_listen: Option<SocketAddr>,
+    shutdown: processkit::CancellationToken,
+) -> io::Result<()> {
+    if board_listen.is_some_and(|a| !a.ip().is_loopback() || a.port() == 0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "board must use a nonzero loopback address",
+        ));
+    }
+    let store = JobStore::open(root).await?;
+    let runner = open_lock(&root.join("runner.lock"))?;
+    runner.try_lock().map_err(io::Error::other)?;
+    let listener = match board_listen {
+        Some(address) => Some(tokio::net::TcpListener::bind(address).await?),
+        None => None,
+    };
+    let backend = store
+        .backend
+        .clone()
+        .poll_with_interval(Duration::from_millis(100));
+    let uncertain = Arc::new(AtomicBool::new(false));
+    let context = ExecutionContext {
+        stop: shutdown.clone(),
+        uncertain: uncertain.clone(),
+    };
+    let worker = WorkerBuilder::new(format!("hostlink-{}", ulid::Ulid::generate()))
+        .backend(backend)
+        .data(context)
+        .layer(tower::limit::ConcurrencyLimitLayer::new(MAX_ACTIVE_JOBS))
+        .build(execute);
+    let stop = shutdown.clone();
+    let worker_future = worker.run_until(async move {
+        stop.cancelled().await;
+        Ok::<(), WorkerError>(())
+    });
+    tokio::pin!(worker_future);
+    let result = if let (Some(listener), Some(address)) = (listener, board_listen) {
+        let stop = shutdown.clone();
+        let router = super::board::router(&store, address, root);
+        let server = async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move { stop.cancelled().await })
+                .await
+        };
+        tokio::pin!(server);
+        tokio::select! {
+            result = &mut worker_future => { shutdown.cancel(); result.map_err(io::Error::other) },
+            result = &mut server => { shutdown.cancel(); let worker_result = worker_future.await.map_err(io::Error::other); result?; worker_result },
+        }
+    } else {
+        worker_future.await.map_err(io::Error::other)
+    };
+    store.close().await;
+    runner.unlock()?;
+    if uncertain.load(Ordering::Acquire) {
+        return Err(io::Error::other("process teardown unconfirmed"));
+    }
+    result
+}

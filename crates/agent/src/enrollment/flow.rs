@@ -212,12 +212,31 @@ where
             remote_port: response.host.remote_port,
         })
         .collect::<Vec<_>>();
+    let listen = available_loopback_addr()?;
+    // The board is a separate localhost-only HTTP endpoint. Assign a distinct
+    // available address during fresh enrollment so users can open it without
+    // modifying the manifest-bound installed configuration.
+    let mut board_listen = None;
+    for _ in 0..LISTENER_PORT_ATTEMPTS {
+        let candidate = available_loopback_addr()?;
+        if candidate != listen {
+            board_listen = Some(candidate);
+            break;
+        }
+    }
+    let board_listen = board_listen.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "could not allocate a distinct board port",
+        )
+    })?;
     let config = AgentConfig {
-        listen: available_loopback_addr()?,
+        listen,
         user: options.user.clone(),
         host_key: PathBuf::from("host_key"),
         authorized_keys: PathBuf::from("authorized_keys"),
         jobs_root,
+        board_listen: Some(board_listen),
         gateway: Some(ReverseGateway {
             host: gateway.host.clone(),
             port: gateway.port,

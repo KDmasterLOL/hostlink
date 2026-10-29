@@ -96,6 +96,7 @@ async fn transient_gateway_loss_retries_until_shutdown() {
         host_key: temp.path().join("unused-host-key"),
         authorized_keys: temp.path().join("unused-authorized-keys"),
         jobs_root: temp.path().join("unused-jobs"),
+        board_listen: None,
         gateway: Some(ReverseGateway {
             host: gateway_addr.ip().to_string(),
             port: gateway_addr.port(),

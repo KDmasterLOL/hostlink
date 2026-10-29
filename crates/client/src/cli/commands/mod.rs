@@ -1,12 +1,10 @@
 mod forward;
 pub(super) mod hosts;
 mod hub;
-pub(super) mod job;
 mod remote;
-pub(super) mod run;
 
 use crate::cli::{
-    args::{Cli, Command, JobCommand},
+    args::{Cli, Command},
     commands::hosts::resolve_target_spec,
 };
 use hostlink::connect::HostConnection;
@@ -64,35 +62,14 @@ pub(super) async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         Some(path) => path,
         None => hub::default_hub_config_path()?,
     };
-    let target_hint = if selected_host.is_some() {
-        "--host <HOST>"
-    } else {
-        "--config <PATH>"
-    };
-    job::validate(&cli.command)?;
-    let prepared_run = run::prepare(&cli.command)?;
     let spec = resolve_target_spec(&config_path, selected_host.as_deref()).await?;
     let mut client = HostConnection::connect(&spec).await?;
 
     // Keep cleanup errors visible alongside any command failure.
     let operation: Result<i32, Box<dyn Error>> = async {
-        match &cli.command {
-            Command::Jobs {
-                command: JobCommand::Run { .. },
-            } => {
-                run::execute(
-                    &mut client,
-                    prepared_run.ok_or("internal run command preparation mismatch")?,
-                    &spec,
-                    target_hint,
-                )
-                .await
-            }
-            Command::Jobs { command } => job::execute(&mut client, command).await,
-            command => remote::execute(&mut client, command)
-                .await?
-                .ok_or_else(|| "internal remote command dispatch mismatch".into()),
-        }
+        remote::execute(&mut client, &cli.command)
+            .await?
+            .ok_or_else(|| "internal remote command dispatch mismatch".into())
     }
     .await;
     let cleanup = client.close().await;
@@ -115,13 +92,6 @@ fn selection(command: &Command) -> Result<(Option<PathBuf>, Option<String>), Box
         | Command::Forward { config, host, .. }
         | Command::Rdp { config, host, .. }
         | Command::Probe { config, host, .. } => (config.clone(), host.clone()),
-        Command::Jobs { command } => match command {
-            JobCommand::List { config, host, .. }
-            | JobCommand::Run { config, host, .. }
-            | JobCommand::Status { config, host, .. }
-            | JobCommand::Cancel { config, host, .. }
-            | JobCommand::Logs { config, host, .. } => (config.clone(), host.clone()),
-        },
         _ => return Err("internal command selection mismatch".into()),
     };
     Ok(selected)

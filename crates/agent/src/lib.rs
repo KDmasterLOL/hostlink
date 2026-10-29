@@ -26,6 +26,8 @@ pub struct AgentConfig {
     pub host_key: PathBuf,
     pub authorized_keys: PathBuf,
     pub jobs_root: PathBuf,
+    #[serde(default)]
+    pub board_listen: Option<SocketAddr>,
     pub gateway: Option<ReverseGateway>,
     /// Hub-approved fallback routes, ordered after the explicitly selected primary.
     #[serde(default)]
@@ -50,6 +52,14 @@ impl AgentConfig {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "SSH listener must be loopback and nonzero",
+            ));
+        }
+        if self.board_listen.is_some_and(|addr| {
+            addr.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) || addr.port() == 0
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "board listener must be 127.0.0.1 and nonzero",
             ));
         }
         if self.user.trim().is_empty()
@@ -141,10 +151,28 @@ mod tests {
             host_key: "key".into(),
             authorized_keys: "keys".into(),
             jobs_root: "jobs".into(),
+            board_listen: None,
             gateway: None,
             gateway_alternates: Vec::new(),
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn board_listener_is_ipv4_loopback_and_nonzero() {
+        let mut cfg: AgentConfig = serde_json::from_str(r#"{"listen":"127.0.0.1:2200","user":"agent","host_key":"host","authorized_keys":"authorized","jobs_root":"jobs","gateway":null}"#).unwrap();
+        assert_eq!(cfg.board_listen, None);
+        for address in [
+            "0.0.0.0:3000",
+            "127.0.0.1:0",
+            "[::1]:3000",
+            "127.0.0.2:3000",
+        ] {
+            cfg.board_listen = Some(address.parse().unwrap());
+            assert!(cfg.validate().is_err(), "{address}");
+        }
+        cfg.board_listen = Some("127.0.0.1:3000".parse().unwrap());
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

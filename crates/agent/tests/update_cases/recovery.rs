@@ -63,35 +63,18 @@ async fn active_job_prevents_recovery_mutations_then_update_recovers_backup() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&jobs, fs::Permissions::from_mode(0o700)).expect("private jobs root");
     }
-    let store = JobStore::initialize_fresh(&jobs).await.expect("job store");
-    let id = JobId::new();
-    let owner = "1".repeat(64);
-    store
-        .admit(
-            id,
-            &owner,
-            &JobSpec {
-                program: "true".to_owned(),
-                args: Vec::new(),
-                cwd: None,
-                source_sha256: "2".repeat(64),
-            },
-        )
-        .await
-        .expect("admit active job");
+    let _store = JobStore::initialize_fresh(&jobs).await.expect("job store");
+    let id = started_job::queued(&jobs).await;
     let (archive, digest) = package(&root, "2.0.0", b"new exact Agent binary");
     let update = request(&root, &archive, "2.0.0", digest);
     assert!(matches!(
         apply(&update).expect("defer while recovery is pending"),
-        AgentUpdateOutcome::DeferredActiveJobs { job_ids } if job_ids == vec![id.to_string()]
+        AgentUpdateOutcome::DeferredActiveJobs { job_ids } if job_ids == vec![id.clone()]
     ));
     assert!(!root.join("bin").exists());
     assert!(backup.join("hostlink-agent").is_file());
 
-    store
-        .cancel_pending(id, &owner)
-        .await
-        .expect("native queued cancellation reaches terminal state");
+    started_job::completed(&jobs, &id).await;
     assert!(matches!(
         apply(&update).expect("recover and update"),
         AgentUpdateOutcome::Installed { .. }
@@ -157,7 +140,7 @@ fn legacy_records_block_update_without_replacing_or_removing_existing_state() {
     let (_temp, root) = install_root();
     let (archive, digest) = package(&root, "2.0.0", b"new exact Agent binary");
     let jobs = root.join("jobs");
-    let legacy = jobs.join(JobId::new().to_string());
+    let legacy = jobs.join(ulid::Ulid::generate().to_string());
     fs::create_dir_all(&legacy).expect("legacy record directory");
     #[cfg(unix)]
     {
@@ -191,7 +174,7 @@ fn legacy_records_block_update_without_replacing_or_removing_existing_state() {
 }
 
 #[tokio::test]
-async fn orphan_output_blocks_update_without_claiming_a_known_terminal_job() {
+async fn unknown_legacy_output_blocks_update_without_modifying_existing_state() {
     let (_temp, root) = install_root();
     let (archive, digest) = package(&root, "2.0.0", b"new exact Agent binary");
     let jobs = root.join("jobs");
@@ -206,15 +189,17 @@ async fn orphan_output_blocks_update_without_claiming_a_known_terminal_job() {
         .expect("fresh SQLite store")
         .close()
         .await;
-    let orphan = jobs.join("outputs").join(JobId::new().to_string());
-    fs::create_dir(&orphan).expect("orphan output evidence");
+    // The new queue uses Apalis results, not HostLink output directories.
+    // Any legacy output tree must be preserved and refused as unknown state.
+    let orphan = jobs.join("outputs");
+    fs::create_dir(&orphan).expect("legacy output evidence");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&orphan, fs::Permissions::from_mode(0o700))
             .expect("private orphan output");
     }
-    assert!(active_ids(&jobs).is_err(), "orphan output is unknown state");
+    assert!(active_ids(&jobs).is_err(), "legacy output is unknown state");
     assert!(apply(&request(&root, &archive, "2.0.0", digest)).is_err());
     assert!(orphan.is_dir(), "unknown evidence must remain intact");
     assert_eq!(

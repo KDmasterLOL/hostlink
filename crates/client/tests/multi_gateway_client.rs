@@ -191,6 +191,7 @@ async fn unavailable_primary_fails_over_and_pinned_nested_agent_execs_and_sftp()
         host_key: agent_path,
         authorized_keys: authorized,
         jobs_root: jobs,
+        board_listen: None,
         gateway: None,
         gateway_alternates: Vec::new(),
     };
