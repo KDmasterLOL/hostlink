@@ -1,252 +1,129 @@
-# Minimal Agent jobs (1C-1081)
+# Agent jobs contract (Huly 1C-1081)
 
-Owner: `crates/agent/src/jobs/`. Update this contract when changing job storage,
-execution, framing or Client commands. This is development integration only.
-See the [module README](../crates/agent/src/jobs/README.md) for the entry
-points, ownership diagram and per-file source map.
+Source: `crates/agent/src/jobs/`. For architecture and the file map, see the
+[module README](../crates/agent/src/jobs/README.md). For exact test receipts,
+see [verification evidence](AGENT_MINIMAL_JOBS_EVIDENCE.md).
 
-## Queue and execution
+## Queue and recovery
 
-One `SqliteStorage<JobPayload>` sink and one Agent-owned `WorkerBuilder` handle
-admission and processing. The worker polls every 100 ms in batches of 16;
-concurrency is bounded to 16 processes, with no retry middleware or alternate
-backend.
-Runtime startup lives in `jobs::JobRuntime::open`: open only an established
-private SQLite root, obtain its exclusive runner lease, recover, then publish a
-fully initialized Agent-owned runtime. SSH never assembles job storage, process
-locks or scheduler state. The Tower concurrency layer bounds simultaneous Apalis
-consumer futures; the separate process semaphore retains capacity until OS
-tree teardown/output publication and deliberately keeps a permit quarantined
-when that completion is UNKNOWN. They protect different lifetimes and must not
-be mechanically collapsed.
-Updater/service safety scans read SQLite through their read-only pool without
-constructing a write-capable Apalis backend.
+The Agent uses the **pinned Apalis SQLite 1.0.0** backend, its native
+`TaskSink`, `WorkerBuilder`, task locks, and persisted results. No
+HostLink-specific `StartedClaims` table, one-shot execution fence,
+manual completion ACK or custom restart replay blocker exists.
 
-ProcessKit owns execution, raw output and tree teardown. Local cancellation
-uses the Agent's active token to stop the explicit group concurrently with child
-drain; jobs do not wire `Command::cancel_on`. In pinned 3.3.4 that finisher's
-Cancelled result masks a pump read error. An error-free drain plus both stream-end
-flushes, spool sync and confirmed empty group permits clean user cancel to become
-Failed. Any drain error (including Io with a cancelled active token) stays UNKNOWN.
-The final pre-spawn cancel check and ProcessKit start hold `start_lock`, shared
-with authenticated Cancel, so an acknowledged pre-start cancel cannot execute.
-Before any OS spawn, the Agent inspects the **actual created group's**
-`ProcessGroup::mechanism()`. Only Linux `CgroupV2`, Windows `JobObject` and
-FreeBSD `ProcessReaper` are trusted; POSIX `ProcessGroup`, other platforms and
-future enum variants are rejected. Linux therefore requires delegated cgroup v2.
-Pinned ProcessKit 3.3.4 can fall back when cgroup creation fails, even if its
-`host_containment()` prediction said cgroup. It has no other strong Linux backend;
-parent-death cleanup protects only the direct child. An unsupported backend never
-reaches `start()`: its claimed job becomes Failed only after both fresh empty
-spools sync. Sync/publication uncertainty stays UNKNOWN and blocks updates.
-The Agent retains an explicit ProcessGroup owner through child drain and always
-requires `group.stop(Duration::ZERO, true).members_after() == Some(0)` before
-result publication and permit release. The job deadline is enforced against
-this owned group rather than via `Command::timeout`: in ProcessKit 3.3.4
-the shared-group command timeout kills only its direct child, potentially
-leaving a grandchild's inherited stdout/stderr open until `join_pumps`
-aborts without an EOF flush. On deadline the Agent cancels the active token,
-stops the entire group concurrently with `drain()`, then confirms group
-emptiness, both stream-end flushes and durable sync before recording Failed.
-The stop/reap/drain phase has a ten-second upper bound; if OS termination,
-reaping or pipe drainage cannot be confirmed, the worker publishes UNKNOWN,
-closes admission and retains its permit instead of hanging indefinitely
-or reporting a false terminal result. A successful kill call alone is insufficient.
-After the direct child is drained/reaped, the Agent repeats the OS-backed stop/count
-query every 25 ms for at most five seconds, retaining group ownership. This includes
-descendants that close stdio and outlive their parent. Cancellation issues group
-stop concurrently with drain/reap, then confirms zero membership. Unknown counts,
-query errors or a nonempty group at the deadline yield UNKNOWN, no output EOF,
-and an error that retains the permit and blocks updates. Failed starts also require
-empty-group confirmation before a proven pre-spawn failure can become Failed.
-SSH authenticates the controller and carries requests; closing a jobs channel
-cannot cancel a process. Ordinary SSH exec retains its channel-owned lifetime.
+**Approved behavior (2026-10-29): Apalis may repeat a task that already
+started if its worker/Agent crashes.** Retrying may duplicate side effects.
+Do not advertise at-most-once or exactly-once execution. Explicit admission
+of an identical ULID/spec is idempotent; Apalis automatic crash recovery is
+independent from a second admission request.
 
-The immutable payload contains only ULID, controller fingerprint, request digest
-and exact executable/argv/cwd/source SHA. Lifecycle is **never serialized into
-that payload**. Apalis `Jobs.status`, `attempts` and `last_result` are authoritative.
-`JobView`/wire `JobState` are read-only projections:
+Apalis's `reenqueue_orphaned.sql` changes stale Running/Queued tasks to
+Pending, increments attempts and can enqueue them even with
+`max_attempts(1)`. That setting limits ordinary failed-attempt retries;
+it does **not** prevent orphan replay. The worker handler returns
+`io::Result<i32>`: `Ok(exit_code)` (including nonzero codes) becomes
+native `Done` + `Ok(code)`, and `Err` becomes native `Failed` + error.
+Normal job errors are not fatal to the entire Agent.
 
-| Native Apalis | Operator view | Update |
+There is one canonical uppercase caller-generated ULID for the Apalis ID,
+idempotency key, and filesystem output path; no UUID compatibility.
+`JobPayload` stores immutable owner fingerprint/request digest/program/argv/
+cwd/source digest. Native Apalis `Jobs.status`, `attempts`, and
+`last_result` are the durable lifecycle source, not a copied JobState.
+
+`JobStore::lookup` and `list` use bounded authenticated native-row queries.
+`FetchById` / `ListTasks` in pinned Apalis do not expose the combination
+of owner-filtered payload/status/result and paginated all-status listing.
+These queries do not manage state. A tiny guarded pending-cancel SQL update
+remains because the pinned backend has no public atomic cancel-by-ID API.
+
+| Native Apalis | Operator state | Updater |
 | --- | --- | --- |
-| Pending / Queued, pristine or exact native requeue result, no claim | prepared | deferred |
-| Running with matching claim | running | deferred |
-| Done + `Ok(exit_code)` with matching claim | exited, exact code (including nonzero) | allowed |
-| Failed + `Err(...)`, attempts=1 | failed | allowed after required output validation |
-| Killed + `Err(...)` | interrupted / UNKNOWN | deferred |
-| Pending / Queued with prior claim or consumed eligibility | interrupted / UNKNOWN | deferred |
-| Invalid identity, schema, attempt/result or files | error | blocked |
+| Pending / Queued | prepared | defer |
+| Running | running | defer |
+| Done + `Ok(i32)` | exited(code) | may proceed after output checks |
+| Failed + `Err` | failed | may proceed after output checks |
+| Killed with zero attempts | failed (cancelled before start) | may proceed |
+| Killed after an attempt | interrupted / unknown | defer |
+| Missing/torn/invalid data | error | reject |
 
-`ListTasks` and `FetchById` exist in pinned apalis-sqlite 1.0.0. Neither
-returns an atomic owner-filtered payload/status/result/claim snapshot; `ListTasks`
-also defaults to Pending. The small SQL projection in `jobs/query.rs` replaces
-both. `WaitForCompletion` cannot join the one-use fence and is not used.
+## SSH, binaries and process handling
 
-The caller's canonical uppercase ULID is **also** `Jobs.id` (Apalis TaskId) and
-`idempotency_key`; there is no second generated identity or UUID compatibility.
-The Client generates and prints it before resolving/connecting to the host.
-The pinned `ulid = 3.0.0` dependency was already in Cargo.lock through Apalis;
-parse plus canonical round-trip rejects lowercase, aliases and 130-bit overflow.
+The authenticated SSH subsystem is `hostlink-jobs` (no jobs-v1 adapter).
+Each bounded channel carries one length-prefixed JSON request and response.
+The operations are `seal` (internal), `run`, `list`, `status`, `logs`,
+and `cancel`. Closing an SSH jobs channel does **not** cancel the job.
+Ordinary short SSH `exec` is channel-owned, not durable.
 
-`StartedClaims(task_id PRIMARY KEY, owner, request_sha256)` is an immutable
-one-use **execution fence**, not another lifecycle engine. Only WorkerBuilder's
-dequeue can reach the production `claim_dequeued` method. Under `update.lock`
-and `BEGIN IMMEDIATE`, `INSERT … SELECT` matches the exact payload, same task ID,
-worker lock, due time, unclaimed eligibility and Queued status, then sets native
-Running/attempts=1 before ProcessKit launches. A spent or stale claim is an error.
-Upstream orphan requeue ignores max_attempts; neither it nor restart grants a
-second process attempt. On restart, pristine unclaimed Pending/Queued work is
-preserved. The worker heartbeat is expired so actual Apalis registration can
-reenqueue Queued work. Pinned Apalis increments attempts and stores one of two
-exact requeue Err strings (heartbeat timeout / worker shutdown); only those
-unclaimed rows remain eligible. Claim atomically sets attempts=1 and clears that
-bookkeeping result. Spent claims and uncertain native state become Killed/UNKNOWN;
-corrupt status/result fails closed. Restart never grants a second process attempt.
+The Client's `HostConnection::job_run(id, bytes, args)` uploads a binary via
+SFTP, verifies/seals its SHA-256 within the authenticated controller's
+private artifact root, then admits its ULID/spec via Apalis. Only the
+managed exact sealed source can be executed; no arbitrary remote program
+path is accepted through jobs. A lost ACK should be resolved by querying
+the same ULID, not by inventing a new identity.
 
-Admission holds `update.lock`: indexed ID lookup with owner/spec/digest check,
-capacity count, then the standard Apalis task sink. It does not enumerate jobs
-or output files. Status uses one indexed SELECT; list uses one owner-filtered
-SELECT, claim join, deterministic ID order, LIMIT 32 and OFFSET in one SQLite
-snapshot. Result/payload/claim bytes are bounded and validated. Logs reuse their
-single authenticated record snapshot. Deep database/filesystem inventory is
-reserved for startup/recovery and updater safety checks; output reads still
-validate private paths and file bounds. Corrupt unrelated files do not trigger
-an O(N) admission scan, but still block updater/startup and fail on direct read.
+`ProcessKit` starts, stops and drains a real OS-backed process group.
+Only Linux CgroupV2, Windows JobObject and FreeBSD ProcessReaper are
+accepted for durable execution; the POSIX process-group fallback is
+rejected. The Agent must not assert successful completion until the process
+tree is empty, both raw output pumps reached EOF and the spools synced.
+Cancelled/failed processes return native errors; unconfirmed tree teardown
+stops admission until the Agent is recovered. Linux parent-death cleanup
+on abrupt Agent termination is not a guarantee for every descendant:
+the service supervisor and OS containment remain relevant. Duplicate
+effects after crash are an accepted consequence of native Apalis replay.
 
-## Breaking transport and CLI
+stdout/stderr are private raw byte files. Reattempts append existing
+output and the per-stream size limit covers all attempts combined. The
+output may contain partial data or multiple attempts. EOF is reported
+only once a terminal native status and the captured file bounds permit
+it; a lost output file is not silently interpreted as complete empty
+output after a started attempt.
 
-The only jobs subsystem is **`hostlink-jobs`**. There is no v1 adapter. Each SSH
-channel carries exactly one UTF-8 JSON request with a four-byte big-endian length,
-then EOF; replies have the same framing. Frames are bounded to 64 KiB and requests
-time out after 15 seconds. Unknown fields (including the old `version`) fail.
-Operations are `run`, `list`, `status`, `logs`, `cancel`, `seal`.
+## Storage, service and migration policy
 
-```sh
-hostlink jobs run --config HOST.json --binary ./local-binary --id ULID -- exact argv
-hostlink jobs run --config HOST.json --binary ./local-binary --wait -- exact argv
-hostlink jobs list --config HOST.json --page 1
-hostlink jobs list --config HOST.json --status Done --page 1
-hostlink jobs status --config HOST.json --id ULID
-hostlink jobs logs --config HOST.json --id ULID --stream stdout --offset 0
-hostlink jobs cancel --config HOST.json --id ULID
-```
+- `JobStore::initialize_fresh` is explicit fresh provisioning only.
+  Native Apalis migrations initialize the new store once.
+- The private database schema marker is **version 4**; no
+  `StartedClaims`. Version 3, legacy `record.json` or torn/unknown roots
+  are **rejected without modification**. Import/migration stays Huly
+  1C-1080 and requires separate authorization for existing installations.
+- `JobRuntime::open` opens only an existing root and holds the exclusive
+  `runner.lock` for the serving lifetime. Never create replacement state
+  on recovery.
+- SQLite remains WAL with verified synchronous FULL and bounded
+  owner-only paths; updater scanning opens a read-only pool. Corruption
+  fails closed.
+- `update.lock` excludes admission/start during an update. The updater
+  and OS service lifecycle use `jobs::active_ids` and refuse replacement
+  when native tasks are Pending/Queued/Running or state cannot be
+  validated. A server crash does **not** establish that a task has completed.
+- `start_lock` coordinates cancellation and spawn; Apalis's own
+  ConcurrencyLimit bounds dequeue handlers and the OS-process semaphore
+  bounds actual tree lifetimes. A delayed Apalis lock publication must not
+  cause a cancelled task to execute.
 
-`--host NAME` may replace `--config`. The single `jobs run` uploads via SFTP,
-seals and enqueues using private Client `job_seal`/`job_start`. By default it
-prints admission ID/status and returns promptly; `--wait` streams exact raw
-stdout/stderr and returns the process exit code, with at most three reconnects across a single total status/stdout/stderr failure
-budget. Successful reads never replenish that budget.
-`HostConnection::job_run(id, bytes, args)` is the same upload/seal/enqueue pipeline
-used by CLI and integration callers. No start retry occurs on transport failure.
-Top-level `hostlink run`, low-level `--program/--source-sha256/--cwd`, and former
-`job start/output` commands are removed with no alias. IDs print before connection;
-a lost ACK means UNKNOWN: query that ULID before further action. Repeated identical
-IDs/specs return the existing view; conflicting specs/keys fail.
+Resource limits: 16 concurrent job processes, 32 jobs SSH channels,
+4,096 jobs per store, 64 MiB per uploaded artifact, 128 artifacts per
+controller, 8 MiB per output stream, 24 KiB per log chunk and 64 KiB per
+job frame. No service may silently expand these bounds.
 
-`list` returns only this controller's summaries, ULID-sorted, 32 per page
-(pages 1..128). Omit status to list across all six native statuses. Concurrent
-changes can move entries between filtered pages; listing does not claim a stable
-snapshot across requests. Logs are raw bytes, at most 24 KiB per chunk; continue
-using the returned offset. Cancel acknowledges the request; status confirms
-terminal teardown. Seal retains digest-bound per-controller SFTP ownership.
+This is a development-only breaking source change. **Do not deploy to
+installed Agents with schema-v3 jobs roots or reset their state** to
+work around the version gate. Native Windows 11 and Windows 7 x86/x64
+acceptance must be recorded separately before release.
 
-New authenticated run admission accepts only this controller's exact canonical
-`artifacts/<controller-sha>/sealed/<source-sha>.program` returned by Seal.
-The Agent validates the install/artifact/controller/sealed parents and file using
-the existing private owner/permissions or Windows SID/protected-DACL checks, then
-verifies executable permissions, single-link identity and SHA. An arbitrary owned
-read-only executable, writable parent, symlink alias, traversal or another
-controller's source is insufficient, even with identical bytes/basename.
-The worker repeats source authorization, digest and optional remote cwd validation
-after dequeue, immediately before ProcessKit start. A source rejected after claim
-cannot be retried/replayed; its synced empty spools permit definite Failed.
-Exact same-ID/owner/spec retries return the immutable record even if the source
-was subsequently removed or changed; they never enqueue another attempt.
-Hashing an opened descriptor followed by pathname exec does **not** guarantee
-execution of that descriptor against same-UID replacement between check and exec.
-
-On Unix, the Agent no longer imposes a second ownership/mode policy on every
-directory ancestor from `/` to the install root. A single standard
-`canonicalize` comparison rejects non-canonical path aliases and ancestor
-symlinks. The **managed** install/artifact/controller/sealed directories still
-require private Agent ownership and permissions; sealed executable ownership,
-read-only mode, single-link identity, exact controller path and SHA-256 are
-still checked. On Windows, the existing private SID/DACL and reparse checks
-remain. This uses the explicit trusted-controller, unprivileged-Agent model
-instead of treating the host's entire ancestor hierarchy as Agent-controlled.
-It is a pathname policy, **not** an atomic guarantee against mutation by the
-same user or a hostile process able to modify an ancestor between operations.
-
-## Private roots and durability
-
-Schema version 3 is fresh-root-only. Explicit enrollment calls
-`JobStore::initialize_fresh` on a private empty directory. Runtime opening never
-creates/migrates a database or repairs missing files. Old SQLite schemas,
-record.json roots, unknown entries and torn stores are preserved and rejected.
-Cutover/import belongs to 1C-1080; do not reset IDs or delete state to pass checks.
-
-Keep private owner/permissions, Windows SID/DACL, hardlink/reparse checks,
-WAL and verified FULL on every connection. Limits remain 4096 jobs, 64 KiB per
-payload, 8 MiB per raw stream, 64 MiB per artifact and 128 artifacts/controller.
-Both spools must be durable for exited and claimed failed jobs. ProcessKit 3.3.4
-can silently abort output pumps after its five-second join grace; fsync alone
-therefore cannot prove complete output. Both private raw tee writers must report
-a successful stream-end flush, drain must be error-free, and both spool fsyncs
-must succeed before terminal complete logs. Missing markers mean UNKNOWN,
-updater deferral and `eof=false`. At overflow,
-the writer cancels the tree and discards excess bytes while draining to EOF;
-the bounded captured prefix remains a Failed result after confirmed teardown.
-
-The marker relies on pinned `pump.rs` calling raw tee flush only at stream end,
-including read error. Flush alone is not proof of clean EOF: without `cancel_on`,
-`child.drain` preserves the sink read error as Io, even during user cancellation.
-`AsyncWrite::poll_flush` is not intrinsically an EOF API: an upstream early flush would invalidate this
-proof; later writes clear the marker, but a future ProcessKit upgrade must recheck
-this contract. No marker is needed when no pumps existed: pre-spawn
-rejection/cancel or Spawn/NotFound yield Failed only after spool fsync.
-Other launch/teardown errors remain UNKNOWN. Lost spool files are
-errors rather than empty EOF. Service/updater scans use a read-only connection;
-admission and dequeue claim share `update.lock` and use a nonblocking try-lock.
-Admission returns Busy without enqueue; an explicit same-ID retry is idempotent.
-The consumer retains the exact dequeue-bound task on WouldBlock, releases its
-permit and `start_lock`, and retries after async 10/20/40/80/100 ms backoff (capped
-at 100 ms) until the lock is available or Agent shutdown cancels the wait. Each
-attempt re-reads cancellation/terminal state under `start_lock`. It never returns
-success merely for Busy, never blocks Tokio, and never retries a committed claim.
-On shutdown it leaves unclaimed Queued work for native Apalis recovery during
-restart; spent claims remain fenced as UNKNOWN. Other handler/backend errors
-still fail closed and stop admission/process trees. Both lock APIs explicitly
-unlock before FD close (a concurrent fork may inherit a descriptor until exec).
-Fresh initialization/updater retain their blocking lock APIs. Installed Agent
-publication defers for prepared, running, UNKNOWN or invalid state. No new Windows API is introduced;
-Win7 runtime and disposable native Windows acceptance remain separate gates.
-
-Native positive process tests probe the actual created group's mechanism and emit
-`NOT RUN` when strong containment is unavailable. They never bypass the production
-gate. On fallback hosts, separate regressions run real admission/Apalis consumption
-and verify no launch marker, spent claims, Failed, synced empty output and no replay.
-Optional runs still count early-return skips as libtest `ok`; inspect the named
-`NOT RUN` diagnostics rather than treating the harness total as native passes.
-Use a host with provable filesystem ownership, strong containment and permitted
-loopback sockets for mandatory positive acceptance:
+## Verification
 
 ```sh
-HOSTLINK_REQUIRE_NATIVE_CONTAINMENT=1 CARGO_INCREMENTAL=0 \
-  CARGO_TARGET_DIR="$PWD/target" TMPDIR="$PWD/target/test-tmp" \
-  cargo test --locked --workspace -- --nocapture --test-threads=1
+cargo fmt --all -- --check
+cargo check --offline --locked --workspace --all-targets
+cargo clippy --offline --locked --workspace --all-targets -- -D warnings
+cargo test --offline --locked --workspace -- --test-threads=1
 ```
 
-All jobs/internal, encrypted SSH wire and shared Agent/Client integration
-capability checks use one test-only helper. In required mode an unavailable
-actual CgroupV2/JobObject/ProcessReaper backend panics with its name and the test
-name before any skip. Host-wide ancestor ownership is no longer a separate
-native acceptance gate; private managed roots remain mandatory.
-The mode regression uses isolated current-test-binary subprocesses; its helper
-test is explicitly ignored outside those subprocesses. No production bypass or
-new dependency is involved. A nonzero required-mode run is **not** native acceptance.
-Verification and exact limitations: [1C-1081 evidence](AGENT_MINIMAL_JOBS_EVIDENCE.md).
-
-On Windows, SFTP hardens only a successful CREATE_NEW upload: check regular file,
-reparse/owner/SID/allow ACEs (permitting safe inheritance), then reject hardlinks,
-then protect the DACL and validate it. No existing file is repaired and Seal's
-protected-DACL/source checks are unchanged.
+Focused regressions: native orphan reenqueue/handler retry, ordinary
+nonzero exit code, pending cancellation vs dequeued/locked task,
+update.lock vs run, SSH disconnect/reconnect, SFTP artifact scope,
+ProcessKit cancellation/output EOF, updater/service active-job deferral,
+old schema preservation, and native Windows containment.

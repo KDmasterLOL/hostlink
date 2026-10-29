@@ -1,5 +1,87 @@
 # 1C-1081 simplification and P1 follow-up evidence
 
+## 2026-10-29 — native Apalis lifecycle and approved crash replay
+
+**User-approved contract change:** an already-started remote process may be
+executed again by Apalis if its Agent/worker crashes. This permits duplicate
+side effects; **do not claim exactly-once or at-most-once execution**. Explicit
+submission of an identical ULID/request remains idempotent. The repository
+`AGENTS.md` rule was updated to match this authorization.
+
+Source code commit:
+`c0d4f5c52e04ff91b3f329d95e548874fc081ee7`.
+Only the isolated, disposable task worktree was modified during implementation
+and checks. No previously installed Agent, customer/production host, service,
+SQLite DB, release, tag or `main` was changed.
+
+What was deleted/replaced:
+
+- The `StartedClaims` SQL table and one-use per-process claim.
+- `JobStore::claim_dequeued`, manual `transition` completion publishing,
+  `recover_nonterminal` and the old native status/claim join.
+- Custom retry-eligibility parsing and duplicate lifecycle cases. Apalis's
+  default `lock_tasks=true` and `persist_results=true` now own task locks and
+  persistence. The worker returns `io::Result<i32>` to Apalis, including
+  `Ok(7)` for a process that exits with status 7. A task-specific `Err` no
+  longer shuts down the healthy Agent.
+- Obsolete no-replay tests and fixtures. New cases exercise native Apalis
+  orphan requeue and result projection, cancellation, and bounded output
+  append across attempts.
+
+The remaining `lifecycle.rs` contains **only** a native-row guarded
+`cancel_pending` transition, because pinned Apalis SQLite 1.0.0 does not
+offer a public atomic queued-task cancellation API. The owner-scoped
+`query.rs` is still needed because the upstream `FetchById`/`ListTasks`
+projections omit `last_result` and do not offer atomic owner-filtered
+all-status pagination; no second persisted lifecycle is maintained.
+ProcessKit group ownership and output-completion checks remain independent
+of the queue.
+
+New **fresh-only schema v4** keeps Apalis native tables and a private
+`DurableMeta` marker; `StartedClaims` is absent. Existing v3/legacy/torn
+roots are refused without schema mutation or deletion. Migrating actual
+installed v3 roots remains separate task Huly 1C-1080.
+
+Measured with all `*.rs` under `agent/src/jobs`, treating filenames
+containing `test` as tests:
+
+| Code slice | Pre-change dev e8b58af | New candidate | Delta |
+| --- | ---: | ---: | ---: |
+| Production Rust | 2,664 | 2,390 | **−274** |
+| Test Rust | 3,416 | 1,845 | **−1,571** |
+| Total | 6,080 | 4,235 | **−1,845** |
+
+Native Linux source checks on the integrated candidate (same implementation
+as code commit above):
+
+| Check | Outcome |
+| --- | --- |
+| `cargo fmt --all -- --check` | PASS |
+| `cargo check --offline --locked --workspace --all-targets` | PASS |
+| `cargo clippy --offline --locked --workspace --all-targets -- -D warnings` | PASS |
+| `cargo test --offline --locked --workspace -- --test-threads=1` | **PASS, exit 0**, includes Agent/Client/Hub integration and updater recovery |
+| Agent lib jobs scenarios | 39 pass, 0 fail, 1 ignored subprocess-only helper |
+| Authenticated SSH wire & TCP jobs reconnect | PASS on HOME; real ProcessKit group and native results exercised |
+| Native Apalis orphan requeue and status/result | PASS; old custom claim removed |
+| Windows 11 native / Windows 7 | **NOT RUN** on this revision |
+
+Two external HTTPS/Caddy/sshd fixture tests are explicitly ignored
+because their external fixtures are not provisioned. HOME does not certify
+Windows/Win7 behavior. A Windows MSVC-target `cargo check` from HOME was
+**blocked by missing MSVC `lib.exe`** in the Linux cross-build environment,
+not a HostLink source diagnostic. The existing WORK disposable checkout
+was inspected read-only; its Windows system drive has approximately
+**1.1 GiB free**, so a fresh native compilation was not attempted to avoid
+filling that drive. No installed Agent or client state was changed.
+
+Before the final full-workspace PASS, the TCP SSH-loopback test failed
+intermittently to observe a started job. Its later six consecutive focused
+repetitions and the complete workspace run passed. A diagnostic native
+`status` query was added to the failure branch; the original intermittent
+cause was not conclusively identified. The earlier historical verification
+below refers to its own source SHAs and must not be read as acceptance of
+this new branch.
+
 ## 2026-10-28 — Apalis-first deletion pass (post-a144f57)
 
 The user requested **maximum removal** of bespoke jobs machinery, prioritizing

@@ -38,10 +38,12 @@ does not certify production or registered Windows updater deployment.
 ledger contract, whose security checks justify exceeding 200 lines.
 `jobs/private_fs.rs` keeps private permissions/ACLs, canonical source paths and
 filesystem durability in one security contract, also exceeding 200 lines.
-`jobs/persistence.rs` owns immutable admission; `jobs/query.rs` decodes one
-bounded native-status/result/claim snapshot for lookup, list and deep inventory. `jobs/lifecycle.rs` holds the one-use execution fence and native result
-publication. `jobs/engine.rs` keeps the supervised consumer, dequeue-bound Busy
-backoff and permit quarantine together as a lifecycle contract exceeding 200 lines.
+`jobs/persistence.rs` owns Apalis-native task admission; `jobs/query.rs` decodes
+bounded owner-filtered native status/result for lookup and list.
+`jobs/lifecycle.rs` is limited to guarded cancellation of a pending native
+task (not manual lifecycle completion). `jobs/engine.rs` hosts the native
+`WorkerBuilder` handler and ProcessKit runtime handoff. There is no
+`StartedClaims` table or custom crash replay blocker.
 `jobs/mod.rs::JobRuntime::open` owns existing-store opening, runner lease,
 recovery and runtime construction; `ssh/server.rs` never assembles the job
 engine. `jobs/inventory.rs` performs updater safety scans directly against a

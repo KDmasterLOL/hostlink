@@ -109,15 +109,16 @@ and is also the Apalis TaskId. After a lost acknowledgement, query that same
 ULID. Top-level `hostlink run` and low-level run flags are removed. Ordinary SSH
 exec is channel-owned.
 
-One Agent-owned Apalis SQLite 1.0.0 WorkerBuilder polls the queue and runs at most
-16 ProcessKit trees. Native Apalis status/result is authoritative; the payload is
-immutable. A durable one-use start claim prevents replay after disconnect,
-orphan requeue or restart. Updater lock contention keeps the same unclaimed
-dequeue pending with cancellable async backoff. User cancel stops the ProcessKit
-group while draining pipes: clean capture becomes Failed; read errors stay UNKNOWN.
-UNKNOWN blocks updates. Private raw output, source
-SHA checks and per-controller sealed artifacts retain their bounds. Fresh private
-roots only; old record.json and SQLite schemas fail closed without migration.
+One Agent-owned Apalis SQLite 1.0.0 WorkerBuilder polls the queue and runs at
+most 16 ProcessKit trees. Apalis owns worker locks, native status, persisted
+results and automatic recovery. **After Agent/worker failure an already-started
+job may execute again**; repeated side effects are an accepted trade-off,
+not an exactly-once guarantee. An explicit duplicate ULID admission is still
+idempotent. The old custom start-claim ledger and manual completion/recovery
+engine were removed. Cancelled or failed jobs do not stop an otherwise healthy
+worker. Private output can append across crash-recovered attempts. SHA checks
+and per-controller sealed artifacts retain their bounds. Fresh private roots
+use jobs schema v4; older schemas/record.json are rejected, not migrated.
 New runs require the authenticated controller's exact canonical sealed source,
 with private-parent and digest checks repeated immediately before launch.
 On Unix, the managed install/artifact roots must be Agent-owned and private.
@@ -127,7 +128,8 @@ the managed install root. This assumes trusted SSH controllers and the
 non-privileged Agent's filesystem boundary.
 Job execution requires actual cgroup v2 containment on Linux (delegation required),
 Job Objects on Windows, or a process reaper on FreeBSD. POSIX fallback is rejected
-before spawn; after empty spool sync this is a definite Failed job with no replay.
+before spawn; after empty spool sync this is a definite Failed job, not a
+successful process execution.
 Native-positive acceptance uses `HOSTLINK_REQUIRE_NATIVE_CONTAINMENT=1`; missing
 strong containment then fails tests instead of reporting an optional skip.
 The CLI/protocol change is breaking, with no v1 compatibility. See the
