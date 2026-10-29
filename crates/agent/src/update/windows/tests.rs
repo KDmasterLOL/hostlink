@@ -19,6 +19,26 @@ mod windows_recovery_tests {
         format!("{:x}", Sha256::digest(bytes))
     }
 
+    #[test]
+    fn standard_library_directory_handle_preserves_file_identity() {
+        use crate::update::windows::fs::windows_file_identity;
+        let root = TempDir::new().unwrap();
+        let directory = root.path().join("directory");
+        create_private_directory(&directory).unwrap();
+        let (volume, index) = windows_file_identity(&directory, true).unwrap();
+        assert_ne!(index, 0);
+        assert_eq!(
+            (volume, index),
+            windows_file_identity(&directory.join("."), true).unwrap()
+        );
+        let file = directory.join("file");
+        write_private_synced(&file, b"not a directory").unwrap();
+        assert_ne!(
+            (volume, index),
+            windows_file_identity(&file, false).unwrap()
+        );
+    }
+
     struct Fixture {
         _temp: TempDir,
         root: PathBuf,

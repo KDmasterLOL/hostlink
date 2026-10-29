@@ -32,17 +32,46 @@ Agent startup error. Windows managed updates additionally require authenticated
 health after restart. Do not describe Linux package publication as proof of
 runtime health.
 
-## Further opportunities, not implemented
+## Follow-up: 1C-1102 (2026-10-29) — implemented
 
-| Priority | Source | Library-first / smaller approach | Why separate |
-| --- | --- | --- | --- |
-| P2 | `agent/exec.rs`, `agent/enrollment/platform.rs`, `agent/service/windows/private_fs.rs` | Consolidate duplicate Windows current-user/SYSTEM/elevation checks using existing `windows-permissions` SID APIs. | Requires native Windows token/ACL tests, including NT6.1. Do not remove owner or elevation restrictions. |
-| P2 | `agent/update/private_fs.rs`, `hub/state.rs`, `hub/ssh_authorization.rs` | Use same-directory `tempfile::NamedTempFile` instead of custom PID-named temporary publishers and manual naming/cleanup. | Must preserve file and directory fsync, private ACL and recovery-on-error semantics. |
-| P2 | `client/hub/client.rs::read_config` and `cli/commands/hub.rs::configured_hub_client` | Avoid creating/dropping a reqwest client, reading secrets, and then constructing another client. | Public `from_config` remains an independent validated entrypoint. |
-| P2 | `client/cli/commands/hosts.rs` | Replace `JoinSet` + `Arc<Semaphore>` per inventory entry with `futures::stream::buffer_unordered(4)` (existing workspace crate). | Preserve per-host timeouts, all status results and stable sorted output. |
-| P3 | `agent/update/windows/fs.rs` | Use `std::os::windows::fs::OpenOptionsExt` + `File` rather than manual CreateFileW handle machinery for opening a directory. | Preserve share, backup-semantics, reparse and file identity flags; native Windows tests needed. |
-| P3 | `agent/update/private_fs.rs` | Investigate replacing small `HashWriter` adapter with standard digest I/O facilities, if type-level contract matches. | Must match streamed hash and length checks. |
-| P3 | `agent/update_handoff/recovery.rs` | Remove duplicate branch producing the same recovery action after confirming truth table. | Journal state transitions must retain error and power-loss recovery cases. |
+Every P2/P3 candidate below has been replaced with an existing library or
+standard library feature, preserving the remaining trust-boundary checks:
+
+| Area | Change | Remaining invariant |
+| --- | --- | --- |
+| Windows Agent exec, enrollment and service | One `private_fs::windows::is_non_elevated_user` using `windows-permissions` SID and `std::os::windows::io::OwnedHandle` for the token; removed three separate token/elevation implementations and unsafe `TOKEN_USER` buffer decoding | SYSTEM or elevated users are rejected; Windows token errors propagate rather than permitting execution |
+| Agent updater + Hub state + authorized_keys projection | Same-directory `tempfile::NamedTempFile` replaces PID/nonce-generated names and manual temporary-file cleanup | Still sync the written file and parent directory; preserve Hub uncertain-commit readback; retain private directory/file ownership checks |
+| Client `list --check` | `futures::stream::buffer_unordered(4)` replaces `JoinSet` + `Semaphore` and spawns no per-host tasks | At most four simultaneous checks, same per-host timeout and status classification, stable sorted output |
+| Client Hub config | `HubClient::from_file` returns parsed config and its single constructed client | The public `read_config` and `from_config` boundaries remain independently validated |
+| Windows updater file identity | `std::os::windows::fs::OpenOptionsExt` replaces custom UTF-16 `CreateFileW` and handle-drop code | Explicit access/share/reparse/backup flags and file-index identity checks preserved |
+| SHA-256 | `std::io::copy` writes directly into the `digest`-provided `Write` impl for SHA-256 | Streamed hashing and size limits remain in place |
+| Windows rollback planner | Removed duplicate `BackedUp → CancelUnpublished` match branch with identical result | Other journal transitions and evidence validation unchanged |
+
+This follow-up adds a direct Hub temporary-file cleanup/private-mode
+assertion, Linux updater idempotent-publication cleanup test and a
+Windows-only file/directory identity regression. The last test compiles for
+both Windows architectures; its runtime check still requires native Windows.
+
+The Hub's `tempfile` dependency is optional under `server`; Client's
+`futures` was already used elsewhere in the workspace. We did **not**
+replace persistent journals, recorded backups or updater transaction locks
+with temporary objects.
+
+## Remaining work and testing caveats
+
+* Native Windows 11 and Windows 7 (x64 and x86) execution still must
+  validate token/elevation handling, protected DACLs, directory identity,
+  authentication and installed-Agent update/recovery in a disposable user
+  profile. Cross-compilation and strict Clippy cannot prove Win32 runtime.
+* Linux installed-Agent update admission still assumes the enrolled
+  `install_root/jobs/runner.lock` identity; arbitrary custom jobs roots
+  require explicit acceptance before deployment.
+* Windows identity opening now uses standard Rust handle construction; its
+  `FILE_READ_ATTRIBUTES | SYNCHRONIZE`, sharing and
+  `FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT` flags match
+  the previous native call, but must be tested live on NT6.1.
+* There may be further simplification opportunities, but no remaining
+  P2/P3 candidate in the earlier list is left unimplemented.
 
 ## Guarantees that are not redundant
 

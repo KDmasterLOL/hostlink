@@ -37,7 +37,7 @@ pub(super) fn prepare_command(command: &str) -> io::Result<Command> {
 
     #[cfg(windows)]
     let child = {
-        if !safe_windows_user_context()? {
+        if !crate::private_fs::windows::is_non_elevated_user()? {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "SSH exec requires a verified non-elevated, non-LocalSystem Windows user context",
@@ -137,7 +137,8 @@ mod windows_process_tests {
     #[tokio::test]
     async fn powershell_processkit_pipe_preserves_binary_stdin_and_exit_status() {
         let command = r#"$inputStream=[Console]::OpenStandardInput();$outputStream=[Console]::OpenStandardOutput();$buffer=New-Object byte[] 8192;while(($count=$inputStream.Read($buffer,0,$buffer.Length))-gt 0){$outputStream.Write($buffer,0,$count)};$outputStream.Flush();$errorStream=[Console]::OpenStandardError();$errorBytes=[byte[]](0,255,69,82,82,13,10);$errorStream.Write($errorBytes,0,$errorBytes.Length);$errorStream.Flush();exit 7"#;
-        let safe_context = safe_windows_user_context().expect("inspect Windows user context");
+        let safe_context = crate::private_fs::windows::is_non_elevated_user()
+            .expect("inspect Windows user context");
         let prepared = prepare_command(command);
         if !safe_context {
             assert!(matches!(
@@ -192,130 +193,6 @@ mod windows_process_tests {
         assert_eq!(stdout, payload);
         assert_eq!(stderr, [0_u8, 255, b'E', b'R', b'R', b'\r', b'\n']);
     }
-}
-
-#[cfg(windows)]
-pub(super) fn safe_windows_user_context() -> io::Result<bool> {
-    use std::mem::{size_of, zeroed};
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
-    use windows_sys::Win32::Security::{
-        CreateWellKnownSid, EqualSid, GetLengthSid, GetTokenInformation, SID, TOKEN_ELEVATION,
-        TOKEN_QUERY, TokenElevation, TokenUser, WELL_KNOWN_SID_TYPE, WinLocalSystemSid,
-    };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-
-    // SAFETY: GetCurrentProcess returns a pseudo-handle owned by the current process.
-    let process = unsafe { GetCurrentProcess() };
-    let mut token: HANDLE = std::ptr::null_mut();
-    // SAFETY: token is a valid out pointer and the process pseudo-handle is valid.
-    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    struct TokenHandle(HANDLE);
-    impl Drop for TokenHandle {
-        fn drop(&mut self) {
-            // SAFETY: OpenProcessToken initialized this owned handle and Drop runs once.
-            unsafe { CloseHandle(self.0) };
-        }
-    }
-    let token = TokenHandle(token);
-
-    // SAFETY: TOKEN_ELEVATION is a plain integer struct and all-zero is a valid output buffer.
-    let mut elevation: TOKEN_ELEVATION = unsafe { zeroed() };
-    let mut returned = 0;
-    // SAFETY: elevation and returned are writable buffers of the documented sizes.
-    if unsafe {
-        GetTokenInformation(
-            token.0,
-            TokenElevation,
-            (&mut elevation as *mut TOKEN_ELEVATION).cast(),
-            size_of::<TOKEN_ELEVATION>() as u32,
-            &mut returned,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    if elevation.TokenIsElevated != 0 {
-        return Ok(false);
-    }
-
-    let user_storage_bytes: usize = 16 * 1024;
-    let user_storage_words = user_storage_bytes.div_ceil(size_of::<usize>());
-    let mut user_storage = vec![0_usize; user_storage_words];
-    let user_buffer_bytes = user_storage.len() * size_of::<usize>();
-    // SAFETY: usize storage provides TOKEN_USER alignment and enough writable bytes for its
-    // variable-size data; the allocation remains alive through all SID validation below.
-    if unsafe {
-        GetTokenInformation(
-            token.0,
-            TokenUser,
-            user_storage.as_mut_ptr().cast(),
-            user_buffer_bytes as u32,
-            &mut returned,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    if returned as usize > user_buffer_bytes
-        || (returned as usize) < size_of::<windows_sys::Win32::Security::TOKEN_USER>()
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Windows returned an invalid token user buffer length",
-        ));
-    }
-    // SAFETY: GetTokenInformation succeeded and returned at least a complete, aligned TOKEN_USER.
-    let user = unsafe {
-        &*user_storage
-            .as_ptr()
-            .cast::<windows_sys::Win32::Security::TOKEN_USER>()
-    };
-    let user_buffer_start = user_storage.as_ptr() as usize;
-    let user_buffer_end = user_buffer_start
-        .checked_add(returned as usize)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "token user buffer overflow"))?;
-    let sid_start = user.User.Sid as usize;
-    let sid_header_end = sid_start
-        .checked_add(size_of::<SID>())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "token SID pointer overflow"))?;
-    if sid_start < user_buffer_start || sid_header_end > user_buffer_end {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Windows returned a token SID outside its user buffer",
-        ));
-    }
-    // SAFETY: the pointer is within the live TokenUser buffer and includes a complete SID header.
-    let sid_bytes = unsafe { GetLengthSid(user.User.Sid) } as usize;
-    if sid_bytes < size_of::<SID>()
-        || sid_start
-            .checked_add(sid_bytes)
-            .is_none_or(|end| end > user_buffer_end)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Windows returned a truncated token SID",
-        ));
-    }
-    let mut system_sid = [0_u8; 68];
-    let mut sid_size = system_sid.len() as u32;
-    // SAFETY: system_sid is writable storage for a well-known SID and sid_size is its capacity.
-    if unsafe {
-        CreateWellKnownSid(
-            WinLocalSystemSid as WELL_KNOWN_SID_TYPE,
-            std::ptr::null_mut(),
-            system_sid.as_mut_ptr().cast(),
-            &mut sid_size,
-        )
-    } == 0
-    {
-        // SAFETY: GetLastError reads the calling thread's last OS error value.
-        let error = unsafe { GetLastError() };
-        return Err(io::Error::from_raw_os_error(error as i32));
-    }
-    // SAFETY: both pointers reference valid SID structures returned/contained by the OS.
-    Ok(unsafe { EqualSid(user.User.Sid.cast(), system_sid.as_mut_ptr().cast()) } == 0)
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use super::{
 use crate::update::manifest::{InstallMetadata, read_install_metadata, validate_installed};
 use crate::update::private_fs::{
     create_private_directory, is_reparse_point, open_private_file, set_private_directory,
-    sync_directory, validate_private_directory, write_atomic, write_atomic_new,
+    sync_directory, validate_private_directory, write_atomic,
 };
 use std::{
     fs::{self, File},
@@ -71,7 +71,7 @@ pub(super) fn publish_linux(
             .to_owned(),
         old_metadata: old_metadata.clone(),
     };
-    write_atomic_new(
+    write_atomic(
         &journal_path,
         &serde_json::to_vec(&journal).map_err(io::Error::other)?,
     )?;

@@ -177,27 +177,13 @@ pub(crate) fn reconcile(app: &App) -> std::io::Result<()> {
             "authorized_keys projection exceeds limit",
         ));
     }
-    let mut nonce = [0u8; 8];
-    getrandom::fill(&mut nonce).map_err(std::io::Error::other)?;
-    let temp = parent.join(format!(".hostlink-authorized-{}.tmp", hex::encode(nonce)));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    let mut staged = tempfile::Builder::new()
+        .prefix(".hostlink-authorized-")
+        .tempfile_in(parent)?;
+    staged.write_all(&output)?;
+    staged.as_file().sync_all()?;
+    staged.persist(path).map_err(|error| error.error)?;
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temp)?;
-    let result = (|| {
-        file.write_all(&output)?;
-        file.sync_all()?;
-        fs::rename(&temp, path)?;
-        #[cfg(unix)]
-        OpenOptions::new().read(true).open(parent)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
+    OpenOptions::new().read(true).open(parent)?.sync_all()?;
+    Ok(())
 }

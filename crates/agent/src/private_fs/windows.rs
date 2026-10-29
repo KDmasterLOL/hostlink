@@ -17,6 +17,49 @@ pub(crate) enum AllowedPrincipals {
     OwnerSystemAdministrators,
 }
 
+/// Authoritative user-scope decision for Agent execution, enrollment and
+/// service management. Windows token ownership and elevation are independent.
+pub(crate) fn is_non_elevated_user() -> io::Result<bool> {
+    use std::{
+        mem::size_of,
+        os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    };
+    use windows_sys::Win32::{
+        Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    let current =
+        windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
+    let system: LocalBox<Sid> = "S-1-5-18".parse().map_err(io::Error::other)?;
+    if current.as_ref() == system.as_ref() {
+        return Ok(false);
+    }
+    let mut raw = std::ptr::null_mut();
+    // SAFETY: the current process pseudo-handle is valid; raw is an out parameter.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: OpenProcessToken returned an exclusively owned kernel handle.
+    let token = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut returned = 0;
+    // SAFETY: the owned handle remains valid, and elevation and returned are writable.
+    if unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevation,
+            (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(elevation.TokenIsElevated == 0)
+}
+
 pub(crate) fn validate_acl(
     path: &Path,
     metadata: &fs::Metadata,

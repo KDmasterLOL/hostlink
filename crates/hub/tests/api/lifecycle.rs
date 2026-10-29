@@ -199,6 +199,33 @@ async fn invite_enroll_inventory_rename_revoke_and_restart_are_secret_free() {
         std::fs::read_to_string(dir.path().join("gateway/hostlink-v2-authorized_keys")).unwrap();
     assert!(projected.contains("hostlink-agent:machine-001"));
     assert!(projected.contains("onec-agent:legacy-must-survive"));
+    for directory in [
+        dir.path().join("hostlink-hub-v2"),
+        dir.path().join("gateway"),
+    ] {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let name = entry.unwrap().file_name();
+            assert!(
+                !name.to_string_lossy().starts_with(".registry-v2-")
+                    && !name.to_string_lossy().starts_with(".hostlink-authorized-"),
+                "Hub publisher leaked temporary file: {name:?}"
+            );
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for file in [
+            dir.path().join("hostlink-hub-v2/registry-v2.json"),
+            dir.path().join("gateway/hostlink-v2-authorized_keys"),
+        ] {
+            assert_eq!(
+                std::fs::metadata(file).unwrap().permissions().mode() & 0o077,
+                0,
+                "published Hub state must remain owner-private"
+            );
+        }
+    }
     let (status, list) = call(app.clone(), "GET", "/v2/hosts", Some(OPERATOR), json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(list["hosts"].as_array().unwrap().len(), 1);

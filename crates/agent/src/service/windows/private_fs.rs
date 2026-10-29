@@ -198,47 +198,14 @@ pub(super) fn current_sid() -> io::Result<String> {
         .to_string())
 }
 pub(super) fn ensure_user_scope() -> io::Result<()> {
-    let current =
-        windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
-    let system: windows_permissions::LocalBox<windows_permissions::Sid> =
-        "S-1-5-18".parse().map_err(io::Error::other)?;
-    if current.as_ref() == system.as_ref() {
-        return Err(io::Error::new(
+    if crate::private_fs::windows::is_non_elevated_user()? {
+        Ok(())
+    } else {
+        Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "Agent service management must not run as SYSTEM",
-        ));
+            "Agent service management must run as a non-elevated current user",
+        ))
     }
-    let mut token = std::ptr::null_mut();
-    // SAFETY: token APIs receive a valid current-process pseudo handle and writable output buffer.
-    unsafe {
-        use windows_sys::Win32::{
-            Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
-            System::Threading::{GetCurrentProcess, OpenProcessToken},
-        };
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
-            return Err(io::Error::from_raw_os_error(GetLastError() as i32));
-        }
-        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
-        let mut returned = 0;
-        let ok = GetTokenInformation(
-            token,
-            TokenElevation,
-            (&mut elevation as *mut TOKEN_ELEVATION).cast(),
-            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
-            &mut returned,
-        );
-        windows_sys::Win32::Foundation::CloseHandle(token);
-        if ok == 0 {
-            return Err(io::Error::from_raw_os_error(GetLastError() as i32));
-        }
-        if elevation.TokenIsElevated != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Agent service management must run as a non-elevated current user",
-            ));
-        }
-    }
-    Ok(())
 }
 pub(super) fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()

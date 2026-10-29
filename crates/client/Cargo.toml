@@ -20,6 +20,7 @@ thiserror.workspace = true
 uuid.workspace = true
 secrecy.workspace = true
 reqwest.workspace = true
+futures.workspace = true
 hostlink-hub = { path = "../hub", default-features = false }
 
 [target.'cfg(unix)'.dependencies]

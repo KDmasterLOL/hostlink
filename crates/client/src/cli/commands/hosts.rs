@@ -2,6 +2,7 @@ use crate::cli::{
     args::Command,
     commands::hub::{configured_hub_client, load_hub_config},
 };
+use futures::{StreamExt, stream};
 use hostlink::{
     HostSpec,
     connect::{HostConnection, SshClientError},
@@ -48,21 +49,10 @@ pub(super) async fn list_command(check: bool, json: bool) -> Result<i32, Box<dyn
     // single authoritative set of Hub-approved routes, even when more than
     // one gateway is configured.
     let gateways = client.info().await.ok();
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
-    let mut tasks = tokio::task::JoinSet::new();
-    for host in hosts {
-        let semaphore = semaphore.clone();
-        let config = config.clone();
-        let gateways = gateways.clone();
-        tasks.spawn(async move {
-            let Ok(_permit) = semaphore.acquire_owned().await else {
-                return HostCheck {
-                    machine_id: host.machine_id.to_string(),
-                    name: host.name,
-                    status: "unknown",
-                    observed_at_unix: 0,
-                };
-            };
+    let mut statuses: Vec<HostCheck> = stream::iter(hosts.into_iter().map(|host| {
+        let config = &config;
+        let gateways = gateways.as_ref();
+        async move {
             let observed_at_unix = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -72,8 +62,8 @@ pub(super) async fn list_command(check: bool, json: bool) -> Result<i32, Box<dyn
                 Some(gateways) => {
                     match hostlink::hub::host_spec_from_approved_routes(
                         host.clone(),
-                        &gateways,
-                        &config,
+                        gateways,
+                        config,
                     )
                     .await
                     {
@@ -107,12 +97,11 @@ pub(super) async fn list_command(check: bool, json: bool) -> Result<i32, Box<dyn
                 status,
                 observed_at_unix,
             }
-        });
-    }
-    let mut statuses = Vec::new();
-    while let Some(result) = tasks.join_next().await {
-        statuses.push(result.map_err(|_| "host status task failed")?);
-    }
+        }
+    }))
+    .buffer_unordered(4)
+    .collect()
+    .await;
     statuses.sort_by(|left, right| left.name.cmp(&right.name));
     if json {
         serde_json::to_writer_pretty(io::stdout().lock(), &statuses)?;

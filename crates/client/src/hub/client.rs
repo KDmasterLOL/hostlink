@@ -32,12 +32,17 @@ pub struct HubClient {
 impl HubClient {
     /// Reads a bounded owner-only controller config file and validates its token source.
     pub fn read_config(path: &Path) -> Result<HubConfig, HubClientError> {
+        let (_, config) = Self::from_file(path)?;
+        Ok(config)
+    }
+
+    /// Parse a private config and construct its usable HTTP client once.
+    pub fn from_file(path: &Path) -> Result<(Self, HubConfig), HubClientError> {
         let value = read_private_credential(path)?;
         let config: HubConfig =
             serde_json::from_str(&value).map_err(|_| HubClientError::Credential)?;
-        // Constructor validation is deliberately local-only; callers may choose when to connect.
-        let _ = Self::from_config(&config)?;
-        Ok(config)
+        let client = Self::from_config(&config)?;
+        Ok((client, config))
     }
 
     /// Loads the owner-only token and creates a strict HTTPS client without proxies or redirects.

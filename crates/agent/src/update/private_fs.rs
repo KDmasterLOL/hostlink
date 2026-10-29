@@ -7,10 +7,12 @@ use super::manifest::FileIdentity;
 use super::windows::{set_windows_private_acl, validate_windows_private_acl};
 use super::{MAX_ENTRY_BYTES, MAX_TOTAL_BYTES, invalid};
 use sha2::{Digest, Sha256};
+#[cfg(not(windows))]
+use std::io::Write;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io,
     path::{Component, Path, PathBuf},
 };
 
@@ -78,7 +80,7 @@ pub(super) fn file_identities(
         let mut file = File::open(path)?;
         let size = file.metadata()?.len();
         let mut hasher = Sha256::new();
-        io::copy(&mut file, &mut HashWriter(&mut hasher))?;
+        io::copy(&mut file, &mut hasher)?;
         result.insert(
             name.clone(),
             FileIdentity {
@@ -90,17 +92,6 @@ pub(super) fn file_identities(
     Ok(result)
 }
 
-struct HashWriter<'a>(&'a mut Sha256);
-impl Write for HashWriter<'_> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.update(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 pub(super) fn hash_file(path: &Path, max_size: u64) -> io::Result<String> {
     let mut file = File::open(path)?;
     let size = file.metadata()?.len();
@@ -108,14 +99,7 @@ pub(super) fn hash_file(path: &Path, max_size: u64) -> io::Result<String> {
         return Err(invalid("Agent archive exceeds its size limit"));
     }
     let mut hasher = Sha256::new();
-    let mut buffer = [0; 64 * 1024];
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
+    io::copy(&mut file, &mut hasher)?;
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -141,44 +125,16 @@ pub(super) fn open_private_file(path: &Path, create: bool) -> io::Result<File> {
 }
 
 #[cfg(not(windows))]
-pub(super) fn open_new_private_file(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    options.open(path)
-}
-
-#[cfg(not(windows))]
-pub(super) fn write_atomic_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| invalid("journal path has no parent"))?;
-    let temporary = parent.join(format!(".publication-{}.tmp", std::process::id()));
-    let mut file = open_new_private_file(&temporary)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&temporary, path)?;
-    File::open(parent)?.sync_all()?;
-    Ok(())
-}
-
-#[cfg(not(windows))]
 pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid("metadata path has no parent"))?;
-    let temporary = parent.join(format!(".install-{}.tmp", std::process::id()));
-    let mut file = open_new_private_file(&temporary)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    fs::rename(&temporary, path)?;
+    let mut staged = tempfile::Builder::new()
+        .prefix(".install-")
+        .tempfile_in(parent)?;
+    staged.write_all(bytes)?;
+    staged.as_file().sync_all()?;
+    staged.persist(path).map_err(|error| error.error)?;
     File::open(parent)?.sync_all()?;
     Ok(())
 }

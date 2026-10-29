@@ -28,9 +28,7 @@ pub(super) fn load_hub_config(path: &std::path::Path) -> Result<HubConfig, Box<d
 }
 
 pub(super) fn configured_hub_client() -> Result<(HubClient, HubConfig), Box<dyn Error>> {
-    let config = load_hub_config(&default_hub_config_path()?)?;
-    let client = HubClient::from_config(&config)?;
-    Ok((client, config))
+    Ok(HubClient::from_file(&default_hub_config_path()?)?)
 }
 
 pub(super) async fn hub_command(command: &HubCommand) -> Result<i32, Box<dyn Error>> {

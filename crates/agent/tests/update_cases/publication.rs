@@ -127,6 +127,17 @@ fn exact_package_updates_files_and_repeat_is_idempotent() {
             archive_sha256: digest,
         }
     );
+    // Temporary metadata/journal files are cleaned after both publication
+    // and an idempotent retry; only durable named state remains.
+    for parent in [&root, &root.join(".updates")] {
+        for entry in fs::read_dir(parent).unwrap() {
+            let name = entry.unwrap().file_name();
+            assert!(
+                !name.to_string_lossy().starts_with(".install-"),
+                "atomic publication leaked a temporary file: {name:?}"
+            );
+        }
+    }
 }
 #[test]
 fn extracted_package_root_is_the_source_for_linux_publication() {

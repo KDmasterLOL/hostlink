@@ -106,13 +106,12 @@ pub(crate) fn reject_running_agent(installed_executable: &Path) -> io::Result<()
 }
 #[cfg(windows)]
 pub(super) fn windows_file_identity(path: &Path, directory: bool) -> io::Result<(u32, u64)> {
-    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING, SYNCHRONIZE,
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        GetFileInformationByHandle, SYNCHRONIZE,
     };
 
     fn query(
@@ -147,42 +146,14 @@ pub(super) fn windows_file_identity(path: &Path, directory: bool) -> io::Result<
         return query(file.as_raw_handle(), path);
     }
 
-    struct OwnedHandle(windows_sys::Win32::Foundation::HANDLE);
-    impl Drop for OwnedHandle {
-        fn drop(&mut self) {
-            // SAFETY: this wrapper is created only for a successful CreateFileW result and owns
-            // that handle until Drop.
-            unsafe { CloseHandle(self.0) };
-        }
-    }
-
-    let mut path_wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
-    if path_wide.contains(&0) {
-        return Err(invalid("Windows identity path contains a null character"));
-    }
-    path_wide.push(0);
     // OPEN_REPARSE_POINT exposes a raced-in reparse point's own identity. BACKUP_SEMANTICS permits
     // opening a directory for attributes; shared access avoids blocking cleanup operations.
-    let handle = unsafe {
-        CreateFileW(
-            path_wide.as_ptr(),
-            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            std::ptr::null_mut(),
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::other(format!(
-            "cannot open Windows directory for identity {}: {}",
-            path.display(),
-            io::Error::last_os_error()
-        )));
-    }
-    let handle = OwnedHandle(handle);
-    query(handle.0, path)
+    let handle = OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    query(handle.as_raw_handle(), path)
 }
 
 #[cfg(windows)]

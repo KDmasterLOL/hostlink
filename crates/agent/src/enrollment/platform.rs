@@ -52,57 +52,11 @@ pub(super) fn reject_elevated_user() -> io::Result<()> {
         }
     }
     #[cfg(windows)]
-    windows_elevation::reject_elevated_user()?;
-    Ok(())
-}
-
-#[cfg(windows)]
-mod windows_elevation {
-    use std::{io, mem::size_of};
-    use windows_sys::Win32::{
-        Foundation::{CloseHandle, GetLastError, HANDLE},
-        Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
-        System::Threading::{GetCurrentProcess, OpenProcessToken},
-    };
-
-    pub fn reject_elevated_user() -> io::Result<()> {
-        let current_sid =
-            windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
-        let system_sid: windows_permissions::LocalBox<windows_permissions::Sid> =
-            "S-1-5-18".parse().map_err(io::Error::other)?;
-        if current_sid.as_ref() == system_sid.as_ref() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "enrollment must not run as SYSTEM",
-            ));
-        }
-        // SAFETY: all handles and output buffers follow the Win32 token API contracts.
-        unsafe {
-            let mut token: HANDLE = std::ptr::null_mut();
-            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
-                return Err(io::Error::from_raw_os_error(GetLastError() as i32));
-            }
-            let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
-            let mut returned = 0;
-            let result = GetTokenInformation(
-                token,
-                TokenElevation,
-                (&mut elevation as *mut TOKEN_ELEVATION).cast(),
-                size_of::<TOKEN_ELEVATION>() as u32,
-                &mut returned,
-            );
-            let last_error = GetLastError();
-            CloseHandle(token);
-            if result == 0 {
-                return Err(io::Error::from_raw_os_error(last_error as i32));
-            }
-            if elevation.TokenIsElevated != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "enrollment must not run elevated or as SYSTEM",
-                ));
-            }
-        }
-        Ok(())
+    if !crate::private_fs::windows::is_non_elevated_user()? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "enrollment must not run elevated or as SYSTEM",
+        ));
     }
+    Ok(())
 }

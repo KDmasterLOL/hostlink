@@ -185,25 +185,21 @@ impl LockedState {
                 "Hub state exceeds size limit",
             )));
         }
-        let mut nonce = [0u8; 8];
-        getrandom::fill(&mut nonce).map_err(|_| {
-            CommitError::NotCommitted(io::Error::other("secure random source unavailable"))
-        })?;
-        let temp = self
-            .store
-            .root
-            .join(format!(".registry-v2-{}.tmp", hex::encode(nonce)));
-        let mut file = private_new_file(&temp).map_err(CommitError::NotCommitted)?;
+        let mut staged = tempfile::Builder::new()
+            .prefix(".registry-v2-")
+            .tempfile_in(&self.store.root)
+            .map_err(CommitError::NotCommitted)?;
         let result = (|| {
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            fs::rename(&temp, &self.store.state_path)?;
+            staged.write_all(&bytes)?;
+            staged.as_file().sync_all()?;
+            staged
+                .persist(&self.store.state_path)
+                .map_err(|error| error.error)?;
             #[cfg(unix)]
             File::open(&self.store.root)?.sync_all()?;
             Ok::<(), io::Error>(())
         })();
         if let Err(error) = result {
-            let _ = fs::remove_file(&temp);
             return match read_bounded(&self.store.state_path) {
                 Ok(current) if current == bytes => Err(CommitError::Uncertain(error)),
                 Err(readback) if readback.kind() != io::ErrorKind::NotFound => {
@@ -248,18 +244,6 @@ fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
     }
     Ok(v)
 }
-fn private_new_file(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options.open(path)?;
-    Ok(file)
-}
-
 fn validate_or_create_private_root(root: &Path) -> io::Result<()> {
     if root.as_os_str().is_empty() {
         return Err(invalid("state root is required"));

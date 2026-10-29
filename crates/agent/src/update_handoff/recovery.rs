@@ -137,16 +137,6 @@ pub fn recovery_action(phase: UpdatePhase, evidence: RecoveryEvidence) -> Recove
             if evidence.installed_old_valid
                 && evidence.installed_old_metadata_valid
                 && evidence.backup_old_valid
-                && evidence.backup_old_metadata_valid
-                && evidence.staged_new_valid
-                && evidence.staged_new_metadata_valid =>
-        {
-            Action::CancelUnpublished
-        }
-        Phase::BackedUp
-            if evidence.installed_old_valid
-                && evidence.installed_old_metadata_valid
-                && evidence.backup_old_valid
                 && evidence.backup_old_metadata_valid =>
         {
             Action::CancelUnpublished

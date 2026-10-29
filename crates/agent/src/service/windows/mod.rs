@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, ERROR_SUCCESS, GetLastError, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
     Security::{EqualSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser},
     Storage::FileSystem::SYNCHRONIZE,
     System::Registry::{
