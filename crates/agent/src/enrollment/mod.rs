@@ -1,8 +1,8 @@
 //! Explicit, one-shot enrollment of a fresh user-owned Agent root.
 
-use crate::private_fs::sync_directory;
-use crate::{AgentConfig, ReverseGateway, jobs, private_fs};
+use crate::{AgentConfig, ReverseGateway, jobs};
 use hostlink_hub::{EnrollRequest, EnrollResponse, GatewayEndpoint, MachineId};
+use private_fs::PrivateDir;
 use rand::{RngExt, rng};
 use reqwest::{Client, Url, redirect::Policy};
 use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};

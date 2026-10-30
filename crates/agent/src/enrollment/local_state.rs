@@ -2,9 +2,18 @@ use super::*;
 
 pub(super) fn read_token(path: &Path) -> io::Result<SecretString> {
     let mut bytes = Vec::new();
-    private_fs::open_private(path, false)?
-        .take(MAX_TOKEN_BYTES + 1)
-        .read_to_end(&mut bytes)?;
+    PrivateDir::open(
+        path.parent()
+            .ok_or_else(|| invalid("token has no parent"))?,
+    )
+    .map_err(io::Error::other)?
+    .open_file(
+        path.file_name()
+            .ok_or_else(|| invalid("token has no name"))?,
+    )
+    .map_err(io::Error::other)?
+    .take(MAX_TOKEN_BYTES + 1)
+    .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_TOKEN_BYTES {
         return Err(invalid("enrollment token file exceeds size limit"));
     }
@@ -30,33 +39,29 @@ pub(super) fn public_key(key: &PrivateKey) -> io::Result<String> {
 }
 
 pub(super) fn write_private_new(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "cannot create private enrollment file {}: {error}",
-                path.display()
-            ),
-        )
-    })?;
-    private_fs::restrict_private_path(path, false).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "private enrollment file validation failed for {}: {error}",
-                path.display()
-            ),
-        )
-    })?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("private file has no parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid("private file has no name"))?;
+    let mut file = PrivateDir::open(parent)
+        .map_err(io::Error::other)?
+        .create(name)
+        .map_err(io::Error::other)?;
     file.write_all(contents)?;
-    file.sync_all()
+    file.sync_all().map_err(io::Error::other)
+}
+
+pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    PrivateDir::open(path)
+        .map_err(io::Error::other)?
+        .sync_all()
+        .map_err(io::Error::other)?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 pub(super) fn ensure_fresh_root_parent(root: &Path) -> io::Result<()> {
@@ -91,8 +96,7 @@ pub(super) fn ensure_fresh_root_parent(root: &Path) -> io::Result<()> {
         }
     }
     #[cfg(windows)]
-    // cap-std rejects traversal, symlinks and reparse points in ancestors.
-    private_fs::open_private(parent, true)?;
+    PrivateDir::open(parent).map_err(io::Error::other)?;
     let metadata = fs::symlink_metadata(parent)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(invalid("Agent install root parent is not a real directory"));

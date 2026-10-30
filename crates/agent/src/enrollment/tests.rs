@@ -93,8 +93,8 @@ fn key() -> (PrivateKey, String) {
 fn fresh_root_accepts_dos_drive_path_without_allowing_alias_or_network_root() {
     let fixture = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))
         .expect("fresh current-user Windows fixture");
-    private_fs::restrict_private_path(fixture.path(), true)
-        .expect("protect current-user fixture with explicit ACL");
+    fs::remove_dir(fixture.path()).expect("remove empty fixture before private creation");
+    PrivateDir::ensure(fixture.path()).expect("create current-user fixture with a protected ACL");
     let canonical = fs::canonicalize(fixture.path()).expect("canonical Windows path");
     assert_ne!(
         canonical,
@@ -202,13 +202,18 @@ async fn fresh_enrollment_publishes_private_config_once_against_local_hub_v2() {
     let fixture = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))
         .expect("isolated disposable fixture under Agent crate");
     #[cfg(windows)]
-    private_fs::restrict_private_path(fixture.path(), true)
-        .expect("fresh enrollment fixture must have a protected current-user ACL");
+    {
+        fs::remove_dir(fixture.path()).expect("remove empty fixture before private creation");
+        PrivateDir::ensure(fixture.path())
+            .expect("create private enrollment fixture with protected current-user ACL");
+    }
     let operator = "operator-test-secret-000000000000000000000000000000000000";
     let gateway_lookup = "gateway-test-secret-000000000000000000000000000000";
     let projection = fixture.path().join("projection");
-    fs::create_dir(&projection).unwrap();
-    private_fs::restrict_private_path(&projection, true).unwrap();
+    PrivateDir::open(fixture.path())
+        .unwrap()
+        .create_dir("projection")
+        .unwrap();
     let gateway_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
     let alternate_gateway_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
     let controller_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();

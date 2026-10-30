@@ -126,18 +126,17 @@ where
 
     // The root and pending marker make a second invocation fail closed even if publication or
     // the Hub acknowledgement was interrupted. The invite is never sent a second time.
-    fs::create_dir(&options.install_root)?;
-    private_fs::restrict_private_path(&options.install_root, true)?;
+    let agent_dir = PrivateDir::ensure(&options.install_root).map_err(io::Error::other)?;
     let pending = options.install_root.join("enrollment.pending");
     write_private_new(
         &pending,
         b"Hub enrollment may have committed; reconcile before retrying\n",
     )?;
-    let stage = options
-        .install_root
-        .join(format!(".stage-{}", Uuid::new_v4()));
-    fs::create_dir(&stage)?;
-    private_fs::restrict_private_path(&stage, true)?;
+    let stage_name = format!(".stage-{}", Uuid::new_v4());
+    let stage_dir = agent_dir
+        .create_dir(&stage_name)
+        .map_err(io::Error::other)?;
+    let stage = options.install_root.join(stage_name);
 
     let reverse_private = reverse_key
         .to_openssh(LineEnding::LF)
@@ -197,8 +196,7 @@ where
     // update::apply and its active-job interlock. Keeping it below state/
     // would let a running managed job evade update deferral.
     let jobs_root = options.install_root.join("jobs");
-    fs::create_dir(&jobs_root)?;
-    private_fs::restrict_private_path(&jobs_root, true)?;
+    agent_dir.create_dir("jobs").map_err(io::Error::other)?;
     jobs::JobStore::initialize_fresh(&jobs_root)
         .await?
         .close()
@@ -280,7 +278,9 @@ where
         &stage.join("machine.json"),
         &serde_json::to_vec(&identity).map_err(io::Error::other)?,
     )?;
-    fs::remove_file(stage.join("enrollment-attempt.json"))?;
+    stage_dir
+        .remove_file("enrollment-attempt.json", private_fs::Durability::None)
+        .map_err(io::Error::other)?;
     let mut files = vec![
         "agent.json".to_owned(),
         "authorized_keys".to_owned(),
@@ -293,8 +293,11 @@ where
     let files = files
         .into_iter()
         .map(|name| {
-            let path = stage.join(&name);
-            let bytes = fs::read(&path)?;
+            let mut bytes = Vec::new();
+            stage_dir
+                .open_file(&name)
+                .map_err(io::Error::other)?
+                .read_to_end(&mut bytes)?;
             Ok((
                 name.to_owned(),
                 FileDigest {
@@ -314,8 +317,8 @@ where
         })
         .map_err(io::Error::other)?,
     )?;
-    // Files are already flushed by write_private_new. Windows cannot open a
-    // directory with File::open for sync_all; use the platform-aware barrier.
+    // Release stage directory handles before renaming on Windows.
+    drop(stage_dir);
     sync_directory(&stage)?;
 
     // Publish the complete set with one same-filesystem directory rename.
