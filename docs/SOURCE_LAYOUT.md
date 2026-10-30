@@ -31,7 +31,8 @@ does not certify production or registered Windows updater deployment.
 | Direct and gateway SSH | `crates/client/src/connect/`; `crates/agent/src/ssh/`; `crates/agent/src/tunnel/` |
 | Agent process supervision (SSH, Apalis, tunnel, updater lifetime lock) | `crates/agent/src/runtime.rs` |
 | Agent-local Apalis command queue and Board UI/API | `crates/agent/src/jobs/` (no Client jobs subsystem) |
-| Shared Agent-private files, locks and Windows DACL | `crates/agent/src/private_fs/` |
+| Owner-only private files and Windows ACL | `Vendor/private-fs/` (pinned upstream + Win7 fallback) |
+| Standard OS file locks and OS profile lookup | `crates/agent/src/private_fs/` (small integration only) |
 | Hub v2 endpoints and authoritative registry | `crates/hub/src/server/`; `crates/hub/src/state.rs` |
 | Fresh enrollment and source-pinned installation | `crates/agent/src/enrollment/`; `crates/client/src/bootstrap/` |
 | Linux service lifecycle | `crates/agent/src/service/linux.rs` (`service-manager` + systemd --user) |
@@ -44,26 +45,28 @@ updater contract. `jobs/store.rs` configures the native Apalis SQLite
 through ProcessKit. `jobs/board.rs` mounts the upstream Apalis Board
 Axum API and embedded UI; `jobs/new.html` is a small form calling the
 upstream task API. `jobs/database.rs` preserves private fresh-only SQLite
-schema using upstream Apalis migrations only. Shared `private_fs/mod.rs`
-uses `cap-std` and `cap-fs-ext` for no-follow, directory-relative lock
-opening; operations on existing private files validate and restrict permissions
-through the opened handle, not a second path lookup. The standard
-`File::lock` / `File::unlock` retains process coordination.
-`private_fs/windows.rs` centralizes owner-only DACL and hardlink checks for
-jobs, SSH, SFTP, service and updater using `windows-permissions` on opened
-handles. `open_private` returns the actual checked file, avoiding the former
-check-then-open race. There is no combined root/elevation validator; service
-install/start validate only the Agent root and immediate parent. Remote
-execution privilege policy belongs to `runtime.rs`. Read-only Task Scheduler
-status does not inspect filesystem permissions. A cross-compile does not
-establish Windows 7 native handle/reparse behavior.
+schema using upstream Apalis migrations only. `Vendor/private-fs/` supplies
+`PrivateDir`, `PrivateFile`, owner-only permissions, Windows protected DACL,
+nofollow/reparse and hardlink checks, and durable atomic publication.
+Its pinned upstream revision and compatibility deviations are recorded in
+[`Vendor/private-fs/VENDOR.md`](../Vendor/private-fs/VENDOR.md).
+`private_fs/mod.rs` only converts verified file capabilities to standard
+handles for `File::lock`/`File::unlock` and Tokio, preserving exact object
+identity without reopening the path. `private_fs/windows.rs` only resolves
+the OS profile's LocalAppData directory on Win7. There is no separate Agent
+ACL/parser implementation or root/elevation validator. Service install/start
+validate the private Agent root and its immediate parent; runtime privilege
+policy belongs to `runtime.rs`. Read-only Task Scheduler status does not
+inspect filesystem permissions. Win7 compatibility uses a local-NTFS legacy
+identity fallback, but native Win7 reparse/ACL/rename tests remain a separate
+acceptance gate.
 `jobs/tests/` contains the focused API and worker tests. There are no
 SSH jobs frames, SFTP binary artifacts, custom lifecycle or Client jobs
 module. `runtime.rs` supervises the independent SSH server, Apalis worker
 and outbound tunnel and owns the Linux updater process-lifetime lock.
 `ssh/server.rs` only runs the `russh` server and handles authenticated
-exec, SFTP and TCP-forward channels. `ssh/config.rs` uses shared
-`private_fs` for key-file validation. `ssh::serve` and `ssh::serve_on`
+exec, SFTP and TCP-forward channels. `ssh/config.rs` uses vendored
+`private-fs` file capabilities for key access. `ssh::serve` and `ssh::serve_on`
 remain public re-exports of the runtime functions for existing callers.
 `russh` advertises only public-key authentication; channel tracking
 requires no shared mutex because the handler owns its session map.

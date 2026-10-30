@@ -12,10 +12,13 @@ Service status does not attest the installed binary SHA or probe SSH. Package
 integrity is checked by this updater's exact manifest and journal verification.
 
 The supported updater root remains the exact OS-resolved LocalAppData/HostLink/Agent
-with protected owner-only ACLs on Agent and its immediate parent. `cap-std`
-rejects path reparse components; standard OS profile ACLs are trusted.
-The updater opens the known root directly with `cap-std`; it checks the
-private root and parent ACLs, without a combined root/elevation validator.
+with protected owner-only ACLs on Agent and its immediate parent.
+Vendored `private-fs` opens and verifies these directories without following
+symlink/reparse components. Its strict Windows DACL policy is described in
+[`VENDOR.md`](../Vendor/private-fs/VENDOR.md); existing `OICI` ACLs are
+not silently changed. Archive staging files are created privately at birth,
+the recovery journal uses the crate's durable atomic publication, and the
+same update/runner locks remain mandatory.
 Run the update command from a separate private executable beneath that root
 on the same volume, not from the executable being replaced. Keep the existing
 CLI syntax: `update --root ROOT --archive ZIP --sha256 SHA --target TARGET

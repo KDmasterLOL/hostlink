@@ -40,7 +40,10 @@ invite. A rerun against an existing root fails before sending another request.
 On Windows the direct `enroll` command validates the current user's private
 files and parent directory rather than testing whether its token is elevated.
 The published PowerShell bootstrap still requires a non-elevated interactive
-session. Even if enrollment is performed elevated by a separate operator
+session and creates each directory with a protected, non-inheritable current-user
+ACE required by vendored `private-fs`. Older existing `HostLink` directories
+with inherited `OICI` ACEs are not adopted without a separate ACL migration.
+Even if enrollment is performed elevated by a separate operator
 workflow, Agent runtime refuses elevated tokens before serving remote commands
 or Apalis jobs.
 
