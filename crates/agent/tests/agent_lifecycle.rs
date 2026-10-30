@@ -1,98 +1,82 @@
 #![cfg(target_os = "linux")]
 
-#[path = "support/started_job.rs"]
-mod started_job;
-
-use hostlink_agent::jobs::JobStore;
-use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
+use sha2::{Digest, Sha256};
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::{Command, Output},
+};
 use tempfile::TempDir;
 
-fn fixture() -> (
-    TempDir,
-    std::path::PathBuf,
-    std::path::PathBuf,
-    std::path::PathBuf,
-) {
+fn fixture(name: &str) -> (TempDir, PathBuf, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
-    let root = home.join(".local/share/hostlink/new-agent");
-    let bin_dir = temp.path().join("bin");
-    let config_home = home.join(".config");
-    fs::create_dir_all(&root).unwrap();
-    fs::create_dir_all(&bin_dir).unwrap();
-    fs::create_dir_all(&config_home).unwrap();
-    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
-    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-    let executable = root.join("bin/hostlink-agent");
-    fs::create_dir(root.join("bin")).unwrap();
-    fs::set_permissions(root.join("bin"), fs::Permissions::from_mode(0o700)).unwrap();
-    let built_agent = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("hostlink-agent");
-    let help = Command::new(&built_agent).arg("--help").output().unwrap();
-    assert!(
-        String::from_utf8_lossy(&help.stdout).contains("service"),
-        "binary={} output={}",
-        built_agent.display(),
-        String::from_utf8_lossy(&help.stdout)
-    );
-    fs::copy(built_agent, &executable).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-    let config = root.join("state/agent.json");
-    fs::create_dir_all(config.parent().unwrap()).unwrap();
-    fs::set_permissions(config.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
-    fs::write(&config, br#"{"listen":"127.0.0.1:39427","user":"fixture","host_key":"host_key","authorized_keys":"authorized_keys","jobs_root":"jobs","gateway":null}"#).unwrap();
-    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
-    write_enrollment_fixture(config.parent().unwrap());
-    fs::create_dir(root.join("state/jobs")).unwrap();
-    fs::set_permissions(root.join("state/jobs"), fs::Permissions::from_mode(0o700)).unwrap();
-    std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(async {
-                        JobStore::initialize_fresh(root.join("state/jobs"))
-                            .await
-                            .unwrap()
-                            .close()
-                            .await;
-                    });
-            })
-            .join()
-            .unwrap();
-    });
-    let runtime = temp.path().join("runtime");
-    fs::create_dir(&runtime).unwrap();
-    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
-    let fake_systemctl = bin_dir.join("systemctl");
+    let root = home.join(name);
+    for dir in [
+        &home,
+        &root,
+        &root.join("bin"),
+        &root.join("state"),
+        &home.join(".config"),
+        &temp.path().join("bin"),
+        &temp.path().join("runtime"),
+    ] {
+        fs::create_dir_all(dir).unwrap();
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let binary = root.join("bin/hostlink-agent");
+    fs::copy(env!("CARGO_BIN_EXE_hostlink-agent"), &binary).unwrap();
+    fs::set_permissions(binary, fs::Permissions::from_mode(0o700)).unwrap();
+    // Service lifecycle treats these as opaque data, including the jobs store.
+    for name in ["agent.json", "host_key", "machine.json", "jobs.db"] {
+        let path = root.join("state").join(name);
+        fs::write(&path, b"preserve this data\n").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let systemctl = temp.path().join("bin/systemctl");
+    // Synchronous state fixture only: no daemon, SSH endpoint or signal emulation.
     fs::write(
-        &fake_systemctl,
+        &systemctl,
         r##"#!/bin/sh
 set -eu
-printf '%s\n' "$*" >> "$FIXTURE_SYSTEMCTL_LOG"
-case "${2-}" in
-  status) exit 3 ;;
+printf '%s\n' "$*" >> "$FIXTURE_LOG"
+[ "${1-}" = --user ] || exit 2
+if [ -f "$FIXTURE_LOG.fail" ] && [ "${2-}" = "$(cat "$FIXTURE_LOG.fail")" ]; then exit 1; fi
+case "${3-}" in
+  /*) unit=$3 ;;
+  *) unit="$XDG_CONFIG_HOME/systemd/user/${3-}.service" ;;
 esac
-if [ "${2-}" = "--version" ]; then printf 'systemd 255\n'; fi
+case "${2-}" in
+  status)
+    if [ -f "$FIXTURE_LOG.race" ]; then
+      mkdir -p "$(dirname "$unit")"
+      printf 'foreign unit\n' > "$unit"
+      exit 4
+    fi
+    [ -f "$unit" ] || exit 4
+    [ -f "$FIXTURE_LOG.active" ] || exit 3 ;;
+  start) [ -f "$unit" ] || exit 4; touch "$FIXTURE_LOG.active" ;;
+  stop) [ -f "$unit" ] || exit 4; rm -f "$FIXTURE_LOG.active" ;;
+  enable|disable) [ -f "$unit" ] || exit 4 ;;
+  daemon-reload) ;;
+  *) exit 2 ;;
+esac
 "##,
     )
     .unwrap();
-    fs::set_permissions(&fake_systemctl, fs::Permissions::from_mode(0o700)).unwrap();
-    (temp, home, root, config)
+    fs::set_permissions(systemctl, fs::Permissions::from_mode(0o700)).unwrap();
+    (temp, home, root)
 }
 
-fn invoke(binary: &Path, args: &[&str], home: &Path) -> std::process::Output {
+fn command(home: &Path, root: &Path, action: &str) -> Command {
     let temp = home.parent().unwrap();
-    Command::new(binary)
-        .args(["service"])
-        .args(args)
+    let mut command = Command::new(root.join("bin/hostlink-agent"));
+    command.args(["service", action, "--root"]).arg(root);
+    if action == "install" {
+        command.arg("--config").arg(root.join("state/agent.json"));
+    }
+    command
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_RUNTIME_DIR", temp.join("runtime"))
@@ -100,285 +84,165 @@ fn invoke(binary: &Path, args: &[&str], home: &Path) -> std::process::Output {
             "PATH",
             format!("{}:/usr/bin:/bin", temp.join("bin").display()),
         )
-        .env("FIXTURE_SYSTEMCTL_LOG", temp.join("systemctl.log"))
-        .env("RUST_LOG", "error")
-        .output()
-        .unwrap()
+        .env("FIXTURE_LOG", temp.join("systemctl.log"));
+    command
 }
 
-fn write_enrollment_fixture(state: &Path) {
-    use sha2::{Digest, Sha256};
-    let machine_id = "00000000-0000-4000-8000-000000000001";
-    fs::write(state.join("authorized_keys"), b"ssh-ed25519 AAAA fixture\n").unwrap();
-    fs::write(
-        state.join("gateway_host_key"),
-        b"ssh-ed25519 AAAA gateway\n",
-    )
-    .unwrap();
-    fs::write(state.join("gateway_identity"), b"fixture private key\n").unwrap();
-    fs::write(state.join("host_key"), b"fixture host key\n").unwrap();
-    fs::write(
-        state.join("machine.json"),
-        serde_json::json!({
-            "format": 1,
-            "machine_id": machine_id,
-            "name": "fixture",
-            "ssh_public_key": "ssh-ed25519 AAAA fixture",
-            "ssh_host_public_key": "ssh-ed25519 AAAA host",
-            "gateway": {"host": "127.0.0.1", "port": 22, "user": "fixture", "host_public_key": "ssh-ed25519 AAAA gateway"},
-            "remote_port": 39427
-        }).to_string(),
-    ).unwrap();
-    for entry in fs::read_dir(state).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_file() {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
-        }
-    }
-    let mut files = serde_json::Map::new();
-    for name in [
-        "agent.json",
-        "authorized_keys",
-        "gateway_host_key",
-        "gateway_identity",
-        "host_key",
-        "machine.json",
-    ] {
-        let bytes = fs::read(state.join(name)).unwrap();
-        files.insert(
-            name.to_owned(),
-            serde_json::json!({
-                "size": bytes.len(),
-                "sha256": format!("{:x}", Sha256::digest(&bytes))
-            }),
-        );
-    }
-    let manifest = serde_json::json!({"format": 1, "machine_id": machine_id, "name": "fixture", "files": files});
-    fs::write(state.join("manifest.json"), manifest.to_string()).unwrap();
-    fs::set_permissions(
-        state.join("manifest.json"),
-        fs::Permissions::from_mode(0o600),
-    )
-    .unwrap();
+fn run(home: &Path, root: &Path, action: &str) -> Output {
+    command(home, root, action).output().unwrap()
 }
 
-#[tokio::test]
-async fn service_commands_bind_private_unit_to_root_and_remove_only_service_metadata() {
-    let (_temp, home, root, config) = fixture();
-    let args = [
-        "install",
-        "--root",
-        root.to_str().unwrap(),
-        "--config",
-        config.to_str().unwrap(),
-    ];
-    let output = invoke(&root.join("bin/hostlink-agent"), &args, &home);
+fn success(home: &Path, root: &Path, action: &str) {
+    let output = run(home, root, action);
     assert!(
         output.status.success(),
-        "{}",
+        "{action}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
 
-    let unit_dir = home.join(".config/systemd/user");
-    let mut units = fs::read_dir(&unit_dir).unwrap();
-    let unit_path = units.next().unwrap().unwrap().path();
-    assert!(units.next().is_none(), "one install root creates one unit");
-    let unit = fs::read_to_string(&unit_path).unwrap();
-    assert!(unit.contains("Restart=on-failure\nRestartSec=15s"));
-    assert!(unit.contains(root.to_str().unwrap()));
-    assert!(unit.contains("WantedBy=default.target"));
-    assert!(!unit.contains("enable-linger"));
+fn unit_path(home: &Path, root: &Path) -> PathBuf {
+    let hash = Sha256::digest(root.canonicalize().unwrap().as_os_str().as_encoded_bytes());
+    home.join(".config/systemd/user").join(format!(
+        "hostlink-agent-{}.service",
+        &format!("{hash:x}")[..20]
+    ))
+}
 
-    let machine_file = root.join("state/machine.json");
-    let saved_machine = fs::read(&machine_file).unwrap();
-    let mut machine: serde_json::Value = serde_json::from_slice(&saved_machine).unwrap();
-    machine["name"] = serde_json::json!("modified");
-    fs::write(&machine_file, machine.to_string()).unwrap();
-    let stopped_with_unrelated_metadata_change = invoke(
-        &root.join("bin/hostlink-agent"),
-        &["stop", "--root", root.to_str().unwrap()],
-        &home,
-    );
-    assert!(stopped_with_unrelated_metadata_change.status.success());
-    fs::write(&machine_file, saved_machine).unwrap();
-    fs::set_permissions(&machine_file, fs::Permissions::from_mode(0o600)).unwrap();
-
-    let jobs_root = root.join("state/jobs");
-    let _store = JobStore::open(&jobs_root).await.unwrap();
-    let id = started_job::queued(&jobs_root).await;
-    // Process lifecycle does not inspect the Apalis queue; queued records
-    // remain in the database across service stop.
-    let stopped = invoke(
-        &root.join("bin/hostlink-agent"),
-        &["stop", "--root", root.to_str().unwrap()],
-        &home,
-    );
-    assert!(stopped.status.success());
-    started_job::completed(&jobs_root, &id).await;
-
-    let status = invoke(
-        &root.join("bin/hostlink-agent"),
-        &["status", "--root", root.to_str().unwrap()],
-        &home,
-    );
+fn status(home: &Path, root: &Path, installed: bool, active: bool) {
+    let output = run(home, root, "status");
     assert!(
-        !status.status.success(),
-        "inactive service must not report healthy"
+        String::from_utf8_lossy(&output.stdout)
+            .contains(&format!("installed={installed} active={active}"))
     );
-    assert!(
-        String::from_utf8_lossy(&status.stdout).contains("installed but service is not active")
-    );
-    assert!(
-        String::from_utf8_lossy(&status.stdout)
-            .contains("local_enrollment_metadata=true hub_reachability=not_checked")
-    );
+    assert_eq!(output.status.success(), installed && active);
+}
 
-    for cmd in ["start", "stop"] {
-        let output = invoke(
-            &root.join("bin/hostlink-agent"),
-            &[cmd, "--root", root.to_str().unwrap()],
-            &home,
-        );
-        assert!(
-            output.status.success(),
-            "{}: {}",
-            cmd,
-            String::from_utf8_lossy(&output.stderr)
+fn refused(home: &Path, root: &Path) {
+    let log = home.parent().unwrap().join("systemctl.log");
+    let before = fs::read(&log).unwrap_or_default();
+    for action in ["install", "start", "stop", "status", "remove"] {
+        assert!(!run(home, root, action).status.success(), "{action}");
+    }
+    assert_eq!(fs::read(log).unwrap_or_default(), before);
+}
+
+#[test]
+fn lifecycle_preserves_v2_unit_bytes_and_all_agent_data() {
+    let (_temp, home, root) = fixture("agent");
+    status(&home, &root, false, false);
+    success(&home, &root, "install");
+    let path = unit_path(&home, &root);
+    let expected = format!(
+        "[Unit]\nDescription=HostLink Agent ({})\nStartLimitIntervalSec=300\nStartLimitBurst=5\n\
+         \n[Service]\nType=simple\nExecStart=\"{}/bin/hostlink-agent\" run --config=\"{}/state/agent.json\"\n\
+         Restart=on-failure\nRestartSec=15s\n\
+         \n[Install]\nWantedBy=default.target\n",
+        path.file_name().unwrap().to_str().unwrap(),
+        root.display(),
+        root.display()
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+    let log = home.parent().unwrap().join("systemctl.log");
+    assert!(!fs::read_to_string(&log).unwrap().contains("--user start"));
+    success(&home, &root, "install");
+    status(&home, &root, true, false);
+    success(&home, &root, "start");
+    status(&home, &root, true, true); // Invalid JSON and no SSH listener are irrelevant.
+    success(&home, &root, "stop");
+    status(&home, &root, true, false);
+    success(&home, &root, "stop");
+    success(&home, &root, "start");
+    let binary = fs::read(root.join("bin/hostlink-agent")).unwrap();
+    success(&home, &root, "remove");
+    assert!(!path.exists());
+    status(&home, &root, false, false);
+    assert_eq!(fs::read(root.join("bin/hostlink-agent")).unwrap(), binary);
+    for name in ["agent.json", "host_key", "machine.json", "jobs.db"] {
+        assert_eq!(
+            fs::read(root.join("state").join(name)).unwrap(),
+            b"preserve this data\n"
         );
     }
-
-    let remove = invoke(
-        &root.join("bin/hostlink-agent"),
-        &["remove", "--root", root.to_str().unwrap()],
-        &home,
-    );
-    assert!(
-        remove.status.success(),
-        "{}",
-        String::from_utf8_lossy(&remove.stderr)
-    );
-    assert!(!unit_path.exists());
-    assert!(
-        jobs_root.join("jobs.db").is_file(),
-        "uninstall preserves Apalis state"
-    );
-    assert!(!root.join(".hostlink-user-service.json").exists());
-    assert!(
-        root.join("bin/hostlink-agent").exists(),
-        "service removal must preserve the installed Agent executable"
-    );
-    assert!(
-        config.exists(),
-        "uninstall leaves enrollment data for recovery"
-    );
-    let log = fs::read_to_string(home.parent().unwrap().join("systemctl.log")).unwrap();
-    assert!(log.contains("--user daemon-reload"));
-    assert!(log.contains("--user enable "));
-    assert!(log.contains("--user disable "));
+    let calls = fs::read_to_string(log).unwrap();
+    assert!(calls.contains("--user enable ") && calls.contains("--user disable "));
+    assert!(!calls.contains("linger"));
 }
 
 #[test]
-fn service_rejects_symlink_root_and_unmanaged_unit_collision() {
-    let (_temp, home, root, config) = fixture();
+fn private_root_legacy_marker_and_modified_unit_refuse_without_os_actions() {
+    let (_temp, home, root) = fixture("agent");
     let link = home.join("root-link");
     std::os::unix::fs::symlink(&root, &link).unwrap();
-    let output = invoke(
-        &root.join("bin/hostlink-agent"),
-        &[
-            "install",
-            "--root",
-            link.to_str().unwrap(),
-            "--config",
-            config.to_str().unwrap(),
-        ],
-        &home,
-    );
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("without symlinks"));
-
-    let foreign_root = home.join("foreign");
-    fs::create_dir(&foreign_root).unwrap();
-    fs::set_permissions(&foreign_root, fs::Permissions::from_mode(0o700)).unwrap();
-    let suffix = {
-        use sha2::{Digest, Sha256};
-        let b = Sha256::digest(
-            foreign_root
-                .canonicalize()
-                .unwrap()
-                .as_os_str()
-                .as_encoded_bytes(),
-        );
-        b[..10]
-            .iter()
-            .map(|v| format!("{v:02x}"))
-            .collect::<String>()
-    };
-    let unit_dir = home.join(".config/systemd/user");
-    fs::create_dir_all(&unit_dir).unwrap();
-    let collision = unit_dir.join(format!("hostlink-agent-{suffix}.service"));
-    fs::write(&collision, "foreign unit\n").unwrap();
-    fs::create_dir(foreign_root.join("bin")).unwrap();
-    fs::set_permissions(foreign_root.join("bin"), fs::Permissions::from_mode(0o700)).unwrap();
-    let binary = foreign_root.join("bin/hostlink-agent");
-    let built_agent = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("hostlink-agent");
-    fs::copy(built_agent, &binary).unwrap();
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
-    fs::create_dir(foreign_root.join("state")).unwrap();
-    fs::set_permissions(
-        foreign_root.join("state"),
-        fs::Permissions::from_mode(0o700),
-    )
-    .unwrap();
-    let cfg = foreign_root.join("state/agent.json");
-    fs::write(&cfg, fs::read(config).unwrap()).unwrap();
-    fs::set_permissions(&cfg, fs::Permissions::from_mode(0o600)).unwrap();
-    write_enrollment_fixture(cfg.parent().unwrap());
-    let output = invoke(
-        &binary,
-        &[
-            "install",
-            "--root",
-            foreign_root.to_str().unwrap(),
-            "--config",
-            cfg.to_str().unwrap(),
-        ],
-        &home,
-    );
-    assert!(
-        !output.status.success(),
-        "must not overwrite a colliding unit"
-    );
-    assert_eq!(fs::read_to_string(collision).unwrap(), "foreign unit\n");
+    refused(&home, &link);
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    refused(&home, &root);
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let marker = root.join(".hostlink-user-service.json");
+    fs::write(&marker, b"legacy\n").unwrap();
+    refused(&home, &root);
+    assert_eq!(fs::read(&marker).unwrap(), b"legacy\n");
+    fs::remove_file(marker).unwrap();
+    success(&home, &root, "install");
+    let path = unit_path(&home, &root);
+    fs::write(&path, b"foreign unit\n").unwrap();
+    refused(&home, &root);
+    assert_eq!(fs::read(path).unwrap(), b"foreign unit\n");
 }
 
 #[test]
-fn legacy_service_registration_is_preserved_and_not_adopted() {
-    let (_temp, home, root, config) = fixture();
-    let legacy = root.join(".hostlink-user-service.json");
-    fs::write(&legacy, b"legacy owner marker\n").unwrap();
-    let result = invoke(
-        &root.join("bin/hostlink-agent"),
-        &[
-            "install",
-            "--root",
-            root.to_str().unwrap(),
-            "--config",
-            config.to_str().unwrap(),
-        ],
-        &home,
-    );
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("legacy HostLink"));
-    assert_eq!(fs::read(&legacy).unwrap(), b"legacy owner marker\n");
-    let user_units = home.join(".config/systemd/user");
+fn dangling_and_racing_collisions_never_get_overwritten() {
+    let (temp, home, root) = fixture("agent");
+    let path = unit_path(&home, &root);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let target = home.join("absent");
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    refused(&home, &root);
+    assert_eq!(fs::read_link(&path).unwrap(), target);
+    assert!(!target.exists());
+    fs::remove_file(&path).unwrap();
+    fs::write(temp.path().join("systemctl.log.race"), b"").unwrap();
+    assert!(!run(&home, &root, "install").status.success());
+    assert_eq!(fs::read(path).unwrap(), b"foreign unit\n");
     assert!(
-        !user_units.exists() || fs::read_dir(user_units).unwrap().next().is_none(),
-        "legacy refusal must not create or replace a user unit"
+        !fs::read_to_string(temp.path().join("systemctl.log"))
+            .unwrap()
+            .contains("--user enable ")
     );
+}
+
+#[test]
+fn special_paths_escape_quotes_backslashes_specifiers_and_environment_expansion() {
+    let (_temp, home, root) = fixture("space %n ${USER} 'quote' \\\"x");
+    success(&home, &root, "install");
+    let unit = fs::read_to_string(unit_path(&home, &root)).unwrap();
+    assert!(
+        unit.contains("ExecStart=:\"") && unit.contains("%%n ${USER} 'quote' \\\\\\\"x"),
+        "{unit}"
+    );
+    success(&home, &root, "start");
+    status(&home, &root, true, true);
+    success(&home, &root, "remove");
+}
+
+#[test]
+fn os_failures_propagate_and_failed_stop_preserves_unit() {
+    let (temp, home, root) = fixture("agent");
+    let failure = temp.path().join("systemctl.log.fail");
+    fs::write(&failure, "enable").unwrap();
+    assert!(!run(&home, &root, "install").status.success());
+    fs::remove_file(&failure).unwrap();
+    success(&home, &root, "install");
+    for action in ["status", "start", "stop", "disable"] {
+        fs::write(&failure, action).unwrap();
+        let command = if action == "disable" || action == "stop" {
+            "remove"
+        } else {
+            action
+        };
+        assert!(!run(&home, &root, command).status.success());
+        assert!(unit_path(&home, &root).is_file());
+    }
+    fs::remove_file(failure).unwrap();
+    success(&home, &root, "remove");
 }
