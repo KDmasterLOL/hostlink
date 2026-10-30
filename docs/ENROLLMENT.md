@@ -37,6 +37,13 @@ Hub enrollment may have committed or local publication did not finish. Check
 the Hub's secret-free inventory and reconcile the record before creating a new
 invite. A rerun against an existing root fails before sending another request.
 
+On Windows the direct `enroll` command validates the current user's private
+files and parent directory rather than testing whether its token is elevated.
+The published PowerShell bootstrap still requires a non-elevated interactive
+session. Even if enrollment is performed elevated by a separate operator
+workflow, Agent runtime refuses elevated tokens before serving remote commands
+or Apalis jobs.
+
 ## Bootstrap scripts
 
 `crates/agent/assets/Install-HostLink-Agent.ps1` supports Windows PowerShell 2

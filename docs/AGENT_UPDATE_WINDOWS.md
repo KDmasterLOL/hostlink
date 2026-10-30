@@ -3,18 +3,19 @@
 Windows updates require a fully stopped, unregistered Agent. Live update,
 maintenance mode, one-use candidate admission, automatic restart and health
 handoff have been removed. The updater never changes Task Scheduler or HKCU.
-An installed task (even stopped), legacy service marker/launcher/admission or
-Run registration is an error. Remove the task before updating and explicitly
-reinstall/start it afterwards. Existing legacy installations require a separately
-authorized removal using their matching old executable.
+An installed task (even stopped) or an old root-derived HKCU Run registration
+is an error. Historical marker/VBS files alone do not block an offline update.
+Remove the owned task before updating and explicitly reinstall/start it
+afterwards. Existing active legacy installations require stopping and removing
+their old autorun registration with the matching old executable.
 Service status does not attest the installed binary SHA or probe SSH. Package
 integrity is checked by this updater's exact manifest and journal verification.
 
 The supported updater root remains the exact OS-resolved LocalAppData/HostLink/Agent
 with protected owner-only ACLs on Agent and its immediate parent. `cap-std`
 rejects path reparse components; standard OS profile ACLs are trusted.
-These filesystem checks are shared with the user-service lifecycle through
-the Agent's private filesystem owner, not duplicated in service.
+The updater opens the known root directly with `cap-std`; it checks the
+private root and parent ACLs, without a combined root/elevation validator.
 Run the update command from a separate private executable beneath that root
 on the same volume, not from the executable being replaced. Keep the existing
 CLI syntax: `update --root ROOT --archive ZIP --sha256 SHA --target TARGET

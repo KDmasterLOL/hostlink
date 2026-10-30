@@ -49,12 +49,14 @@ uses `cap-std` and `cap-fs-ext` for no-follow, directory-relative lock
 opening; operations on existing private files validate and restrict permissions
 through the opened handle, not a second path lookup. The standard
 `File::lock` / `File::unlock` retains process coordination.
-`private_fs/windows.rs` centralizes owner-only DACL checks for jobs, SSH,
-SFTP, service installation and updater using `windows-permissions` handles.
-Only the Agent root and immediate parent require protected current-user ACLs;
-normal profile ancestors may be readable. Read-only Task Scheduler status
-does not inspect filesystem permissions. A cross-compile does not establish
-Windows 7 native handle/reparse behavior.
+`private_fs/windows.rs` centralizes owner-only DACL and hardlink checks for
+jobs, SSH, SFTP, service and updater using `windows-permissions` on opened
+handles. `open_private` returns the actual checked file, avoiding the former
+check-then-open race. There is no combined root/elevation validator; service
+install/start validate only the Agent root and immediate parent. Remote
+execution privilege policy belongs to `runtime.rs`. Read-only Task Scheduler
+status does not inspect filesystem permissions. A cross-compile does not
+establish Windows 7 native handle/reparse behavior.
 `jobs/tests/` contains the focused API and worker tests. There are no
 SSH jobs frames, SFTP binary artifacts, custom lifecycle or Client jobs
 module. `runtime.rs` supervises the independent SSH server, Apalis worker

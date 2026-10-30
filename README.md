@@ -191,9 +191,10 @@ enrollment, keys and Apalis jobs. Windows stop uses Scheduler termination;
 graceful shutdown and descendant cleanup are not guaranteed. Interrupted
 commands may replay after restart, repeating side effects.
 Linux handles systemd SIGTERM gracefully and does not enable login lingering. Windows requires interactive sign-in.
-Install roots must be protected current-user-only descendants of OS-resolved
-LocalAppData, with a private immediate parent; normal readable profile
-ancestors are allowed. Legacy Run/VBS/pipe/maintenance registrations are
-rejected during installation, not adopted.
+Windows service roots and their immediate parents must be private to their
+current owner; read-only profile ancestors are allowed. The offline Windows
+updater still requires the exact OS-resolved LocalAppData/HostLink/Agent root.
+Stale legacy markers do not block service installation, but an existing
+legacy HKCU Run autorun must be safely removed before Task Scheduler startup.
 See [docs/AGENT_LIFECYCLE.md](docs/AGENT_LIFECYCLE.md) for commands, platform
 limits and safety behavior. Windows native acceptance remains unrun.

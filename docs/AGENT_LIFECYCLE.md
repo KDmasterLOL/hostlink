@@ -68,9 +68,13 @@ It creates one SID/root-derived `HostLinkAgent-v2-...` task with a current-user
 logon trigger, `InteractiveToken`, `LeastPrivilege`, no password, one direct
 Agent executable action and `IgnoreNew` instance policy. It requires an
 interactive sign-in, does not restart on failure and has no execution time
-limit. `install` registers without starting; `start` explicitly runs the task.
-No administrator, SYSTEM, Windows service, HKCU Run writer, VBS launcher,
-private service marker, lifecycle named pipe or PID owner is used.
+limit. `install` uses `TASK_CREATE` for a new task and `TASK_UPDATE` for a
+verified existing task; it stops a running owned task before refreshing its
+registration, without starting it again. `start` explicitly runs the task.
+No administrator privilege is required for registration, and the service
+lifecycle no longer checks whether the installer process is elevated.
+No SYSTEM service, HKCU Run writer, VBS launcher, private service marker,
+lifecycle named pipe or PID owner is used.
 
 The public commands above remain, with a minimal `ServiceStatus` containing
 `installed` and `active` only. `active` means the Task Scheduler reports a
@@ -79,7 +83,8 @@ running/queued task or an extant instance, **not** that SSH/Hub is healthy.
 before dangerous operations compare the registered current-user identity,
 action and Agent root/config and essential task policy; no executable SHA
 attestation or full XML-comparison engine is part of the service lifecycle.
-`TASK_CREATE` refuses an occupied task name atomically; install never
+`TASK_CREATE` refuses an occupied task name; `TASK_UPDATE` is used only
+after verifying an owned registration. Install never intentionally
 overwrites a foreign definition.
 Unknown state, COM errors and access denial fail closed without localized text
 parsing. `stop`/`remove` also work when the task is already stopped.
@@ -93,22 +98,23 @@ and may replay interrupted work with repeated side effects. `remove` stops all
 task instances and deletes only the verified task, preserving the executable,
 enrollment, keys, jobs and every other Agent file.
 
-Installation accepts a protected current-user-only Agent root beneath the
-OS-resolved LocalAppData. The Agent root and its immediate parent must have
-private owner-only ACLs; ordinary profile ancestors may remain readable to
-other users. `cap-std` rejects reparse/symlink components. Read-only service
-status does not audit filesystem ACLs; start, stop and remove serialize through
-the protected `update.lock`. Enrollment validates secrets and Agent runtime
-reads them independently.
+The Windows service accepts an Agent root and immediate parent with protected
+owner-only ACLs, even outside LocalAppData. `cap-std` rejects symlink/reparse
+components; other readable ancestor directories are not an automatic failure.
+Read-only service status does not inspect filesystem ACLs. Install, start,
+stop and remove serialize through the protected `update.lock`; installation
+and explicit start check private root permissions. Enrollment validates
+secrets separately, and the Agent runtime refuses elevated Windows execution
+before launching SSH, Apalis jobs and its reverse tunnel.
 The installed executable must be `ROOT/bin/hostlink-agent.exe` and config
-`ROOT/state/agent.json`. Legacy `.hostlink-user-service.json`, VBS,
-maintenance/admission/temporary-marker files and the old root-derived HKCU Run
-value are rejected **during installation and offline update admission**.
-Once a current-user task is registered and its ownership verified, stale legacy
-markers do not prevent status, start, stop or removal of that task.
-Legacy files and registry values are never modified. Use the matching legacy executable under a
-separately authorized migration to remove the old registration; this version
-cannot adopt or uninstall it. Hidden `run --managed-service` and
+`ROOT/state/agent.json`. Historical marker/VBS files are inert and do not
+block installing or refreshing the verified Task Scheduler registration.
+However, an existing root-derived legacy HKCU Run registration still blocks
+install, start and offline update: deleting it without first stopping the old
+process can start two independent Agents. The Run value and old files are
+preserved. Stop/remove the old registration using its matching old Agent
+before reinstallation; a verified automatic migration has not been implemented.
+Hidden `run --managed-service` and
 `--maintenance-start` flags are removed and rejected.
 
 Windows updates are offline only: stop/remove the task, run the separate private
@@ -139,10 +145,11 @@ runner defaults to preflight only:
   -RunAcceptance
 ```
 
-The fixture checks essential task ownership and execution fields,
-collision/tamper/legacy-install refusal, idempotent
-install/start, stopped stop/remove, running removal, SSH readiness and enrollment
-retention. The runner checks unchanged HKCU Run values and root-task snapshots.
+The fixture checks task ownership and execution fields, collision/tamper
+refusal, owned-task refresh, stale legacy markers, foreign HKCU Run refusal,
+install/start, stopped stop/remove, running removal, SSH readiness and
+enrollment retention. The runner checks unchanged foreign HKCU Run values and
+root-task snapshots.
 A failed cleanup preserves the fixture root and unresolved task for diagnosis.
 Win7 logon and offline update/recovery require separately authorized disposable
 native execution; the Windows 11 runner does not satisfy that gate.
