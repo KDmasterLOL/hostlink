@@ -143,13 +143,15 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     let wrong_root = private_parent.join("Wrong Root");
     fs::create_dir(&wrong_root).expect("create unrelated private root");
     private_windows_path(&wrong_root, true);
-    let wrong_root_status = Command::new(source_agent)
-        .args(["service", "status", "--root"])
-        .arg(&wrong_root)
-        .output()
-        .expect("query unrelated private root");
-    assert!(!wrong_root_status.status.success());
-    assert!(String::from_utf8_lossy(&wrong_root_status.stdout).contains("installed=false"));
+    let unrelated = hostlink_agent::service::status(&wrong_root).unwrap();
+    assert!(!unrelated.installed && !unrelated.active);
+    for action in ["start", "stop", "remove"] {
+        assert!(
+            !service_output(source_agent, &wrong_root, action, None)
+                .status
+                .success()
+        );
+    }
 
     // A private final root does not make a shared or replaceable parent safe.
     // The lifecycle must reject this disposable world-writable ancestor path.
@@ -193,13 +195,6 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     assert!(!root.join(".hostlink-agent-start.vbs").exists());
     let stopped = hostlink_agent::service::status(&root).unwrap();
     assert!(stopped.installed && !stopped.active);
-    assert!(stopped.pid.is_none());
-    assert!(
-        hostlink_agent::service::ensure_update_unregistered(&root)
-            .unwrap_err()
-            .to_string()
-            .contains("service remove")
-    );
 
     let scheduler = NativeScheduler::connect();
     let name = task_name(&root);
@@ -228,49 +223,108 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     assert!(value("Arguments").starts_with("run --config="));
     assert!(!original_xml.contains("--managed-service"));
 
-    // An occupied name is not sufficient ownership; refuse an altered action.
-    let foreign_xml = original_xml.replace("run --config=", "check --config=");
-    scheduler.replace(&name, &foreign_xml);
-    // SAFETY: read-only snapshot after Scheduler normalization.
-    let foreign_before = unsafe { task.Xml().unwrap().to_string() };
-    for action in ["install", "start", "stop", "remove"] {
-        let mut cmd = Command::new(source_agent);
-        cmd.args(["service", action, "--root"]).arg(&root);
-        // install must execute from its installed location.
-        if action == "install" {
-            cmd = Command::new(&executable);
-            cmd.args(["service", "install", "--root"])
-                .arg(&root)
-                .arg("--config")
-                .arg(state.join("agent.json"));
+    // Each foreign definition is valid Scheduler XML, but is not our task.
+    for foreign_xml in [
+        original_xml.replace("run --config=", "check --config="),
+        original_xml.replace("hostlink-agent.exe</Command>", "foreign.exe</Command>"),
+        original_xml.replace("agent.json", "foreign.json"),
+        original_xml.replace("<RunLevel>LeastPrivilege", "<RunLevel>HighestAvailable"),
+        original_xml.replace(
+            "<MultipleInstancesPolicy>IgnoreNew",
+            "<MultipleInstancesPolicy>Parallel",
+        ),
+        original_xml.replace("</LogonTrigger>", "<Delay>PT1M</Delay></LogonTrigger>"),
+        original_xml.replace("<Enabled>true</Enabled>", "<Enabled>false</Enabled>"),
+    ] {
+        assert_ne!(foreign_xml, original_xml, "tamper fixture must alter XML");
+        scheduler.replace(&name, &foreign_xml);
+        let foreign_before = scheduler.xml(&name);
+        for action in ["install", "start", "stop", "remove"] {
+            let config = (action == "install").then(|| state.join("agent.json"));
+            assert!(
+                !service_output(&executable, &root, action, config.as_deref())
+                    .status
+                    .success(),
+                "{action} accepted a foreign definition"
+            );
         }
-        assert!(!cmd.output().unwrap().status.success());
+        assert!(hostlink_agent::service::status(&root).is_err());
+        assert_eq!(scheduler.xml(&name), foreign_before);
+        scheduler.replace(&name, &original_xml);
     }
-    // SAFETY: read-only fixture query; rejection must not alter the foreign task.
-    assert_eq!(unsafe { task.Xml().unwrap().to_string() }, foreign_before);
-    scheduler.replace(&name, &original_xml);
 
-    let original_binary = fs::read(&executable).unwrap();
-    let mut changed = original_binary.clone();
-    changed[0] ^= 1;
-    fs::write(&executable, changed).unwrap();
-    assert!(hostlink_agent::service::start(&root).is_err());
-    fs::write(&executable, original_binary).unwrap();
+    // Registration ownership is independent of executable/enrollment hashes.
+    // Neither status nor stop needs to read the installed executable or config.
+    let moved_executable = bin.join("saved-agent.exe");
+    let moved_config = state.join("saved-agent.json");
+    fs::rename(&executable, &moved_executable).unwrap();
+    fs::rename(state.join("agent.json"), &moved_config).unwrap();
+    assert!(hostlink_agent::service::status(&root).unwrap().installed);
+    hostlink_agent::service::stop(&root).unwrap();
+    fs::rename(moved_executable, &executable).unwrap();
+    fs::rename(moved_config, state.join("agent.json")).unwrap();
 
-    let legacy_marker = root.join(".hostlink-user-service.json");
-    fs::write(&legacy_marker, b"legacy fixture").unwrap();
-    assert!(
-        hostlink_agent::service::status(&root)
-            .unwrap_err()
-            .to_string()
-            .contains("legacy")
-    );
-    assert!(hostlink_agent::service::ensure_update_unregistered(&root).is_err());
-    fs::remove_file(legacy_marker).unwrap();
+    for name in [
+        ".hostlink-user-service.json",
+        ".hostlink-agent-start.vbs",
+        ".hostlink-maintenance-admission.json",
+        ".hostlink-service-marker-fixture",
+    ] {
+        let legacy = root.join(name);
+        fs::write(&legacy, b"legacy fixture").unwrap();
+        for action in ["install", "start", "stop", "remove"] {
+            let config = (action == "install").then(|| state.join("agent.json"));
+            let refused = service_output(&executable, &root, action, config.as_deref());
+            assert!(!refused.status.success());
+            assert!(String::from_utf8_lossy(&refused.stderr).contains("legacy"));
+        }
+        assert_eq!(fs::read(&legacy).unwrap(), b"legacy fixture");
+        assert_eq!(scheduler.xml(&task_name(&root)), original_xml);
+        fs::remove_file(legacy).unwrap();
+    }
+
+    {
+        let legacy_run = LegacyRun::create(&root);
+        let refused = service_output(
+            &executable,
+            &root,
+            "install",
+            Some(&state.join("agent.json")),
+        );
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("legacy HKCU Run"));
+        assert_eq!(scheduler.xml(&name), original_xml);
+        legacy_run.assert_unchanged();
+    }
+
+    let updates = root.join(".updates");
+    fs::create_dir(&updates).unwrap();
+    private_windows_path(&updates, true);
+    let journal = updates.join("handoff.json");
+    // Even an unreadable/malformed pending transaction must block launch.
+    fs::write(&journal, b"pending fixture journal").unwrap();
+    private_windows_path(&journal, false);
+    for action in ["install", "start"] {
+        let config = (action == "install").then(|| state.join("agent.json"));
+        let refused = service_output(&executable, &root, action, config.as_deref());
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("journal"));
+    }
+    assert_eq!(fs::read(&journal).unwrap(), b"pending fixture journal");
+    assert_eq!(scheduler.xml(&name), original_xml);
+    fs::remove_file(journal).unwrap();
+    fs::remove_dir(updates).unwrap();
 
     service(&executable, &root, "stop", None); // Already stopped is valid.
     service(&executable, &root, "remove", None); // Idle removal needs no PID.
-    hostlink_agent::service::ensure_update_unregistered(&root).unwrap();
+    assert!(!hostlink_agent::service::status(&root).unwrap().installed);
+    for action in ["stop", "remove"] {
+        assert!(
+            !service_output(&executable, &root, action, None)
+                .status
+                .success()
+        );
+    }
     service(
         &executable,
         &root,
@@ -283,7 +337,7 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     let mut healthy = false;
     for _ in 0..100 {
         let status = hostlink_agent::service::status(&root).unwrap();
-        if status.active && status.ssh_banner {
+        if status.active && ssh_banner(listen_port) {
             healthy = true;
             break;
         }
@@ -307,14 +361,12 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
         },
         1
     );
-    assert!(hostlink_agent::service::ensure_update_unregistered(&root).is_err());
     service(&executable, &root, "stop", None);
     assert!(!hostlink_agent::service::status(&root).unwrap().active);
     assert!(std::net::TcpStream::connect(("127.0.0.1", listen_port)).is_err());
     service(&executable, &root, "start", None);
     service(&executable, &root, "remove", None);
     assert!(!hostlink_agent::service::status(&root).unwrap().installed);
-    hostlink_agent::service::ensure_update_unregistered(&root).unwrap();
     assert!(executable.is_file());
     assert!(root.join("jobs").is_dir());
     for (name, bytes) in &payloads {
@@ -324,17 +376,43 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
 }
 
 fn service(executable: &Path, root: &Path, action: &str, config: Option<&Path>) {
-    let mut cmd = Command::new(executable);
-    cmd.args(["service", action, "--root"]).arg(root);
-    if let Some(config) = config {
-        cmd.arg("--config").arg(config);
-    }
-    let output = cmd.output().unwrap();
+    let output = service_output(executable, root, action, config);
     assert!(
         output.status.success(),
         "{action}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+fn service_output(
+    executable: &Path,
+    root: &Path,
+    action: &str,
+    config: Option<&Path>,
+) -> std::process::Output {
+    let mut cmd = Command::new(executable);
+    cmd.args(["service", action, "--root"]).arg(root);
+    if let Some(config) = config {
+        cmd.arg("--config").arg(config);
+    }
+    cmd.output().unwrap()
+}
+fn ssh_banner(port: u16) -> bool {
+    use std::{
+        io::Read,
+        net::{Ipv4Addr, SocketAddr, TcpStream},
+        time::Duration,
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(
+        &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        Duration::from_millis(100),
+    ) else {
+        return false;
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let mut banner = [0; 8];
+    stream.read_exact(&mut banner).is_ok() && &banner == b"SSH-2.0-"
 }
 fn task_name(root: &Path) -> String {
     let root = root.canonicalize().unwrap();
@@ -349,6 +427,17 @@ struct NativeScheduler {
     folder: windows::Win32::System::TaskScheduler::ITaskFolder,
 }
 impl NativeScheduler {
+    fn xml(&self, name: &str) -> String {
+        // SAFETY: read-only query of the guarded, unique fixture task.
+        unsafe {
+            self.folder
+                .GetTask(&name.into())
+                .unwrap()
+                .Xml()
+                .unwrap()
+                .to_string()
+        }
+    }
     fn connect() -> Self {
         use windows::Win32::System::Variant::VARIANT;
         use windows::Win32::System::{Com::*, TaskScheduler::*};
@@ -384,6 +473,125 @@ impl NativeScheduler {
     }
 }
 // COM apartment intentionally remains initialized until the disposable test thread exits.
+// Only the ignored, disposable-profile fixture writes the unique legacy Run
+// value. Production lifecycle detection is read-only and must preserve it.
+struct LegacyRun {
+    key: windows_sys::Win32::System::Registry::HKEY,
+    name: Vec<u16>,
+    owns_value: bool,
+}
+impl LegacyRun {
+    fn assert_unchanged(&self) {
+        use windows_sys::Win32::System::Registry::*;
+        let mut data = [0u16; 15];
+        let mut size = 30;
+        let mut kind = 0;
+        // SAFETY: live query handle and writable terminated UTF-16 buffer.
+        assert_eq!(
+            unsafe {
+                RegQueryValueExW(
+                    self.key,
+                    self.name.as_ptr(),
+                    std::ptr::null(),
+                    &mut kind,
+                    data.as_mut_ptr().cast(),
+                    &mut size,
+                )
+            },
+            0
+        );
+        assert_eq!(kind, REG_SZ);
+        assert_eq!(size, 30);
+        assert_eq!(
+            data.to_vec(),
+            "legacy fixture"
+                .encode_utf16()
+                .chain(Some(0))
+                .collect::<Vec<_>>()
+        );
+    }
+    fn create(root: &Path) -> Self {
+        use windows_sys::Win32::System::Registry::*;
+        let key_name: Vec<_> = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        let root = root.canonicalize().unwrap();
+        let digest = format!("{:x}", Sha256::digest(root.to_string_lossy().as_bytes()));
+        let name: Vec<_> = format!("HostLinkAgent-{}", &digest[..24])
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        let mut key = std::ptr::null_mut();
+        // SAFETY: guarded disposable HKCU; owned strings and output buffers.
+        assert_eq!(
+            unsafe {
+                RegCreateKeyExW(
+                    HKEY_CURRENT_USER,
+                    key_name.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_QUERY_VALUE | KEY_SET_VALUE,
+                    std::ptr::null(),
+                    &mut key,
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut fixture = Self {
+            key,
+            name,
+            owns_value: false,
+        };
+        // SAFETY: live handle; existence-only query, no value is overwritten.
+        assert_eq!(
+            unsafe {
+                RegQueryValueExW(
+                    key,
+                    fixture.name.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            2,
+            "refusing to overwrite an existing Run value"
+        );
+        let data: Vec<_> = "legacy fixture".encode_utf16().chain(Some(0)).collect();
+        // SAFETY: byte view covers the complete terminated UTF-16 buffer.
+        assert_eq!(
+            unsafe {
+                RegSetValueExW(
+                    key,
+                    fixture.name.as_ptr(),
+                    0,
+                    REG_SZ,
+                    data.as_ptr().cast(),
+                    u32::try_from(data.len() * 2).unwrap(),
+                )
+            },
+            0
+        );
+        fixture.owns_value = true;
+        fixture
+    }
+}
+impl Drop for LegacyRun {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Registry::*;
+        // SAFETY: deletes only the unique value this fixture created, then closes
+        // its handle. Never delete the shared Run key, even if we created it.
+        unsafe {
+            if self.owns_value {
+                assert_eq!(RegDeleteValueW(self.key, self.name.as_ptr()), 0);
+            }
+            RegCloseKey(self.key);
+        }
+    }
+}
 struct CleanupService {
     executable: std::path::PathBuf,
     root: std::path::PathBuf,

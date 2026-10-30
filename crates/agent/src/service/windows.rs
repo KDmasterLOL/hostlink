@@ -1,0 +1,488 @@
+//! Current-user Task Scheduler 2.0 lifecycle. Scheduler alone owns execution.
+use super::ServiceStatus;
+use sha2::{Digest, Sha256};
+use std::{
+    fs::{self, File},
+    io,
+    marker::PhantomData,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+use windows::{
+    Win32::System::{
+        Com::{
+            CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+            CoUninitialize,
+        },
+        TaskScheduler::{
+            IRegisteredTask, ITaskFolder, ITaskService, TASK_CREATE, TASK_LOGON_INTERACTIVE_TOKEN,
+            TASK_STATE_DISABLED, TASK_STATE_QUEUED, TASK_STATE_READY, TASK_STATE_RUNNING,
+            TaskScheduler,
+        },
+        Variant::VARIANT,
+    },
+    core::BSTR,
+};
+
+/// Register without starting or replacing an occupied task name.
+/// # Errors
+/// Refuses unsafe inputs, legacy registrations, pending updates and foreign tasks.
+pub fn install(root: &Path, config: &Path) -> io::Result<()> {
+    let root = crate::private_fs::windows::validate_agent_root(root)?;
+    reject_legacy(&root)?;
+    let _lock = mutation_lock(&root)?;
+    crate::update_handoff::ensure_no_pending_windows_handoff(&root)?;
+    for directory in [root.join("bin"), root.join("state")] {
+        crate::private_fs::validate_private_path(&directory, true)?;
+    }
+    let (command, arguments) = action(&root)?;
+    let executable = root.join("bin/hostlink-agent.exe");
+    crate::private_fs::validate_private_path(&executable, false)?;
+    crate::private_fs::validate_private_path(config, false)?;
+    if config.canonicalize()? != root.join("state/agent.json")
+        || std::env::current_exe()?.canonicalize()? != executable
+    {
+        return Err(invalid(
+            "service install requires ROOT/bin/hostlink-agent.exe and ROOT/state/agent.json",
+        ));
+    }
+    let _apartment = Apartment::new()?;
+    let folder = task_folder()?;
+    let name = task_name(&root)?;
+    if let Some(task) = registered(&folder, &name)? {
+        verify_task(&task, &root)?;
+    } else {
+        let xml = definition(&command, &arguments, &current_sid()?)?;
+        let empty = VARIANT::default();
+        // SAFETY: live local COM interface and owned arguments. TASK_CREATE is
+        // atomic and never replaces a task that appears after the lookup.
+        let task = unsafe {
+            folder.RegisterTask(
+                &BSTR::from(name),
+                &BSTR::from(xml),
+                TASK_CREATE.0,
+                &empty,
+                &empty,
+                TASK_LOGON_INTERACTIVE_TOKEN,
+                &empty,
+            )
+        }
+        .map_err(com_error)?;
+        // Preserve an unexpected readback for investigation, without deleting it.
+        verify_task(&task, &root)?;
+    }
+    Ok(())
+}
+
+/// Start the verified task and wait at most ten seconds for OS activation.
+/// # Errors
+/// Refuses pending updates, foreign tasks and unconfirmed activation.
+pub fn start(root: &Path) -> io::Result<()> {
+    let root = crate::private_fs::windows::validate_agent_root(root)?;
+    reject_legacy(&root)?;
+    let _lock = mutation_lock(&root)?;
+    crate::update_handoff::ensure_no_pending_windows_handoff(&root)?;
+    let _apartment = Apartment::new()?;
+    let folder = task_folder()?;
+    let task = owned(&folder, &root)?;
+    // SAFETY: ownership checked; IgnoreNew handles logon/concurrent starts.
+    unsafe { task.Run(&VARIANT::default()).map_err(com_error)? };
+    wait(&task, true)
+}
+
+/// Stop all verified task instances. OS termination is not graceful shutdown.
+/// # Errors
+/// Refuses missing/foreign tasks and unconfirmed termination.
+pub fn stop(root: &Path) -> io::Result<()> {
+    let root = crate::private_fs::windows::validate_agent_root(root)?;
+    reject_legacy(&root)?;
+    let _lock = mutation_lock(&root)?;
+    let _apartment = Apartment::new()?;
+    let folder = task_folder()?;
+    stop_task(&owned(&folder, &root)?)
+}
+
+/// Stop and unregister only the verified task, retaining every Agent file.
+/// # Errors
+/// Refuses missing/foreign tasks and unconfirmed termination or deletion.
+pub fn remove(root: &Path) -> io::Result<()> {
+    let root = crate::private_fs::windows::validate_agent_root(root)?;
+    reject_legacy(&root)?;
+    let _lock = mutation_lock(&root)?;
+    let _apartment = Apartment::new()?;
+    let folder = task_folder()?;
+    stop_task(&owned(&folder, &root)?)?;
+    // Recheck ownership after waiting, before deleting the named registration.
+    owned(&folder, &root)?;
+    let name = task_name(&root)?;
+    // SAFETY: the exact named task was verified and all instances stopped.
+    unsafe {
+        folder
+            .DeleteTask(&BSTR::from(&name), 0)
+            .map_err(com_error)?
+    };
+    if registered(&folder, &name)?.is_some() {
+        return Err(invalid("Agent task still exists after deletion"));
+    }
+    Ok(())
+}
+
+/// Read registration and OS execution state without probing Agent protocols.
+/// # Errors
+/// Refuses unsafe roots, foreign definitions and unknown Scheduler state.
+pub fn status(root: &Path) -> io::Result<ServiceStatus> {
+    let root = crate::private_fs::windows::validate_agent_root(root)?;
+    let _apartment = Apartment::new()?;
+    let folder = task_folder()?;
+    let task = registered(&folder, &task_name(&root)?)?;
+    let active = if let Some(task) = &task {
+        verify_task(task, &root)?;
+        active(task)?
+    } else {
+        false
+    };
+    Ok(ServiceStatus {
+        installed: task.is_some(),
+        active,
+    })
+}
+
+/// Read-only updater guard; the updater holds update.lock for its transaction.
+pub(crate) fn ensure_update_unregistered(root: &Path) -> io::Result<()> {
+    let root = crate::private_fs::windows::validate_agent_root(root)?;
+    reject_legacy(&root)?;
+    let _apartment = Apartment::new()?;
+    let folder = task_folder()?;
+    if registered(&folder, &task_name(&root)?)?.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "offline Windows update requires service stop and service remove before update; reinstall the task afterwards",
+        ));
+    }
+    Ok(())
+}
+
+fn mutation_lock(root: &Path) -> io::Result<File> {
+    let file = crate::private_fs::open_lock(&root.join("update.lock"))?;
+    file.try_lock().map_err(io::Error::other)?;
+    Ok(file)
+}
+fn current_sid() -> io::Result<String> {
+    Ok(windows_permissions::utilities::current_process_sid()
+        .map_err(io::Error::other)?
+        .to_string())
+}
+fn root_digest(root: &Path) -> String {
+    format!("{:x}", Sha256::digest(root.to_string_lossy().as_bytes()))[..24].into()
+}
+fn task_name(root: &Path) -> io::Result<String> {
+    Ok(format!(
+        "HostLinkAgent-v2-{}-{}",
+        current_sid()?,
+        root_digest(root)
+    ))
+}
+fn action(root: &Path) -> io::Result<(String, String)> {
+    let unicode = |path: PathBuf| {
+        path.into_os_string()
+            .into_string()
+            .map_err(|_| invalid("Agent task path is not Unicode"))
+    };
+    // Both fixed filenames end in a non-backslash and Windows forbids quotes
+    // in path components, so quoting the complete config path is sufficient.
+    Ok((
+        unicode(root.join("bin/hostlink-agent.exe"))?,
+        format!(
+            "run --config=\"{}\"",
+            unicode(root.join("state/agent.json"))?
+        ),
+    ))
+}
+
+// This guard cannot leave its thread. All COM interfaces are declared after it
+// and released before Drop; S_OK and S_FALSE both require CoUninitialize.
+struct Apartment(bool, PhantomData<*mut ()>);
+impl Apartment {
+    fn new() -> io::Result<Self> {
+        // SAFETY: initializes only the calling thread, without raw pointers.
+        let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if result.0 as u32 == 0x80010106 {
+            return Ok(Self(false, PhantomData)); // Existing STA, owned by caller.
+        }
+        result.ok().map_err(com_error)?;
+        Ok(Self(true, PhantomData))
+    }
+}
+impl Drop for Apartment {
+    fn drop(&mut self) {
+        if self.0 {
+            // SAFETY: balances this thread's successful CoInitializeEx.
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+fn com_error(error: windows::core::Error) -> io::Error {
+    io::Error::other(format!(
+        "Task Scheduler COM failed (HRESULT {:#010x})",
+        error.code().0
+    ))
+}
+fn task_folder() -> io::Result<ITaskFolder> {
+    // SAFETY: every caller holds a COM apartment until all interfaces drop.
+    unsafe {
+        let service: ITaskService =
+            CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER).map_err(com_error)?;
+        let empty = VARIANT::default();
+        service
+            .Connect(&empty, &empty, &empty, &empty)
+            .map_err(com_error)?;
+        service.GetFolder(&BSTR::from("\\")).map_err(com_error)
+    }
+}
+fn registered(folder: &ITaskFolder, name: &str) -> io::Result<Option<IRegisteredTask>> {
+    // SAFETY: live local interface and owned task name.
+    match unsafe { folder.GetTask(&BSTR::from(name)) } {
+        Ok(task) => Ok(Some(task)),
+        Err(error) if error.code().0 as u32 == 0x80070002 => Ok(None),
+        Err(error) => Err(com_error(error)),
+    }
+}
+fn owned(folder: &ITaskFolder, root: &Path) -> io::Result<IRegisteredTask> {
+    let task = registered(folder, &task_name(root)?)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "Agent Task Scheduler task is not installed",
+        )
+    })?;
+    verify_task(&task, root)?;
+    Ok(task)
+}
+fn verify_task(task: &IRegisteredTask, root: &Path) -> io::Result<()> {
+    let (command, arguments) = action(root)?;
+    // SAFETY: read-only query of a live registered task.
+    let xml = unsafe { task.Xml().map_err(com_error)?.to_string() };
+    verify_definition(&xml, &command, &arguments, &current_sid()?)
+}
+fn active(task: &IRegisteredTask) -> io::Result<bool> {
+    // SAFETY: read-only OS state/instance queries on a live interface.
+    unsafe {
+        let state = task.State().map_err(com_error)?;
+        if ![
+            TASK_STATE_DISABLED,
+            TASK_STATE_READY,
+            TASK_STATE_QUEUED,
+            TASK_STATE_RUNNING,
+        ]
+        .contains(&state)
+        {
+            return Err(invalid("Task Scheduler cannot establish Agent state"));
+        }
+        Ok(state == TASK_STATE_RUNNING
+            || state == TASK_STATE_QUEUED
+            || task
+                .GetInstances(0)
+                .map_err(com_error)?
+                .Count()
+                .map_err(com_error)?
+                != 0)
+    }
+}
+fn stop_task(task: &IRegisteredTask) -> io::Result<()> {
+    if active(task)? {
+        // SAFETY: caller verified the task; Stop terminates all its instances.
+        unsafe { task.Stop(0).map_err(com_error)? };
+    }
+    wait(task, false)
+}
+fn wait(task: &IRegisteredTask, running: bool) -> io::Result<()> {
+    for _ in 0..100 {
+        let ready = if running {
+            // SAFETY: read-only queries; queued alone does not confirm start.
+            unsafe {
+                task.State().map_err(com_error)? == TASK_STATE_RUNNING
+                    && task
+                        .GetInstances(0)
+                        .map_err(com_error)?
+                        .Count()
+                        .map_err(com_error)?
+                        > 0
+            }
+        } else {
+            !active(task)?
+        };
+        if ready {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "Task Scheduler did not reach the requested state within 10 seconds",
+    ))
+}
+
+const TASK_NAMESPACE: &str = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+fn definition(command: &str, arguments: &str, sid: &str) -> io::Result<String> {
+    let command = escape(command)?;
+    let arguments = escape(arguments)?;
+    let sid = escape(sid)?;
+    Ok(format!(
+        r#"<Task version="1.2" xmlns="{TASK_NAMESPACE}">
+<RegistrationInfo><Description>HostLink Agent v2</Description></RegistrationInfo>
+<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{sid}</UserId></LogonTrigger></Triggers>
+<Principals><Principal id="Agent"><UserId>{sid}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>false</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>false</WakeToRun><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority></Settings>
+<Actions Context="Agent"><Exec><Command>{command}</Command><Arguments>{arguments}</Arguments></Exec></Actions>
+</Task>"#
+    ))
+}
+fn escape(value: &str) -> io::Result<String> {
+    if value
+        .chars()
+        .any(|c| c < ' ' || c == '\u{fffe}' || c == '\u{ffff}')
+    {
+        return Err(invalid(
+            "task XML input contains unsupported control characters",
+        ));
+    }
+    Ok(value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;"))
+}
+
+/// Check execution ownership fields, not Scheduler serialization or file hashes.
+fn verify_definition(xml: &str, command: &str, arguments: &str, sid: &str) -> io::Result<()> {
+    let document = roxmltree::Document::parse(xml).map_err(io::Error::other)?;
+    let task = document.root_element();
+    if !task.has_tag_name((TASK_NAMESPACE, "Task")) {
+        return Err(invalid("foreign Task Scheduler XML namespace"));
+    }
+    let principals = child(task, "Principals")?;
+    let principal = child(principals, "Principal")?;
+    let triggers = child(task, "Triggers")?;
+    let trigger = child(triggers, "LogonTrigger")?;
+    let actions = child(task, "Actions")?;
+    let exec = child(actions, "Exec")?;
+    let settings = child(task, "Settings")?;
+    for container in [principals, triggers, actions] {
+        if container.children().filter(|n| n.is_element()).count() != 1 {
+            return Err(invalid(
+                "Agent task must have one principal, logon trigger and exec action",
+            ));
+        }
+    }
+    if principal.attribute("id").is_none()
+        || actions.attribute("Context") != principal.attribute("id")
+        || principal.children().filter(|n| n.is_element()).count() != 3
+        || trigger.children().filter(|n| n.is_element()).count() != 2
+        || exec.children().filter(|n| n.is_element()).count() != 2
+        || settings
+            .children()
+            .any(|n| n.is_element() && n.tag_name().name() == "RestartOnFailure")
+    {
+        return Err(invalid(
+            "foreign Agent task principal, trigger, action or restart policy",
+        ));
+    }
+    for (parent, name, expected) in [
+        (principal, "UserId", sid),
+        (principal, "LogonType", "InteractiveToken"),
+        (principal, "RunLevel", "LeastPrivilege"),
+        (trigger, "UserId", sid),
+        (trigger, "Enabled", "true"),
+        (exec, "Command", command),
+        (exec, "Arguments", arguments),
+        (settings, "MultipleInstancesPolicy", "IgnoreNew"),
+        (settings, "AllowHardTerminate", "true"),
+        (settings, "AllowStartOnDemand", "true"),
+        (settings, "Enabled", "true"),
+        (settings, "ExecutionTimeLimit", "PT0S"),
+    ] {
+        let field = child(parent, name)?;
+        if field.children().any(|n| n.is_element())
+            || field.children().filter(|n| n.is_text()).count() != 1
+            || field.text() != Some(expected)
+        {
+            return Err(invalid(
+                "foreign or changed Agent task; registration preserved",
+            ));
+        }
+    }
+    Ok(())
+}
+fn child<'a>(parent: roxmltree::Node<'a, 'a>, name: &str) -> io::Result<roxmltree::Node<'a, 'a>> {
+    let mut matching = parent
+        .children()
+        .filter(|n| n.has_tag_name((TASK_NAMESPACE, name)));
+    let node = matching
+        .next()
+        .ok_or_else(|| invalid("Agent task is missing an ownership field"))?;
+    if matching.next().is_some() {
+        return Err(invalid("Agent task has duplicate ownership fields"));
+    }
+    Ok(node)
+}
+
+fn reject_legacy(root: &Path) -> io::Result<()> {
+    use windows_sys::Win32::System::Registry::{
+        HKEY_CURRENT_USER, KEY_QUERY_VALUE, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+    };
+    for entry in fs::read_dir(root)? {
+        let name = entry?.file_name().to_string_lossy().to_ascii_lowercase();
+        if name == ".hostlink-user-service.json"
+            || name == ".hostlink-agent-start.vbs"
+            || name == ".hostlink-maintenance-admission.json"
+            || name.starts_with(".hostlink-service-marker-")
+        {
+            return Err(invalid(
+                "legacy Windows service files found; use the matching old Agent for separately authorized removal; files preserved",
+            ));
+        }
+    }
+    let wide = |value: &str| value.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let key_name = wide(r"Software\Microsoft\Windows\CurrentVersion\Run");
+    let value_name = wide(&format!("HostLinkAgent-{}", root_digest(root)));
+    let mut key = std::ptr::null_mut();
+    // SAFETY: terminated name and writable handle; current user, query-only access.
+    let result = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            key_name.as_ptr(),
+            0,
+            KEY_QUERY_VALUE,
+            &mut key,
+        )
+    };
+    if result == 2 {
+        return Ok(());
+    }
+    if result != 0 {
+        return Err(io::Error::from_raw_os_error(result as i32));
+    }
+    // SAFETY: live query-only handle; null data buffers query existence only.
+    let result = unsafe {
+        RegQueryValueExW(
+            key,
+            value_name.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    // SAFETY: uniquely owned handle is no longer used.
+    unsafe { RegCloseKey(key) };
+    match result {
+        2 => Ok(()),
+        0 | 234 => Err(invalid(
+            "legacy HKCU Run registration found; value preserved; remove with the matching old Agent before installation or offline update",
+        )),
+        _ => Err(io::Error::from_raw_os_error(result as i32)),
+    }
+}
+fn invalid(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
