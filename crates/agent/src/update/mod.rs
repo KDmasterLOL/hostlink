@@ -19,8 +19,6 @@ mod manifest;
 mod private_fs;
 #[cfg(windows)]
 mod windows;
-#[cfg(windows)]
-pub(crate) use windows::ensure_no_pending_windows_handoff;
 
 pub use bootstrap::{finalize_fresh_install, verify_fresh_package};
 

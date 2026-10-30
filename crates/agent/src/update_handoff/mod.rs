@@ -15,6 +15,42 @@ pub(crate) use journal::{
 pub(crate) use recovery::RecoveryEvidence;
 pub(crate) use recovery::{RecoveryAction, TransactionFiles, inspect_files, recovery_action};
 
+/// A registered Agent must not start while an offline Windows publication
+/// awaits recovery. Journal validation belongs to the update mechanism, not
+/// to the OS service lifecycle.
+#[cfg(windows)]
+pub(crate) fn ensure_no_pending_windows_handoff(root: &std::path::Path) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    let updates = root.join(".updates");
+    let metadata = match fs::symlink_metadata(&updates) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.file_attributes() & 0x400 != 0
+    {
+        return Err(invalid(
+            "Windows updater directory is not a private real directory",
+        ));
+    }
+    crate::private_fs::windows::validate_acl(
+        &updates,
+        &metadata,
+        crate::private_fs::windows::AllowedPrincipals::OwnerOnly,
+        true,
+    )?;
+    if read_journal(&updates.join("handoff.json"))?.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Windows Agent update journal requires verified recovery before startup",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_identity(identity: &UpdateIdentity) -> io::Result<()> {
     const WINDOWS_TARGETS: &[&str] = &[
         "x86_64-pc-windows-msvc",

@@ -8,7 +8,8 @@ does not certify production or registered Windows updater deployment.
 
 - For a module with children, use `name/mod.rs` and `name/*.rs`. **Never**
   create both `name.rs` and `name/mod.rs` at the same Rust module path.
-  Windows layouts use `service/windows/mod.rs`, not `windows.rs`.
+  The Agent service has `service/mod.rs` plus sibling platform modules
+  `service/linux.rs` and `service/windows.rs`; these do not have children.
 - Aim for roughly **200 physical lines per new module**. Larger cohesive files
   (protocol handlers, Windows state transitions, or single end-to-end tests)
   are allowed when splitting introduces more coupling than clarity.
@@ -33,8 +34,8 @@ does not certify production or registered Windows updater deployment.
 | Shared Agent-private files, locks and Windows DACL | `crates/agent/src/private_fs/` |
 | Hub v2 endpoints and authoritative registry | `crates/hub/src/server/`; `crates/hub/src/state.rs` |
 | Fresh enrollment and source-pinned installation | `crates/agent/src/enrollment/`; `crates/client/src/bootstrap/` |
-| Linux service lifecycle | `crates/agent/src/service/linux/` (`service-manager` + systemd --user) |
-| Windows current-user Task Scheduler | `crates/agent/src/service/windows/`, with COM adapter, exact task XML and read-only legacy rejection |
+| Linux service lifecycle | `crates/agent/src/service/linux.rs` (`service-manager` + systemd --user) |
+| Windows current-user Task Scheduler | `crates/agent/src/service/windows.rs` (direct COM, owned task action, legacy collision rejection) |
 | Agent update and ZIP security | `crates/agent/src/update/`, including `archive/`, `windows/` and `update_handoff/` for recovery |
 
 `jobs/mod.rs` exposes only the typed `CommandJob`, local queue and private
@@ -62,7 +63,9 @@ requires no shared mutex because the handler owns its session map.
 Agent CLI command argument definitions and execution live together in
 individual modules under `commands/`, including separate service actions.
 The `cli.rs` module only parses and dispatches Clap commands, while
-`shared.rs` owns the bounded Agent configuration loader. Public command syntax and status fields are retained; retired Windows hidden
+`shared.rs` owns the bounded Agent configuration loader. Service status
+exposes OS registration/running state only; SSH/Hub readiness and enrollment
+health have separate owners. Retired Windows hidden
 `--managed-service` and `--maintenance-start` flags are removed.
 See [jobs README](../crates/agent/src/jobs/README.md) and
 [jobs contract](AGENT_MINIMAL_JOBS.md).

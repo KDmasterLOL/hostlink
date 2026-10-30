@@ -33,17 +33,17 @@ systemd system unit, `loginctl enable-linger` or version-254-only exponential
 restart feature is required.
 
 There is **no HostLink JSON ownership marker**, internal PID registry,
-custom process supervisor or executable-hash attestation. The unit's exact
-contents identify the owned registration; conflicting or modified units,
+custom process supervisor or executable-hash attestation. The unit's
+identity and command must match before modifying its registration; conflicting or modified units,
 symlinked/private-ownership-invalid roots and legacy
 `.hostlink-user-service.json` markers are refused without mutation.
 Legacy registrations need an explicit reviewed migration using their matching
 old Agent; they are never automatically adopted or deleted.
 
-`status` uses the OS service state and probes the configured local SSH
-banner separately. It does not report a PID or an executable SHA-256.
-An active OS unit without an SSH listener is **not** considered healthy.
-Neither this probe nor local enrollment metadata certifies Hub reachability.
+`service status` reports **only** installed/running state from systemd.
+It makes no SSH connection and does not assert enrollment, package integrity,
+or Hub reachability. `hostlink-agent check` validates the Agent configuration;
+`hostlink list --check` separately checks authenticated remote SSH access.
 
 `stop` asks systemd to stop the unit. The Agent now handles **SIGTERM**
 as well as Ctrl+C, cancelling SSH, Apalis and outbound tunnel through
@@ -68,15 +68,15 @@ limit. `install` registers without starting; `start` explicitly runs the task.
 No administrator, SYSTEM, Windows service, HKCU Run writer, VBS launcher,
 private service marker, lifecycle named pipe or PID owner is used.
 
-The public commands above and `ServiceStatus` are retained. Windows `pid` is
-`None`; `active` means Scheduler running/queued state or an extant task instance.
-The SSH banner is a separate health probe, not authenticated process identity.
-`start` waits up to ten seconds for Scheduler activation; it does not certify
-SSH/Hub readiness. `status` fails if the exact expected task XML differs,
-including SID, action/config path, trigger, settings and executable SHA-256 in
-the task description. Both expected and registered XML are normalized through
-the Scheduler's own schema before structural comparison. `TASK_CREATE` refuses
-an occupied task name atomically; install never overwrites a foreign definition.
+The public commands above remain, with a minimal `ServiceStatus` containing
+`installed` and `active` only. `active` means the Task Scheduler reports a
+running/queued task or an extant instance, **not** that SSH/Hub is healthy.
+`start` waits up to ten seconds for Scheduler activation. Ownership checks
+before dangerous operations compare the registered current-user identity,
+action and Agent root/config and essential task policy; no executable SHA
+attestation or full XML-comparison engine is part of the service lifecycle.
+`TASK_CREATE` refuses an occupied task name atomically; install never
+overwrites a foreign definition.
 Unknown state, COM errors and access denial fail closed without localized text
 parsing. `stop`/`remove` also work when the task is already stopped.
 
@@ -90,7 +90,8 @@ task instances and deletes only the verified task, preserving the executable,
 enrollment, keys, jobs and every other Agent file.
 
 Roots remain protected current-user-only descendants of OS-resolved LocalAppData,
-with protected private ancestors, no reparse points and verified enrollment.
+with protected private ancestors and no reparse points. Enrollment validation
+belongs to enrollment/Agent runtime, not each service status request.
 The installed executable must be `ROOT/bin/hostlink-agent.exe` and config
 `ROOT/state/agent.json`. Legacy `.hostlink-user-service.json`, VBS,
 maintenance/admission/temporary-marker files and the old root-derived HKCU Run

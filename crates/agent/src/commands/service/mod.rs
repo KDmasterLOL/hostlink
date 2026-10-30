@@ -34,12 +34,12 @@ enum ServiceCommand {
         #[arg(long)]
         root: PathBuf,
     },
-    /// Report service state, owned process identity and SSH loopback banner.
+    /// Report the OS-managed service registration and running state.
     Status {
         #[arg(long)]
         root: PathBuf,
     },
-    /// Uninstall the owned executable and service integration; retain enrollment data and jobs.
+    /// Remove only the owned service registration; preserve Agent files and jobs.
     Remove {
         #[arg(long)]
         root: PathBuf,

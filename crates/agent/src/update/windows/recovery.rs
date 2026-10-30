@@ -223,34 +223,3 @@ pub(in crate::update) fn recover_windows_handoff(root: &Path) -> io::Result<()> 
         )),
     }
 }
-
-/// Prevent a login/start command from launching an Agent while a stopped-runtime transaction
-/// needs recovery. The caller must already have verified the current user's install root.
-#[cfg(windows)]
-pub(crate) fn ensure_no_pending_windows_handoff(root: &Path) -> io::Result<()> {
-    use std::os::windows::fs::MetadataExt;
-
-    let updates = root.join(".updates");
-    let metadata = match fs::symlink_metadata(&updates) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    if !metadata.is_dir()
-        || metadata.file_type().is_symlink()
-        || metadata.file_attributes() & 0x400 != 0
-    {
-        return Err(invalid(
-            "Windows updater directory is not a private real directory",
-        ));
-    }
-    validate_windows_private_acl(&updates, &metadata)?;
-    let journal = crate::update_handoff::read_journal(&updates.join("handoff.json"))?;
-    if journal.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "Windows Agent update journal requires verified recovery before startup",
-        ));
-    }
-    Ok(())
-}

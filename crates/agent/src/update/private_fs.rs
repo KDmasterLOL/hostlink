@@ -37,10 +37,22 @@ pub(super) fn validate_user_owned_root(root: &Path) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
-        crate::service::validate_windows_update_root(root)?;
+        validate_windows_update_root(root)?;
         validate_windows_private_acl(root, &metadata)?;
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn validate_windows_update_root(root: &Path) -> io::Result<()> {
+    let root = crate::private_fs::windows::validate_agent_root(root)?;
+    let expected = crate::private_fs::windows::local_app_data_path()?.join("HostLink/Agent");
+    if expected.canonicalize()? != root {
+        return Err(invalid(
+            "Agent updater root must be the exact current-user LocalAppData/HostLink/Agent",
+        ));
+    }
+    crate::service::ensure_update_unregistered(&root)
 }
 
 pub(super) fn file_identities(

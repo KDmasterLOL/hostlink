@@ -1,7 +1,10 @@
 //! Windows ACL policy shared by Agent jobs, SSH, SFTP, service and updater.
 
 use super::invalid;
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 use windows_permissions::{
     LocalBox, Sid,
     constants::{AceType, SeObjectType, SecurityInformation},
@@ -15,6 +18,99 @@ use windows_permissions::{
 pub(crate) enum AllowedPrincipals {
     OwnerOnly,
     OwnerSystemAdministrators,
+}
+
+/// OS-resolved profile path, independent of caller-supplied environment variables.
+/// SHGetFolderPathW is available on NT6.1 and avoids the Windows 7 combase import.
+pub(crate) fn local_app_data_path() -> io::Result<PathBuf> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+    use windows_sys::Win32::UI::Shell::{CSIDL_LOCAL_APPDATA, SHGetFolderPathW};
+
+    let mut buffer = [0u16; 260];
+    // SAFETY: SHGetFolderPathW writes at most MAX_PATH UTF-16 units into this buffer.
+    let result = unsafe {
+        SHGetFolderPathW(
+            std::ptr::null_mut(),
+            CSIDL_LOCAL_APPDATA as i32,
+            std::ptr::null_mut(),
+            0,
+            buffer.as_mut_ptr(),
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::other(format!(
+            "cannot resolve current-user LocalAppData (HRESULT {result:#x})"
+        )));
+    }
+    let len = buffer
+        .iter()
+        .position(|&ch| ch == 0)
+        .filter(|&len| len > 0 && len < buffer.len() - 1)
+        .ok_or_else(|| invalid("LocalAppData path is missing or truncated"))?;
+    PathBuf::from(OsString::from_wide(&buffer[..len])).canonicalize()
+}
+
+/// Canonical owned Agent root shared by the service and the stopped updater.
+/// No application/enrollment/schema validation occurs at this filesystem boundary.
+pub(crate) fn validate_agent_root(path: &Path) -> io::Result<PathBuf> {
+    use std::os::windows::fs::MetadataExt;
+
+    let sid = windows_permissions::utilities::current_process_sid()
+        .map_err(io::Error::other)?
+        .to_string();
+    if !is_non_elevated_user()? || !sid.starts_with("S-1-5-21-") {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Agent service/update requires a non-elevated current Windows user",
+        ));
+    }
+
+    // Inspect the caller's original components before canonicalization, not
+    // just the resolved target of a junction or symlink.
+    for ancestor in path.ancestors() {
+        let meta = fs::symlink_metadata(ancestor)?;
+        if meta.file_attributes() & 0x400 != 0 {
+            return Err(invalid("Agent root path contains a reparse point"));
+        }
+    }
+    let root = path.canonicalize()?;
+    let profile = local_app_data_path()?;
+    let profile_meta = fs::symlink_metadata(&profile)?;
+    if !profile_meta.is_dir() || profile_meta.file_attributes() & 0x400 != 0 {
+        return Err(invalid(
+            "current-user LocalAppData profile boundary is unsafe",
+        ));
+    }
+    validate_acl(
+        &profile,
+        &profile_meta,
+        AllowedPrincipals::OwnerSystemAdministrators,
+        false,
+    )?;
+    let relative = root.strip_prefix(&profile).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Agent root is outside current-user LocalAppData",
+        )
+    })?;
+    if !(1..=8).contains(&relative.components().count()) {
+        return Err(invalid(
+            "Agent root must be a bounded LocalAppData descendant",
+        ));
+    }
+
+    let mut directory = root.as_path();
+    while directory != profile {
+        let meta = fs::symlink_metadata(directory)?;
+        if !meta.is_dir() || meta.file_attributes() & 0x400 != 0 {
+            return Err(invalid("Agent root contains an unsafe directory"));
+        }
+        validate_acl(directory, &meta, AllowedPrincipals::OwnerOnly, true)?;
+        directory = directory
+            .parent()
+            .ok_or_else(|| invalid("Agent root has no profile ancestor"))?;
+    }
+    Ok(root)
 }
 
 /// Authoritative user-scope decision for Agent execution, enrollment and

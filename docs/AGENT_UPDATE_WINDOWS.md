@@ -7,9 +7,13 @@ An installed task (even stopped), legacy service marker/launcher/admission or
 Run registration is an error. Remove the task before updating and explicitly
 reinstall/start it afterwards. Existing legacy installations require a separately
 authorized removal using their matching old executable.
+Service status does not attest the installed binary SHA or probe SSH. Package
+integrity is checked by this updater's exact manifest and journal verification.
 
 The supported root remains the exact OS-resolved LocalAppData/HostLink/Agent
 with protected current-user ACLs, verified ancestry and non-reparse paths.
+These filesystem checks are shared with the user-service lifecycle through
+the Agent's private filesystem owner, not duplicated in service.
 Run the update command from a separate private executable beneath that root
 on the same volume, not from the executable being replaced. Keep the existing
 CLI syntax: `update --root ROOT --archive ZIP --sha256 SHA --target TARGET
