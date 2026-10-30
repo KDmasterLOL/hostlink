@@ -45,10 +45,14 @@ through ProcessKit. `jobs/board.rs` mounts the upstream Apalis Board
 Axum API and embedded UI; `jobs/new.html` is a small form calling the
 upstream task API. `jobs/database.rs` preserves private fresh-only SQLite
 schema using upstream Apalis migrations only. Shared `private_fs/mod.rs`
-enforces owned paths and uses
-standard `File::lock` / `File::unlock`; `private_fs/windows.rs`
-centralizes DACL checks for jobs, SSH, SFTP, service and updater while
-preserving their different allowed-principal policies.
+uses `cap-std` and `cap-fs-ext` for no-follow, directory-relative lock
+opening; operations on existing private files validate and restrict permissions
+through the opened handle, not a second path lookup. The standard
+`File::lock` / `File::unlock` retains process coordination.
+`private_fs/windows.rs` centralizes DACL policy for jobs, SSH, SFTP,
+service and updater using existing `windows-permissions` handle-based APIs,
+not an Agent-owned ACL engine. A cross-compile does not establish Windows 7
+native handle/reparse behavior.
 `jobs/tests/` contains the focused API and worker tests. There are no
 SSH jobs frames, SFTP binary artifacts, custom lifecycle or Client jobs
 module. `runtime.rs` supervises the independent SSH server, Apalis worker

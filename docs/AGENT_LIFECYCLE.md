@@ -35,8 +35,9 @@ restart feature is required.
 There is **no HostLink JSON ownership marker**, internal PID registry,
 custom process supervisor or executable-hash attestation. The unit's
 identity and command must match before modifying its registration; conflicting or modified units,
-symlinked/private-ownership-invalid roots and legacy
-`.hostlink-user-service.json` markers are refused without mutation.
+symlinked/private-ownership-invalid roots are refused. A legacy
+`.hostlink-user-service.json` marker blocks **new installation**, not
+status, stop or removal of an already verified user unit.
 Legacy registrations need an explicit reviewed migration using their matching
 old Agent; they are never automatically adopted or deleted.
 
@@ -60,6 +61,9 @@ Hub revocation and the local service lifecycle are separate operations.
 ## Windows 7 and Windows 11 current-user Task Scheduler task
 
 Windows uses Task Scheduler 2.0 through Microsoft's `windows` COM bindings.
+The direct API remains deliberately small: `schtasks.exe` would introduce
+interactive password handling and locale-sensitive status parsing; `planif`
+only covers task construction/registration, not the complete lifecycle.
 It creates one SID/root-derived `HostLinkAgent-v2-...` task with a current-user
 logon trigger, `InteractiveToken`, `LeastPrivilege`, no password, one direct
 Agent executable action and `IgnoreNew` instance policy. It requires an
@@ -95,7 +99,10 @@ belongs to enrollment/Agent runtime, not each service status request.
 The installed executable must be `ROOT/bin/hostlink-agent.exe` and config
 `ROOT/state/agent.json`. Legacy `.hostlink-user-service.json`, VBS,
 maintenance/admission/temporary-marker files and the old root-derived HKCU Run
-value are rejected and preserved. Use the matching legacy executable under a
+value are rejected **during installation and offline update admission**.
+Once a current-user task is registered and its ownership verified, stale legacy
+markers do not prevent status, start, stop or removal of that task.
+Legacy files and registry values are never modified. Use the matching legacy executable under a
 separately authorized migration to remove the old registration; this version
 cannot adopt or uninstall it. Hidden `run --managed-service` and
 `--maintenance-start` flags are removed and rejected.
@@ -128,7 +135,8 @@ runner defaults to preflight only:
   -RunAcceptance
 ```
 
-The fixture checks essential task ownership and execution fields, collision/tamper/legacy refusal, idempotent
+The fixture checks essential task ownership and execution fields,
+collision/tamper/legacy-install refusal, idempotent
 install/start, stopped stop/remove, running removal, SSH readiness and enrollment
 retention. The runner checks unchanged HKCU Run values and root-task snapshots.
 A failed cleanup preserves the fixture root and unresolved task for diagnosis.
