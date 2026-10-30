@@ -17,26 +17,13 @@ use std::{
 };
 
 pub(super) fn validate_user_owned_root(root: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(root)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
-        return Err(invalid("Agent install root is not a real directory"));
-    }
+    crate::private_fs::validate_private_path(root, true)?;
     if fs::canonicalize(root)? != root {
         return Err(invalid("Agent install root must not use a symlinked path"));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // SAFETY: geteuid has no preconditions and reads only the current process identity.
-        if metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(invalid("Agent install root is not owned by this user"));
-        }
-        if metadata.mode() & 0o077 != 0 {
-            return Err(invalid("Agent install root permissions are not private"));
-        }
-    }
     #[cfg(windows)]
     {
+        let metadata = fs::symlink_metadata(root)?;
         validate_windows_update_root(root)?;
         validate_windows_private_acl(root, &metadata)?;
     }
@@ -168,19 +155,8 @@ pub(super) fn create_private_directory(path: &Path) -> io::Result<()> {
 
 #[cfg(not(windows))]
 pub(super) fn validate_private_directory(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
-    if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse_point(metadata) {
-        return Err(invalid("Agent update directory is unsafe"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // SAFETY: geteuid has no preconditions and reads only the current process identity.
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-            return Err(invalid("Agent update directory is not privately owned"));
-        }
-    }
-    let _ = path;
-    Ok(())
+    let _ = metadata;
+    crate::private_fs::validate_private_path(path, true)
 }
 
 pub(super) fn set_private_directory(path: &Path) -> io::Result<()> {
