@@ -161,10 +161,7 @@ pub(super) fn validate_private_directory(path: &Path, metadata: &fs::Metadata) -
 
 pub(super) fn set_private_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
+    crate::private_fs::restrict_private_path(path, true)?;
     #[cfg(windows)]
     set_windows_private_acl(path, true)?;
     #[cfg(not(any(unix, windows)))]

@@ -1,16 +1,16 @@
 //! Windows ACL policy shared by Agent jobs, SSH, SFTP, service and updater.
 
 use super::invalid;
+pub(crate) use super::restrict_private_path as set_acl;
 use std::{
     fs, io,
     path::{Path, PathBuf},
 };
 use windows_permissions::{
-    LocalBox, Sid,
+    LocalBox, SecurityDescriptor,
     constants::{AceType, SeObjectType, SecurityInformation},
     wrappers::{
-        ConvertSecurityDescriptorToStringSecurityDescriptor, ConvertSidToStringSid,
-        GetNamedSecurityInfo, SetNamedSecurityInfo,
+        ConvertSecurityDescriptorToStringSecurityDescriptor, GetSecurityInfo, SetSecurityInfo,
     },
 };
 
@@ -53,11 +53,8 @@ pub(crate) fn local_app_data_path() -> io::Result<PathBuf> {
 /// Canonical owned Agent root shared by the service and the stopped updater.
 /// No application/enrollment/schema validation occurs at this filesystem boundary.
 pub(crate) fn validate_agent_root(path: &Path) -> io::Result<PathBuf> {
-    use std::os::windows::fs::MetadataExt;
-
-    let sid = windows_permissions::utilities::current_process_sid()
-        .map_err(io::Error::other)?
-        .to_string();
+    let mut directory = super::open_directory(path)?;
+    let sid = windows_permissions::utilities::current_process_sid()?.to_string();
     if !is_non_elevated_user()? || !sid.starts_with("S-1-5-21-") {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -65,50 +62,38 @@ pub(crate) fn validate_agent_root(path: &Path) -> io::Result<PathBuf> {
         ));
     }
 
-    // Inspect the caller's original components before canonicalization, not
-    // just the resolved target of a junction or symlink.
-    for ancestor in path.ancestors() {
-        let meta = fs::symlink_metadata(ancestor)?;
-        if meta.file_attributes() & 0x400 != 0 {
-            return Err(invalid("Agent root path contains a reparse point"));
-        }
-    }
     let root = path.canonicalize()?;
     let profile = local_app_data_path()?;
-    let profile_meta = fs::symlink_metadata(&profile)?;
-    if !profile_meta.is_dir() || profile_meta.file_attributes() & 0x400 != 0 {
-        return Err(invalid(
-            "current-user LocalAppData profile boundary is unsafe",
-        ));
-    }
-    validate_acl(
-        &profile,
-        &profile_meta,
-        AllowedPrincipals::OwnerSystemAdministrators,
-        false,
-    )?;
-    let relative = root.strip_prefix(&profile).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Agent root is outside current-user LocalAppData",
-        )
-    })?;
-    if !(1..=8).contains(&relative.components().count()) {
+    let depth = root
+        .strip_prefix(&profile)
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Agent root is outside current-user LocalAppData",
+            )
+        })?
+        .components()
+        .count();
+    if !(1..=8).contains(&depth) {
         return Err(invalid(
             "Agent root must be a bounded LocalAppData descendant",
         ));
     }
-
-    let mut directory = root.as_path();
-    while directory != profile {
-        let meta = fs::symlink_metadata(directory)?;
-        if !meta.is_dir() || meta.file_attributes() & 0x400 != 0 {
-            return Err(invalid("Agent root contains an unsafe directory"));
+    // open_directory rejected every original reparse component. Walk upward
+    // through handles only as far as the profile, checking each DACL once.
+    for index in 0..=depth {
+        validate_file_acl(
+            &directory.try_clone()?.into_std_file(),
+            if index == depth {
+                AllowedPrincipals::OwnerSystemAdministrators
+            } else {
+                AllowedPrincipals::OwnerOnly
+            },
+            index < depth,
+        )?;
+        if index < depth {
+            directory = directory.open_parent_dir(cap_std::ambient_authority())?;
         }
-        validate_acl(directory, &meta, AllowedPrincipals::OwnerOnly, true)?;
-        directory = directory
-            .parent()
-            .ok_or_else(|| invalid("Agent root has no profile ancestor"))?;
     }
     Ok(root)
 }
@@ -125,10 +110,8 @@ pub(crate) fn is_non_elevated_user() -> io::Result<bool> {
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
 
-    let current =
-        windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
-    let system: LocalBox<Sid> = "S-1-5-18".parse().map_err(io::Error::other)?;
-    if current.as_ref() == system.as_ref() {
+    let current = windows_permissions::utilities::current_process_sid()?;
+    if current.to_string() == "S-1-5-18" {
         return Ok(false);
     }
     let mut raw = std::ptr::null_mut();
@@ -163,49 +146,46 @@ pub(crate) fn validate_acl(
     protected: bool,
 ) -> io::Result<()> {
     use std::os::windows::fs::MetadataExt;
-
-    if metadata.file_attributes() & 0x400 != 0 {
-        return Err(invalid("Windows private path is a reparse point"));
+    let file = super::open_path(path, false)?;
+    let actual = file.metadata()?;
+    if actual.file_attributes() & 0x400 != 0 || actual.is_dir() != metadata.is_dir() {
+        return Err(invalid(
+            "Windows private path changed type or is a reparse point",
+        ));
     }
-    let descriptor = GetNamedSecurityInfo(
-        path.as_os_str(),
+    validate_file_acl(&file, allowed, protected)
+}
+
+pub(super) fn validate_file_acl(
+    file: &fs::File,
+    allowed: AllowedPrincipals,
+    protected: bool,
+) -> io::Result<()> {
+    let descriptor = GetSecurityInfo(
+        file,
         SeObjectType::SE_FILE_OBJECT,
         SecurityInformation::Dacl | SecurityInformation::Owner,
-    )
-    .map_err(io::Error::other)?;
-    let current =
-        windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
+    )?;
+    let current = windows_permissions::utilities::current_process_sid()?;
     if descriptor.owner() != Some(current.as_ref()) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Windows private path owner is not the current Agent user",
         ));
     }
-    if protected {
-        let sddl = ConvertSecurityDescriptorToStringSecurityDescriptor(
+    if protected
+        && !ConvertSecurityDescriptorToStringSecurityDescriptor(
             &descriptor,
             SecurityInformation::Dacl,
-        )
-        .map_err(io::Error::other)?;
-        if !sddl.to_string_lossy().starts_with("D:P") {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Windows private path DACL inherits permissions",
-            ));
-        }
+        )?
+        .to_string_lossy()
+        .starts_with("D:P")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Windows private path DACL inherits permissions",
+        ));
     }
-    let system: Option<LocalBox<Sid>> = match allowed {
-        AllowedPrincipals::OwnerOnly => None,
-        AllowedPrincipals::OwnerSystemAdministrators => {
-            Some("S-1-5-18".parse().map_err(io::Error::other)?)
-        }
-    };
-    let admins: Option<LocalBox<Sid>> = match allowed {
-        AllowedPrincipals::OwnerOnly => None,
-        AllowedPrincipals::OwnerSystemAdministrators => {
-            Some("S-1-5-32-544".parse().map_err(io::Error::other)?)
-        }
-    };
     let dacl = descriptor
         .dacl()
         .ok_or_else(|| invalid("Windows private path has no DACL"))?;
@@ -226,8 +206,8 @@ pub(crate) fn validate_acl(
             .sid()
             .ok_or_else(|| invalid("Windows private path has an allow ACE without SID"))?;
         if sid != current.as_ref()
-            && !system.as_ref().is_some_and(|id| sid == id.as_ref())
-            && !admins.as_ref().is_some_and(|id| sid == id.as_ref())
+            && !(matches!(allowed, AllowedPrincipals::OwnerSystemAdministrators)
+                && matches!(sid.to_string().as_str(), "S-1-5-18" | "S-1-5-32-544"))
         {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -238,20 +218,26 @@ pub(crate) fn validate_acl(
     Ok(())
 }
 
-pub(crate) fn set_acl(path: &Path, directory: bool) -> io::Result<()> {
-    use windows_permissions::SecurityDescriptor;
-
-    let current =
-        windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
-    let current = ConvertSidToStringSid(&current).map_err(io::Error::other)?;
+pub(super) fn set_file_acl(file: &mut fs::File, directory: bool) -> io::Result<()> {
+    let current = windows_permissions::utilities::current_process_sid()?;
+    let descriptor = GetSecurityInfo(
+        file,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Owner,
+    )?;
+    if descriptor.owner() != Some(current.as_ref()) {
+        return Err(invalid(
+            "Windows private path owner is not the current Agent user",
+        ));
+    }
     let inheritance = if directory { "OICI" } else { "" };
-    let sddl = format!("D:P(A;{inheritance};FA;;;{})", current.to_string_lossy());
-    let descriptor: LocalBox<SecurityDescriptor> = sddl.parse().map_err(io::Error::other)?;
+    let sddl = format!("D:P(A;{inheritance};FA;;;{current})");
+    let descriptor: LocalBox<SecurityDescriptor> = sddl.parse()?;
     let dacl = descriptor
         .dacl()
         .ok_or_else(|| invalid("cannot create private Windows DACL"))?;
-    SetNamedSecurityInfo(
-        path.as_os_str(),
+    SetSecurityInfo(
+        file,
         SeObjectType::SE_FILE_OBJECT,
         SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
         None,
@@ -259,17 +245,13 @@ pub(crate) fn set_acl(path: &Path, directory: bool) -> io::Result<()> {
         Some(dacl),
         None,
     )
-    .map_err(io::Error::other)
 }
 
-// Prevent a SQLite sidecar with another hardlink from being modified while
-// hardening its inherited ACL.
-pub(crate) fn reject_hardlinks(path: &Path) -> io::Result<()> {
+pub(super) fn reject_file_hardlinks(file: &fs::File) -> io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
     };
-    let file = fs::File::open(path)?;
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: the handle belongs to the open File and info is writable.
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
