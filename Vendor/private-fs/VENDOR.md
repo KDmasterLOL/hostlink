@@ -16,6 +16,20 @@ the native Windows backend and documented in this file.
 When updating, review upstream diffs and preserve all HostLink-specific
 compatibility changes. Do not blindly replace this directory with `main`.
 
+The Windows bindings generator is an isolated Cargo workspace so its
+`windows-bindgen = 0.100` build-time dependency never enters the Agent
+dependency graph. Verify the generated bindings match this checked-in source:
+
+```sh
+cargo run --locked --manifest-path Vendor/private-fs/tools/windows-bindings/Cargo.toml -- --check
+```
+
+This source-parity check also runs in HostLink's Linux dev CI. The generator
+emits Win32 constants `FILE_DEVICE_DISK` and `FILE_REMOTE_DEVICE` as `i32`,
+while the queried device fields are `u32`; the Windows backend casts the
+positive constants at the comparison boundary rather than altering generated
+ABI bindings by hand.
+
 ## HostLink integration and test-environment compatibility
 
 HostLink now uses `PrivateDir`/`PrivateFile` for Agent enrollment, SSH keys,
@@ -23,6 +37,22 @@ SFTP, private locks, updater staging and durable journals. Remaining Agent
 `private_fs/` code only bridges a validated handle to `std::fs::File` for
 OS locks/Tokio and resolves Windows LocalAppData through a Win7-compatible API.
 The former bespoke `cap-std` traversal and ACL validation are removed.
+
+The HostLink fork intentionally uses protected, owner-only `OICI` on Windows
+**directories**, while Windows **regular files** keep a noninheritable,
+protected owner-only DACL. SQLite/Apalis creates `jobs.db`, `jobs.db-wal`,
+and `jobs.db-shm` through its Windows VFS without supplying a security
+descriptor: noninheritable directory ACLs would leave their access rights
+dependent on the token's default DACL. The inherited ACE grants only the
+already-authorized current user; no other SID is accepted. Directory
+acquisition, creation and explicit hardening consistently require/publish
+`OICI`. Existing directories with an otherwise owner-only noninheritable
+ACL are not silently modified. A non-ignored Windows integration regression
+(`crates/agent/tests/private_fs_windows_sqlite.rs`) checks actual SQLite
+file ACLs and a default-DACL file in a disposable temporary directory.
+It is included in Windows CI but has not yet run natively for this change.
+The existing ignored lifecycle acceptance checks the same invariant in
+a guarded disposable Windows profile; Windows 7 remains a separate gate.
 
 On Linux, upstream's named-user POSIX ACL test originally hard-coded UID 12345,
 which produces `EINVAL` inside user namespaces where that UID is not mapped.
@@ -32,7 +62,7 @@ the standard minimal ACL with `EINVAL`/`EOPNOTSUPP`. This is a test-only
 portability change, not a relaxed production permission check. Native
 non-owner named-UID ACL tests remain best exercised on a host with mapped UIDs.
 
-HostLink source acceptance: Linux Agent library 52/52, Agent updater lifecycle
+HostLink source acceptance: Linux Agent library 54/54, Agent updater lifecycle
 27/27, Linux service lifecycle 6/6, vendored `private-fs` Linux 91/91.
 Generic Windows MSVC x86/x64 Agent all-target check and strict Clippy pass.
 Pinned nightly `build-std` checks pass for `private-fs` on both true Win7
@@ -146,7 +176,7 @@ handles, with final-component nofollow and post-open checks on every retry.
 | `NtCreateFile`, `OBJ_DONT_REPARSE` | [The object-attribute contract rejects reparses](https://learn.microsoft.com/en-us/windows/win32/api/ntdef/ns-ntdef-_object_attributes); old kernels use the bounded fallback and trusted-anchor contract above. Native Win7 drive mapping, empty-name reopen, symlink/junction, protected creation and replacement behavior remain acceptance gates. |
 | `FileIdBothDirectoryInfo` / restart | [The structure/classes are available since Vista / Server 2008](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_both_dir_info). Enumeration uses filenames, not these 64-bit IDs for identity. Independent cursor and buffer bounds checks remain. |
 | `FileRenameInformationEx` | Existing code retries only the three known unsupported NTSTATUS values with classic `FileRenameInformation`, using the same source/parent handles. It never unlinks to emulate replacement. Classic replacement can refuse an open destination; test this on Win7. |
-| Handles / ACLs / flush | Noninheritance, owned handle cleanup, token-user ownership, protected DACLs, exact-handle disposition, and writable-directory flush are unchanged. Test creation, acquisition, hardening, deletion, listing, and flush on native x86/x64 NTFS. Unsupported flushes remain errors. |
+| Handles / ACLs / flush | Kernel handles remain noninheritable; directories now have owner-only `OICI` ACEs for SQLite's native child creation, while private files remain noninheritable. TokenUser ownership, protected DACLs, exact-handle disposition and writable-directory flush remain enforced. Test creation, inheritance, hardening, deletion, listing and flush on native x86/x64 NTFS. Unsupported flushes remain errors. |
 
 An additional integration gate is the RNG/toolchain selection. The cached
 `getrandom 0.4.3` source selects `ProcessPrng` for ordinary Windows targets;
@@ -173,7 +203,7 @@ HostLink consumer code were not modified.
 | Same Clippy command, `i686-pc-windows-msvc` | PASS, exit 0. |
 | `cargo test --offline --locked -p private-fs --lib path::` | PASS: 7 tests; 84 filtered out. No workspace-wide test run. |
 | Linux pure policy harness | PASS: 7 exact-source tests of identity variants/bits, legacy metadata/ABI, error allowlists, local-device/ACL scope, normal components and trusted-anchor spelling. |
-| Bindings generator `--check` | BLOCKED: the tool is not a root-workspace member; an isolated temporary mirror still fails offline because `windows-bindgen = 0.100` is unavailable. New declarations mirror the documented Win32 ABI, and `apis.txt` includes the requested APIs/constants. Generated byte-for-byte parity is NOT verified. |
+| Bindings generator `--check` | PASS on HostLink 1C-1141 QA: isolated workspace, locked `windows-bindgen 0.100`, byte-for-byte generated source matches tracked `bindings.rs`. |
 | Native Win7 SP1 / Server 2008 R2 and modern Windows / ReFS | NOT RUN. No native runtime, reparse/race, hardening, publication, durability or ReFS acceptance PASS is claimed. |
 
 The coordinator populated the original Cargo cache with `windows-link 0.100`,
@@ -202,7 +232,7 @@ The file-symlink regression is explicitly ignored by default because native
 creation needs SeCreateSymbolicLinkPrivilege (or Developer Mode on newer
 Windows). It requires an explicit privileged native run; it is not a PASS.
 
-**Remaining merge/acceptance gates:** generated bindings parity; native Win7
+**Remaining acceptance gates:** native Win7
 x86/x64 root acquisition under the actual OS drive mapping; normal and forced
 fallback creation/acquisition/reopens; junction and privileged file-symlink
 regressions; permitted/denied attribute access during hardening; classic

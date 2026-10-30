@@ -49,7 +49,7 @@ fn forced_open_fallback_walks_roots_and_creates_protected_objects() {
                 namespace_replacement_after_validation_keeps_the_original_parent();
                 let (temp, dir) = fixture();
                 let child = dir.create_dir("child").unwrap();
-                security::verify(&child, &dir.user).unwrap();
+                security::verify(&child, &dir.user, true).unwrap();
                 assert!(PrivateDir::open(temp.path().join("private/child")).is_ok());
                 for name in ["a/b", r"a\b", ".", "..", "C:key", r"\??\C:\child"] {
                     assert!(matches!(
@@ -341,7 +341,7 @@ mod identity_tests {
     #[test]
     fn legacy_identity_requires_local_ntfs_even_with_persistent_acls() {
         let local = FILE_FS_DEVICE_INFORMATION {
-            DeviceType: FILE_DEVICE_DISK,
+            DeviceType: FILE_DEVICE_DISK as u32,
             Characteristics: 0,
         };
         let ntfs: Vec<_> = "NTFS".encode_utf16().collect();
@@ -361,8 +361,8 @@ mod identity_tests {
         }
         for device in [
             FILE_FS_DEVICE_INFORMATION {
-                DeviceType: FILE_DEVICE_DISK,
-                Characteristics: FILE_REMOTE_DEVICE,
+                DeviceType: FILE_DEVICE_DISK as u32,
+                Characteristics: FILE_REMOTE_DEVICE as u32,
             },
             FILE_FS_DEVICE_INFORMATION::default(),
         ] {
@@ -544,8 +544,8 @@ fn round_trip_private_creation_and_noninheritance() {
     file.read_to_string(&mut contents).unwrap();
     assert_eq!(contents, "secret");
     file.verify().unwrap();
-    security::verify(&dir, &dir.user).unwrap();
-    security::verify(&nested, &dir.user).unwrap();
+    security::verify(&dir, &dir.user, true).unwrap();
+    security::verify(&nested, &dir.user, true).unwrap();
     assert_eq!(
         std::fs::read(temp.path().join(r"private\nested\key")).unwrap(),
         b"secret"
@@ -620,7 +620,7 @@ fn inherited_permissive_parent_cannot_broaden_new_objects() {
     // Root acquisition permits public ancestors, but supplies its own protected
     // DACL in the creation syscall. The parent's inheritable grants cannot enter it.
     let private = PrivateDir::ensure(_temp.path().join("private/child")).unwrap();
-    security::verify(&private, &private.user).unwrap();
+    security::verify(&private, &private.user, true).unwrap();
     private.create("key").unwrap().verify().unwrap();
 }
 #[test]
@@ -628,7 +628,7 @@ fn hard_links_owner_and_full_file_identity_are_checked() {
     let (temp, dir) = fixture();
     let mut file = dir.create("key").unwrap();
     assert!(matches!(
-        security::verify(&file, &world()),
+        security::verify(&file, &world(), false),
         Err(Error::OwnerMismatch)
     ));
     let different = dir.create("other").unwrap();
@@ -807,11 +807,11 @@ fn owner_uses_token_user_even_when_default_owner_differs() {
     // SAFETY: both SIDs are owned valid allocations.
     if unsafe { EqualSid(owner.as_ptr(), dir.user.as_ptr()) } == 0 {
         assert!(matches!(
-            security::verify(&file, &owner),
+            security::verify(&file, &owner, false),
             Err(Error::OwnerMismatch)
         ));
     }
-    security::verify(&file, &Sid::process_user().unwrap()).unwrap();
+    security::verify(&file, &Sid::process_user().unwrap(), false).unwrap();
 }
 
 #[test]
@@ -844,7 +844,7 @@ fn hardening_is_explicit_descriptor_bound_and_revalidated() {
         Err(Error::MultipleHardLinks { .. })
     ));
     assert!(matches!(
-        security::verify(&file, &dir.user),
+        security::verify(&file, &dir.user, false),
         Err(Error::InsecureAcl)
     ));
 }
@@ -881,6 +881,31 @@ fn empty_and_null_dacls_and_inheritable_aces_are_rejected() {
     assert!(matches!(dir.create("new-key"), Err(Error::InsecureAcl)));
     dir.harden().unwrap();
     dir.create("new-key").unwrap();
+}
+
+#[test]
+fn private_directories_require_owner_only_child_inheritance() {
+    let (_temp, dir) = fixture();
+    let file = dir.create("key").unwrap();
+    // Owner-only but non-inheritable directory ACLs are insufficient for
+    // SQLite and other APIs that create children without an explicit DACL.
+    set_acl(&dir, &[(&dir.user, FILE_ALL_ACCESS as u32, 0)], true);
+    assert!(matches!(dir.check_private(), Err(Error::InsecureAcl)));
+    assert!(matches!(dir.create("blocked"), Err(Error::InsecureAcl)));
+    dir.harden().unwrap();
+    dir.check_private().unwrap();
+    dir.create("allowed").unwrap();
+    // A regular private file must not pass directory inheritance to objects.
+    set_acl(
+        &file,
+        &[(
+            &dir.user,
+            FILE_ALL_ACCESS as u32,
+            (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u32,
+        )],
+        true,
+    );
+    assert!(matches!(file.verify(), Err(Error::InsecureAcl)));
 }
 #[test]
 fn unpaired_utf16_names_are_not_lossily_converted() {
@@ -999,7 +1024,7 @@ fn borrowed_library_handle_hardening_never_reopens_a_path() {
     original.verify().unwrap();
     assert!(matches!(replacement.verify(), Err(Error::InsecureAcl)));
     assert!(matches!(
-        security::harden(&donor, &other),
+        security::harden(&donor, &other, false),
         Err(Error::OwnerMismatch)
     ));
 }

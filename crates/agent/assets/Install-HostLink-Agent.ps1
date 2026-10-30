@@ -17,8 +17,8 @@ function Set-PrivateDirectory([string]$Path, [Security.Principal.SecurityIdentif
     if ([IO.Directory]::Exists($Path) -or [IO.File]::Exists($Path)) { throw 'Bootstrap staging path already exists.' }
     $security = New-Object Security.AccessControl.DirectorySecurity
     $security.SetAccessRuleProtection($true, $false)
-    # private-fs requires exactly one non-inheritable, protected user ACE.
-    $rule = New-Object Security.AccessControl.FileSystemAccessRule($Sid, 'FullControl', 'None', 'None', 'Allow')
+    # SQLite creates DB/WAL/SHM itself: child files must inherit only this SID.
+    $rule = New-Object Security.AccessControl.FileSystemAccessRule($Sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
     [void]$security.AddAccessRule($rule)
     [void][IO.Directory]::CreateDirectory($Path, $security)
     $directory = New-Object IO.DirectoryInfo($Path)
@@ -37,7 +37,7 @@ function Assert-PrivateDirectory([string]$Path, [Security.Principal.SecurityIden
     if (-not $rule.IdentityReference.Equals($Sid) -or
         $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
         $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
-        $rule.InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or
+        $rule.InheritanceFlags -ne ([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit) -or
         $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
         throw 'Install parent ACL differs from private-fs owner-only policy; migrate the old parent explicitly.'
     }

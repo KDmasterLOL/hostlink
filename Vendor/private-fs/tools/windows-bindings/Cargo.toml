@@ -7,3 +7,8 @@ publish = false
 
 [dependencies]
 windows-bindgen = "=0.100"
+
+# Build the generator independently from HostLink's application workspace.
+# Its own codegen dependencies should not enter the Agent dependency graph.
+[workspace]
+resolver = "3"

@@ -101,12 +101,14 @@ enrollment, keys, jobs and every other Agent file.
 The Windows service accepts an Agent root and immediate parent with protected
 owner-only ACLs, even outside LocalAppData. Vendored `private-fs` opens
 these via retained file handles and rejects symlink/reparse redirection.
-Its strict Windows policy requires exactly one non-inheritable full-control
-ACE for the current user (no `OICI` inheritance); the installer uses that
-policy for newly created directories and files. Existing Agent roots with
-older inheritable ACLs require a deliberate stopped-state migration and are
-not silently repaired. Other readable ancestor directories are not by
-themselves an automatic failure.
+Its strict Windows policy requires one protected full-control ACE for the
+current user. Directories must use owner-only `OICI` inheritance so
+SQLite-created DB/WAL/SHM files do not depend on the process token's default
+DACL; files created through `private-fs` use noninheritable protected ACLs.
+The installer follows the same policy. Existing roots with unrelated SID
+grants or owner-only directories lacking inheritance require an explicit
+stopped-state migration and are not silently repaired. Other readable
+ancestor directories are not by themselves an automatic failure.
 Read-only service status does not inspect filesystem ACLs. Install, start,
 stop and remove serialize through the protected `update.lock`; installation
 and explicit start check private root permissions. Enrollment validates

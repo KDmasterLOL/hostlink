@@ -46,11 +46,22 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     for directory in [&root, &state, &bin, &root.join("jobs")] {
         private_windows_path(directory, true);
     }
-    JobStore::initialize_fresh(root.join("jobs"))
+    let store = JobStore::initialize_fresh(root.join("jobs"))
         .await
-        .expect("initialize installed Agent SQLite state")
-        .close()
-        .await;
+        .expect("initialize installed Agent SQLite state");
+    // SQLite creates the database and transient WAL/SHM files via CreateFileW
+    // without an explicit security descriptor. Verify OS inheritance did not
+    // grant any other SID access while SQLite still holds these files open.
+    let mut saw_database = false;
+    for entry in fs::read_dir(root.join("jobs")).expect("list SQLite state") {
+        let entry = entry.expect("SQLite directory entry");
+        if entry.file_name().to_string_lossy().starts_with("jobs.db") {
+            saw_database |= entry.file_name() == "jobs.db";
+            assert_sqlite_owner_only(&entry.path());
+        }
+    }
+    assert!(saw_database, "SQLite must have created its database");
+    store.close().await;
 
     let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("choose disposable port");
     let listen_port = probe.local_addr().expect("read disposable port").port();
@@ -809,8 +820,8 @@ fn private_windows_path(path: &Path, directory: bool) {
 
     let current = windows_permissions::utilities::current_process_sid().expect("current SID");
     let sid = ConvertSidToStringSid(&current).expect("SID string");
-    let _ = directory;
-    let sddl = format!("D:P(A;;FA;;;{})", sid.to_string_lossy());
+    let inheritance = if directory { "OICI" } else { "" };
+    let sddl = format!("D:P(A;{inheritance};FA;;;{})", sid.to_string_lossy());
     let descriptor: LocalBox<SecurityDescriptor> = sddl.parse().expect("protected private DACL");
     SetNamedSecurityInfo(
         path.as_os_str(),
@@ -822,6 +833,37 @@ fn private_windows_path(path: &Path, directory: bool) {
         None,
     )
     .expect("apply current-user-only DACL");
+}
+
+fn assert_sqlite_owner_only(path: &Path) {
+    use windows_permissions::constants::{
+        AceType, SeObjectType::SE_FILE_OBJECT, SecurityInformation,
+    };
+    use windows_permissions::{utilities::current_process_sid, wrappers::GetSecurityInfo};
+
+    let file = fs::File::open(path).expect("open SQLite-created file for ACL inspection");
+    let descriptor = GetSecurityInfo(
+        &file,
+        SE_FILE_OBJECT,
+        SecurityInformation::Owner | SecurityInformation::Dacl,
+    )
+    .expect("inspect SQLite file ACL");
+    let owner = current_process_sid().expect("current disposable user's SID");
+    assert_eq!(descriptor.owner(), Some(owner.as_ref()));
+    let dacl = descriptor.dacl().expect("SQLite file must have a DACL");
+    assert!(dacl.len() > 0, "SQLite file DACL cannot be empty");
+    for index in 0..dacl.len() {
+        let ace = dacl.get_ace(index).expect("valid SQLite file ACE");
+        if ace.ace_type() == AceType::ACCESS_ALLOWED_ACE_TYPE {
+            assert_eq!(
+                ace.sid(),
+                Some(owner.as_ref()),
+                "SQLite file ACL grants access to an unexpected SID"
+            );
+        } else {
+            panic!("unexpected SQLite file ACE type");
+        }
+    }
 }
 
 fn world_writable_windows_directory(path: &Path) {

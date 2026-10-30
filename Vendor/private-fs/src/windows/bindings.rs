@@ -79,8 +79,8 @@ pub const DELETE: i32 = 65536;
 pub const ERROR_INSUFFICIENT_BUFFER: i32 = 122;
 pub const ERROR_INVALID_FUNCTION: i32 = 1;
 pub const ERROR_INVALID_PARAMETER: i32 = 87;
-pub const ERROR_NO_MORE_FILES: i32 = 18;
 pub const ERROR_NOT_SUPPORTED: i32 = 50;
+pub const ERROR_NO_MORE_FILES: i32 = 18;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct FILETIME {
@@ -98,8 +98,7 @@ pub struct FILE_ATTRIBUTE_TAG_INFO {
     pub ReparseTag: u32,
 }
 pub const FILE_CREATE: i32 = 2;
-pub const FILE_DEVICE_DISK: FILE_DEVICE_TYPE = 7;
-pub type FILE_DEVICE_TYPE = u32;
+pub const FILE_DEVICE_DISK: i32 = 7;
 pub const FILE_DIRECTORY_FILE: i32 = 1;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -162,7 +161,7 @@ pub const FILE_OPEN_REPARSE_POINT: i32 = 2097152;
 pub const FILE_PERSISTENT_ACLS: i32 = 8;
 pub const FILE_READ_ATTRIBUTES: i32 = 128;
 pub const FILE_READ_DATA: i32 = 1;
-pub const FILE_REMOTE_DEVICE: u32 = 16;
+pub const FILE_REMOTE_DEVICE: i32 = 16;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FILE_RENAME_INFORMATION {

@@ -60,7 +60,8 @@ pub(super) mod identity {
     }
 
     pub(in super::super) fn local_disk(device: &FILE_FS_DEVICE_INFORMATION) -> Result<()> {
-        if device.DeviceType != FILE_DEVICE_DISK || device.Characteristics & FILE_REMOTE_DEVICE != 0
+        if device.DeviceType != FILE_DEVICE_DISK as u32
+            || device.Characteristics & FILE_REMOTE_DEVICE as u32 != 0
         {
             return Err(Error::UnsupportedFilesystem {
                 capability: "local Windows disk device",
@@ -290,7 +291,9 @@ fn open_access(
         MaximumLength: bytes,
         Buffer: name.as_mut_ptr(),
     };
-    let mut security = user.map(Descriptor::new).transpose()?;
+    let mut security = user
+        .map(|sid| Descriptor::new(sid, directory))
+        .transpose()?;
     let mut attributes = OBJECT_ATTRIBUTES {
         Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
         RootDirectory: parent.map_or(ptr::null_mut(), |p| p.as_raw_handle()),
@@ -467,7 +470,7 @@ pub(super) fn validate(
     user: &Sid,
 ) -> Result<Identity> {
     let id = metadata(handle.as_handle(), directory, expected)?;
-    security::verify(handle, user)?;
+    security::verify(handle, user, directory)?;
     Ok(id)
 }
 

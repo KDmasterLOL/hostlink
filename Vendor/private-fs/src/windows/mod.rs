@@ -42,12 +42,12 @@ pub struct PrivateFile {
 }
 fn harden(handle: impl AsHandle, directory: bool, id: nt::Identity, user: &Sid) -> Result<()> {
     nt::metadata(handle.as_handle(), directory, Some(id))?;
-    match security::harden(handle.as_handle(), user) {
+    match security::harden(handle.as_handle(), user, directory) {
         Ok(()) => (),
         Err(Error::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied => {
             let writable = nt::security_handle(handle.as_handle())?;
             nt::identity_matches(&writable, id)?;
-            security::harden(&writable, user)?;
+            security::harden(&writable, user, directory)?;
         }
         Err(e) => return Err(e),
     }

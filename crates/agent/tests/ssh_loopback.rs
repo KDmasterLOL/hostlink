@@ -14,8 +14,8 @@ fn private_windows_test_path(path: &std::path::Path, directory: bool) {
     let current = windows_permissions::utilities::current_process_sid()
         .expect("current user token for fixture");
     let sid = ConvertSidToStringSid(&current).expect("SID string");
-    let _ = directory;
-    let sddl = format!("D:P(A;;FA;;;{})", sid.to_string_lossy());
+    let inheritance = if directory { "OICI" } else { "" };
+    let sddl = format!("D:P(A;{inheritance};FA;;;{})", sid.to_string_lossy());
     let descriptor: LocalBox<SecurityDescriptor> = sddl.parse().expect("protected fixture DACL");
     SetNamedSecurityInfo(
         path.as_os_str(),

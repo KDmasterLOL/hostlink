@@ -173,9 +173,9 @@ fn protect_windows_fixture(path: &Path, directory: bool) {
 
     let owner = windows_permissions::utilities::current_process_sid().expect("current SID");
     let sid = ConvertSidToStringSid(&owner).expect("format SID");
-    let _ = directory;
+    let inheritance = if directory { "OICI" } else { "" };
     let descriptor: LocalBox<SecurityDescriptor> =
-        format!("D:P(A;;FA;;;{})", sid.to_string_lossy())
+        format!("D:P(A;{inheritance};FA;;;{})", sid.to_string_lossy())
             .parse()
             .expect("construct private ACL");
     SetNamedSecurityInfo(

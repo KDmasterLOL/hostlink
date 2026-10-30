@@ -86,7 +86,7 @@ pub(super) struct Descriptor<'a> {
     descriptor: SECURITY_DESCRIPTOR,
 }
 impl<'a> Descriptor<'a> {
-    pub(super) fn new(user: &'a Sid) -> Result<Self> {
+    pub(super) fn new(user: &'a Sid, directory: bool) -> Result<Self> {
         // SAFETY: user owns a valid SID copied from TokenUser.
         let bytes = size_of::<ACL>() + size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>()
             + unsafe { GetLengthSid(user.as_ptr()) } as usize;
@@ -101,7 +101,11 @@ impl<'a> Descriptor<'a> {
             bool_result(AddAccessAllowedAceEx(
                 acl_ptr,
                 ACL_REVISION as u32,
-                0,
+                if directory {
+                    (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u32
+                } else {
+                    0
+                },
                 FILE_ALL_ACCESS as u32,
                 user.as_ptr(),
             ))?;
@@ -136,10 +140,10 @@ impl Drop for SecurityInfo {
         }
     }
 }
-pub(super) fn verify(handle: impl AsHandle, user: &Sid) -> Result<()> {
-    inspect(handle, user, true)
+pub(super) fn verify(handle: impl AsHandle, user: &Sid, directory: bool) -> Result<()> {
+    inspect(handle, user, true, directory)
 }
-fn inspect(handle: impl AsHandle, user: &Sid, check_acl: bool) -> Result<()> {
+fn inspect(handle: impl AsHandle, user: &Sid, check_acl: bool, directory: bool) -> Result<()> {
     let mut owner = ptr::null_mut();
     let mut acl = ptr::null_mut();
     let mut raw = ptr::null_mut();
@@ -190,8 +194,13 @@ fn inspect(handle: impl AsHandle, user: &Sid, check_acl: bool) -> Result<()> {
         bool_result(GetAce(acl, 0, &mut raw_ace))?;
         let header = &*raw_ace.cast::<ACE_HEADER>();
         let sid_offset = size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>();
+        let expected_flags = if directory {
+            (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8
+        } else {
+            0
+        };
         if header.AceType != ACCESS_ALLOWED_ACE_TYPE as u8
-            || header.AceFlags != 0
+            || header.AceFlags != expected_flags
             || (header.AceSize as usize) < sid_offset + 8
         {
             return Err(Error::InsecureAcl);
@@ -218,9 +227,9 @@ fn inspect(handle: impl AsHandle, user: &Sid, check_acl: bool) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn harden(handle: impl AsHandle, user: &Sid) -> Result<()> {
-    inspect(handle.as_handle(), user, false)?;
-    let descriptor = Descriptor::new(user)?;
+pub(super) fn harden(handle: impl AsHandle, user: &Sid, directory: bool) -> Result<()> {
+    inspect(handle.as_handle(), user, false, directory)?;
+    let descriptor = Descriptor::new(user, directory)?;
     // SAFETY: descriptor retains the ACL, handle remains live, and only the DACL
     // is changed. Owner mismatch must fail before mutation, never be repaired.
     let error = unsafe {
@@ -237,5 +246,5 @@ pub(super) fn harden(handle: impl AsHandle, user: &Sid) -> Result<()> {
     if error != 0 {
         return Err(io::Error::from_raw_os_error(error as i32).into());
     }
-    verify(handle, user)
+    verify(handle, user, directory)
 }

@@ -29,6 +29,8 @@ jobs:
         run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
       - name: Format
         run: cargo fmt --all -- --check
+      - name: Verify vendored Windows bindings
+        run: cargo run --locked --manifest-path Vendor/private-fs/tools/windows-bindings/Cargo.toml -- --check
       - name: Check all targets
         run: cargo check --locked --workspace --all-targets
       - name: Strict Clippy

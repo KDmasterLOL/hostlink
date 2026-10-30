@@ -16,8 +16,13 @@ Do not give an untrusted same-principal actor write access to a private tree.
   of special bits. The library never changes process umask. A narrower creation
   mode may be normalized through the newly held descriptor.
 - Unix ownership is the effective UID. Windows ownership is the process TokenUser,
-  with a protected DACL containing exactly one noninheritable full-access user ACE.
-  No extra SYSTEM or administrator grant is inserted.
+  with a protected DACL containing exactly one full-access ACE for that user.
+  Files use a noninheritable ACE; directories use only `OBJECT_INHERIT_ACE |
+  CONTAINER_INHERIT_ACE` for the same user SID, so children created through
+  native APIs without an explicit security descriptor (for example SQLite's
+  database/WAL/SHM files) inherit user-only access. No extra SYSTEM,
+  administrator, Everyone, or Users grant is inserted. A directory without
+  this owner-only inheritance is rejected rather than repaired implicitly.
 - Relative paths reject roots, prefixes, traversal, interior dots, NULs, and colons
   (including Windows alternate streams). Unix also rejects backslashes. Native
   names are passed without lossy Unicode conversion; filesystem encoding rules
