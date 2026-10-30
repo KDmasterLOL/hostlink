@@ -33,8 +33,6 @@ mod local_state;
 mod platform;
 mod validation;
 
-#[cfg(windows)]
-pub(crate) use flow::EnrollmentManifest;
 #[cfg(test)]
 use flow::*;
 pub use flow::{
