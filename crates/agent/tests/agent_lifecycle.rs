@@ -99,6 +99,18 @@ fn success(home: &Path, root: &Path, action: &str) {
         "{action}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let expected = match action {
+        "install" => "Installed user service",
+        "start" => "Started hostlink-agent-",
+        "stop" => "Stopped hostlink-agent-",
+        "remove" => "Unregistered user service",
+        _ => unreachable!("unknown lifecycle operation"),
+    };
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(expected),
+        "unexpected {action} output: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 fn unit_path(home: &Path, root: &Path) -> PathBuf {

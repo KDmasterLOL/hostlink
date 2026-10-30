@@ -128,7 +128,7 @@ runner defaults to preflight only:
   -RunAcceptance
 ```
 
-The fixture checks exact task XML, collision/tamper/legacy refusal, idempotent
+The fixture checks essential task ownership and execution fields, collision/tamper/legacy refusal, idempotent
 install/start, stopped stop/remove, running removal, SSH readiness and enrollment
 retention. The runner checks unchanged HKCU Run values and root-task snapshots.
 A failed cleanup preserves the fixture root and unresolved task for diagnosis.

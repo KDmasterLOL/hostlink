@@ -48,7 +48,7 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
             .write_all(contents.as_bytes())?;
     }
     manager.install(ServiceInstallCtx {
-        label,
+        label: label.clone(),
         program,
         args: Vec::new(), // ExecStart and restart policy come from contents.
         contents: Some(contents),
@@ -57,7 +57,12 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
         environment: None,
         autostart: true,
         restart_policy: Default::default(),
-    })
+    })?;
+    println!(
+        "Installed user service {}.service (enabled for this user's login; not started)",
+        label.application
+    );
+    Ok(())
 }
 
 /// Start the matching unit.
@@ -66,7 +71,11 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
 pub fn start(root: &Path) -> io::Result<()> {
     let (root, label) = root_label(root)?;
     check_unit(&root, &label, true)?;
-    SystemdServiceManager::user().start(ServiceStartCtx { label })
+    SystemdServiceManager::user().start(ServiceStartCtx {
+        label: label.clone(),
+    })?;
+    println!("Started {}.service", label.application);
+    Ok(())
 }
 
 /// Stop the matching unit (systemd defaults to SIGTERM).
@@ -75,7 +84,11 @@ pub fn start(root: &Path) -> io::Result<()> {
 pub fn stop(root: &Path) -> io::Result<()> {
     let (root, label) = root_label(root)?;
     check_unit(&root, &label, true)?;
-    SystemdServiceManager::user().stop(ServiceStopCtx { label })
+    SystemdServiceManager::user().stop(ServiceStopCtx {
+        label: label.clone(),
+    })?;
+    println!("Stopped {}.service", label.application);
+    Ok(())
 }
 
 /// Stop and unregister the matching unit, preserving all Agent files.
@@ -88,8 +101,15 @@ pub fn remove(root: &Path) -> io::Result<()> {
     manager.stop(ServiceStopCtx {
         label: label.clone(),
     })?;
-    manager.uninstall(ServiceUninstallCtx { label })?;
-    reload()
+    manager.uninstall(ServiceUninstallCtx {
+        label: label.clone(),
+    })?;
+    reload()?;
+    println!(
+        "Unregistered user service {}.service (Agent binary, keys and jobs preserved)",
+        label.application
+    );
+    Ok(())
 }
 
 /// Return only OS installation/activity state, without Agent health probes.
