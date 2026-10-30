@@ -128,6 +128,41 @@ pub fn read_journal(path: &Path) -> io::Result<Option<UpdateJournal>> {
     Ok(Some(journal))
 }
 
+/// Refuse Agent startup while a private offline update journal needs recovery.
+/// The caller has already authenticated the current user's install root.
+#[cfg(windows)]
+pub(crate) fn ensure_no_pending_windows_handoff(root: &Path) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    let updates = root.join(".updates");
+    let metadata = match fs::symlink_metadata(&updates) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.file_attributes() & 0x400 != 0
+    {
+        return Err(invalid(
+            "Windows updater directory is not a private real directory",
+        ));
+    }
+    crate::private_fs::windows::validate_acl(
+        &updates,
+        &metadata,
+        crate::private_fs::windows::AllowedPrincipals::OwnerOnly,
+        true,
+    )?;
+    if read_journal(&updates.join("handoff.json"))?.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Windows Agent update journal requires verified recovery before startup",
+        ));
+    }
+    Ok(())
+}
+
 /// Atomically persist one validated journal phase in the same directory as its destination.
 /// The updater must provide a private, non-reparse parent directory owned by the current user.
 #[cfg(not(windows))]
