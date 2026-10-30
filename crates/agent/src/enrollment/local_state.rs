@@ -1,14 +1,19 @@
 use super::*;
 
 pub(super) fn read_token(path: &Path) -> io::Result<SecretString> {
+    // Resolve relative names lexically before selecting the capability root.
+    // The file is still opened nofollow via the same checked handle.
+    let absolute = std::path::absolute(path)?;
     let mut bytes = Vec::new();
     PrivateDir::open(
-        path.parent()
+        absolute
+            .parent()
             .ok_or_else(|| invalid("token has no parent"))?,
     )
     .map_err(io::Error::other)?
     .open_file(
-        path.file_name()
+        absolute
+            .file_name()
             .ok_or_else(|| invalid("token has no name"))?,
     )
     .map_err(io::Error::other)?

@@ -10,6 +10,48 @@ use tower::ServiceExt;
 
 static LISTENER_ADDRESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+#[test]
+fn relative_token_filename_uses_a_private_working_directory() {
+    use std::io::Write;
+
+    let temp = tempfile::tempdir().expect("disposable token fixture");
+    let root = temp.path().join("private");
+    let dir = PrivateDir::ensure(&root).expect("private working directory");
+    let mut file = dir.create("invite-token").expect("private one-use token");
+    file.write_all("0123456789abcdef".repeat(4).as_bytes())
+        .expect("token bytes");
+    drop(file);
+
+    // Run in a child process so test parallelism cannot observe a changed cwd.
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "enrollment::tests::relative_token_child"])
+        .current_dir(&root)
+        .env("HOSTLINK_RELATIVE_TOKEN_TEST_CHILD", "1")
+        .output()
+        .expect("isolated relative-token test");
+    assert!(
+        result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn relative_token_child() {
+    if std::env::var_os("HOSTLINK_RELATIVE_TOKEN_TEST_CHILD").is_none() {
+        return;
+    }
+    for name in ["invite-token", "./invite-token"] {
+        let token = read_token(Path::new(name)).expect("relative private token");
+        assert_eq!(
+            token.expose_secret(),
+            &"0123456789abcdef".repeat(4),
+            "{name}"
+        );
+    }
+}
+
 fn listener_address_test_guard() -> std::sync::MutexGuard<'static, ()> {
     LISTENER_ADDRESS_TEST_LOCK
         .lock()
