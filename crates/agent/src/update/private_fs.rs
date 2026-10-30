@@ -19,7 +19,7 @@ use std::{
 pub(super) fn validate_user_owned_root(root: &Path) -> io::Result<()> {
     #[cfg(not(windows))]
     {
-        crate::private_fs::validate_private_path(root, true)?;
+        crate::private_fs::open_private(root, true)?;
         if fs::canonicalize(root)? != root {
             return Err(invalid("Agent install root must not use a symlinked path"));
         }
@@ -32,14 +32,24 @@ pub(super) fn validate_user_owned_root(root: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn validate_windows_update_root(root: &Path) -> io::Result<()> {
-    let root = crate::private_fs::windows::validate_agent_root(root)?;
-    let expected = crate::private_fs::windows::local_app_data_path()?.join("HostLink/Agent");
-    if expected.canonicalize()? != root {
+    use crate::private_fs::windows::{AllowedPrincipals, local_app_data_path, validate_acl};
+    use cap_fs_ext::DirExt;
+
+    let profile = local_app_data_path()?;
+    let parent = profile.join("HostLink");
+    let expected = parent.join("Agent");
+    let profile_dir = cap_std::fs::Dir::open_ambient_dir(&profile, cap_std::ambient_authority())?;
+    let agent_parent = profile_dir.open_dir_nofollow("HostLink")?;
+    let _agent = agent_parent.open_dir_nofollow("Agent")?;
+    if expected.canonicalize()? != root.canonicalize()? {
         return Err(invalid(
             "Agent updater root must be the exact current-user LocalAppData/HostLink/Agent",
         ));
     }
-    crate::service::ensure_update_unregistered(&root)
+    for directory in [&parent, &expected] {
+        validate_acl(directory, AllowedPrincipals::OwnerOnly, true)?;
+    }
+    crate::service::ensure_update_unregistered(&expected)
 }
 
 pub(super) fn file_identities(
@@ -156,7 +166,7 @@ pub(super) fn create_private_directory(path: &Path) -> io::Result<()> {
 #[cfg(not(windows))]
 pub(super) fn validate_private_directory(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
     let _ = metadata;
-    crate::private_fs::validate_private_path(path, true)
+    crate::private_fs::open_private(path, true).map(|_| ())
 }
 
 pub(super) fn set_private_directory(path: &Path) -> io::Result<()> {

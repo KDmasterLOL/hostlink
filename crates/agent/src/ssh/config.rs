@@ -81,15 +81,13 @@ pub(crate) fn prepare(config: &AgentConfig) -> io::Result<PreparedEmbeddedSshCon
     })
 }
 fn read_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
-    let meta = std::fs::symlink_metadata(path)?;
+    let file = crate::private_fs::open_private(path, false)?;
+    let meta = file.metadata()?;
     if meta.len() > limit as u64 {
         return Err(invalid_data("SSH key input must be a bounded regular file"));
     }
-    crate::private_fs::validate_private_path(path, false)?;
     let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)?;
+    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > limit {
         return Err(invalid_data("SSH key input exceeds size limit"));
     }

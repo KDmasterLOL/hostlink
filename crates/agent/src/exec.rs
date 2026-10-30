@@ -37,12 +37,6 @@ pub(super) fn prepare_command(command: &str) -> io::Result<Command> {
 
     #[cfg(windows)]
     let child = {
-        if !crate::private_fs::windows::is_non_elevated_user()? {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "SSH exec requires a verified non-elevated, non-LocalSystem Windows user context",
-            ));
-        }
         // Keep PowerShell from consuming redirected stdin before the command starts.
         Command::new("powershell.exe").args([
             "-NoProfile",
@@ -137,16 +131,7 @@ mod windows_process_tests {
     #[tokio::test]
     async fn powershell_processkit_pipe_preserves_binary_stdin_and_exit_status() {
         let command = r#"$inputStream=[Console]::OpenStandardInput();$outputStream=[Console]::OpenStandardOutput();$buffer=New-Object byte[] 8192;while(($count=$inputStream.Read($buffer,0,$buffer.Length))-gt 0){$outputStream.Write($buffer,0,$count)};$outputStream.Flush();$errorStream=[Console]::OpenStandardError();$errorBytes=[byte[]](0,255,69,82,82,13,10);$errorStream.Write($errorBytes,0,$errorBytes.Length);$errorStream.Flush();exit 7"#;
-        let safe_context = crate::private_fs::windows::is_non_elevated_user()
-            .expect("inspect Windows user context");
         let prepared = prepare_command(command);
-        if !safe_context {
-            assert!(matches!(
-                prepared,
-                Err(ref error) if error.kind() == io::ErrorKind::PermissionDenied
-            ));
-            return;
-        }
 
         // The published processkit 3.3.4 API exposes raw byte tees, not
         // RawOutputSink. Draining both pipes concurrently avoids blocking
@@ -154,7 +139,7 @@ mod windows_process_tests {
         let (stdout_writer, mut stdout_reader) = tokio::io::duplex(16 * 1024);
         let (stderr_writer, mut stderr_reader) = tokio::io::duplex(4 * 1024);
         let mut process = prepared
-            .expect("verified Windows user context and PowerShell command")
+            .expect("PowerShell command")
             .stdout_raw_tee(stdout_writer)
             .stderr_raw_tee(stderr_writer)
             .timeout(Duration::from_secs(15))

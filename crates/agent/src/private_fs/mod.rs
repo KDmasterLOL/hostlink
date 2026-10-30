@@ -18,10 +18,6 @@ pub(crate) fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-pub(crate) fn validate_private_path(path: &Path, directory: bool) -> io::Result<()> {
-    check_file(&mut open_path(path, false)?, directory, false)
-}
-
 fn check_file(file: &mut File, directory: bool, restrict: bool) -> io::Result<()> {
     let metadata = file.metadata()?;
     if metadata.file_type().is_symlink()
@@ -75,7 +71,20 @@ fn check_file(file: &mut File, directory: bool, restrict: bool) -> io::Result<()
     Ok(())
 }
 
-fn open_directory(path: &Path) -> io::Result<Dir> {
+/// Open and verify the actual private object once, then use its handle.
+pub(crate) fn open_private(path: &Path, directory: bool) -> io::Result<File> {
+    let mut file = open_path(path, false)?;
+    check_file(&mut file, directory, false)?;
+    Ok(file)
+}
+
+/// Open a directory without symlink/reparse components; this does not validate ownership or permissions.
+/// # Errors
+/// Rejects traversal, links, reparse points and paths that cannot be opened as directories.
+pub(crate) fn open_directory(path: &Path) -> io::Result<Dir> {
+    if path.components().any(|c| c == Component::ParentDir) {
+        return Err(invalid("private path contains parent traversal"));
+    }
     let path = std::path::absolute(path)?;
     let root = path
         .ancestors()
@@ -83,11 +92,10 @@ fn open_directory(path: &Path) -> io::Result<Dir> {
         .ok_or_else(|| invalid("private path has no root"))?;
     let mut directory = Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
     for component in path.components() {
-        match component {
-            Component::Normal(name) => directory = directory.open_dir_nofollow(name)?,
-            Component::ParentDir => return Err(invalid("private path contains parent traversal")),
-            _ => continue,
-        }
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        directory = directory.open_dir_nofollow(name)?;
         #[cfg(windows)]
         {
             use cap_std::fs::MetadataExt;
@@ -120,7 +128,12 @@ fn open_path(path: &Path, restrict: bool) -> io::Result<File> {
         use cap_std::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::*;
         options
-            .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES | if restrict { WRITE_DAC } else { 0 })
+            .access_mode(
+                READ_CONTROL
+                    | FILE_READ_ATTRIBUTES
+                    | FILE_READ_DATA
+                    | if restrict { WRITE_DAC } else { 0 },
+            )
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
     }

@@ -180,7 +180,7 @@ fn status_from_io(e: io::Error) -> StatusCode {
 mod tests;
 
 fn validate_directory(path: &Path) -> io::Result<()> {
-    crate::private_fs::validate_private_path(path, true)
+    crate::private_fs::open_private(path, true).map(|_| ())
 }
 
 fn create_directory(path: &Path) -> io::Result<()> {

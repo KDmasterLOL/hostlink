@@ -1,6 +1,6 @@
 //! Minimal systemd user lifecycle; systemd alone owns process state.
 use super::ServiceStatus;
-use crate::private_fs::validate_private_path;
+use crate::private_fs::open_private;
 use service_manager::{
     ServiceInstallCtx, ServiceLabel, ServiceManager, ServiceStartCtx, ServiceStatus as OsStatus,
     ServiceStatusCtx, ServiceStopCtx, ServiceUninstallCtx, SystemdServiceManager,
@@ -28,8 +28,8 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
         Ok(_) => return Err(io::Error::other("legacy marker requires migration")),
     }
     let program = root.join("bin/hostlink-agent");
-    validate_private_path(&program, false)?;
-    validate_private_path(config, false)?;
+    open_private(&program, false)?;
+    open_private(config, false)?;
     if config.canonicalize()? != root.join("state/agent.json")
         || std::env::current_exe()?.canonicalize()? != program
     {
@@ -143,7 +143,7 @@ fn root_label(root: &Path) -> io::Result<(PathBuf, ServiceLabel)> {
     {
         return Err(io::Error::other("non-root systemd user session required"));
     }
-    validate_private_path(root, true)?;
+    open_private(root, true)?;
     let canonical = root.canonicalize()?;
     if std::path::absolute(root)? != canonical
         || canonical

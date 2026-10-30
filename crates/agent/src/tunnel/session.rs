@@ -297,15 +297,22 @@ async fn tunnel_once(
 }
 
 fn load_gateway_key(path: &Path) -> io::Result<russh::keys::PublicKey> {
-    crate::private_fs::validate_private_path(path, false)?;
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 64 * 1024 {
+    use std::io::Read;
+    let file = crate::private_fs::open_private(path, false)?;
+    if file.metadata()?.len() > 64 * 1024 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "gateway pin must be a bounded regular file",
         ));
     }
-    let text = std::fs::read_to_string(path)?;
+    let mut text = String::new();
+    file.take(64 * 1024 + 1).read_to_string(&mut text)?;
+    if text.len() > 64 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "gateway pin exceeds size limit",
+        ));
+    }
     let key = russh::keys::PublicKey::from_openssh(text.trim()).map_err(io::Error::other)?;
     if key.algorithm() != Algorithm::Ed25519 {
         return Err(io::Error::new(
@@ -316,15 +323,23 @@ fn load_gateway_key(path: &Path) -> io::Result<russh::keys::PublicKey> {
     Ok(key)
 }
 fn load_identity(path: &Path) -> io::Result<PrivateKey> {
-    crate::private_fs::validate_private_path(path, false)?;
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 64 * 1024 {
+    use std::io::Read;
+    let file = crate::private_fs::open_private(path, false)?;
+    if file.metadata()?.len() > 64 * 1024 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "gateway identity must be a bounded regular file",
         ));
     }
-    let key = PrivateKey::from_openssh(&std::fs::read(path)?).map_err(io::Error::other)?;
+    let mut bytes = Vec::new();
+    file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 64 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "gateway identity exceeds size limit",
+        ));
+    }
+    let key = PrivateKey::from_openssh(&bytes).map_err(io::Error::other)?;
     if key.is_encrypted() || key.algorithm() != Algorithm::Ed25519 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

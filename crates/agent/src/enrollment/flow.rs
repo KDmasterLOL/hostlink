@@ -104,9 +104,14 @@ where
     Fut: std::future::Future<Output = io::Result<EnrollResponse>>,
 {
     validate_inputs(options)?;
-    reject_elevated_user()?;
+    #[cfg(unix)]
+    if unsafe { libc::geteuid() } == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "enrollment must not run as root",
+        ));
+    }
     ensure_fresh_root_parent(&options.install_root)?;
-    private_fs::validate_private_path(&options.token_file, false)?;
     let token = read_token(&options.token_file)?;
 
     let machine_id = MachineId::parse(Uuid::new_v4().to_string()).map_err(invalid_data)?;

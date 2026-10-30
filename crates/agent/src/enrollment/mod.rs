@@ -10,7 +10,7 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener},
     path::{Path, PathBuf},
@@ -30,7 +30,6 @@ const LISTENER_PORT_ATTEMPTS: usize = 32;
 
 mod flow;
 mod local_state;
-mod platform;
 mod validation;
 
 #[cfg(test)]
@@ -40,7 +39,6 @@ pub use flow::{
     prepare_enrollment_with_ca,
 };
 use local_state::*;
-use platform::*;
 use validation::*;
 
 #[cfg(test)]

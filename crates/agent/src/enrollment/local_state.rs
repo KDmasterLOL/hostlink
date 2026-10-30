@@ -1,9 +1,8 @@
 use super::*;
 
 pub(super) fn read_token(path: &Path) -> io::Result<SecretString> {
-    private_fs::validate_private_path(path, false)?;
     let mut bytes = Vec::new();
-    File::open(path)?
+    private_fs::open_private(path, false)?
         .take(MAX_TOKEN_BYTES + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_TOKEN_BYTES {
@@ -93,7 +92,7 @@ pub(super) fn ensure_fresh_root_parent(root: &Path) -> io::Result<()> {
     }
     #[cfg(windows)]
     // cap-std rejects traversal, symlinks and reparse points in ancestors.
-    private_fs::validate_private_path(parent, true)?;
+    private_fs::open_private(parent, true)?;
     let metadata = fs::symlink_metadata(parent)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(invalid("Agent install root parent is not a real directory"));

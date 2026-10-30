@@ -4,16 +4,14 @@ use super::invalid;
 pub(crate) use super::restrict_private_path as set_acl;
 use std::{
     fs, io,
-    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    os::windows::io::AsRawHandle,
     path::{Path, PathBuf},
 };
 use windows_permissions::{
     LocalBox, SecurityDescriptor,
     constants::{AceType, SeObjectType::SE_FILE_OBJECT, SecurityInformation},
     utilities::{current_process_sid, os_from_buf},
-    wrappers::{
-        ConvertSecurityDescriptorToStringSecurityDescriptor, GetSecurityInfo, SetSecurityInfo,
-    },
+    wrappers::{GetSecurityInfo, SetSecurityInfo},
 };
 
 #[derive(Clone, Copy)]
@@ -44,76 +42,6 @@ pub(crate) fn local_app_data_path() -> io::Result<PathBuf> {
     PathBuf::from(os_from_buf(&buffer)).canonicalize()
 }
 
-/// Canonical owned Agent root shared by the service and the stopped updater.
-/// No application/enrollment/schema validation occurs at this filesystem boundary.
-pub(crate) fn validate_agent_root(path: &Path) -> io::Result<PathBuf> {
-    if !is_non_elevated_user()? {
-        return Err(invalid(
-            "Agent service/update requires a non-elevated Windows user",
-        ));
-    }
-    let directory = super::open_directory(path)?;
-    let root = path.canonicalize()?;
-    let profile = local_app_data_path()?;
-    let relative = root
-        .strip_prefix(&profile)
-        .map_err(|_| invalid("Agent root must be beneath the current user's LocalAppData"))?;
-    if relative.as_os_str().is_empty() {
-        return Err(invalid("Agent root cannot be LocalAppData itself"));
-    }
-    // Trust the OS profile boundary, not arbitrary intermediate directories.
-    // cap-std rejects reparse components; the private parent prevents root replacement.
-    let parent = directory.open_parent_dir(cap_std::ambient_authority())?;
-    validate_file_acl(
-        &directory.into_std_file(),
-        AllowedPrincipals::OwnerOnly,
-        true,
-    )?;
-    if root.parent() != Some(profile.as_path()) {
-        validate_file_acl(&parent.into_std_file(), AllowedPrincipals::OwnerOnly, true)?;
-    }
-    Ok(root)
-}
-
-/// Authoritative user-scope decision for Agent execution, enrollment and
-/// service management. Windows token ownership and elevation are independent.
-pub(crate) fn is_non_elevated_user() -> io::Result<bool> {
-    use windows_sys::Win32::{
-        Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
-        System::Threading::{GetCurrentProcess, OpenProcessToken},
-    };
-
-    if matches!(
-        current_process_sid()?.to_string().as_str(),
-        "S-1-5-18" | "S-1-5-19" | "S-1-5-20"
-    ) {
-        return Ok(false);
-    }
-    let mut raw = std::ptr::null_mut();
-    // SAFETY: the current process pseudo-handle is valid; raw is an out parameter.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: OpenProcessToken returned an exclusively owned kernel handle.
-    let token = unsafe { OwnedHandle::from_raw_handle(raw) };
-    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
-    let mut returned = 0;
-    // SAFETY: the owned handle remains valid, and elevation and returned are writable.
-    if unsafe {
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenElevation,
-            (&mut elevation as *mut TOKEN_ELEVATION).cast(),
-            size_of::<TOKEN_ELEVATION>() as u32,
-            &mut returned,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(elevation.TokenIsElevated == 0)
-}
-
 pub(crate) fn validate_acl(
     path: &Path,
     allowed: AllowedPrincipals,
@@ -127,7 +55,10 @@ pub(crate) fn validate_acl(
     validate_file_acl(&file, allowed, protected)
 }
 
-pub(super) fn validate_file_acl(
+/// Validate owner/DACL on the opened object; file type, reparse points and links are checked separately.
+/// # Errors
+/// Rejects foreign owners, unsafe/missing DACLs, unsupported ACEs and security query failures.
+pub(crate) fn validate_file_acl(
     file: &fs::File,
     allowed: AllowedPrincipals,
     protected: bool,
@@ -147,11 +78,17 @@ pub(super) fn validate_file_acl(
     let dacl = descriptor
         .dacl()
         .ok_or_else(|| invalid("Windows private path has no DACL"))?;
-    let sddl = ConvertSecurityDescriptorToStringSecurityDescriptor(
-        &descriptor,
-        SecurityInformation::Dacl,
-    )?;
-    if protected && !sddl.to_string_lossy().starts_with("D:P") {
+    use windows_sys::Win32::Security::{GetSecurityDescriptorControl, SE_DACL_PROTECTED};
+    let mut control = 0;
+    let mut revision = 0;
+    // SAFETY: GetSecurityInfo returned a valid descriptor; both outputs are writable.
+    if unsafe {
+        GetSecurityDescriptorControl(descriptor.as_ptr().cast(), &mut control, &mut revision)
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if protected && control & SE_DACL_PROTECTED == 0 {
         return Err(invalid("Windows private path DACL inherits permissions"));
     }
     if dacl.len() == 0 {
@@ -191,7 +128,10 @@ pub(super) fn validate_file_acl(
     Ok(())
 }
 
-pub(super) fn set_file_acl(file: &mut fs::File, directory: bool) -> io::Result<()> {
+/// Set a protected owner-only DACL on an opened object after type/reparse/hardlink checks.
+/// # Errors
+/// Rejects foreign owners and security query/update failures.
+pub(crate) fn set_file_acl(file: &mut fs::File, directory: bool) -> io::Result<()> {
     let current = current_process_sid()?;
     let descriptor = GetSecurityInfo(file, SE_FILE_OBJECT, SecurityInformation::Owner)?;
     if descriptor.owner() != Some(current.as_ref()) {
@@ -216,7 +156,9 @@ pub(super) fn set_file_acl(file: &mut fs::File, directory: bool) -> io::Result<(
     )
 }
 
-pub(super) fn reject_file_hardlinks(file: &fs::File) -> io::Result<()> {
+/// # Errors
+/// Rejects files with multiple links and handle information query failures.
+pub(crate) fn reject_file_hardlinks(file: &fs::File) -> io::Result<()> {
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
     };
