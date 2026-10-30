@@ -175,6 +175,31 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("LocalAppData"));
 
+    // A private Agent directory inside LocalAppData is insufficient when its
+    // immediate parent can be renamed or replaced by another local user.
+    let shared_profile_parent = local_app_data.join(format!(
+        "HostLink Untrusted Parent {}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir(&shared_profile_parent).unwrap();
+    let _shared_cleanup = ProfileFixture(shared_profile_parent.clone());
+    world_writable_windows_directory(&shared_profile_parent);
+    let shared_root = shared_profile_parent.join("Agent");
+    fs::create_dir(&shared_root).unwrap();
+    private_windows_path(&shared_root, true);
+    let shared_install = service_output(
+        source_agent,
+        &shared_root,
+        "install",
+        Some(&shared_root.join("state/agent.json")),
+    );
+    private_windows_path(&shared_profile_parent, true);
+    fs::remove_dir(&shared_root).unwrap();
+    assert!(
+        !shared_install.status.success(),
+        "install must reject a replaceable parent even inside LocalAppData"
+    );
+
     let _cleanup = CleanupService {
         executable: source_agent.to_path_buf(),
         root: root.clone(),
@@ -195,6 +220,18 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     assert!(!root.join(".hostlink-agent-start.vbs").exists());
     let stopped = hostlink_agent::service::status(&root).unwrap();
     assert!(stopped.installed && !stopped.active);
+
+    // Status reads the Scheduler registration; a changed filesystem DACL
+    // must not prevent the owner from inspecting/removing the registration.
+    world_writable_windows_directory(&root);
+    assert!(hostlink_agent::service::status(&root).unwrap().installed);
+    assert!(
+        !service_output(&executable, &root, "start", None)
+            .status
+            .success(),
+        "an untrusted installation must not be started"
+    );
+    private_windows_path(&root, true);
 
     let scheduler = NativeScheduler::connect();
     let name = task_name(&root);

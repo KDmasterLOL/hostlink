@@ -242,19 +242,14 @@ fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
 #[cfg(windows)]
 pub(in crate::update) fn validate_windows_private_acl(
     path: &Path,
-    metadata: &fs::Metadata,
+    _metadata: &fs::Metadata,
 ) -> io::Result<()> {
     crate::private_fs::windows::validate_acl(
         path,
-        metadata,
         crate::private_fs::windows::AllowedPrincipals::OwnerOnly,
         true,
     )
 }
 
 #[cfg(windows)]
-pub(in crate::update) fn set_windows_private_acl(path: &Path, directory: bool) -> io::Result<()> {
-    crate::private_fs::windows::set_acl(path, directory)?;
-    let metadata = fs::symlink_metadata(path)?;
-    validate_windows_private_acl(path, &metadata)
-}
+pub(in crate::update) use crate::private_fs::restrict_private_path as set_windows_private_acl;

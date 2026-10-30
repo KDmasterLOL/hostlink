@@ -4,7 +4,7 @@
 use super::EXECUTABLE_BASE;
 use super::manifest::FileIdentity;
 #[cfg(windows)]
-use super::windows::{set_windows_private_acl, validate_windows_private_acl};
+use super::windows::set_windows_private_acl;
 use super::{MAX_ENTRY_BYTES, MAX_TOTAL_BYTES, invalid};
 use sha2::{Digest, Sha256};
 #[cfg(not(windows))]
@@ -17,16 +17,16 @@ use std::{
 };
 
 pub(super) fn validate_user_owned_root(root: &Path) -> io::Result<()> {
-    crate::private_fs::validate_private_path(root, true)?;
-    if fs::canonicalize(root)? != root {
-        return Err(invalid("Agent install root must not use a symlinked path"));
+    #[cfg(not(windows))]
+    {
+        crate::private_fs::validate_private_path(root, true)?;
+        if fs::canonicalize(root)? != root {
+            return Err(invalid("Agent install root must not use a symlinked path"));
+        }
     }
     #[cfg(windows)]
-    {
-        let metadata = fs::symlink_metadata(root)?;
-        validate_windows_update_root(root)?;
-        validate_windows_private_acl(root, &metadata)?;
-    }
+    return validate_windows_update_root(root);
+    #[cfg(not(windows))]
     Ok(())
 }
 

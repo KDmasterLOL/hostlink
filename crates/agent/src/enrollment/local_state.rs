@@ -61,6 +61,19 @@ pub(super) fn write_private_new(path: &Path, contents: &[u8]) -> io::Result<()> 
 }
 
 pub(super) fn ensure_fresh_root_parent(root: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        if !matches!(
+            root.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        ) {
+            return Err(invalid(
+                "Agent install root must be on a local Windows drive",
+            ));
+        }
+    }
     if root.exists() || fs::symlink_metadata(root).is_ok() {
         return Err(invalid(
             "Agent install root already exists; enrollment never adopts an existing root",
@@ -78,12 +91,9 @@ pub(super) fn ensure_fresh_root_parent(root: &Path) -> io::Result<()> {
             ));
         }
     }
-    // On Windows canonicalize() rewrites ordinary C:\ paths into \\?\C:\
-    // extended-length paths. Their PathBuf values differ even in the absence
-    // of a junction. Inspect each ancestor without following reparse points
-    // rather than treating that benign prefix conversion as an alias.
     #[cfg(windows)]
-    reject_windows_parent_reparse_components(parent)?;
+    // cap-std rejects traversal, symlinks and reparse points in ancestors.
+    private_fs::validate_private_path(parent, true)?;
     let metadata = fs::symlink_metadata(parent)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(invalid("Agent install root parent is not a real directory"));
@@ -105,8 +115,6 @@ pub(super) fn ensure_fresh_root_parent(root: &Path) -> io::Result<()> {
             ));
         }
     }
-    #[cfg(windows)]
-    private_fs::validate_private_path(parent, true)?;
     Ok(())
 }
 

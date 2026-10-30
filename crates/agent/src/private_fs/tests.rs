@@ -82,7 +82,6 @@ fn windows_acl_preserves_different_agent_policies() {
             None,
         )
         .unwrap();
-        let metadata = fs::symlink_metadata(&file).unwrap();
         for (policy, expected) in [
             (windows::AllowedPrincipals::OwnerOnly, owner_only),
             (
@@ -90,10 +89,7 @@ fn windows_acl_preserves_different_agent_policies() {
                 shared,
             ),
         ] {
-            assert_eq!(
-                windows::validate_acl(&file, &metadata, policy, true).is_ok(),
-                expected
-            );
+            assert_eq!(windows::validate_acl(&file, policy, true).is_ok(), expected);
         }
         assert_eq!(open_lock(&file).is_ok(), shared);
     }

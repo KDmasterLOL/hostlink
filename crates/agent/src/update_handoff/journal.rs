@@ -150,7 +150,6 @@ pub(crate) fn ensure_no_pending_windows_handoff(root: &Path) -> io::Result<()> {
     }
     crate::private_fs::windows::validate_acl(
         &updates,
-        &metadata,
         crate::private_fs::windows::AllowedPrincipals::OwnerOnly,
         true,
     )?;
@@ -260,56 +259,11 @@ fn set_private_journal_file(path: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn validate_journal_acl(path: &Path, _metadata: &fs::Metadata) -> io::Result<()> {
-    use windows_permissions::constants::{AceType, SeObjectType, SecurityInformation};
-    use windows_permissions::wrappers::GetNamedSecurityInfo;
-
-    let descriptor = GetNamedSecurityInfo(
-        path.as_os_str(),
-        SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Dacl | SecurityInformation::Owner,
+    crate::private_fs::windows::validate_acl(
+        path,
+        crate::private_fs::windows::AllowedPrincipals::OwnerOnly,
+        true,
     )
-    .map_err(io::Error::other)?;
-    let current =
-        windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
-    if descriptor.owner() != Some(current.as_ref()) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Windows update journal is not owned by the current user",
-        ));
-    }
-    let sddl = windows_permissions::wrappers::ConvertSecurityDescriptorToStringSecurityDescriptor(
-        &descriptor,
-        SecurityInformation::Dacl,
-    )
-    .map_err(io::Error::other)?;
-    if !sddl.to_string_lossy().starts_with("D:P") {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Windows update journal ACL inherits permissions",
-        ));
-    }
-    let dacl = descriptor
-        .dacl()
-        .ok_or_else(|| invalid("Windows update journal has no DACL"))?;
-    for index in 0..dacl.len() {
-        let ace = dacl
-            .get_ace(index)
-            .ok_or_else(|| invalid("Windows update journal DACL entry is unreadable"))?;
-        if matches!(
-            ace.ace_type(),
-            AceType::ACCESS_ALLOWED_ACE_TYPE
-                | AceType::ACCESS_ALLOWED_CALLBACK_ACE_TYPE
-                | AceType::ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
-                | AceType::ACCESS_ALLOWED_OBJECT_ACE_TYPE
-        ) && ace.sid() != Some(current.as_ref())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Windows update journal ACL grants access to a foreign owner",
-            ));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(not(windows))]
@@ -319,26 +273,7 @@ fn validate_journal_acl(_path: &Path, _metadata: &fs::Metadata) -> io::Result<()
 
 #[cfg(windows)]
 fn set_private_journal_file(path: &Path) -> io::Result<()> {
-    use windows_permissions::constants::{SeObjectType, SecurityInformation};
-    use windows_permissions::wrappers::{ConvertSidToStringSid, SetNamedSecurityInfo};
-    use windows_permissions::{LocalBox, SecurityDescriptor};
-
-    let owner = windows_permissions::utilities::current_process_sid().map_err(io::Error::other)?;
-    let owner = ConvertSidToStringSid(&owner).map_err(io::Error::other)?;
-    let descriptor: LocalBox<SecurityDescriptor> =
-        format!("D:P(A;;FA;;;{})", owner.to_string_lossy())
-            .parse()
-            .map_err(io::Error::other)?;
-    SetNamedSecurityInfo(
-        path.as_os_str(),
-        SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-        None,
-        None,
-        descriptor.dacl(),
-        None,
-    )
-    .map_err(io::Error::other)
+    crate::private_fs::restrict_private_path(path, false)
 }
 
 #[cfg(not(any(unix, windows)))]

@@ -81,6 +81,7 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
 /// # Errors
 /// Refuses pending updates, foreign tasks and unconfirmed activation.
 pub fn start(root: &Path) -> io::Result<()> {
+    // Starting may execute installed code; verify its private root and parent.
     let root = crate::private_fs::windows::validate_agent_root(root)?;
     let _lock = mutation_lock(&root)?;
     crate::update_handoff::ensure_no_pending_windows_handoff(&root)?;
@@ -96,7 +97,7 @@ pub fn start(root: &Path) -> io::Result<()> {
 /// # Errors
 /// Refuses missing/foreign tasks and unconfirmed termination.
 pub fn stop(root: &Path) -> io::Result<()> {
-    let root = crate::private_fs::windows::validate_agent_root(root)?;
+    let root = root.canonicalize()?;
     let _lock = mutation_lock(&root)?;
     let _apartment = Apartment::new()?;
     let folder = task_folder()?;
@@ -107,7 +108,7 @@ pub fn stop(root: &Path) -> io::Result<()> {
 /// # Errors
 /// Refuses missing/foreign tasks and unconfirmed termination or deletion.
 pub fn remove(root: &Path) -> io::Result<()> {
-    let root = crate::private_fs::windows::validate_agent_root(root)?;
+    let root = root.canonicalize()?;
     let _lock = mutation_lock(&root)?;
     let _apartment = Apartment::new()?;
     let folder = task_folder()?;
@@ -131,7 +132,8 @@ pub fn remove(root: &Path) -> io::Result<()> {
 /// # Errors
 /// Refuses unsafe roots, foreign definitions and unknown Scheduler state.
 pub fn status(root: &Path) -> io::Result<ServiceStatus> {
-    let root = crate::private_fs::windows::validate_agent_root(root)?;
+    // A read-only Scheduler query does not inspect Agent files or need their ACLs.
+    let root = root.canonicalize()?;
     let _apartment = Apartment::new()?;
     let folder = task_folder()?;
     let task = registered(&folder, &task_name(&root)?)?;
@@ -149,7 +151,8 @@ pub fn status(root: &Path) -> io::Result<ServiceStatus> {
 
 /// Read-only updater guard; the updater holds update.lock for its transaction.
 pub(crate) fn ensure_update_unregistered(root: &Path) -> io::Result<()> {
-    let root = crate::private_fs::windows::validate_agent_root(root)?;
+    // The updater validates its install root before calling this read-only guard.
+    let root = root.canonicalize()?;
     reject_legacy(&root)?;
     let _apartment = Apartment::new()?;
     let folder = task_folder()?;

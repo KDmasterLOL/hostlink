@@ -111,8 +111,7 @@ fn fresh_root_accepts_dos_drive_path_without_allowing_alias_or_network_root() {
         "parent traversal is still rejected"
     );
     assert!(
-        reject_windows_parent_reparse_components(Path::new(r"\\untrusted.example\share\new-agent"))
-            .is_err(),
+        ensure_fresh_root_parent(Path::new(r"\\untrusted.example\share\new-agent")).is_err(),
         "a network share cannot be adopted as a local Agent install root"
     );
 }
