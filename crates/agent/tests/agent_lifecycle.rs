@@ -192,7 +192,22 @@ fn private_root_legacy_marker_and_modified_unit_refuse_without_os_actions() {
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let marker = root.join(".hostlink-user-service.json");
     fs::write(&marker, b"legacy\n").unwrap();
-    refused(&home, &root);
+    assert!(!run(&home, &root, "install").status.success());
+    status(&home, &root, false, false);
+    for action in ["start", "stop", "remove"] {
+        assert!(!run(&home, &root, action).status.success());
+    }
+    let log = fs::read_to_string(home.parent().unwrap().join("systemctl.log")).unwrap();
+    assert!(
+        ![
+            "--user enable",
+            "--user start",
+            "--user stop",
+            "--user disable"
+        ]
+        .iter()
+        .any(|action| log.contains(action))
+    );
     assert_eq!(fs::read(&marker).unwrap(), b"legacy\n");
     fs::remove_file(marker).unwrap();
     success(&home, &root, "install");
@@ -200,6 +215,20 @@ fn private_root_legacy_marker_and_modified_unit_refuse_without_os_actions() {
     fs::write(&path, b"foreign unit\n").unwrap();
     refused(&home, &root);
     assert_eq!(fs::read(path).unwrap(), b"foreign unit\n");
+}
+
+#[test]
+fn old_marker_does_not_block_uninstall_of_verified_user_unit() {
+    let (_temp, home, root) = fixture("agent");
+    success(&home, &root, "install");
+    let marker = root.join(".hostlink-user-service.json");
+    fs::write(&marker, b"legacy marker\n").unwrap();
+    assert!(!run(&home, &root, "install").status.success());
+    status(&home, &root, true, false);
+    success(&home, &root, "start");
+    success(&home, &root, "stop");
+    success(&home, &root, "remove");
+    assert_eq!(fs::read(&marker).unwrap(), b"legacy marker\n");
 }
 
 #[test]

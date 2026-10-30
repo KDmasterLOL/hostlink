@@ -20,6 +20,13 @@ use std::{
 /// Rejects unsafe paths, legacy/colliding units, or systemd failures.
 pub fn install(root: &Path, config: &Path) -> io::Result<()> {
     let (root, label) = root_label(root)?;
+    // Only installation may conflict with the former launcher. A stale
+    // marker must not prevent stopping/removing an already owned unit.
+    match fs::symlink_metadata(root.join(".hostlink-user-service.json")) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+        Ok(_) => return Err(io::Error::other("legacy marker requires migration")),
+    }
     let program = root.join("bin/hostlink-agent");
     validate_private_path(&program, false)?;
     validate_private_path(config, false)?;
@@ -144,13 +151,6 @@ fn root_label(root: &Path) -> io::Result<(PathBuf, ServiceLabel)> {
             .is_none_or(|s| s.chars().any(char::is_control))
     {
         return Err(io::Error::other("unsafe root path"));
-    }
-    match fs::symlink_metadata(canonical.join(".hostlink-user-service.json")) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-        Ok(_) => {
-            return Err(io::Error::other("legacy marker requires migration"));
-        }
     }
     let hash = Sha256::digest(canonical.as_os_str().as_encoded_bytes());
     let digest = format!("{hash:x}");
