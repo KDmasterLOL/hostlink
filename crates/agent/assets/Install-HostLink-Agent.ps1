@@ -17,7 +17,8 @@ function Set-PrivateDirectory([string]$Path, [Security.Principal.SecurityIdentif
     if ([IO.Directory]::Exists($Path) -or [IO.File]::Exists($Path)) { throw 'Bootstrap staging path already exists.' }
     $security = New-Object Security.AccessControl.DirectorySecurity
     $security.SetAccessRuleProtection($true, $false)
-    $rule = New-Object Security.AccessControl.FileSystemAccessRule($Sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+    # private-fs requires exactly one non-inheritable, protected user ACE.
+    $rule = New-Object Security.AccessControl.FileSystemAccessRule($Sid, 'FullControl', 'None', 'None', 'Allow')
     [void]$security.AddAccessRule($rule)
     [void][IO.Directory]::CreateDirectory($Path, $security)
     $directory = New-Object IO.DirectoryInfo($Path)
@@ -30,8 +31,15 @@ function Assert-PrivateDirectory([string]$Path, [Security.Principal.SecurityIden
     if (-not $directory.Exists -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Install parent is missing or a reparse point.' }
     $acl = $directory.GetAccessControl()
     if (-not $acl.GetOwner([Security.Principal.SecurityIdentifier]).Equals($Sid) -or -not $acl.AreAccessRulesProtected) { throw 'Install parent owner or ACL is unsafe.' }
-    foreach ($rule in $acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier])) {
-        if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and -not $rule.IdentityReference.Equals($Sid)) { throw 'Install parent ACL grants access to another identity.' }
+    $rules = $acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier])
+    if ($rules.Count -ne 1) { throw 'Install parent must have exactly one current-user ACL entry; migrate the old parent explicitly.' }
+    $rule = $rules[0]
+    if (-not $rule.IdentityReference.Equals($Sid) -or
+        $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+        $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+        $rule.InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or
+        $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
+        throw 'Install parent ACL differs from private-fs owner-only policy; migrate the old parent explicitly.'
     }
 }
 
