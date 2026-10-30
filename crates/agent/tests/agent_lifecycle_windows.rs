@@ -173,7 +173,7 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
         .output()
         .expect("refuse install beneath shared ancestor");
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("LocalAppData"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("private"));
 
     // A private Agent directory inside LocalAppData is insufficient when its
     // immediate parent can be renamed or replaced by another local user.
@@ -344,6 +344,16 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
         .replace("</LogonTrigger>", "<Delay>PT0S</Delay></LogonTrigger>")
         .replace("<Enabled>true</Enabled>", "<Enabled>false</Enabled>");
     scheduler.replace(&name, &normalized);
+    // An owned task is refreshed in place, without a second running Agent.
+    service(
+        &executable,
+        &root,
+        "install",
+        Some(&state.join("agent.json")),
+    );
+    assert!(hostlink_agent::service::status(&root).unwrap().installed);
+    assert!(!hostlink_agent::service::status(&root).unwrap().active);
+    scheduler.replace(&name, &normalized);
     let normalized = scheduler.xml(&name);
     assert!(hostlink_agent::service::status(&root).unwrap().installed);
     service(&executable, &root, "stop", None);
@@ -369,14 +379,12 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     ] {
         let legacy = root.join(name);
         fs::write(&legacy, b"legacy fixture").unwrap();
-        let refused = service_output(
+        service(
             &executable,
             &root,
             "install",
             Some(&state.join("agent.json")),
         );
-        assert!(!refused.status.success());
-        assert!(String::from_utf8_lossy(&refused.stderr).contains("legacy"));
         assert!(hostlink_agent::service::status(&root).unwrap().installed);
         service(&executable, &root, "start", None);
         service(&executable, &root, "stop", None);
@@ -387,13 +395,12 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
         service(&executable, &root, "remove", None);
         assert!(!hostlink_agent::service::status(&root).unwrap().installed);
         assert_eq!(fs::read(&legacy).unwrap(), b"legacy fixture");
-        let refused = service_output(
+        service(
             &executable,
             &root,
             "install",
             Some(&state.join("agent.json")),
         );
-        assert!(!refused.status.success());
         fs::remove_file(legacy).unwrap();
         service(
             &executable,
@@ -412,7 +419,7 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
             Some(&state.join("agent.json")),
         );
         assert!(!refused.status.success());
-        assert!(String::from_utf8_lossy(&refused.stderr).contains("legacy HKCU Run"));
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("old HKCU Run"));
         assert_eq!(scheduler.xml(&name), original_xml);
         legacy_run.assert_unchanged();
     }
@@ -498,6 +505,17 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
         },
         1
     );
+    // Reinstalling the already running, owned task stops it and refreshes its
+    // registration, but never starts another process automatically.
+    service(
+        &executable,
+        &root,
+        "install",
+        Some(&state.join("agent.json")),
+    );
+    assert!(hostlink_agent::service::status(&root).unwrap().installed);
+    assert!(!hostlink_agent::service::status(&root).unwrap().active);
+    assert!(std::net::TcpStream::connect(("127.0.0.1", listen_port)).is_err());
     service(&executable, &root, "stop", None);
     assert!(!hostlink_agent::service::status(&root).unwrap().active);
     assert!(std::net::TcpStream::connect(("127.0.0.1", listen_port)).is_err());

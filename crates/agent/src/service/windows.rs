@@ -5,7 +5,7 @@
 use super::ServiceStatus;
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File},
+    fs::File,
     io,
     marker::PhantomData,
     path::{Path, PathBuf},
@@ -20,28 +20,38 @@ use windows::{
         TaskScheduler::{
             IRegisteredTask, ITaskFolder, ITaskService, TASK_CREATE, TASK_LOGON_INTERACTIVE_TOKEN,
             TASK_STATE_DISABLED, TASK_STATE_QUEUED, TASK_STATE_READY, TASK_STATE_RUNNING,
-            TaskScheduler,
+            TASK_UPDATE, TaskScheduler,
         },
         Variant::VARIANT,
     },
     core::BSTR,
 };
 
-/// Register without starting or replacing an occupied task name.
+/// Register or refresh an owned task without starting it.
 /// # Errors
 /// Refuses unsafe inputs, legacy registrations, pending updates and foreign tasks.
 pub fn install(root: &Path, config: &Path) -> io::Result<()> {
-    let root = crate::private_fs::windows::validate_agent_root(root)?;
-    reject_legacy(&root)?;
+    let directory = crate::private_fs::open_directory(root)?;
+    let parent = directory.open_parent_dir(cap_std::ambient_authority())?;
+    use crate::private_fs::windows::{AllowedPrincipals, validate_file_acl};
+    for file in [directory.into_std_file(), parent.into_std_file()] {
+        validate_file_acl(&file, AllowedPrincipals::OwnerOnly, true)?;
+    }
+    let root = root.canonicalize()?;
+    if legacy_run_present(&root)? {
+        return Err(invalid(
+            "old HKCU Run startup is still registered; stop/remove that legacy Agent before installing Task Scheduler",
+        ));
+    }
     let _lock = mutation_lock(&root)?;
     crate::update_handoff::ensure_no_pending_windows_handoff(&root)?;
     for directory in [root.join("bin"), root.join("state")] {
-        crate::private_fs::validate_private_path(&directory, true)?;
+        crate::private_fs::open_private(&directory, true)?;
     }
     let (command, arguments) = action(&root)?;
     let executable = root.join("bin/hostlink-agent.exe");
-    crate::private_fs::validate_private_path(&executable, false)?;
-    crate::private_fs::validate_private_path(config, false)?;
+    crate::private_fs::open_private(&executable, false)?;
+    crate::private_fs::open_private(config, false)?;
     if config.canonicalize()? != root.join("state/agent.json")
         || std::env::current_exe()?.canonicalize()? != executable
     {
@@ -52,28 +62,31 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
     let _apartment = Apartment::new()?;
     let folder = task_folder()?;
     let name = task_name(&root)?;
-    if let Some(task) = registered(&folder, &name)? {
+    let flags = if let Some(task) = registered(&folder, &name)? {
         verify_task(&task, &root)?;
+        stop_task(&task)?;
+        owned(&folder, &root)?;
+        TASK_UPDATE
     } else {
-        let xml = definition(&command, &arguments, &current_sid()?);
-        let empty = VARIANT::default();
-        // SAFETY: live local COM interface and owned arguments. TASK_CREATE is
-        // atomic and never replaces a task that appears after the lookup.
-        let task = unsafe {
-            folder.RegisterTask(
-                &BSTR::from(name),
-                &BSTR::from(xml),
-                TASK_CREATE.0,
-                &empty,
-                &empty,
-                TASK_LOGON_INTERACTIVE_TOKEN,
-                &empty,
-            )
-        }
-        .map_err(com_error)?;
-        // Preserve an unexpected readback for investigation, without deleting it.
-        verify_task(&task, &root)?;
+        TASK_CREATE
+    };
+    let xml = definition(&command, &arguments, &current_sid()?);
+    let empty = VARIANT::default();
+    // SAFETY: CREATE never replaces an occupied name; UPDATE follows
+    // verification of our registered task, including its executable and SID.
+    let task = unsafe {
+        folder.RegisterTask(
+            &BSTR::from(name),
+            &BSTR::from(xml),
+            flags.0,
+            &empty,
+            &empty,
+            TASK_LOGON_INTERACTIVE_TOKEN,
+            &empty,
+        )
     }
+    .map_err(com_error)?;
+    verify_task(&task, &root)?;
     Ok(())
 }
 
@@ -81,10 +94,20 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
 /// # Errors
 /// Refuses pending updates, foreign tasks and unconfirmed activation.
 pub fn start(root: &Path) -> io::Result<()> {
-    // Starting may execute installed code; verify its private root and parent.
-    let root = crate::private_fs::windows::validate_agent_root(root)?;
+    let directory = crate::private_fs::open_directory(root)?;
+    let parent = directory.open_parent_dir(cap_std::ambient_authority())?;
+    use crate::private_fs::windows::{AllowedPrincipals, validate_file_acl};
+    for file in [directory.into_std_file(), parent.into_std_file()] {
+        validate_file_acl(&file, AllowedPrincipals::OwnerOnly, true)?;
+    }
+    let root = root.canonicalize()?;
     let _lock = mutation_lock(&root)?;
     crate::update_handoff::ensure_no_pending_windows_handoff(&root)?;
+    if legacy_run_present(&root)? {
+        return Err(invalid(
+            "old HKCU Run startup must be removed before starting Task Scheduler",
+        ));
+    }
     let _apartment = Apartment::new()?;
     let folder = task_folder()?;
     let task = owned(&folder, &root)?;
@@ -153,7 +176,11 @@ pub fn status(root: &Path) -> io::Result<ServiceStatus> {
 pub(crate) fn ensure_update_unregistered(root: &Path) -> io::Result<()> {
     // The updater validates its install root before calling this read-only guard.
     let root = root.canonicalize()?;
-    reject_legacy(&root)?;
+    if legacy_run_present(&root)? {
+        return Err(invalid(
+            "old HKCU Run startup must be removed before an offline update",
+        ));
+    }
     let _apartment = Apartment::new()?;
     let folder = task_folder()?;
     if registered(&folder, &task_name(&root)?)?.is_some() {
@@ -408,22 +435,10 @@ fn child<'a>(parent: roxmltree::Node<'a, 'a>, name: &str) -> io::Result<roxmltre
     Ok(node)
 }
 
-fn reject_legacy(root: &Path) -> io::Result<()> {
+fn legacy_run_present(root: &Path) -> io::Result<bool> {
     use windows_sys::Win32::System::Registry::{
         HKEY_CURRENT_USER, RRF_NOEXPAND, RRF_RT_ANY, RegGetValueW,
     };
-    for entry in fs::read_dir(root)? {
-        let name = entry?.file_name().to_string_lossy().to_ascii_lowercase();
-        if name == ".hostlink-user-service.json"
-            || name == ".hostlink-agent-start.vbs"
-            || name == ".hostlink-maintenance-admission.json"
-            || name.starts_with(".hostlink-service-marker-")
-        {
-            return Err(invalid(
-                "legacy Windows service files found; use the matching old Agent for separately authorized removal; files preserved",
-            ));
-        }
-    }
     let wide = |value: &str| value.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
     let key_name = wide(r"Software\Microsoft\Windows\CurrentVersion\Run");
     let value_name = wide(&format!("HostLinkAgent-{}", root_digest(root)));
@@ -441,10 +456,8 @@ fn reject_legacy(root: &Path) -> io::Result<()> {
         )
     };
     match result {
-        2 => Ok(()),
-        0 | 234 => Err(invalid(
-            "legacy HKCU Run registration found; value preserved; remove with the matching old Agent before installation or offline update",
-        )),
+        2 => Ok(false),
+        0 | 234 => Ok(true),
         _ => Err(io::Error::from_raw_os_error(result as i32)),
     }
 }
