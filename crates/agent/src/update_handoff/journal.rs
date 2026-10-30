@@ -1,12 +1,11 @@
 //! Durable Windows update journal format and atomic persistence.
 
 use super::{invalid, is_reparse, transaction_id, validate_identity};
+use private_fs::PrivateDir;
 use serde::{Deserialize, Serialize};
-#[cfg(windows)]
-use std::fs::OpenOptions;
 use std::{
-    fs::{self, File},
-    io::{self, Read, Write},
+    fs,
+    io::{self, Read},
     path::Path,
 };
 
@@ -111,12 +110,19 @@ pub fn read_journal(path: &Path) -> io::Result<Option<UpdateJournal>> {
     if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse(&metadata) {
         return Err(invalid("Windows update journal is not a regular file"));
     }
-    validate_journal_acl(path, &metadata)?;
     if metadata.len() > MAX_JOURNAL_BYTES {
         return Err(invalid("Windows update journal exceeds its size limit"));
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    File::open(path)?
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("Windows update journal has no parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid("Windows update journal has no name"))?;
+    PrivateDir::open(parent)
+        .and_then(|dir| dir.open_file(name))
+        .map_err(io::Error::other)?
         .take(MAX_JOURNAL_BYTES + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_JOURNAL_BYTES {
@@ -148,11 +154,7 @@ pub(crate) fn ensure_no_pending_windows_handoff(root: &Path) -> io::Result<()> {
             "Windows updater directory is not a private real directory",
         ));
     }
-    crate::private_fs::windows::validate_acl(
-        &updates,
-        crate::private_fs::windows::AllowedPrincipals::OwnerOnly,
-        true,
-    )?;
+    PrivateDir::open(&updates).map_err(io::Error::other)?;
     if read_journal(&updates.join("handoff.json"))?.is_some() {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
@@ -162,131 +164,23 @@ pub(crate) fn ensure_no_pending_windows_handoff(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Atomically persist one validated journal phase in the same directory as its destination.
-/// The updater must provide a private, non-reparse parent directory owned by the current user.
-#[cfg(not(windows))]
+/// Atomically persist one validated journal phase with file and parent durability.
+/// The parent and existing destination must already be private; neither is repaired.
+/// An error may mean publication occurred: preserve the transaction and recover from
+/// the persisted phase and exact file hashes. The library retains classic Win7 rename.
 pub fn write_journal_atomic(path: &Path, journal: &UpdateJournal) -> io::Result<()> {
     journal.validate()?;
     let parent = path
         .parent()
         .ok_or_else(|| invalid("Windows update journal has no parent directory"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid("Windows update journal has no name"))?;
     let bytes = serde_json::to_vec(journal).map_err(io::Error::other)?;
     if bytes.len() as u64 > MAX_JOURNAL_BYTES {
         return Err(invalid("Windows update journal exceeds its size limit"));
     }
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse(&metadata) {
-            return Err(invalid("Windows update journal destination is unsafe"));
-        }
-        validate_journal_acl(path, &metadata)?;
-    }
-    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-    set_private_journal_file(staged.path())?;
-    staged.write_all(&bytes)?;
-    staged.as_file().sync_all()?;
-    staged.persist(path).map_err(|error| error.error)?;
-    sync_parent(parent)
-}
-
-/// On Windows, flush the journal bytes and use a same-directory write-through replacement.
-#[cfg(windows)]
-pub fn write_journal_atomic(path: &Path, journal: &UpdateJournal) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    journal.validate()?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| invalid("Windows update journal has no parent directory"))?;
-    let bytes = serde_json::to_vec(journal).map_err(io::Error::other)?;
-    if bytes.len() as u64 > MAX_JOURNAL_BYTES {
-        return Err(invalid("Windows update journal exceeds its size limit"));
-    }
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse(&metadata) {
-            return Err(invalid("Windows update journal destination is unsafe"));
-        }
-        validate_journal_acl(path, &metadata)?;
-    }
-    let temporary = parent.join(format!(".handoff-{}.tmp", uuid::Uuid::new_v4()));
-    let mut staged = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
-    set_private_journal_file(&temporary)?;
-    staged.write_all(&bytes)?;
-    staged.sync_all()?;
-    drop(staged);
-
-    let temporary_wide = temporary
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let destination_wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    // SAFETY: both paths are NUL-terminated UTF-16 and share one private parent directory.
-    let moved = unsafe {
-        MoveFileExW(
-            temporary_wide.as_ptr(),
-            destination_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        let error = io::Error::last_os_error();
-        let cleanup = fs::remove_file(&temporary);
-        return match cleanup {
-            Ok(()) => Err(error),
-            Err(cleanup_error) => Err(io::Error::other(format!(
-                "journal replacement failed ({error}); private temporary cleanup failed ({cleanup_error})"
-            ))),
-        };
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_private_journal_file(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(windows)]
-fn validate_journal_acl(path: &Path, _metadata: &fs::Metadata) -> io::Result<()> {
-    crate::private_fs::windows::validate_acl(
-        path,
-        crate::private_fs::windows::AllowedPrincipals::OwnerOnly,
-        true,
-    )
-}
-
-#[cfg(not(windows))]
-fn validate_journal_acl(_path: &Path, _metadata: &fs::Metadata) -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(windows)]
-fn set_private_journal_file(path: &Path) -> io::Result<()> {
-    crate::private_fs::restrict_private_path(path, false)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn set_private_journal_file(_path: &Path) -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_parent(parent: &Path) -> io::Result<()> {
-    File::open(parent)?.sync_all()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn sync_parent(_parent: &Path) -> io::Result<()> {
-    Ok(())
+    PrivateDir::open(parent)
+        .and_then(|dir| dir.write_atomic_durable(name, &bytes))
+        .map_err(io::Error::other)
 }

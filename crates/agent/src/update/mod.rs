@@ -17,6 +17,9 @@ mod bootstrap;
 mod linux;
 mod manifest;
 mod private_fs;
+mod staging;
+#[cfg(test)]
+mod tests;
 #[cfg(windows)]
 mod windows;
 

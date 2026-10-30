@@ -1,11 +1,12 @@
 //! Windows publication rollback.
 
 #[cfg(windows)]
-use super::super::super::private_fs::{hash_file, set_private_directory};
+use super::super::super::private_fs::hash_file;
 #[cfg(windows)]
 use super::super::super::{MAX_ENTRY_BYTES, MAX_MANIFEST_BYTES, invalid};
 #[cfg(windows)]
-use super::super::fs::{copy_private_synced, validate_windows_private_acl};
+use super::super::fs::copy_private_synced;
+use crate::update::staging::PrivateTempDir;
 #[cfg(windows)]
 use std::{fs, io, path::Path};
 
@@ -61,16 +62,12 @@ pub(in crate::update::windows) fn rollback_windows(
         }
         copy_private_synced(backup_metadata, &restore_metadata)?;
     }
-    let rollback_stash = tempfile::Builder::new()
-        .prefix("rollback-stash-")
-        .tempdir_in(
-            backup_executable
-                .parent()
-                .ok_or_else(|| invalid("Windows rollback backup has no parent"))?,
-        )?;
-    set_private_directory(rollback_stash.path())?;
-    let rollback_stash_metadata = fs::symlink_metadata(rollback_stash.path())?;
-    validate_windows_private_acl(rollback_stash.path(), &rollback_stash_metadata)?;
+    let mut rollback_stash = PrivateTempDir::new_in(
+        backup_executable
+            .parent()
+            .ok_or_else(|| invalid("Windows rollback backup has no parent"))?,
+        "rollback-stash-",
+    )?;
     let mut moves = self_update::MoveAll::from_temp(rollback_stash.path());
     if restore_executable_needed {
         moves.add(&restore_executable, installed_executable);
@@ -94,10 +91,16 @@ pub(in crate::update::windows) fn rollback_windows(
         Ok(())
     })();
     if let Err(inventory_error) = inventory_result {
+        // Failed restoration is ambiguous: retain displaced images for investigation.
+        rollback_stash.preserve();
         return Err(io::Error::other(match move_result {
-            Ok(()) => inventory_error.to_string(),
+            Ok(()) => format!(
+                "{inventory_error}; preserve rollback stash at {}",
+                rollback_stash.path().display()
+            ),
             Err(move_error) => format!(
-                "self_update rollback returned an error ({move_error}); old inventory verification failed ({inventory_error})"
+                "self_update rollback returned an error ({move_error}); old inventory verification failed ({inventory_error}); preserve rollback stash at {}",
+                rollback_stash.path().display()
             ),
         }));
     }

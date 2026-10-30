@@ -6,6 +6,7 @@ windows_link::link!("advapi32.dll" "system" fn EqualSid(psid1 : PSID, psid2 : PS
 windows_link::link!("kernel32.dll" "system" fn FlushFileBuffers(hfile : HANDLE) -> BOOL);
 windows_link::link!("advapi32.dll" "system" fn GetAce(pacl : *const ACL, dwaceindex : u32, pace : *mut *mut core::ffi::c_void) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn GetCurrentProcess() -> HANDLE);
+windows_link::link!("kernel32.dll" "system" fn GetFileInformationByHandle(hfile : HANDLE, lpfileinformation : *mut BY_HANDLE_FILE_INFORMATION) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn GetFileInformationByHandleEx(hfile : HANDLE, fileinformationclass : FILE_INFO_BY_HANDLE_CLASS, lpfileinformation : *mut core::ffi::c_void, dwbuffersize : u32) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn GetFileType(hfile : HANDLE) -> u32);
 windows_link::link!("kernel32.dll" "system" fn GetHandleInformation(hobject : HANDLE, lpdwflags : *mut u32) -> BOOL);
@@ -20,8 +21,10 @@ windows_link::link!("advapi32.dll" "system" fn IsValidAcl(pacl : *const ACL) -> 
 windows_link::link!("advapi32.dll" "system" fn IsValidSid(psid : PSID) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn LocalFree(hmem : HLOCAL) -> HLOCAL);
 windows_link::link!("ntdll.dll" "system" fn NtCreateFile(filehandle : *mut HANDLE, desiredaccess : ACCESS_MASK, objectattributes : *const OBJECT_ATTRIBUTES, iostatusblock : *mut IO_STATUS_BLOCK, allocationsize : *const i64, fileattributes : u32, shareaccess : u32, createdisposition : u32, createoptions : u32, eabuffer : *const core::ffi::c_void, ealength : u32) -> NTSTATUS);
+windows_link::link!("ntdll.dll" "system" fn NtQueryVolumeInformationFile(filehandle : HANDLE, iostatusblock : *mut IO_STATUS_BLOCK, fsinformation : *mut core::ffi::c_void, length : u32, fsinformationclass : FS_INFORMATION_CLASS) -> NTSTATUS);
 windows_link::link!("ntdll.dll" "system" fn NtSetInformationFile(filehandle : HANDLE, iostatusblock : *mut IO_STATUS_BLOCK, fileinformation : *const core::ffi::c_void, length : u32, fileinformationclass : FILE_INFORMATION_CLASS) -> NTSTATUS);
 windows_link::link!("advapi32.dll" "system" fn OpenProcessToken(processhandle : HANDLE, desiredaccess : u32, tokenhandle : *mut HANDLE) -> BOOL);
+windows_link::link!("kernel32.dll" "system" fn QueryDosDeviceW(lpdevicename : PCWSTR, lptargetpath : PWSTR, ucchmax : u32) -> u32);
 windows_link::link!("ntdll.dll" "system" fn RtlNtStatusToDosError(status : NTSTATUS) -> u32);
 windows_link::link!("kernel32.dll" "system" fn SetFileInformationByHandle(hfile : HANDLE, fileinformationclass : FILE_INFO_BY_HANDLE_CLASS, lpfileinformation : *const core::ffi::c_void, dwbuffersize : u32) -> BOOL);
 windows_link::link!("advapi32.dll" "system" fn SetSecurityDescriptorControl(psecuritydescriptor : PSECURITY_DESCRIPTOR, controlbitsofinterest : SECURITY_DESCRIPTOR_CONTROL, controlbitstoset : SECURITY_DESCRIPTOR_CONTROL) -> BOOL);
@@ -55,12 +58,35 @@ pub struct ACL {
 }
 pub const ACL_REVISION: i32 = 2;
 pub type BOOL = i32;
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct BY_HANDLE_FILE_INFORMATION {
+    pub dwFileAttributes: u32,
+    pub ftCreationTime: FILETIME,
+    pub ftLastAccessTime: FILETIME,
+    pub ftLastWriteTime: FILETIME,
+    pub dwVolumeSerialNumber: u32,
+    pub nFileSizeHigh: u32,
+    pub nFileSizeLow: u32,
+    pub nNumberOfLinks: u32,
+    pub nFileIndexHigh: u32,
+    pub nFileIndexLow: u32,
+}
 pub type CCHAR = i8;
 pub const CONTAINER_INHERIT_ACE: i32 = 2;
 pub const DACL_SECURITY_INFORMATION: i32 = 4;
 pub const DELETE: i32 = 65536;
 pub const ERROR_INSUFFICIENT_BUFFER: i32 = 122;
+pub const ERROR_INVALID_FUNCTION: i32 = 1;
+pub const ERROR_INVALID_PARAMETER: i32 = 87;
 pub const ERROR_NO_MORE_FILES: i32 = 18;
+pub const ERROR_NOT_SUPPORTED: i32 = 50;
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct FILETIME {
+    pub dwLowDateTime: u32,
+    pub dwHighDateTime: u32,
+}
 pub const FILE_ALL_ACCESS: i32 = 2032127;
 pub const FILE_ATTRIBUTE_DIRECTORY: i32 = 16;
 pub const FILE_ATTRIBUTE_NORMAL: i32 = 128;
@@ -72,11 +98,19 @@ pub struct FILE_ATTRIBUTE_TAG_INFO {
     pub ReparseTag: u32,
 }
 pub const FILE_CREATE: i32 = 2;
+pub const FILE_DEVICE_DISK: FILE_DEVICE_TYPE = 7;
+pub type FILE_DEVICE_TYPE = u32;
 pub const FILE_DIRECTORY_FILE: i32 = 1;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct FILE_DISPOSITION_INFO {
     pub DeleteFile: bool,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct FILE_FS_DEVICE_INFORMATION {
+    pub DeviceType: u32,
+    pub Characteristics: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -128,6 +162,7 @@ pub const FILE_OPEN_REPARSE_POINT: i32 = 2097152;
 pub const FILE_PERSISTENT_ACLS: i32 = 8;
 pub const FILE_READ_ATTRIBUTES: i32 = 128;
 pub const FILE_READ_DATA: i32 = 1;
+pub const FILE_REMOTE_DEVICE: u32 = 16;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FILE_RENAME_INFORMATION {
@@ -170,8 +205,10 @@ pub const FILE_SYNCHRONOUS_IO_NONALERT: i32 = 32;
 pub const FILE_TYPE_DISK: i32 = 1;
 pub const FILE_WRITE_DATA: i32 = 2;
 pub const FSCTL_SET_REPARSE_POINT: i32 = 589988;
+pub type FS_INFORMATION_CLASS = i32;
 pub const FileAttributeTagInfo: FILE_INFO_BY_HANDLE_CLASS = 9;
 pub const FileDispositionInfo: FILE_INFO_BY_HANDLE_CLASS = 4;
+pub const FileFsDeviceInformation: FS_INFORMATION_CLASS = 4;
 pub const FileIdBothDirectoryInfo: FILE_INFO_BY_HANDLE_CLASS = 10;
 pub const FileIdBothDirectoryRestartInfo: FILE_INFO_BY_HANDLE_CLASS = 11;
 pub const FileIdInfo: FILE_INFO_BY_HANDLE_CLASS = 18;
@@ -250,6 +287,7 @@ pub struct OVERLAPPED_0_0 {
 }
 pub const OWNER_SECURITY_INFORMATION: i32 = 1;
 pub type PACL = *mut ACL;
+pub type PCWSTR = *const u16;
 pub const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 2147483648;
 pub type PSECURITY_DESCRIPTOR = *mut core::ffi::c_void;
 pub type PSID = *mut core::ffi::c_void;
@@ -280,6 +318,7 @@ pub struct SID_AND_ATTRIBUTES {
     pub Sid: PSID,
     pub Attributes: u32,
 }
+pub const STATUS_ACCESS_DENIED: NTSTATUS = 0xC0000022_u32 as _;
 pub const STATUS_INVALID_INFO_CLASS: NTSTATUS = 0xC0000003_u32 as _;
 pub const STATUS_INVALID_PARAMETER: NTSTATUS = 0xC000000D_u32 as _;
 pub const STATUS_NOT_SUPPORTED: NTSTATUS = 0xC00000BB_u32 as _;

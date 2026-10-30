@@ -3,23 +3,20 @@
 #[cfg(not(windows))]
 use super::EXECUTABLE_BASE;
 use super::manifest::FileIdentity;
-#[cfg(windows)]
-use super::windows::set_windows_private_acl;
 use super::{MAX_ENTRY_BYTES, MAX_TOTAL_BYTES, invalid};
+use private_fs::{PrivateDir, PrivateFile};
 use sha2::{Digest, Sha256};
-#[cfg(not(windows))]
-use std::io::Write;
 use std::{
     collections::BTreeMap,
-    fs::{self, File, OpenOptions},
-    io,
+    fs::{self, File},
+    io::{self, Read},
     path::{Component, Path, PathBuf},
 };
 
 pub(super) fn validate_user_owned_root(root: &Path) -> io::Result<()> {
     #[cfg(not(windows))]
     {
-        crate::private_fs::open_private(root, true)?;
+        PrivateDir::open(root).map_err(io::Error::other)?;
         if fs::canonicalize(root)? != root {
             return Err(invalid("Agent install root must not use a symlinked path"));
         }
@@ -32,22 +29,17 @@ pub(super) fn validate_user_owned_root(root: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn validate_windows_update_root(root: &Path) -> io::Result<()> {
-    use crate::private_fs::windows::{AllowedPrincipals, local_app_data_path, validate_acl};
-    use cap_fs_ext::DirExt;
+    use crate::private_fs::windows::local_app_data_path;
 
     let profile = local_app_data_path()?;
     let parent = profile.join("HostLink");
     let expected = parent.join("Agent");
-    let profile_dir = cap_std::fs::Dir::open_ambient_dir(&profile, cap_std::ambient_authority())?;
-    let agent_parent = profile_dir.open_dir_nofollow("HostLink")?;
-    let _agent = agent_parent.open_dir_nofollow("Agent")?;
+    PrivateDir::open(root).map_err(io::Error::other)?;
+    PrivateDir::open(&parent).map_err(io::Error::other)?;
     if expected.canonicalize()? != root.canonicalize()? {
         return Err(invalid(
             "Agent updater root must be the exact current-user LocalAppData/HostLink/Agent",
         ));
-    }
-    for directory in [&parent, &expected] {
-        validate_acl(directory, AllowedPrincipals::OwnerOnly, true)?;
     }
     crate::service::ensure_update_unregistered(&expected)
 }
@@ -77,19 +69,44 @@ pub(super) fn file_identities(
                 "installed Agent package exceeds its total size limit",
             ));
         }
+        let mut hasher = Sha256::new();
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if metadata.nlink() != 1 {
+        let size = if name == EXECUTABLE_BASE {
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+            let executable = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+                .open(&path)?;
+            let metadata = executable.metadata()?;
+            // This is the sole exception to private-fs's exact 0600 file contract.
+            // Published executables may be owner-readable/executable (0500 or 0700).
+            if !metadata.is_file()
+                || metadata.nlink() != 1
+                // SAFETY: geteuid has no preconditions and only reads process identity.
+                || metadata.uid() != unsafe { libc::geteuid() }
+                || !matches!(metadata.mode() & 0o7777, 0o500 | 0o700)
+            {
                 return Err(invalid(
-                    "installed Agent package file has an unexpected hard link",
+                    "installed Agent executable ownership or permissions are unsafe",
                 ));
             }
+            io::copy(&mut executable.take(MAX_ENTRY_BYTES + 1), &mut hasher)?
+        } else {
+            io::copy(
+                &mut open_private_file(&path)?.take(MAX_ENTRY_BYTES + 1),
+                &mut hasher,
+            )?
+        };
+        #[cfg(not(unix))]
+        let size = io::copy(
+            &mut open_private_file(&path)?.take(MAX_ENTRY_BYTES + 1),
+            &mut hasher,
+        )?;
+        if size > MAX_ENTRY_BYTES {
+            return Err(invalid(
+                "installed Agent package file grew beyond its size limit",
+            ));
         }
-        let mut file = File::open(path)?;
-        let size = file.metadata()?.len();
-        let mut hasher = Sha256::new();
-        io::copy(&mut file, &mut hasher)?;
         result.insert(
             name.clone(),
             FileIdentity {
@@ -102,35 +119,29 @@ pub(super) fn file_identities(
 }
 
 pub(super) fn hash_file(path: &Path, max_size: u64) -> io::Result<String> {
-    let mut file = File::open(path)?;
+    let file = File::open(path)?;
     let size = file.metadata()?.len();
     if size == 0 || size > max_size {
         return Err(invalid("Agent archive exceeds its size limit"));
     }
     let mut hasher = Sha256::new();
-    io::copy(&mut file, &mut hasher)?;
+    let copied = io::copy(&mut file.take(max_size + 1), &mut hasher)?;
+    if copied > max_size {
+        return Err(invalid("Agent file grew beyond its size limit"));
+    }
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-pub(super) fn open_private_file(path: &Path, create: bool) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(create).create(create);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    let metadata = fs::symlink_metadata(path);
-    if let Ok(metadata) = metadata
-        && (!metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_point(&metadata))
-    {
-        return Err(invalid(
-            "Agent updater state file is not a safe regular file",
-        ));
-    }
-    options.open(path)
+pub(super) fn open_private_file(path: &Path) -> io::Result<PrivateFile> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("private file has no parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid("private file has no name"))?;
+    PrivateDir::open(parent)
+        .and_then(|dir| dir.open_file(name))
+        .map_err(io::Error::other)
 }
 
 #[cfg(not(windows))]
@@ -138,65 +149,65 @@ pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid("metadata path has no parent"))?;
-    let mut staged = tempfile::Builder::new()
-        .prefix(".install-")
-        .tempfile_in(parent)?;
-    staged.write_all(bytes)?;
-    staged.as_file().sync_all()?;
-    staged.persist(path).map_err(|error| error.error)?;
-    File::open(parent)?.sync_all()?;
-    Ok(())
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid("metadata path has no name"))?;
+    // An error may follow publication; callers preserve the journal and recover by hashes.
+    PrivateDir::open(parent)
+        .and_then(|dir| dir.write_atomic_durable(name, bytes))
+        .map_err(io::Error::other)
 }
 
 #[cfg(not(windows))]
-pub(super) use crate::private_fs::sync_directory;
+pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
+    PrivateDir::open(path)
+        .and_then(|dir| dir.sync_all())
+        .map_err(io::Error::other)
+}
 
-#[cfg(not(windows))]
 pub(super) fn create_private_directory(path: &Path) -> io::Result<()> {
-    match fs::create_dir(path) {
-        Ok(()) => set_private_directory(path),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let metadata = fs::symlink_metadata(path)?;
-            validate_private_directory(path, &metadata)
-        }
-        Err(error) => Err(error),
-    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("private directory has no parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid("private directory has no name"))?;
+    PrivateDir::open(parent)
+        .and_then(|dir| dir.ensure_dir(name))
+        .map(|_| ())
+        .map_err(io::Error::other)
 }
 
 #[cfg(not(windows))]
-pub(super) fn validate_private_directory(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
-    let _ = metadata;
-    crate::private_fs::open_private(path, true).map(|_| ())
-}
-
-pub(super) fn set_private_directory(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    crate::private_fs::restrict_private_path(path, true)?;
-    #[cfg(windows)]
-    set_windows_private_acl(path, true)?;
-    #[cfg(not(any(unix, windows)))]
-    let _ = path;
-    Ok(())
+pub(super) fn validate_private_directory(path: &Path, _metadata: &fs::Metadata) -> io::Result<()> {
+    PrivateDir::open(path).map(|_| ()).map_err(io::Error::other)
 }
 
 pub(super) fn set_staged_file_permissions(path: &Path, relative: &str) -> io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = if relative == EXECUTABLE_BASE {
-            0o700
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        // Only freshly extracted files in our private staging tree are adopted here.
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(path)?;
+        private_fs::harden(&file).map_err(io::Error::other)?;
+        if relative == EXECUTABLE_BASE {
+            // private-fs requires regular files to be exactly 0600. The executable alone
+            // needs 0700 and is subsequently verified by the executable-specific contract.
+            file.set_permissions(fs::Permissions::from_mode(0o700))?;
         } else {
-            0o600
-        };
-        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+            private_fs::verify(&file).map_err(io::Error::other)?;
+        }
     }
-    #[cfg(windows)]
+    #[cfg(not(unix))]
     {
         let _ = relative;
-        set_windows_private_acl(path, false)?;
+        open_private_file(path)?
+            .verify()
+            .map_err(io::Error::other)?;
     }
-    #[cfg(not(any(unix, windows)))]
-    let _ = (path, relative);
     Ok(())
 }
 

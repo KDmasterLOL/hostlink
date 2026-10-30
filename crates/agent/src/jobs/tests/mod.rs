@@ -1,19 +1,25 @@
 use super::*;
-use crate::private_fs::restrict_private_path;
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
+use private_fs::PrivateDir;
 use std::fs;
 use tower::ServiceExt;
 
+fn private_job_root() -> (tempfile::TempDir, std::path::PathBuf) {
+    let parent = tempfile::tempdir().unwrap();
+    // The library creates the private root with 0700 or owner-only Windows ACL.
+    fs::remove_dir(parent.path()).unwrap();
+    let private = PrivateDir::ensure(parent.path()).unwrap();
+    private.create_dir("jobs").unwrap();
+    let root = parent.path().join("jobs");
+    (parent, root)
+}
+
 #[tokio::test]
 async fn board_creates_and_lists_typed_tasks_and_serves_assets() {
-    let parent = tempfile::tempdir().unwrap();
-    restrict_private_path(parent.path(), true).unwrap();
-    let root = parent.path().join("jobs");
-    fs::create_dir(&root).unwrap();
-    restrict_private_path(&root, true).unwrap();
+    let (_parent, root) = private_job_root();
     let store = JobStore::initialize_fresh(&root).await.unwrap();
     let address = "127.0.0.1:4040".parse().unwrap();
     let app = board::router(&store, address);
@@ -88,11 +94,7 @@ async fn board_creates_and_lists_typed_tasks_and_serves_assets() {
 
 #[tokio::test]
 async fn board_host_header_uses_exact_tower_validation() {
-    let parent = tempfile::tempdir().unwrap();
-    restrict_private_path(parent.path(), true).unwrap();
-    let root = parent.path().join("jobs");
-    fs::create_dir(&root).unwrap();
-    restrict_private_path(&root, true).unwrap();
+    let (_parent, root) = private_job_root();
     let store = JobStore::initialize_fresh(&root).await.unwrap();
     let app = board::router(&store, "127.0.0.1:4040".parse().unwrap());
 
@@ -135,11 +137,7 @@ async fn board_host_header_uses_exact_tower_validation() {
 
 #[tokio::test]
 async fn board_preserves_upstream_task_headers_without_hostlink_overrides() {
-    let parent = tempfile::tempdir().unwrap();
-    restrict_private_path(parent.path(), true).unwrap();
-    let root = parent.path().join("jobs");
-    fs::create_dir(&root).unwrap();
-    restrict_private_path(&root, true).unwrap();
+    let (_parent, root) = private_job_root();
     let store = JobStore::initialize_fresh(&root).await.unwrap();
     let app = board::router(&store, "127.0.0.1:4040".parse().unwrap());
 
@@ -182,22 +180,14 @@ async fn board_preserves_upstream_task_headers_without_hostlink_overrides() {
 
 #[tokio::test]
 async fn opening_existing_store_never_creates_a_missing_database() {
-    let parent = tempfile::tempdir().unwrap();
-    restrict_private_path(parent.path(), true).unwrap();
-    let root = parent.path().join("jobs");
-    fs::create_dir(&root).unwrap();
-    restrict_private_path(&root, true).unwrap();
+    let (_parent, root) = private_job_root();
     assert!(JobStore::open(&root).await.is_err());
     assert!(!root.join("jobs.db").exists());
 }
 
 #[tokio::test]
 async fn native_apalis_schema_is_reused_without_hostlink_migrations() {
-    let parent = tempfile::tempdir().unwrap();
-    restrict_private_path(parent.path(), true).unwrap();
-    let root = parent.path().join("jobs");
-    fs::create_dir(&root).unwrap();
-    restrict_private_path(&root, true).unwrap();
+    let (_parent, root) = private_job_root();
 
     let store = JobStore::initialize_fresh(&root).await.unwrap();
     let migrations: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations")
@@ -228,11 +218,7 @@ async fn native_apalis_schema_is_reused_without_hostlink_migrations() {
 
 #[tokio::test]
 async fn preexisting_v5_database_keeps_legacy_marker_and_native_tasks() {
-    let parent = tempfile::tempdir().unwrap();
-    restrict_private_path(parent.path(), true).unwrap();
-    let root = parent.path().join("jobs");
-    fs::create_dir(&root).unwrap();
-    restrict_private_path(&root, true).unwrap();
+    let (_parent, root) = private_job_root();
 
     let old = JobStore::initialize_fresh(&root).await.unwrap();
     sqlx::query("CREATE TABLE DurableMeta(id INTEGER PRIMARY KEY, version INTEGER NOT NULL)")
@@ -269,11 +255,7 @@ async fn preexisting_v5_database_keeps_legacy_marker_and_native_tasks() {
 
 #[tokio::test]
 async fn worker_stops_on_agent_shutdown() {
-    let parent = tempfile::tempdir().unwrap();
-    restrict_private_path(parent.path(), true).unwrap();
-    let root = parent.path().join("jobs");
-    fs::create_dir(&root).unwrap();
-    restrict_private_path(&root, true).unwrap();
+    let (_parent, root) = private_job_root();
     JobStore::initialize_fresh(&root)
         .await
         .unwrap()
@@ -296,11 +278,7 @@ async fn board_serves_http_until_shutdown() {
     let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = reservation.local_addr().unwrap();
     drop(reservation);
-    let parent = tempfile::tempdir().unwrap();
-    restrict_private_path(parent.path(), true).unwrap();
-    let root = parent.path().join("jobs");
-    fs::create_dir(&root).unwrap();
-    restrict_private_path(&root, true).unwrap();
+    let (_parent, root) = private_job_root();
     JobStore::initialize_fresh(&root)
         .await
         .unwrap()
@@ -343,11 +321,7 @@ async fn board_submitted_command_executes_and_apalis_persists_exit_code() {
     let addr = reservation.local_addr().unwrap();
     drop(reservation);
 
-    let parent = tempfile::tempdir().unwrap();
-    restrict_private_path(parent.path(), true).unwrap();
-    let root = parent.path().join("jobs");
-    fs::create_dir(&root).unwrap();
-    restrict_private_path(&root, true).unwrap();
+    let (_parent, root) = private_job_root();
     JobStore::initialize_fresh(&root)
         .await
         .unwrap()

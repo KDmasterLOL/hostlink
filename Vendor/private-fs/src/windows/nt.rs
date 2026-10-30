@@ -16,10 +16,215 @@ use std::{
     ptr,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Identity {
-    volume: u64,
-    id: [u8; 16],
+// Pure identity policy is kept separate from the native queries for testing.
+pub(super) mod identity {
+    use super::super::bindings::*;
+    use crate::{Error, Result};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(in super::super) enum Identity {
+        Legacy { volume: u32, id: u64 },
+        Extended { volume: u64, id: [u8; 16] },
+    }
+
+    impl Identity {
+        pub(in super::super) fn legacy(value: &BY_HANDLE_FILE_INFORMATION) -> Self {
+            Self::Legacy {
+                volume: value.dwVolumeSerialNumber,
+                id: (u64::from(value.nFileIndexHigh) << 32) | u64::from(value.nFileIndexLow),
+            }
+        }
+    }
+
+    pub(in super::super) fn unsupported_class(error: &std::io::Error) -> bool {
+        matches!(
+            error.raw_os_error(),
+            Some(ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED | ERROR_INVALID_FUNCTION)
+        )
+    }
+
+    pub(in super::super) fn legacy_volume(
+        filesystem: &[u16],
+        device: &FILE_FS_DEVICE_INFORMATION,
+        flags: u32,
+    ) -> Result<()> {
+        volume_flags(flags)?;
+        // ReFS needs all 128 bits; remote NTFS cannot supply local identity guarantees.
+        local_disk(device)?;
+        if filesystem != [b'N' as u16, b'T' as u16, b'F' as u16, b'S' as u16] {
+            return Err(Error::UnsupportedFilesystem {
+                capability: "local NTFS file identity on legacy Windows",
+            });
+        }
+        Ok(())
+    }
+
+    pub(in super::super) fn local_disk(device: &FILE_FS_DEVICE_INFORMATION) -> Result<()> {
+        if device.DeviceType != FILE_DEVICE_DISK || device.Characteristics & FILE_REMOTE_DEVICE != 0
+        {
+            return Err(Error::UnsupportedFilesystem {
+                capability: "local Windows disk device",
+            });
+        }
+        Ok(())
+    }
+
+    pub(in super::super) fn volume_flags(flags: u32) -> Result<()> {
+        if flags & FILE_PERSISTENT_ACLS as u32 == 0 {
+            return Err(Error::UnsupportedFilesystem {
+                capability: "persistent Windows ACLs",
+            });
+        }
+        Ok(())
+    }
+}
+pub(super) use identity::{Identity, volume_flags};
+
+pub(super) mod open_policy {
+    use super::super::bindings::*;
+    use crate::{Error, Result};
+
+    pub(in super::super) fn unsupported_flag(status: NTSTATUS) -> bool {
+        matches!(status, STATUS_INVALID_PARAMETER | STATUS_INVALID_INFO_CLASS)
+    }
+
+    pub(in super::super) fn component(name: &[u16]) -> Result<()> {
+        const FORBIDDEN: [u16; 4] = [0, b'/' as u16, b':' as u16, b'\\' as u16];
+        if name.is_empty()
+            || name == [b'.' as u16]
+            || name == [b'.' as u16, b'.' as u16]
+            || name.iter().any(|unit| FORBIDDEN.contains(unit))
+        {
+            return Err(Error::InvalidRelativePath);
+        }
+        Ok(())
+    }
+
+    pub(in super::super) fn drive_anchor(name: &[u16]) -> Result<[u16; 3]> {
+        if name.len() != 7
+            || name[..4] != (*b"\\??\\").map(u16::from)
+            || name[5..] != (*b":\\").map(u16::from)
+            || !u8::try_from(name[4]).is_ok_and(|letter| letter.is_ascii_alphabetic())
+        {
+            return Err(Error::InvalidRelativePath);
+        }
+        Ok([name[4], b':' as u16, 0])
+    }
+
+    pub(in super::super) fn volume_root(target: &[u16]) -> Result<Vec<u16>> {
+        let prefix: Vec<_> = r"\Device\HarddiskVolume".encode_utf16().collect();
+        let Some(number) = target.strip_prefix(prefix.as_slice()) else {
+            return Err(Error::InvalidRelativePath);
+        };
+        if number.is_empty()
+            || !number
+                .iter()
+                .all(|&unit| u8::try_from(unit).is_ok_and(|byte| byte.is_ascii_digit()))
+        {
+            return Err(Error::InvalidRelativePath);
+        }
+        let mut root = target.to_vec();
+        root.push(b'\\' as u16);
+        Ok(root)
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static FORCE_LEGACY_IDENTITY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static FORCE_OPEN_STATUS: std::cell::Cell<Option<NTSTATUS>> = const { std::cell::Cell::new(None) };
+}
+
+fn identity(handle: impl AsHandle) -> Result<Identity> {
+    #[cfg(not(test))]
+    let value = info::<FILE_ID_INFO>(handle.as_handle(), FileIdInfo);
+    #[cfg(test)]
+    let value = if FORCE_LEGACY_IDENTITY.get() {
+        // Simulate only the unavailable class; the fallback uses real Win32 calls.
+        Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER).into())
+    } else {
+        info::<FILE_ID_INFO>(handle.as_handle(), FileIdInfo)
+    };
+    match value {
+        Ok(value) => Ok(Identity::Extended {
+            volume: value.VolumeSerialNumber,
+            id: value.FileId.Identifier,
+        }),
+        Err(Error::Io(error)) if identity::unsupported_class(&error) => legacy_identity(handle),
+        Err(error) => Err(error),
+    }
+}
+
+fn legacy_identity(handle: impl AsHandle) -> Result<Identity> {
+    let mut flags = 0;
+    let mut filesystem = [0u16; 261];
+    // SAFETY: live handle and writable scalar/UTF-16 outputs of the stated sizes.
+    security::bool_result(unsafe {
+        GetVolumeInformationByHandleW(
+            handle.as_handle().as_raw_handle(),
+            ptr::null_mut(),
+            0,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut flags,
+            filesystem.as_mut_ptr(),
+            filesystem.len() as u32,
+        )
+    })?;
+    let device = device_information(handle.as_handle())?;
+    let end = filesystem
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(filesystem.len());
+    identity::legacy_volume(&filesystem[..end], &device, flags)?;
+    let mut value = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: live handle and exact initialized Win32 output structure.
+    security::bool_result(unsafe {
+        GetFileInformationByHandle(handle.as_handle().as_raw_handle(), &mut value)
+    })?;
+    Ok(Identity::legacy(&value))
+}
+
+fn device_information(handle: impl AsHandle) -> Result<FILE_FS_DEVICE_INFORMATION> {
+    let mut device = FILE_FS_DEVICE_INFORMATION::default();
+    let mut status = IO_STATUS_BLOCK::default();
+    // SAFETY: FileFsDeviceInformation queries the device associated with this
+    // retained handle, with an exactly sized/aligned output and live status block.
+    nt_result(unsafe {
+        NtQueryVolumeInformationFile(
+            handle.as_handle().as_raw_handle(),
+            &mut status,
+            (&mut device as *mut FILE_FS_DEVICE_INFORMATION).cast(),
+            size_of::<FILE_FS_DEVICE_INFORMATION>() as u32,
+            FileFsDeviceInformation,
+        )
+    })?;
+    if status.Information != size_of::<FILE_FS_DEVICE_INFORMATION>() {
+        return Err(Error::UnsupportedFilesystem {
+            capability: "Windows volume device information",
+        });
+    }
+    Ok(device)
+}
+
+fn resolve_drive_anchor(name: &[u16]) -> Result<Vec<u16>> {
+    let drive = open_policy::drive_anchor(name)?;
+    let mut target = [0u16; 1024];
+    // SAFETY: NUL-terminated drive name and a writable, bounded UTF-16 MULTI_SZ.
+    let length =
+        unsafe { QueryDosDeviceW(drive.as_ptr(), target.as_mut_ptr(), target.len() as u32) };
+    if length == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    let data = target
+        .get(..length as usize)
+        .ok_or(Error::InvalidRelativePath)?;
+    // The first mapping is current; subsequent entries can be stale mappings.
+    let end = data
+        .iter()
+        .position(|&unit| unit == 0)
+        .ok_or(Error::InvalidRelativePath)?;
+    open_policy::volume_root(&data[..end])
 }
 
 pub(super) fn open(
@@ -57,10 +262,26 @@ fn open_access(
     desired_override: Option<u32>,
 ) -> Result<OwnedHandle> {
     let mut name: Vec<u16> = name.encode_wide().collect();
-    if (name.is_empty() && desired_override.is_none())
-        || name.contains(&0)
+    if ![FILE_OPEN as u32, FILE_CREATE as u32, FILE_OPEN_IF as u32].contains(&disposition)
         || name.len() > (u16::MAX as usize) / 2
     {
+        return Err(Error::InvalidRelativePath);
+    }
+    let anchor = parent.is_none();
+    if anchor {
+        if !directory
+            || disposition != FILE_OPEN as u32
+            || user.is_some()
+            || desired_override.is_some()
+        {
+            return Err(Error::InvalidRelativePath);
+        }
+        // Resolve the DOS alias once. Only a trusted OS device root is opened;
+        // never retry an arbitrary absolute pathname or re-resolve the drive alias.
+        name = resolve_drive_anchor(&name)?;
+    } else if !name.is_empty() {
+        open_policy::component(&name)?;
+    } else if desired_override.is_none() || disposition != FILE_OPEN as u32 || user.is_some() {
         return Err(Error::InvalidRelativePath);
     }
     let bytes = (name.len() * 2) as u16;
@@ -70,7 +291,7 @@ fn open_access(
         Buffer: name.as_mut_ptr(),
     };
     let mut security = user.map(Descriptor::new).transpose()?;
-    let attributes = OBJECT_ATTRIBUTES {
+    let mut attributes = OBJECT_ATTRIBUTES {
         Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
         RootDirectory: parent.map_or(ptr::null_mut(), |p| p.as_raw_handle()),
         ObjectName: &mut string,
@@ -112,23 +333,38 @@ fn open_access(
         } else {
             0
         };
-    // SAFETY: all names, outputs, and optional absolute security descriptor are
-    // live and correctly aligned until this synchronous call completes.
-    let status = unsafe {
-        NtCreateFile(
-            &mut handle,
-            desired,
-            &attributes,
-            &mut io_status,
-            ptr::null(),
-            FILE_ATTRIBUTE_NORMAL as u32,
-            (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE) as u32,
-            disposition,
-            options,
-            ptr::null(),
-            0,
-        )
+    let mut create = |attributes: &OBJECT_ATTRIBUTES, desired| {
+        // SAFETY: all names, outputs, and optional protected descriptor stay live
+        // across both attempts. Neither attempt uses overwrite/delete-on-close.
+        unsafe {
+            NtCreateFile(
+                &mut handle,
+                desired,
+                attributes,
+                &mut io_status,
+                ptr::null(),
+                FILE_ATTRIBUTE_NORMAL as u32,
+                (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE) as u32,
+                disposition,
+                options,
+                ptr::null(),
+                0,
+            )
+        }
     };
+    #[cfg(not(test))]
+    let mut status = create(&attributes, desired);
+    #[cfg(test)]
+    let mut status = FORCE_OPEN_STATUS
+        .get()
+        .unwrap_or_else(|| create(&attributes, desired));
+    let retried = open_policy::unsupported_flag(status);
+    if retried {
+        attributes.Attributes &= !(OBJ_DONT_REPARSE as u32);
+        // FILE_OPEN_REPARSE_POINT is retained. Attribute access is mandatory for
+        // inspecting the acquired handle before it can escape, including reopens.
+        status = create(&attributes, desired | FILE_READ_ATTRIBUTES as u32);
+    }
     if status < 0 {
         if status == STATUS_REPARSE_POINT_ENCOUNTERED || status == STATUS_STOPPED_ON_SYMLINK {
             return Err(Error::PathRedirect);
@@ -140,8 +376,21 @@ fn open_access(
     }
     // SAFETY: successful NtCreateFile transferred a unique non-inheritable handle.
     let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
-    if desired & FILE_READ_ATTRIBUTES as u32 != 0 {
+    if retried || desired & FILE_READ_ATTRIBUTES as u32 != 0 {
+        let directory = if retried && name.is_empty() && desired & FILE_READ_ATTRIBUTES as u32 == 0
+        {
+            // Security-only empty-name reopens can refer to a file or directory.
+            let standard: FILE_STANDARD_INFO =
+                info(parent.ok_or(Error::InvalidRelativePath)?, FileStandardInfo)?;
+            standard.Directory
+        } else {
+            directory
+        };
         kind(&handle, directory)?;
+    }
+    if anchor {
+        identity::local_disk(&device_information(&handle)?)?;
+        volume(&handle)?;
     }
     Ok(handle)
 }
@@ -189,14 +438,6 @@ pub(super) fn volume(handle: impl AsHandle) -> Result<()> {
     })?;
     volume_flags(flags)
 }
-pub(super) fn volume_flags(flags: u32) -> Result<()> {
-    if flags & FILE_PERSISTENT_ACLS as u32 == 0 {
-        return Err(Error::UnsupportedFilesystem {
-            capability: "persistent Windows ACLs",
-        });
-    }
-    Ok(())
-}
 pub(super) fn metadata(
     handle: impl AsHandle,
     directory: bool,
@@ -204,11 +445,7 @@ pub(super) fn metadata(
 ) -> Result<Identity> {
     kind(handle.as_handle(), directory)?;
     volume(handle.as_handle())?;
-    let value: FILE_ID_INFO = info(handle.as_handle(), FileIdInfo)?;
-    let id = Identity {
-        volume: value.VolumeSerialNumber,
-        id: value.FileId.Identifier,
-    };
+    let id = identity(handle.as_handle())?;
     if expected.is_some_and(|expected| expected != id) {
         return Err(Error::IdentityChanged);
     }
@@ -356,12 +593,7 @@ fn nt_result(status: NTSTATUS) -> Result<()> {
     Err(io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32).into())
 }
 pub(super) fn identity_matches(handle: impl AsHandle, expected: Identity) -> Result<()> {
-    let value: FILE_ID_INFO = info(handle, FileIdInfo)?;
-    if (Identity {
-        volume: value.VolumeSerialNumber,
-        id: value.FileId.Identifier,
-    }) != expected
-    {
+    if identity(handle)? != expected {
         return Err(Error::IdentityChanged);
     }
     Ok(())

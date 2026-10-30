@@ -3,6 +3,7 @@
 //! planif 1.0 only builds registrations, leaving lifecycle ownership here.
 //! windows 0.62's typed property out-parameters exceed this XML identity check.
 use super::ServiceStatus;
+use private_fs::PrivateDir;
 use sha2::{Digest, Sha256};
 use std::{
     fs::File,
@@ -31,12 +32,12 @@ use windows::{
 /// # Errors
 /// Refuses unsafe inputs, legacy registrations, pending updates and foreign tasks.
 pub fn install(root: &Path, config: &Path) -> io::Result<()> {
-    let directory = crate::private_fs::open_directory(root)?;
-    let parent = directory.open_parent_dir(cap_std::ambient_authority())?;
-    use crate::private_fs::windows::{AllowedPrincipals, validate_file_acl};
-    for file in [directory.into_std_file(), parent.into_std_file()] {
-        validate_file_acl(&file, AllowedPrincipals::OwnerOnly, true)?;
-    }
+    let directory = PrivateDir::open(root).map_err(io::Error::other)?;
+    let absolute = std::path::absolute(root)?;
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| invalid("Agent root has no parent"))?;
+    let _parent = PrivateDir::open(parent).map_err(io::Error::other)?;
     let root = root.canonicalize()?;
     if legacy_run_present(&root)? {
         return Err(invalid(
@@ -45,13 +46,21 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
     }
     let _lock = mutation_lock(&root)?;
     crate::update_handoff::ensure_no_pending_windows_handoff(&root)?;
-    for directory in [root.join("bin"), root.join("state")] {
-        crate::private_fs::open_private(&directory, true)?;
-    }
     let (command, arguments) = action(&root)?;
     let executable = root.join("bin/hostlink-agent.exe");
-    crate::private_fs::open_private(&executable, false)?;
-    crate::private_fs::open_private(config, false)?;
+    directory
+        .open_file("bin/hostlink-agent.exe")
+        .map_err(io::Error::other)?;
+    let config_parent = config
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let config_name = config
+        .file_name()
+        .ok_or_else(|| invalid("config has no file name"))?;
+    PrivateDir::open(std::path::absolute(config_parent)?)
+        .and_then(|directory| directory.open_file(config_name))
+        .map_err(io::Error::other)?;
     if config.canonicalize()? != root.join("state/agent.json")
         || std::env::current_exe()?.canonicalize()? != executable
     {
@@ -94,12 +103,12 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
 /// # Errors
 /// Refuses pending updates, foreign tasks and unconfirmed activation.
 pub fn start(root: &Path) -> io::Result<()> {
-    let directory = crate::private_fs::open_directory(root)?;
-    let parent = directory.open_parent_dir(cap_std::ambient_authority())?;
-    use crate::private_fs::windows::{AllowedPrincipals, validate_file_acl};
-    for file in [directory.into_std_file(), parent.into_std_file()] {
-        validate_file_acl(&file, AllowedPrincipals::OwnerOnly, true)?;
-    }
+    let _directory = PrivateDir::open(root).map_err(io::Error::other)?;
+    let absolute = std::path::absolute(root)?;
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| invalid("Agent root has no parent"))?;
+    let _parent = PrivateDir::open(parent).map_err(io::Error::other)?;
     let root = root.canonicalize()?;
     let _lock = mutation_lock(&root)?;
     crate::update_handoff::ensure_no_pending_windows_handoff(&root)?;

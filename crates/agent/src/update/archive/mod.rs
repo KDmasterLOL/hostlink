@@ -1,20 +1,19 @@
 //! Archive path validation, strict ZIP index validation, and private package staging.
 
-#[cfg(not(windows))]
-use super::private_fs::{create_private_directory, validate_private_directory};
-#[cfg(windows)]
-use super::windows::{create_private_directory, validate_windows_private_acl};
+use super::private_fs::create_private_directory;
+use super::staging::PrivateTempDir;
 use super::{
     MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_TOTAL_BYTES, PACKAGE_MANIFEST,
     invalid, invalid_owned,
     manifest::{FileIdentity, PackageManifest, package_files},
-    private_fs::{hash_file, set_private_directory, set_staged_file_permissions},
+    private_fs::{hash_file, set_staged_file_permissions},
     private_fs::{is_reparse_point, validate_path_has_no_reparse_components},
 };
+use private_fs::PrivateDir;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
 };
@@ -57,8 +56,6 @@ pub(super) fn validate_archive_path(root: &Path, archive: &Path) -> io::Result<P
         return Err(invalid("Agent archive is not a regular file"));
     }
     validate_path_has_no_reparse_components(archive)?;
-    #[cfg(windows)]
-    validate_windows_private_acl(&canonical_archive, &metadata)?;
     Ok(canonical_archive)
 }
 
@@ -68,11 +65,9 @@ pub(super) fn validate_and_stage_archive(
     target: &str,
     version: &str,
     staging_parent: &Path,
-) -> io::Result<(PackageManifest, tempfile::TempDir)> {
-    let stage = tempfile::Builder::new()
-        .prefix(".agent-package-")
-        .tempdir_in(staging_parent)?;
-    set_private_directory(stage.path())?;
+) -> io::Result<(PackageManifest, PrivateTempDir)> {
+    let stage = PrivateTempDir::new_in(staging_parent, ".agent-package-")?;
+    let stage_dir = PrivateDir::open(stage.path()).map_err(io::Error::other)?;
     let staged_archive = stage.path().join("package.zip");
     let mut source = File::open(archive_path)?;
     let source_size = source.metadata()?.len();
@@ -81,10 +76,7 @@ pub(super) fn validate_and_stage_archive(
             "Agent package archive exceeds its compressed size limit",
         ));
     }
-    let mut archive_copy = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staged_archive)?;
+    let mut archive_copy = stage_dir.create("package.zip").map_err(io::Error::other)?;
     let mut copied = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -105,7 +97,7 @@ pub(super) fn validate_and_stage_archive(
     if copied == 0 {
         return Err(invalid("Agent package archive is empty"));
     }
-    archive_copy.sync_all()?;
+    archive_copy.sync_all().map_err(io::Error::other)?;
     drop(archive_copy);
     if hash_file(&staged_archive, MAX_ARCHIVE_BYTES)? != archive_sha256 {
         return Err(invalid("selected Agent archive SHA-256 does not match"));
@@ -254,23 +246,25 @@ pub(super) fn validate_and_stage_archive(
     // against those exact identities before publication.
     let extraction_root = stage.path().join("extracted");
     create_private_directory(&extraction_root)?;
+    let package_root = extraction_root.join(format!("hostlink-agent-{target}"));
+    create_private_directory(&package_root)?;
+    let package_dir = PrivateDir::open(&package_root).map_err(io::Error::other)?;
+    // self_update truncates these exact precreated files. It must not create Windows
+    // files/directories with inherited ACLs and then repair them after exposure.
+    for name in &expected_order {
+        package_dir.create(name).map_err(io::Error::other)?;
+    }
     self_update::Extract::from_source(&staged_archive)
         .archive(self_update::ArchiveKind::Zip)
         .extract_into(&extraction_root)
         .map_err(|error| invalid_owned(format!("Agent ZIP extraction failed: {error}")))?;
-    let package_root = extraction_root.join(format!("hostlink-agent-{target}"));
     let package_metadata = fs::symlink_metadata(&package_root)?;
     if !package_metadata.is_dir() || is_reparse_point(&package_metadata) {
         return Err(invalid(
             "Agent ZIP extraction produced an unsafe package root",
         ));
     }
-    set_private_directory(&package_root)?;
-    let package_metadata = fs::symlink_metadata(&package_root)?;
-    #[cfg(windows)]
-    validate_windows_private_acl(&package_root, &package_metadata)?;
-    #[cfg(not(windows))]
-    validate_private_directory(&package_root, &package_metadata)?;
+    PrivateDir::open(&package_root).map_err(io::Error::other)?;
     let actual_names = fs::read_dir(&package_root)?
         .map(|entry| {
             let entry = entry?;

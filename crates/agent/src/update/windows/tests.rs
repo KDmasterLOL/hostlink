@@ -24,7 +24,7 @@ mod windows_recovery_tests {
         use crate::update::windows::fs::windows_file_identity;
         let root = TempDir::new().unwrap();
         let directory = root.path().join("directory");
-        create_private_directory(&directory).unwrap();
+        private_fs::PrivateDir::ensure(&directory).unwrap();
         let (volume, index) = windows_file_identity(&directory, true).unwrap();
         assert_ne!(index, 0);
         assert_eq!(
@@ -53,7 +53,8 @@ mod windows_recovery_tests {
     impl Fixture {
         fn new(phase: UpdatePhase, publish_new_exe: bool, publish_new_metadata: bool) -> Self {
             let temp = TempDir::new().expect("disposable Windows recovery root");
-            let root = temp.path().to_path_buf();
+            let root = temp.path().join("agent");
+            private_fs::PrivateDir::ensure(&root).expect("private recovery root at birth");
             let updates = root.join(".updates");
             let bin = root.join("bin");
             create_private_directory(&updates).expect("private updates directory");
@@ -258,6 +259,38 @@ mod windows_recovery_tests {
             fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
             exe
         );
+    }
+
+    #[test]
+    fn recovery_refuses_hardlinked_backup_before_changing_journal_or_install() {
+        let fixture = Fixture::new(UpdatePhase::BackedUp, true, false);
+        let alias = fixture.root.join("backup-alias.exe");
+        fs::hard_link(fixture.transaction.join("backup-agent.exe"), &alias).unwrap();
+        let journal = fs::read(&fixture.journal).unwrap();
+        let exe = fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap();
+        assert!(recover_windows_handoff(&fixture.root).is_err());
+        assert_eq!(fs::read(&fixture.journal).unwrap(), journal);
+        assert_eq!(
+            fs::read(fixture.root.join("bin/hostlink-agent.exe")).unwrap(),
+            exe
+        );
+        assert_eq!(fs::read(alias).unwrap(), fixture.old_exe);
+    }
+
+    #[test]
+    fn private_copy_verifies_source_before_creating_destination() {
+        use crate::update::windows::fs::copy_private_synced;
+        let fixture = Fixture::new(UpdatePhase::Staged, false, false);
+        let source = fixture.transaction.join("backup-agent.exe");
+        let destination = fixture.root.join("copy.exe");
+        copy_private_synced(&source, &destination).unwrap();
+        let dir = private_fs::PrivateDir::open(&fixture.root).unwrap();
+        dir.open_file("copy.exe").unwrap().verify().unwrap();
+        fs::hard_link(&source, fixture.root.join("alias.exe")).unwrap();
+        let refused = fixture.root.join("refused.exe");
+        assert!(copy_private_synced(&source, &refused).is_err());
+        assert!(!refused.exists());
+        assert_eq!(fs::read(&source).unwrap(), fixture.old_exe);
     }
 
     #[test]

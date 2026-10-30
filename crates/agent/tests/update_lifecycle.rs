@@ -174,6 +174,12 @@ fn install_root() -> (TempDir, PathBuf) {
     }
     let bin = root.join("bin");
     fs::create_dir(&bin).expect("bin directory");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o700))
+            .expect("private bin directory");
+    }
     let old = b"old installed Agent binary";
     fs::write(bin.join("hostlink-agent"), old).expect("old binary");
     #[cfg(unix)]
@@ -197,6 +203,12 @@ fn install_root() -> (TempDir, PathBuf) {
         serde_json::to_vec(&metadata).expect("install metadata"),
     )
     .expect("write install metadata");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(root.join("install.json"), fs::Permissions::from_mode(0o600))
+            .expect("private installed metadata");
+    }
     (temp, root)
 }
 

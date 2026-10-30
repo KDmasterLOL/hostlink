@@ -1,6 +1,6 @@
 //! Minimal systemd user lifecycle; systemd alone owns process state.
 use super::ServiceStatus;
-use crate::private_fs::open_private;
+use private_fs::PrivateDir;
 use service_manager::{
     ServiceInstallCtx, ServiceLabel, ServiceManager, ServiceStartCtx, ServiceStatus as OsStatus,
     ServiceStatusCtx, ServiceStopCtx, ServiceUninstallCtx, SystemdServiceManager,
@@ -28,8 +28,31 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
         Ok(_) => return Err(io::Error::other("legacy marker requires migration")),
     }
     let program = root.join("bin/hostlink-agent");
-    open_private(&program, false)?;
-    open_private(config, false)?;
+    let directory = PrivateDir::open(&root).map_err(io::Error::other)?;
+    directory.open_dir("bin").map_err(io::Error::other)?;
+    // private-fs requires data files to be exactly 0600, so it cannot acquire
+    // a runnable Agent (0700). Keep this executable-only service invariant;
+    // current_exe below also requires its exact canonical installed identity.
+    let executable = fs::symlink_metadata(&program)?;
+    // SAFETY: geteuid only reads this process's effective user identity.
+    let uid = unsafe { libc::geteuid() };
+    if !executable.is_file()
+        || executable.uid() != uid
+        || executable.mode() & 0o077 != 0
+        || executable.nlink() != 1
+    {
+        return Err(io::Error::other("unsafe installed Agent executable"));
+    }
+    let parent = config
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = config
+        .file_name()
+        .ok_or_else(|| io::Error::other("config has no file name"))?;
+    PrivateDir::open(std::path::absolute(parent)?)
+        .and_then(|directory| directory.open_file(name))
+        .map_err(io::Error::other)?;
     if config.canonicalize()? != root.join("state/agent.json")
         || std::env::current_exe()?.canonicalize()? != program
     {
@@ -143,7 +166,7 @@ fn root_label(root: &Path) -> io::Result<(PathBuf, ServiceLabel)> {
     {
         return Err(io::Error::other("non-root systemd user session required"));
     }
-    open_private(root, true)?;
+    PrivateDir::open(root).map_err(io::Error::other)?;
     let canonical = root.canonicalize()?;
     if std::path::absolute(root)? != canonical
         || canonical

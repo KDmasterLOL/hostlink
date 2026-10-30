@@ -9,15 +9,16 @@ use crate::update::manifest::{
     BootstrapReceipt, InstallMetadata, package_files, read_install_metadata, validate_installed,
 };
 use crate::update::private_fs::{
-    hash_file, is_reparse_point, open_private_file, set_staged_file_permissions,
-    validate_path_has_no_reparse_components, validate_user_owned_root,
+    hash_file, is_reparse_point, open_private_file, validate_path_has_no_reparse_components,
+    validate_user_owned_root,
 };
 #[cfg(not(windows))]
 use crate::update::private_fs::{sync_directory, validate_private_directory};
 #[cfg(windows)]
-use crate::update::windows::validate_windows_private_acl;
+use crate::update::windows::verify_windows_private_path;
+use private_fs::PrivateDir;
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::{self, Read, Write},
     path::Path,
 };
@@ -80,20 +81,16 @@ pub fn verify_fresh_package(
         installed_package_sha256: archive_sha256.to_owned(),
         installed_files: manifest.files.clone(),
     };
-    let metadata_path = staged_package.join(INSTALL_METADATA);
-    let mut metadata_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&metadata_path)?;
+    let package_dir = PrivateDir::open(&staged_package).map_err(io::Error::other)?;
+    let mut metadata_file = package_dir
+        .create(INSTALL_METADATA)
+        .map_err(io::Error::other)?;
     metadata_file
         .write_all(&serde_json::to_vec_pretty(&install_metadata).map_err(io::Error::other)?)?;
-    metadata_file.sync_all()?;
-    set_staged_file_permissions(&metadata_path, INSTALL_METADATA)?;
-    let receipt_path = staged_package.join("bootstrap-receipt.json");
-    let mut receipt_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&receipt_path)?;
+    metadata_file.sync_all().map_err(io::Error::other)?;
+    let mut receipt_file = package_dir
+        .create("bootstrap-receipt.json")
+        .map_err(io::Error::other)?;
     receipt_file.write_all(
         &serde_json::to_vec_pretty(&serde_json::json!({
             "format": 1,
@@ -106,14 +103,14 @@ pub fn verify_fresh_package(
         }))
         .map_err(io::Error::other)?,
     )?;
-    receipt_file.sync_all()?;
-    set_staged_file_permissions(&receipt_path, "bootstrap-receipt.json")?;
+    receipt_file.sync_all().map_err(io::Error::other)?;
     fs::remove_file(staged_package.join(PACKAGE_MANIFEST))?;
     // Windows refuses renaming a directory containing still-open file handles
     // (ERROR_ACCESS_DENIED), even after each file's sync_all has succeeded.
     // Publish only after closing both verified metadata and receipt files.
     drop(receipt_file);
     drop(metadata_file);
+    drop(package_dir);
     // Windows std::fs::File::open cannot open a directory for sync_all.
     // The member files and receipt have already been individually flushed;
     // the directory durability barrier is available on Unix only.
@@ -137,9 +134,7 @@ pub fn verify_fresh_package(
 pub fn finalize_fresh_install(root: &Path) -> io::Result<()> {
     validate_user_owned_root(root)?;
     let pending = root.join("enrollment.pending");
-    let pending_file = open_private_file(&pending, false)?;
-    #[cfg(windows)]
-    validate_windows_private_acl(&pending, &pending_file.metadata()?)?;
+    let pending_file = open_private_file(&pending)?;
     drop(pending_file);
 
     let state = root.join("state");
@@ -153,7 +148,7 @@ pub fn finalize_fresh_install(root: &Path) -> io::Result<()> {
     #[cfg(not(windows))]
     validate_private_directory(&state, &state_metadata)?;
     #[cfg(windows)]
-    validate_windows_private_acl(&state, &state_metadata)?;
+    verify_windows_private_path(&state, &state_metadata)?;
     let config = state.join("agent.json");
     let config_metadata = fs::symlink_metadata(&config)?;
     if !config_metadata.is_file()
@@ -163,7 +158,7 @@ pub fn finalize_fresh_install(root: &Path) -> io::Result<()> {
         return Err(invalid("fresh Agent configuration is missing or unsafe"));
     }
     #[cfg(windows)]
-    validate_windows_private_acl(&config, &config_metadata)?;
+    verify_windows_private_path(&config, &config_metadata)?;
 
     let metadata_path = root.join(INSTALL_METADATA);
     let installed = read_install_metadata(&metadata_path)?;
@@ -177,9 +172,7 @@ pub fn finalize_fresh_install(root: &Path) -> io::Result<()> {
     }
     validate_installed(&root.join("bin"), &installed, &installed.target)?;
     let receipt_path = root.join("bootstrap-receipt.json");
-    let receipt_file = open_private_file(&receipt_path, false)?;
-    #[cfg(windows)]
-    validate_windows_private_acl(&receipt_path, &receipt_file.metadata()?)?;
+    let receipt_file = open_private_file(&receipt_path)?;
     let mut receipt_bytes = Vec::new();
     receipt_file
         .take(MAX_MANIFEST_BYTES + 1)
@@ -227,17 +220,5 @@ fn validate_fresh_output_parent(path: &Path) -> io::Result<()> {
             "package output parent is not a real private directory",
         ));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // SAFETY: geteuid has no preconditions and reads only the current process identity.
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-            return Err(invalid(
-                "package output parent is not private and user-owned",
-            ));
-        }
-    }
-    #[cfg(windows)]
-    validate_windows_private_acl(path, &metadata)?;
-    Ok(())
+    PrivateDir::open(path).map(|_| ()).map_err(io::Error::other)
 }

@@ -16,6 +16,392 @@ fn fixture() -> (tempfile::TempDir, PrivateDir) {
     (temp, dir)
 }
 
+fn with_legacy_identity<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            nt::FORCE_LEGACY_IDENTITY.set(self.0);
+        }
+    }
+    let _restore = Restore(nt::FORCE_LEGACY_IDENTITY.replace(true));
+    run()
+}
+
+fn with_open_status<T>(status: NTSTATUS, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<NTSTATUS>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            nt::FORCE_OPEN_STATUS.set(self.0);
+        }
+    }
+    let _restore = Restore(nt::FORCE_OPEN_STATUS.replace(Some(status)));
+    run()
+}
+
+#[test]
+fn forced_open_fallback_walks_roots_and_creates_protected_objects() {
+    for status in [STATUS_INVALID_PARAMETER, STATUS_INVALID_INFO_CLASS] {
+        with_open_status(status, || {
+            // Every root/ancestor/leaf open takes the real fallback. Identity
+            // fallback is also forced to exercise the complete legacy path.
+            with_legacy_identity(|| {
+                round_trip_private_creation_and_noninheritance();
+                namespace_replacement_after_validation_keeps_the_original_parent();
+                let (temp, dir) = fixture();
+                let child = dir.create_dir("child").unwrap();
+                security::verify(&child, &dir.user).unwrap();
+                assert!(PrivateDir::open(temp.path().join("private/child")).is_ok());
+                for name in ["a/b", r"a\b", ".", "..", "C:key", r"\??\C:\child"] {
+                    assert!(matches!(
+                        nt::open(
+                            Some(&dir.handle),
+                            OsStr::new(name),
+                            true,
+                            FILE_OPEN as u32,
+                            None
+                        ),
+                        Err(Error::InvalidRelativePath)
+                    ));
+                }
+                assert!(matches!(
+                    nt::open(None, temp.path().as_os_str(), true, FILE_OPEN as u32, None),
+                    Err(Error::InvalidRelativePath)
+                ));
+            });
+        });
+    }
+}
+
+#[test]
+fn forced_open_fallback_rejects_junctions_in_root_and_relative_walks() {
+    with_open_status(STATUS_INVALID_PARAMETER, || {
+        junctions_are_rejected_in_every_position();
+        let (temp, dir) = fixture();
+        let outside = tempfile::tempdir().unwrap();
+        let link = dir.create_dir("link").unwrap();
+        junction(&link, outside.path());
+        assert!(matches!(dir.ensure_dir("link"), Err(Error::PathRedirect)));
+        assert!(matches!(
+            PrivateDir::ensure(temp.path().join("private/link/escape")),
+            Err(Error::PathRedirect)
+        ));
+        assert!(!outside.path().join("escape").exists());
+    });
+}
+
+#[test]
+#[ignore = "native Windows symlink privilege (or Developer Mode) required; run explicitly"]
+fn forced_open_fallback_rejects_file_symlink_before_truncation_or_creation() {
+    let (temp, dir) = fixture();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("data");
+    std::fs::write(&target, b"unchanged").unwrap();
+    std::os::windows::fs::symlink_file(&target, temp.path().join("private/link")).unwrap();
+    with_open_status(STATUS_INVALID_INFO_CLASS, || {
+        for creation in [FileCreation::Existing, FileCreation::OpenOrCreate] {
+            assert!(matches!(
+                dir.open_file_with(
+                    "link",
+                    OpenOptions {
+                        access: FileAccess::ReadWrite,
+                        creation,
+                        truncate: true,
+                        ..OpenOptions::default()
+                    }
+                ),
+                Err(Error::PathRedirect)
+            ));
+        }
+        assert!(dir.create("link").is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"unchanged");
+    });
+}
+
+#[test]
+fn other_open_errors_do_not_retry_or_create() {
+    let (temp, dir) = fixture();
+    for status in [
+        STATUS_NOT_SUPPORTED,
+        STATUS_REPARSE_POINT_ENCOUNTERED,
+        STATUS_ACCESS_DENIED,
+    ] {
+        with_open_status(status, || {
+            assert!(dir.create("blocked").is_err());
+        });
+        assert!(!temp.path().join("private/blocked").exists());
+    }
+}
+
+mod open_policy_tests {
+    use super::super::{bindings::*, nt::open_policy::*};
+
+    #[test]
+    fn retry_is_limited_to_two_unsupported_flag_statuses() {
+        for status in [STATUS_INVALID_PARAMETER, STATUS_INVALID_INFO_CLASS] {
+            assert!(unsupported_flag(status));
+        }
+        for status in [
+            0,
+            STATUS_NOT_SUPPORTED,
+            STATUS_REPARSE_POINT_ENCOUNTERED,
+            STATUS_ACCESS_DENIED,
+        ] {
+            assert!(!unsupported_flag(status));
+        }
+    }
+
+    #[test]
+    fn fallback_never_accepts_multiple_components_or_namespaces() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            r"a\b",
+            "a:b",
+            "a\0b",
+            r"\??\C:\",
+            r"\\host\share",
+        ] {
+            assert!(component(&name.encode_utf16().collect::<Vec<_>>()).is_err());
+        }
+        for name in ["data", "..data", "ключ"] {
+            component(&name.encode_utf16().collect::<Vec<_>>()).unwrap();
+        }
+        component(&[0xd800]).unwrap();
+    }
+
+    #[test]
+    fn only_exact_drive_roots_and_local_os_volume_targets_are_anchors() {
+        for letter in b'A'..=b'Z' {
+            let name = format!(r"\??\{}:\", letter as char);
+            assert_eq!(
+                drive_anchor(&name.encode_utf16().collect::<Vec<_>>()).unwrap(),
+                [u16::from(letter), 58, 0]
+            );
+        }
+        for name in [
+            r"\??\C:\child",
+            r"\??\UNC\host\share\",
+            r"\Device\HarddiskVolume1\",
+            "C:\\",
+            r"\??\1:\",
+        ] {
+            assert!(drive_anchor(&name.encode_utf16().collect::<Vec<_>>()).is_err());
+        }
+        assert_eq!(
+            volume_root(
+                &r"\Device\HarddiskVolume12"
+                    .encode_utf16()
+                    .collect::<Vec<_>>()
+            )
+            .unwrap(),
+            r"\Device\HarddiskVolume12\"
+                .encode_utf16()
+                .collect::<Vec<_>>()
+        );
+        for target in [
+            r"\Device\HarddiskVolume",
+            r"\Device\HarddiskVolume1\child",
+            r"\Device\HarddiskVolume1\",
+            r"\Device\HarddiskVolumeShadowCopy1",
+            r"\Device\Mup\host\share",
+            r"\??\D:\subst",
+            r"\Device\NamedPipe\pipe",
+            r"\Device\HarddiskVolume1\..\Other",
+            "\\Device\\HarddiskVolume1\0junk",
+        ] {
+            assert!(volume_root(&target.encode_utf16().collect::<Vec<_>>()).is_err());
+        }
+    }
+}
+
+#[test]
+fn forced_legacy_identity_preserves_validation_and_handle_relative_operations() {
+    with_legacy_identity(|| {
+        let (temp, dir) = fixture();
+        assert!(matches!(dir.id, nt::Identity::Legacy { .. }));
+        let mut file = dir.create("staging").unwrap();
+        file.write_all(b"legacy").unwrap();
+        file.verify().unwrap();
+        let reopened = dir.open_file("staging").unwrap();
+        assert!(file.same_object(&reopened));
+        let writable = nt::security_handle(&file).unwrap();
+        nt::identity_matches(&writable, file.id).unwrap();
+        let other = dir.create("other").unwrap();
+        assert!(matches!(
+            nt::identity_matches(&other, file.id),
+            Err(Error::IdentityChanged)
+        ));
+        nt::rename_classic(&file, &dir.handle, OsStr::new("published")).unwrap();
+        assert!(file.same_object(&dir.open_file("published").unwrap()));
+        assert_eq!(dir.entries().unwrap().len(), 2);
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "legacy");
+        let readonly = dir.open_file("published").unwrap();
+        set_acl(&readonly, &[(&world(), FILE_ALL_ACCESS as u32, 0)], true);
+        assert!(matches!(file.verify(), Err(Error::InsecureAcl)));
+        readonly.harden().unwrap();
+        file.verify().unwrap();
+        let readonly_dir = PrivateDir::open(temp.path().join("private")).unwrap();
+        set_acl(
+            &readonly_dir,
+            &[(&world(), FILE_ALL_ACCESS as u32, 0)],
+            true,
+        );
+        assert!(matches!(
+            readonly_dir.check_private(),
+            Err(Error::InsecureAcl)
+        ));
+        readonly_dir.harden().unwrap();
+        dir.check_private().unwrap();
+        std::fs::hard_link(
+            temp.path().join("private/published"),
+            temp.path().join("alias"),
+        )
+        .unwrap();
+        assert!(matches!(
+            file.verify(),
+            Err(Error::MultipleHardLinks { links: 2 })
+        ));
+        assert!(file.write(b"blocked").is_err());
+        assert!(matches!(
+            nt::metadata(&dir, false, None),
+            Err(Error::WrongObjectKind)
+        ));
+    });
+}
+
+#[test]
+fn forced_legacy_identity_keeps_reparse_and_replacement_checks() {
+    with_legacy_identity(|| {
+        junctions_are_rejected_in_every_position();
+        retained_capabilities_survive_path_replacement();
+        namespace_replacement_after_validation_keeps_the_original_parent();
+    });
+}
+
+// This module also runs in the Linux source-only identity-policy harness.
+mod identity_tests {
+    use super::super::{bindings::*, nt::identity::*};
+    use crate::Error;
+    use std::mem::{align_of, offset_of, size_of};
+
+    #[test]
+    fn legacy_metadata_preserves_both_index_words_and_volume() {
+        let value = BY_HANDLE_FILE_INFORMATION {
+            dwVolumeSerialNumber: 0xfedc_ba98,
+            nFileIndexHigh: 0x8765_4321,
+            nFileIndexLow: 0x1234_5678,
+            ..Default::default()
+        };
+        assert_eq!(
+            Identity::legacy(&value),
+            Identity::Legacy {
+                volume: 0xfedc_ba98,
+                id: 0x8765_4321_1234_5678
+            }
+        );
+        assert_eq!(size_of::<BY_HANDLE_FILE_INFORMATION>(), 52);
+        assert_eq!(align_of::<BY_HANDLE_FILE_INFORMATION>(), 4);
+        assert_eq!(
+            offset_of!(BY_HANDLE_FILE_INFORMATION, dwVolumeSerialNumber),
+            28
+        );
+        assert_eq!(offset_of!(BY_HANDLE_FILE_INFORMATION, nNumberOfLinks), 40);
+        assert_eq!(offset_of!(BY_HANDLE_FILE_INFORMATION, nFileIndexHigh), 44);
+        assert_eq!(offset_of!(BY_HANDLE_FILE_INFORMATION, nFileIndexLow), 48);
+        assert_eq!(size_of::<FILE_FS_DEVICE_INFORMATION>(), 8);
+        assert_eq!(size_of::<FILE_ID_INFO>(), 24);
+    }
+
+    #[test]
+    fn only_known_unsupported_class_errors_allow_fallback() {
+        assert_eq!(
+            (
+                ERROR_INVALID_PARAMETER,
+                ERROR_NOT_SUPPORTED,
+                ERROR_INVALID_FUNCTION
+            ),
+            (87, 50, 1)
+        );
+        for code in 0..=512 {
+            assert_eq!(
+                unsupported_class(&std::io::Error::from_raw_os_error(code)),
+                matches!(code, 1 | 50 | 87)
+            );
+        }
+        assert!(!unsupported_class(&std::io::Error::other(
+            "no native error"
+        )));
+    }
+
+    #[test]
+    fn legacy_identity_requires_local_ntfs_even_with_persistent_acls() {
+        let local = FILE_FS_DEVICE_INFORMATION {
+            DeviceType: FILE_DEVICE_DISK,
+            Characteristics: 0,
+        };
+        let ntfs: Vec<_> = "NTFS".encode_utf16().collect();
+        let flags = FILE_PERSISTENT_ACLS as u32;
+        legacy_volume(&ntfs, &local, flags).unwrap();
+        assert!(matches!(
+            legacy_volume(&ntfs, &local, 0),
+            Err(Error::UnsupportedFilesystem { .. })
+        ));
+        for name in [
+            "", "ReFS", "FAT", "FAT32", "exFAT", "NTFSx", "ntfs", "NTFS\0",
+        ] {
+            assert!(matches!(
+                legacy_volume(&name.encode_utf16().collect::<Vec<_>>(), &local, flags),
+                Err(Error::UnsupportedFilesystem { .. })
+            ));
+        }
+        for device in [
+            FILE_FS_DEVICE_INFORMATION {
+                DeviceType: FILE_DEVICE_DISK,
+                Characteristics: FILE_REMOTE_DEVICE,
+            },
+            FILE_FS_DEVICE_INFORMATION::default(),
+        ] {
+            assert!(matches!(
+                legacy_volume(&ntfs, &device, flags),
+                Err(Error::UnsupportedFilesystem { .. })
+            ));
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn identities_compare_every_bit_without_cross_variant_coercion(
+            volume in proptest::prelude::any::<u32>(),
+            id in proptest::prelude::any::<u64>(),
+            high in proptest::prelude::any::<u64>(),
+            volume_bit in 0..32u32,
+            id_bit in 0..64u32,
+            extended_bit in 0..128usize,
+        ) {
+            let legacy = Identity::Legacy { volume, id };
+            proptest::prop_assert_eq!(legacy, Identity::legacy(&BY_HANDLE_FILE_INFORMATION {
+                dwVolumeSerialNumber: volume, nFileIndexHigh: (id >> 32) as u32,
+                nFileIndexLow: id as u32, ..Default::default()
+            }));
+            proptest::prop_assert_ne!(legacy, Identity::Legacy { volume: volume ^ (1 << volume_bit), id });
+            proptest::prop_assert_ne!(legacy, Identity::Legacy { volume, id: id ^ (1 << id_bit) });
+            let mut full = [0; 16];
+            full[..8].copy_from_slice(&id.to_le_bytes());
+            full[8..].copy_from_slice(&high.to_le_bytes());
+            let extended = Identity::Extended { volume: u64::from(volume), id: full };
+            proptest::prop_assert_ne!(legacy, extended);
+            proptest::prop_assert_ne!(extended, Identity::Extended { volume: u64::from(volume) | (1 << (volume_bit + 32)), id: full });
+            full[extended_bit / 8] ^= 1 << (extended_bit % 8);
+            proptest::prop_assert_ne!(extended, Identity::Extended { volume: u64::from(volume), id: full });
+        }
+    }
+}
+
 #[test]
 fn classic_publication_fallback_is_atomic_handle_relative_and_keeps_identity() {
     let (temp, dir) = fixture();

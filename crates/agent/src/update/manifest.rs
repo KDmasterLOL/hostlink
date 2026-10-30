@@ -3,7 +3,7 @@
 use super::private_fs::is_reparse_point;
 use super::private_fs::{file_identities, open_private_file};
 #[cfg(windows)]
-use super::windows::validate_windows_private_acl;
+use super::windows::verify_windows_private_path;
 use super::{EXECUTABLE_BASE, invalid, invalid_owned, validate_sha256};
 use serde::{
     Deserialize, Serialize,
@@ -95,9 +95,7 @@ where
     deserializer.deserialize_map(UniqueFileMapVisitor)
 }
 pub(super) fn read_install_metadata(path: &Path) -> io::Result<InstallMetadata> {
-    let file = open_private_file(path, false)?;
-    #[cfg(windows)]
-    validate_windows_private_acl(path, &file.metadata()?)?;
+    let file = open_private_file(path)?;
     let mut bytes = Vec::new();
     file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > 64 * 1024 {
@@ -131,20 +129,8 @@ pub(super) fn validate_installed(
         ));
     }
     #[cfg(windows)]
-    validate_windows_private_acl(bin_root, &bin_metadata)?;
-    semver::Version::parse(&metadata.installed_version)
-        .map_err(|_| invalid("installed Agent version metadata is malformed"))?;
-    validate_sha256(&metadata.installed_package_sha256)
-        .map_err(|_| invalid("installed Agent archive digest metadata is malformed"))?;
-    let bin_metadata = fs::symlink_metadata(bin_root)?;
-    if !bin_metadata.is_dir()
-        || bin_metadata.file_type().is_symlink()
-        || is_reparse_point(&bin_metadata)
-    {
-        return Err(invalid(
-            "installed Agent bin directory is missing or unsafe",
-        ));
-    }
+    verify_windows_private_path(bin_root, &bin_metadata)?;
+    private_fs::PrivateDir::open(bin_root).map_err(io::Error::other)?;
     let expected = package_files(target).into_iter().collect::<BTreeSet<_>>();
     let mut actual_names = BTreeSet::new();
     for entry in fs::read_dir(bin_root)? {
@@ -160,7 +146,7 @@ pub(super) fn validate_installed(
             ));
         }
         #[cfg(windows)]
-        validate_windows_private_acl(&entry.path(), &entry.metadata()?)?;
+        verify_windows_private_path(&entry.path(), &entry.metadata()?)?;
     }
     if actual_names != expected {
         return Err(invalid(

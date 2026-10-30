@@ -1,4 +1,5 @@
 //! Bounded SFTP rooted in the configured Agent-owned directory.
+use private_fs::{Durability, FileAccess, FileCreation, OpenOptions, PrivateDir};
 use russh_sftp::protocol::{
     Attrs, Data, FileAttributes, Handle, OpenFlags, Status, StatusCode, Version,
 };
@@ -7,9 +8,6 @@ use std::io::{self, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::OwnedSemaphorePermit;
-
-#[cfg(windows)]
-use crate::private_fs::windows::set_acl as set_private_acl;
 
 const MAX_READ_BYTES: usize = 1024 * 1024;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
@@ -20,6 +18,7 @@ const MAX_TRANSFERS: usize = 128;
 pub(super) struct OpenFile {
     pub(super) file: tokio::fs::File,
     pub(super) writable: bool,
+    pub(super) readable: bool,
 }
 
 pub(super) struct SftpSession {
@@ -48,11 +47,11 @@ impl SftpSession {
         let install = jobs_root.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "jobs root has no parent")
         })?;
-        validate_directory(install)?;
-        let transfers = install.join("transfers");
-        create_directory(&transfers)?;
-        let root = transfers.join(owner);
-        create_directory(&root)?;
+        PrivateDir::open(install)
+            .and_then(|directory| directory.ensure_dir("transfers"))
+            .and_then(|directory| directory.ensure_dir(owner))
+            .map_err(io::Error::other)?;
+        let root = install.join("transfers").join(owner);
         Ok(Self {
             files: HashMap::new(),
             next_handle: 0,
@@ -62,79 +61,48 @@ impl SftpSession {
     }
 
     pub(super) async fn resolve(&self, path: &str, create: bool) -> Result<PathBuf, StatusCode> {
-        self.validate_roots()?;
-        let relative = PathBuf::from(path);
-        let parts: Vec<_> = relative.components().collect();
-        if parts.len() != 1
-            || parts
-                .iter()
-                .any(|part| !matches!(part, Component::Normal(_)))
-        {
+        let directory = self.private_directory()?;
+        let relative = Path::new(path);
+        let mut parts = relative.components();
+        if !matches!(parts.next(), Some(Component::Normal(_))) || parts.next().is_some() {
             return Err(StatusCode::PermissionDenied);
         }
-        let mut candidate = self.root.clone();
-        for (index, part) in parts.iter().enumerate() {
-            let Component::Normal(name) = part else {
-                return Err(StatusCode::PermissionDenied);
-            };
-            candidate.push(name);
-            match tokio::fs::symlink_metadata(&candidate).await {
-                Ok(meta) if is_link_or_reparse(&meta) => {
+        match directory.open_file(relative) {
+            Ok(file) => {
+                let metadata = crate::private_fs::open_file_std(&file)
+                    .and_then(|file| file.metadata())
+                    .map_err(status_from_io)?;
+                if metadata.len() > MAX_TRANSFER_BYTES {
                     return Err(StatusCode::PermissionDenied);
                 }
-                Ok(meta) => {
-                    if !meta.is_file() || meta.len() > MAX_TRANSFER_BYTES {
-                        return Err(StatusCode::PermissionDenied);
-                    }
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        if meta.uid() != unsafe { libc::geteuid() }
-                            || meta.nlink() != 1
-                            || meta.mode() & 0o077 != 0
-                        {
-                            return Err(StatusCode::PermissionDenied);
-                        }
-                    }
-                }
-                Err(error)
-                    if error.kind() == io::ErrorKind::NotFound
-                        && create
-                        && index + 1 == parts.len() => {}
-                Err(error) => return Err(status_from_io(error)),
             }
+            Err(private_fs::Error::Io(error))
+                if create && error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(status_from_private(error)),
         }
-        Ok(candidate)
+        Ok(self.root.join(relative))
     }
 
     pub(super) async fn upload_count(&self) -> Result<usize, StatusCode> {
-        self.validate_roots()?;
-        let mut count = 0;
-        let mut entries = tokio::fs::read_dir(&self.root)
-            .await
-            .map_err(status_from_io)?;
-        while let Some(entry) = entries.next_entry().await.map_err(status_from_io)? {
-            let metadata = tokio::fs::symlink_metadata(entry.path())
-                .await
-                .map_err(status_from_io)?;
-            if is_link_or_reparse(&metadata) || !metadata.is_file() {
-                return Err(StatusCode::PermissionDenied);
-            }
-            count += 1;
-            if count > MAX_TRANSFERS {
-                return Err(StatusCode::Failure);
-            }
+        let directory = self.private_directory()?;
+        let entries = directory.entries().map_err(status_from_private)?;
+        if entries.len() > MAX_TRANSFERS {
+            return Err(StatusCode::Failure);
         }
-        Ok(count)
+        for entry in &entries {
+            directory.open_file(entry).map_err(status_from_private)?;
+        }
+        Ok(entries.len())
     }
 
-    pub(super) fn validate_roots(&self) -> Result<(), StatusCode> {
+    fn private_directory(&self) -> Result<PrivateDir, StatusCode> {
         let transfers = self.root.parent().ok_or(StatusCode::PermissionDenied)?;
         let install = transfers.parent().ok_or(StatusCode::PermissionDenied)?;
-        for path in [install, transfers, &self.root] {
-            validate_directory(path).map_err(status_from_io)?;
-        }
-        Ok(())
+        let owner = self.root.file_name().ok_or(StatusCode::PermissionDenied)?;
+        PrivateDir::open(install)
+            .and_then(|directory| directory.open_dir("transfers"))
+            .and_then(|directory| directory.open_dir(owner))
+            .map_err(status_from_private)
     }
 
     pub(super) fn handle(&mut self) -> String {
@@ -145,19 +113,6 @@ impl SftpSession {
 }
 
 mod handler;
-
-fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
-    let is_link = metadata.file_type().is_symlink();
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        is_link || metadata.file_attributes() & 0x400 != 0
-    }
-    #[cfg(not(windows))]
-    {
-        is_link
-    }
-}
 
 fn ok(id: u32) -> Status {
     Status {
@@ -179,27 +134,9 @@ fn status_from_io(e: io::Error) -> StatusCode {
 #[cfg(all(test, unix))]
 mod tests;
 
-fn validate_directory(path: &Path) -> io::Result<()> {
-    crate::private_fs::open_private(path, true).map(|_| ())
-}
-
-fn create_directory(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    let mut builder = std::fs::DirBuilder::new();
-    #[cfg(not(unix))]
-    let builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    match builder.create(path) {
-        Ok(()) => {
-            #[cfg(windows)]
-            set_private_acl(path, true)?;
-            validate_directory(path)
-        }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => validate_directory(path),
-        Err(error) => Err(error),
+fn status_from_private(error: private_fs::Error) -> StatusCode {
+    match error {
+        private_fs::Error::Io(error) => status_from_io(error),
+        _ => StatusCode::PermissionDenied,
     }
 }

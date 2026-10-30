@@ -41,43 +41,44 @@ impl russh_sftp::server::Handler for SftpSession {
         if create && self.upload_count().await? >= MAX_TRANSFERS {
             return Err(StatusCode::Failure);
         }
-        let mut options = tokio::fs::OpenOptions::new();
-        options
-            .read(flags.contains(OpenFlags::READ))
-            .write(flags.contains(OpenFlags::WRITE))
-            .append(flags.contains(OpenFlags::APPEND))
-            .truncate(flags.contains(OpenFlags::TRUNCATE));
-        if flags.contains(OpenFlags::CREATE) {
-            options.create_new(true);
-            #[cfg(unix)]
-            {
-                options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-            }
-        } else {
-            #[cfg(unix)]
-            {
-                options.custom_flags(libc::O_NOFOLLOW);
-            }
-        }
-        let file = options.open(&path).await.map_err(status_from_io)?;
-        #[cfg(windows)]
-        if create {
-            set_private_acl(&path, false).map_err(status_from_io)?;
-        }
+        let directory = self.private_directory()?;
+        let file = directory
+            .open_file_with(
+                path.file_name().ok_or(StatusCode::PermissionDenied)?,
+                OpenOptions {
+                    access: if write {
+                        FileAccess::ReadWrite
+                    } else {
+                        FileAccess::Read
+                    },
+                    creation: if create {
+                        FileCreation::CreateNew
+                    } else {
+                        FileCreation::Existing
+                    },
+                    ..OpenOptions::default()
+                },
+            )
+            .map_err(status_from_private)?;
+        let file = tokio::fs::File::from_std(
+            crate::private_fs::open_file_std(&file).map_err(status_from_io)?,
+        );
         if create {
             let over_limit = match self.upload_count().await {
                 Ok(count) => count > MAX_TRANSFERS,
                 Err(error) => {
                     drop(file);
-                    let _ = tokio::fs::remove_file(self.root.join(&filename)).await;
+                    directory
+                        .remove_file(&filename, Durability::None)
+                        .map_err(status_from_private)?;
                     return Err(error);
                 }
             };
             if over_limit {
                 drop(file);
-                tokio::fs::remove_file(self.root.join(&filename))
-                    .await
-                    .map_err(status_from_io)?;
+                directory
+                    .remove_file(&filename, Durability::None)
+                    .map_err(status_from_private)?;
                 return Err(StatusCode::Failure);
             }
         }
@@ -87,6 +88,7 @@ impl russh_sftp::server::Handler for SftpSession {
             OpenFile {
                 file,
                 writable: write,
+                readable: flags.contains(OpenFlags::READ),
             },
         );
         Ok(Handle { id, handle })
@@ -108,6 +110,9 @@ impl russh_sftp::server::Handler for SftpSession {
             return Err(StatusCode::BadMessage);
         }
         let f = self.files.get_mut(&handle).ok_or(StatusCode::Failure)?;
+        if !f.readable {
+            return Err(StatusCode::Failure);
+        }
         f.file
             .seek(SeekFrom::Start(offset))
             .await
@@ -153,8 +158,13 @@ impl russh_sftp::server::Handler for SftpSession {
         Ok(ok(id))
     }
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
-        let m = tokio::fs::metadata(self.resolve(&path, false).await?)
-            .await
+        let path = self.resolve(&path, false).await?;
+        let file = self
+            .private_directory()?
+            .open_file(path.file_name().ok_or(StatusCode::PermissionDenied)?)
+            .map_err(status_from_private)?;
+        let m = crate::private_fs::open_file_std(&file)
+            .and_then(|file| file.metadata())
             .map_err(status_from_io)?;
         Ok(Attrs {
             id,
@@ -162,13 +172,7 @@ impl russh_sftp::server::Handler for SftpSession {
         })
     }
     async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
-        let m = tokio::fs::symlink_metadata(self.resolve(&path, false).await?)
-            .await
-            .map_err(status_from_io)?;
-        Ok(Attrs {
-            id,
-            attrs: FileAttributes::from(&m),
-        })
+        self.stat(id, path).await
     }
     async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
         let m = self
@@ -185,9 +189,10 @@ impl russh_sftp::server::Handler for SftpSession {
         })
     }
     async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {
-        tokio::fs::remove_file(self.resolve(&filename, false).await?)
-            .await
-            .map_err(status_from_io)?;
+        self.resolve(&filename, false).await?;
+        self.private_directory()?
+            .remove_file(&filename, Durability::None)
+            .map_err(status_from_private)?;
         Ok(ok(id))
     }
 }

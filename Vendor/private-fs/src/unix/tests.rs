@@ -372,10 +372,35 @@ fn hardening_is_explicit_and_does_not_repair_hard_links() {
 #[test]
 fn posix_acl_mask_and_inherited_modes_prevent_additional_access() {
     each(|dir, root| {
+        // Some Linux mounts reject even a valid minimal default POSIX ACL with
+        // EINVAL (verified independently with setfacl). Probe support before
+        // testing named-user/mask inheritance so a malformed rich ACL still
+        // fails on filesystems where default ACLs are supported.
+        let mut probe = 2u32.to_le_bytes().to_vec();
+        for (tag, permissions) in [(1u16, 7u16), (4, 7), (32, 7)] {
+            probe.extend_from_slice(&tag.to_le_bytes());
+            probe.extend_from_slice(&permissions.to_le_bytes());
+            probe.extend_from_slice(&u32::MAX.to_le_bytes());
+        }
+        match fs::fsetxattr(
+            &dir,
+            "system.posix_acl_default",
+            &probe,
+            fs::XattrFlags::empty(),
+        ) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::INVAL | rustix::io::Errno::OPNOTSUPP) => {
+                return;
+            }
+            Err(error) => panic!("minimal POSIX default ACL probe failed: {error}"),
+        }
         let mut acl = 2u32.to_le_bytes().to_vec();
         for (tag, permissions, id) in [
             (1u16, 7u16, u32::MAX),
-            (2, 7, 12345),
+            // Container user namespaces can reject an unmapped arbitrary UID
+            // with EINVAL. The effective UID is mapped and still exercises
+            // named-user entry inheritance and ACL mask/mode validation.
+            (2, 7, rustix::process::geteuid().as_raw()),
             (4, 7, u32::MAX),
             (16, 7, u32::MAX),
             (32, 7, u32::MAX),

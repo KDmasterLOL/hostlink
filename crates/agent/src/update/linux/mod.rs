@@ -1,14 +1,15 @@
 //! Linux offline publication and crash recovery.
 
 use super::manifest::{PackageManifest, package_files};
+use super::staging::PrivateTempDir;
 use super::{
     AgentUpdateRequest, INSTALL_METADATA, PublicationJournal, invalid, invalid_owned,
     supported_targets, target_matches_runtime,
 };
 use crate::update::manifest::{InstallMetadata, read_install_metadata, validate_installed};
 use crate::update::private_fs::{
-    create_private_directory, is_reparse_point, open_private_file, set_private_directory,
-    sync_directory, validate_private_directory, write_atomic,
+    create_private_directory, is_reparse_point, open_private_file, sync_directory,
+    validate_private_directory, write_atomic,
 };
 use std::{
     fs::{self, File},
@@ -24,7 +25,7 @@ pub(super) fn publish_linux(
     request: &AgentUpdateRequest,
     manifest: PackageManifest,
     old_metadata: InstallMetadata,
-    staged: tempfile::TempDir,
+    staged: PrivateTempDir,
 ) -> io::Result<()> {
     let updates = root.join(".updates");
     create_private_directory(&updates)?;
@@ -43,8 +44,7 @@ pub(super) fn publish_linux(
         .join("extracted")
         .join(format!("hostlink-agent-{}", request.target));
     let staged_bin = staged.path().join("bin");
-    fs::create_dir(&staged_bin)?;
-    set_private_directory(&staged_bin)?;
+    create_private_directory(&staged_bin)?;
     for name in package_files(&request.target) {
         let source = staged_package.join(&name);
         let dest = staged_bin.join(&name);
@@ -202,7 +202,7 @@ pub(super) fn recover_interrupted_publication(root: &Path) -> io::Result<()> {
             Err(invalid("Agent update recovery journal is unsafe"))
         }
         Ok(_) => {
-            let file = open_private_file(&journal_path, false)?;
+            let file = open_private_file(&journal_path)?;
             let mut bytes = Vec::new();
             file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
             if bytes.len() > 64 * 1024 {

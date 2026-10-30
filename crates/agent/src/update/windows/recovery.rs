@@ -1,7 +1,7 @@
 //! Windows handoff journal recovery before update admission and after interrupted publication.
 
 use super::super::{INSTALL_METADATA, MAX_ENTRY_BYTES, invalid};
-use super::fs::validate_windows_private_acl;
+use super::fs::verify_windows_private_path;
 use super::publication::{
     cleanup_windows_transaction, rollback_windows, validate_windows_transaction_children,
 };
@@ -28,7 +28,7 @@ pub(in crate::update) fn recover_windows_handoff(root: &Path) -> io::Result<()> 
             "Windows updater directory is not a private real directory",
         ));
     }
-    validate_windows_private_acl(&updates, &updates_meta)?;
+    verify_windows_private_path(&updates, &updates_meta)?;
     let journal_path = updates.join("handoff.json");
     let Some(mut journal) = crate::update_handoff::read_journal(&journal_path)? else {
         if fs::read_dir(&updates)?.any(|entry| {
@@ -55,7 +55,7 @@ pub(in crate::update) fn recover_windows_handoff(root: &Path) -> io::Result<()> 
     {
         return Err(invalid("Windows update transaction directory is unsafe"));
     }
-    validate_windows_private_acl(&transaction_dir, &transaction_meta)?;
+    verify_windows_private_path(&transaction_dir, &transaction_meta)?;
     validate_windows_transaction_children(&transaction_dir, &journal.identity)?;
     let staged_executable = transaction_dir.join("staged-agent.exe");
     let staged_metadata = transaction_dir.join("staged-install.json");
@@ -85,7 +85,7 @@ pub(in crate::update) fn recover_windows_handoff(root: &Path) -> io::Result<()> 
                         "Windows update recovery candidate is not a regular file",
                     ));
                 }
-                validate_windows_private_acl(path, &meta)?;
+                verify_windows_private_path(path, &meta)?;
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),

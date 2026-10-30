@@ -298,13 +298,16 @@ async fn tunnel_once(
 
 fn load_gateway_key(path: &Path) -> io::Result<russh::keys::PublicKey> {
     use std::io::Read;
-    let file = crate::private_fs::open_private(path, false)?;
-    if file.metadata()?.len() > 64 * 1024 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "gateway pin must be a bounded regular file",
-        ));
-    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "key path has no file name"))?;
+    let file = private_fs::PrivateDir::open(std::path::absolute(parent)?)
+        .and_then(|directory| directory.open_file(name))
+        .map_err(io::Error::other)?;
     let mut text = String::new();
     file.take(64 * 1024 + 1).read_to_string(&mut text)?;
     if text.len() > 64 * 1024 {
@@ -324,13 +327,16 @@ fn load_gateway_key(path: &Path) -> io::Result<russh::keys::PublicKey> {
 }
 fn load_identity(path: &Path) -> io::Result<PrivateKey> {
     use std::io::Read;
-    let file = crate::private_fs::open_private(path, false)?;
-    if file.metadata()?.len() > 64 * 1024 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "gateway identity must be a bounded regular file",
-        ));
-    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "key path has no file name"))?;
+    let file = private_fs::PrivateDir::open(std::path::absolute(parent)?)
+        .and_then(|directory| directory.open_file(name))
+        .map_err(io::Error::other)?;
     let mut bytes = Vec::new();
     file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > 64 * 1024 {

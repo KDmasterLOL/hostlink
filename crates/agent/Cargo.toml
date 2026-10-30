@@ -8,8 +8,6 @@ publish = false
 
 [dependencies]
 private-fs = { path = "../../Vendor/private-fs" }
-cap-std = "=4.0.3"
-cap-fs-ext = "=4.0.3"
 russh.workspace = true
 russh-sftp.workspace = true
 tokio.workspace = true

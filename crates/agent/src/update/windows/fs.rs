@@ -1,7 +1,9 @@
 //! Windows process, file identity, and private ACL primitives for update handoff.
 
 use super::super::invalid;
-use super::super::private_fs::{set_private_directory, set_staged_file_permissions};
+pub(in crate::update) use super::super::private_fs::create_private_directory;
+use super::super::private_fs::open_private_file;
+use private_fs::PrivateDir;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
@@ -163,37 +165,35 @@ pub(super) fn same_windows_file(left: &Path, right: &Path) -> io::Result<bool> {
 
 #[cfg(windows)]
 pub(super) fn copy_private_synced(source: &Path, destination: &Path) -> io::Result<()> {
-    let source_metadata = fs::symlink_metadata(source)?;
-    if !source_metadata.is_file() || is_reparse_point(&source_metadata) {
-        return Err(invalid("Windows update copy source is not a regular file"));
-    }
-    let mut input = File::open(source)?;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)?;
-    set_staged_file_permissions(
-        destination,
-        destination
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(""),
-    )?;
+    let mut input = open_private_file(source)?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| invalid("copy destination has no parent"))?;
+    let name = destination
+        .file_name()
+        .ok_or_else(|| invalid("copy destination has no name"))?;
+    let mut output = PrivateDir::open(parent)
+        .and_then(|dir| dir.create(name))
+        .map_err(io::Error::other)?;
     io::copy(&mut input, &mut output)?;
-    output.sync_all()?;
+    output.sync_all().map_err(io::Error::other)?;
     drop(output);
     verify_windows_private_file(destination)
 }
 
 #[cfg(windows)]
 pub(super) fn write_private_synced(destination: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)?;
-    set_staged_file_permissions(destination, "install.json")?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| invalid("write destination has no parent"))?;
+    let name = destination
+        .file_name()
+        .ok_or_else(|| invalid("write destination has no name"))?;
+    let mut output = PrivateDir::open(parent)
+        .and_then(|dir| dir.create(name))
+        .map_err(io::Error::other)?;
     output.write_all(bytes)?;
-    output.sync_all()?;
+    output.sync_all().map_err(io::Error::other)?;
     drop(output);
     verify_windows_private_file(destination)
 }
@@ -206,26 +206,12 @@ pub(super) fn verify_windows_private_file(path: &Path) -> io::Result<()> {
             "Windows update transaction contains a non-regular file",
         ));
     }
-    validate_windows_private_acl(path, &metadata)
+    verify_windows_private_path(path, &metadata)
 }
 
 #[cfg(windows)]
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
-}
-
-#[cfg(windows)]
-pub(in crate::update) fn create_private_directory(path: &Path) -> io::Result<()> {
-    match fs::create_dir(path) {
-        Ok(()) => set_private_directory(path)?,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
-    }
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_dir() || is_reparse_point(&metadata) {
-        return Err(invalid("Windows Agent update directory is unsafe"));
-    }
-    validate_windows_private_acl(path, &metadata)
 }
 
 #[cfg(windows)]
@@ -240,16 +226,13 @@ fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
 }
 
 #[cfg(windows)]
-pub(in crate::update) fn validate_windows_private_acl(
+pub(in crate::update) fn verify_windows_private_path(
     path: &Path,
-    _metadata: &fs::Metadata,
+    metadata: &fs::Metadata,
 ) -> io::Result<()> {
-    crate::private_fs::windows::validate_acl(
-        path,
-        crate::private_fs::windows::AllowedPrincipals::OwnerOnly,
-        true,
-    )
+    if metadata.is_dir() {
+        PrivateDir::open(path).map(|_| ()).map_err(io::Error::other)
+    } else {
+        open_private_file(path)?.verify().map_err(io::Error::other)
+    }
 }
-
-#[cfg(windows)]
-pub(in crate::update) use crate::private_fs::restrict_private_path as set_windows_private_acl;

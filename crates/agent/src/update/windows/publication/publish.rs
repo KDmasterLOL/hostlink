@@ -4,17 +4,18 @@ use super::super::super::manifest::{
     InstallMetadata, PackageManifest, read_install_metadata, validate_installed,
 };
 use super::super::super::private_fs::{
-    hash_file, is_reparse_point, set_private_directory, validate_path_has_no_reparse_components,
+    hash_file, is_reparse_point, validate_path_has_no_reparse_components,
 };
 use super::super::super::{
     AgentUpdateRequest, MAX_ENTRY_BYTES, MAX_MANIFEST_BYTES, invalid, invalid_owned,
 };
 use super::super::fs::{
     copy_private_synced, create_private_directory, reject_running_agent, same_windows_file,
-    sha256_hex, validate_windows_private_acl, verify_windows_private_file, windows_file_identity,
+    sha256_hex, verify_windows_private_file, verify_windows_private_path, windows_file_identity,
     write_private_synced,
 };
 use super::{cleanup::cleanup_windows_transaction, rollback::rollback_windows};
+use crate::update::staging::PrivateTempDir;
 use std::{fs, io, path::Path};
 
 #[cfg(windows)]
@@ -24,7 +25,7 @@ pub(in crate::update) fn publish_windows(
     request: &AgentUpdateRequest,
     manifest: PackageManifest,
     old_metadata: InstallMetadata,
-    staged: tempfile::TempDir,
+    staged: PrivateTempDir,
 ) -> io::Result<()> {
     let bin_root = root.join("bin");
     let installed_executable = bin_root.join("hostlink-agent.exe");
@@ -81,8 +82,15 @@ pub(in crate::update) fn publish_windows(
     let journal = crate::update_handoff::UpdateJournal::new(identity)?;
     let transaction = journal.transaction_id();
     let transaction_dir = updates.join(format!("transaction-{transaction}"));
-    fs::create_dir(&transaction_dir)?;
-    set_private_directory(&transaction_dir)?;
+    private_fs::PrivateDir::open(&updates)
+        .and_then(|dir| {
+            dir.create_dir(
+                transaction_dir
+                    .file_name()
+                    .ok_or_else(|| invalid("transaction has no name"))?,
+            )
+        })
+        .map_err(io::Error::other)?;
 
     let staged_executable = transaction_dir.join("staged-agent.exe");
     let staged_metadata = transaction_dir.join("staged-install.json");
@@ -230,7 +238,7 @@ pub(in crate::update) fn ensure_windows_separate_updater(root: &Path) -> io::Res
         return Err(invalid("Windows updater is not a regular executable file"));
     }
     validate_path_has_no_reparse_components(&updater)?;
-    validate_windows_private_acl(&updater, &updater_metadata)?;
+    verify_windows_private_path(&updater, &updater_metadata)?;
 
     let canonical_root = fs::canonicalize(root)?;
     let canonical_updater = fs::canonicalize(&updater)?;

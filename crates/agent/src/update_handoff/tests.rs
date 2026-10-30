@@ -143,6 +143,13 @@ mod external_regressions {
     use std::fs;
     use tempfile::TempDir;
 
+    fn private_temp_dir() -> TempDir {
+        let temp = TempDir::new().expect("temporary updater directory");
+        fs::remove_dir(temp.path()).expect("remove empty temporary directory");
+        private_fs::PrivateDir::ensure(temp.path()).expect("create private updater test fixture");
+        temp
+    }
+
     fn digest(bytes: &[u8]) -> String {
         format!("{:x}", Sha256::digest(bytes))
     }
@@ -163,7 +170,7 @@ mod external_regressions {
 
     #[test]
     fn persisted_journal_round_trips_and_corrupt_identity_is_rejected() {
-        let temp = TempDir::new().expect("temporary updater directory");
+        let temp = private_temp_dir();
         let path = temp.path().join("handoff.json");
         let journal = UpdateJournal::new(identity(b"old", b"new")).expect("valid journal");
 
@@ -280,7 +287,7 @@ mod external_regressions {
     #[test]
     #[cfg(unix)]
     fn offline_publish_failure_after_executable_swap_restores_exact_old_files() {
-        let temp = TempDir::new().expect("temporary offline install");
+        let temp = private_temp_dir();
         let staged = temp.path().join("staged.exe");
         let staged_metadata = temp.path().join("staged-install.json");
         let installed = temp.path().join("hostlink-agent.exe");

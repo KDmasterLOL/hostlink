@@ -5,7 +5,7 @@ use super::super::super::private_fs::hash_file;
 #[cfg(windows)]
 use super::super::super::{MAX_ENTRY_BYTES, invalid};
 #[cfg(windows)]
-use super::super::fs::{validate_windows_private_acl, windows_file_identity};
+use super::super::fs::{verify_windows_private_path, windows_file_identity};
 #[cfg(windows)]
 use std::{
     fs, io,
@@ -52,7 +52,7 @@ pub(in crate::update::windows) fn validate_windows_transaction_children(
         {
             return Err(invalid("Windows transaction child is not a regular file"));
         }
-        validate_windows_private_acl(&path, &metadata)?;
+        verify_windows_private_path(&path, &metadata)?;
         let expected = match name {
             "staged-agent.exe" => &[identity.new_executable_sha256.as_str()][..],
             "staged-install.json" => &[identity.new_metadata_sha256.as_str()][..],
@@ -99,7 +99,7 @@ pub(in crate::update::windows) fn cleanup_windows_transaction(
             "Windows transaction directory changed during cleanup",
         ));
     }
-    validate_windows_private_acl(directory, &directory_metadata)?;
+    verify_windows_private_path(directory, &directory_metadata)?;
     let (directory_volume, directory_index) = windows_file_identity(directory, true)?;
     let observed = validate_windows_transaction_children(directory, identity)?;
     let backup_names = ["backup-agent.exe", "backup-install.json"];
@@ -124,7 +124,7 @@ pub(in crate::update::windows) fn cleanup_windows_transaction(
                 "Windows transaction child identity changed during cleanup",
             ));
         }
-        validate_windows_private_acl(&path, &metadata)?;
+        verify_windows_private_path(&path, &metadata)?;
         fs::remove_file(path)?;
     }
     if fs::read_dir(directory)?.next().is_some() {
@@ -142,7 +142,7 @@ pub(in crate::update::windows) fn cleanup_windows_transaction(
             "Windows transaction directory identity changed during cleanup",
         ));
     }
-    validate_windows_private_acl(directory, &current_directory)?;
+    verify_windows_private_path(directory, &current_directory)?;
     fs::remove_file(journal_path)?;
     fs::remove_dir(directory)
 }
