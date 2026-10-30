@@ -191,7 +191,9 @@ enrollment, keys and Apalis jobs. Windows stop uses Scheduler termination;
 graceful shutdown and descendant cleanup are not guaranteed. Interrupted
 commands may replay after restart, repeating side effects.
 Linux handles systemd SIGTERM gracefully and does not enable login lingering. Windows requires interactive sign-in.
-Roots must be protected descendants of OS-resolved LocalAppData with private
-ancestors. Legacy Run/VBS/pipe/maintenance registrations are rejected, not adopted.
+Install roots must be protected current-user-only descendants of OS-resolved
+LocalAppData, with a private immediate parent; normal readable profile
+ancestors are allowed. Legacy Run/VBS/pipe/maintenance registrations are
+rejected during installation, not adopted.
 See [docs/AGENT_LIFECYCLE.md](docs/AGENT_LIFECYCLE.md) for commands, platform
 limits and safety behavior. Windows native acceptance remains unrun.

@@ -93,9 +93,13 @@ and may replay interrupted work with repeated side effects. `remove` stops all
 task instances and deletes only the verified task, preserving the executable,
 enrollment, keys, jobs and every other Agent file.
 
-Roots remain protected current-user-only descendants of OS-resolved LocalAppData,
-with protected private ancestors and no reparse points. Enrollment validation
-belongs to enrollment/Agent runtime, not each service status request.
+Installation accepts a protected current-user-only Agent root beneath the
+OS-resolved LocalAppData. The Agent root and its immediate parent must have
+private owner-only ACLs; ordinary profile ancestors may remain readable to
+other users. `cap-std` rejects reparse/symlink components. Read-only service
+status does not audit filesystem ACLs; start, stop and remove serialize through
+the protected `update.lock`. Enrollment validates secrets and Agent runtime
+reads them independently.
 The installed executable must be `ROOT/bin/hostlink-agent.exe` and config
 `ROOT/state/agent.json`. Legacy `.hostlink-user-service.json`, VBS,
 maintenance/admission/temporary-marker files and the old root-derived HKCU Run
