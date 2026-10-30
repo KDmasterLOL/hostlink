@@ -214,6 +214,30 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     assert_eq!(value("RunLevel"), "LeastPrivilege");
     assert_eq!(value("MultipleInstancesPolicy"), "IgnoreNew");
     assert_eq!(value("ExecutionTimeLimit"), "PT0S");
+    let sid = windows_permissions::utilities::current_process_sid()
+        .unwrap()
+        .to_string();
+    for user in xml.descendants().filter(|n| n.has_tag_name("UserId")) {
+        assert_eq!(user.text(), Some(sid.as_str()));
+    }
+    assert_eq!(
+        value("Command"),
+        root.canonicalize()
+            .unwrap()
+            .join("bin/hostlink-agent.exe")
+            .to_str()
+            .unwrap()
+    );
+    assert_eq!(
+        value("Arguments"),
+        format!(
+            r#"run --config="{}""#,
+            root.canonicalize()
+                .unwrap()
+                .join("state/agent.json")
+                .display()
+        )
+    );
     assert_eq!(
         xml.descendants()
             .filter(|n| n.has_tag_name("LogonTrigger"))
@@ -224,6 +248,7 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     assert!(!original_xml.contains("--managed-service"));
 
     // Each foreign definition is valid Scheduler XML, but is not our task.
+    let stale = root.join(".hostlink-service-marker-fixture");
     for foreign_xml in [
         original_xml.replace("run --config=", "check --config="),
         original_xml.replace("hostlink-agent.exe</Command>", "foreign.exe</Command>"),
@@ -233,25 +258,60 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
             "<MultipleInstancesPolicy>IgnoreNew",
             "<MultipleInstancesPolicy>Parallel",
         ),
-        original_xml.replace("</LogonTrigger>", "<Delay>PT1M</Delay></LogonTrigger>"),
-        original_xml.replace("<Enabled>true</Enabled>", "<Enabled>false</Enabled>"),
+        original_xml.replace(
+            "</Exec>",
+            r"<WorkingDirectory>C:\foreign</WorkingDirectory></Exec>",
+        ),
+        original_xml.replacen(&sid, "S-1-5-18", 1),
+        original_xml.replace(
+            "</Actions>",
+            &format!(
+                "<Exec><Command>{}</Command></Exec></Actions>",
+                value("Command").replace('&', "&amp;")
+            ),
+        ),
     ] {
         assert_ne!(foreign_xml, original_xml, "tamper fixture must alter XML");
         scheduler.replace(&name, &foreign_xml);
         let foreign_before = scheduler.xml(&name);
-        for action in ["install", "start", "stop", "remove"] {
-            let config = (action == "install").then(|| state.join("agent.json"));
+        let output = service_output(
+            &executable,
+            &root,
+            "install",
+            Some(&state.join("agent.json")),
+        );
+        assert!(
+            !output.status.success(),
+            "install overwrote a foreign definition"
+        );
+        fs::write(&stale, b"legacy fixture").unwrap();
+        for action in ["start", "stop", "remove"] {
+            let output = service_output(&executable, &root, action, None);
             assert!(
-                !service_output(&executable, &root, action, config.as_deref())
-                    .status
-                    .success(),
+                !output.status.success(),
                 "{action} accepted a foreign definition"
             );
+            assert!(!String::from_utf8_lossy(&output.stderr).contains("legacy"));
         }
         assert!(hostlink_agent::service::status(&root).is_err());
         assert_eq!(scheduler.xml(&name), foreign_before);
+        assert_eq!(fs::read(&stale).unwrap(), b"legacy fixture");
+        fs::remove_file(&stale).unwrap();
         scheduler.replace(&name, &original_xml);
     }
+
+    // Scheduler may serialize defaults or an operator may disable/delay logon.
+    // These do not change execution ownership and must not prevent cleanup.
+    let normalized = original_xml
+        .replace("</Exec>", "<WorkingDirectory></WorkingDirectory></Exec>")
+        .replace("</LogonTrigger>", "<Delay>PT0S</Delay></LogonTrigger>")
+        .replace("<Enabled>true</Enabled>", "<Enabled>false</Enabled>");
+    scheduler.replace(&name, &normalized);
+    let normalized = scheduler.xml(&name);
+    assert!(hostlink_agent::service::status(&root).unwrap().installed);
+    service(&executable, &root, "stop", None);
+    assert_eq!(scheduler.xml(&name), normalized);
+    scheduler.replace(&name, &original_xml);
 
     // Registration ownership is independent of executable/enrollment hashes.
     // Neither status nor stop needs to read the installed executable or config.
@@ -272,15 +332,38 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     ] {
         let legacy = root.join(name);
         fs::write(&legacy, b"legacy fixture").unwrap();
-        for action in ["install", "start", "stop", "remove"] {
-            let config = (action == "install").then(|| state.join("agent.json"));
-            let refused = service_output(&executable, &root, action, config.as_deref());
-            assert!(!refused.status.success());
-            assert!(String::from_utf8_lossy(&refused.stderr).contains("legacy"));
-        }
+        let refused = service_output(
+            &executable,
+            &root,
+            "install",
+            Some(&state.join("agent.json")),
+        );
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("legacy"));
+        assert!(hostlink_agent::service::status(&root).unwrap().installed);
+        service(&executable, &root, "start", None);
+        service(&executable, &root, "stop", None);
+        assert!(!hostlink_agent::service::status(&root).unwrap().active);
         assert_eq!(fs::read(&legacy).unwrap(), b"legacy fixture");
         assert_eq!(scheduler.xml(&task_name(&root)), original_xml);
+        service(&executable, &root, "start", None);
+        service(&executable, &root, "remove", None);
+        assert!(!hostlink_agent::service::status(&root).unwrap().installed);
+        assert_eq!(fs::read(&legacy).unwrap(), b"legacy fixture");
+        let refused = service_output(
+            &executable,
+            &root,
+            "install",
+            Some(&state.join("agent.json")),
+        );
+        assert!(!refused.status.success());
         fs::remove_file(legacy).unwrap();
+        service(
+            &executable,
+            &root,
+            "install",
+            Some(&state.join("agent.json")),
+        );
     }
 
     {
@@ -298,6 +381,23 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
     }
 
     let updates = root.join(".updates");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join("update.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    for action in ["install", "start", "stop", "remove"] {
+        let config = (action == "install").then(|| state.join("agent.json"));
+        assert!(
+            !service_output(&executable, &root, action, config.as_deref())
+                .status
+                .success()
+        );
+    }
+    assert!(hostlink_agent::service::status(&root).unwrap().installed);
+    assert_eq!(scheduler.xml(&name), original_xml);
+    drop(lock);
     fs::create_dir(&updates).unwrap();
     private_windows_path(&updates, true);
     let journal = updates.join("handoff.json");

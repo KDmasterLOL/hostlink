@@ -1,4 +1,7 @@
 //! Current-user Task Scheduler 2.0 lifecycle. Scheduler alone owns execution.
+//! 1C-1124: keep direct COM. schtasks adds password/locale/overwrite handling;
+//! planif 1.0 only builds registrations, leaving lifecycle ownership here.
+//! windows 0.62's typed property out-parameters exceed this XML identity check.
 use super::ServiceStatus;
 use sha2::{Digest, Sha256};
 use std::{
@@ -52,7 +55,7 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
     if let Some(task) = registered(&folder, &name)? {
         verify_task(&task, &root)?;
     } else {
-        let xml = definition(&command, &arguments, &current_sid()?)?;
+        let xml = definition(&command, &arguments, &current_sid()?);
         let empty = VARIANT::default();
         // SAFETY: live local COM interface and owned arguments. TASK_CREATE is
         // atomic and never replaces a task that appears after the lookup.
@@ -79,7 +82,6 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
 /// Refuses pending updates, foreign tasks and unconfirmed activation.
 pub fn start(root: &Path) -> io::Result<()> {
     let root = crate::private_fs::windows::validate_agent_root(root)?;
-    reject_legacy(&root)?;
     let _lock = mutation_lock(&root)?;
     crate::update_handoff::ensure_no_pending_windows_handoff(&root)?;
     let _apartment = Apartment::new()?;
@@ -95,7 +97,6 @@ pub fn start(root: &Path) -> io::Result<()> {
 /// Refuses missing/foreign tasks and unconfirmed termination.
 pub fn stop(root: &Path) -> io::Result<()> {
     let root = crate::private_fs::windows::validate_agent_root(root)?;
-    reject_legacy(&root)?;
     let _lock = mutation_lock(&root)?;
     let _apartment = Apartment::new()?;
     let folder = task_folder()?;
@@ -107,7 +108,6 @@ pub fn stop(root: &Path) -> io::Result<()> {
 /// Refuses missing/foreign tasks and unconfirmed termination or deletion.
 pub fn remove(root: &Path) -> io::Result<()> {
     let root = crate::private_fs::windows::validate_agent_root(root)?;
-    reject_legacy(&root)?;
     let _lock = mutation_lock(&root)?;
     let _apartment = Apartment::new()?;
     let folder = task_folder()?;
@@ -266,25 +266,16 @@ fn verify_task(task: &IRegisteredTask, root: &Path) -> io::Result<()> {
 fn active(task: &IRegisteredTask) -> io::Result<bool> {
     // SAFETY: read-only OS state/instance queries on a live interface.
     unsafe {
-        let state = task.State().map_err(com_error)?;
-        if ![
-            TASK_STATE_DISABLED,
-            TASK_STATE_READY,
-            TASK_STATE_QUEUED,
-            TASK_STATE_RUNNING,
-        ]
-        .contains(&state)
-        {
-            return Err(invalid("Task Scheduler cannot establish Agent state"));
-        }
-        Ok(state == TASK_STATE_RUNNING
-            || state == TASK_STATE_QUEUED
-            || task
+        match task.State().map_err(com_error)? {
+            TASK_STATE_RUNNING | TASK_STATE_QUEUED => Ok(true),
+            TASK_STATE_DISABLED | TASK_STATE_READY => Ok(task
                 .GetInstances(0)
                 .map_err(com_error)?
                 .Count()
                 .map_err(com_error)?
-                != 0)
+                != 0),
+            _ => Err(invalid("Task Scheduler cannot establish Agent state")),
+        }
     }
 }
 fn stop_task(task: &IRegisteredTask) -> io::Result<()> {
@@ -322,11 +313,16 @@ fn wait(task: &IRegisteredTask, running: bool) -> io::Result<()> {
 }
 
 const TASK_NAMESPACE: &str = "http://schemas.microsoft.com/windows/2004/02/mit/task";
-fn definition(command: &str, arguments: &str, sid: &str) -> io::Result<String> {
-    let command = escape(command)?;
-    let arguments = escape(arguments)?;
-    let sid = escape(sid)?;
-    Ok(format!(
+fn definition(command: &str, arguments: &str, sid: &str) -> String {
+    // Scheduler validates the XML schema and characters when registering it.
+    let escape = |value: &str| {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    let (command, arguments, sid) = (escape(command), escape(arguments), escape(sid));
+    format!(
         r#"<Task version="1.2" xmlns="{TASK_NAMESPACE}">
 <RegistrationInfo><Description>HostLink Agent v2</Description></RegistrationInfo>
 <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{sid}</UserId></LogonTrigger></Triggers>
@@ -334,23 +330,7 @@ fn definition(command: &str, arguments: &str, sid: &str) -> io::Result<String> {
 <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>false</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>false</WakeToRun><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority></Settings>
 <Actions Context="Agent"><Exec><Command>{command}</Command><Arguments>{arguments}</Arguments></Exec></Actions>
 </Task>"#
-    ))
-}
-fn escape(value: &str) -> io::Result<String> {
-    if value
-        .chars()
-        .any(|c| c < ' ' || c == '\u{fffe}' || c == '\u{ffff}')
-    {
-        return Err(invalid(
-            "task XML input contains unsupported control characters",
-        ));
-    }
-    Ok(value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;"))
+    )
 }
 
 /// Check execution ownership fields, not Scheduler serialization or file hashes.
@@ -376,9 +356,13 @@ fn verify_definition(xml: &str, command: &str, arguments: &str, sid: &str) -> io
     }
     if principal.attribute("id").is_none()
         || actions.attribute("Context") != principal.attribute("id")
-        || principal.children().filter(|n| n.is_element()).count() != 3
-        || trigger.children().filter(|n| n.is_element()).count() != 2
-        || exec.children().filter(|n| n.is_element()).count() != 2
+        || principal
+            .children()
+            .any(|n| n.has_tag_name((TASK_NAMESPACE, "GroupId")))
+        || exec.children().any(|n| {
+            n.has_tag_name((TASK_NAMESPACE, "WorkingDirectory"))
+                && n.text().is_some_and(|s| !s.is_empty())
+        })
         || settings
             .children()
             .any(|n| n.is_element() && n.tag_name().name() == "RestartOnFailure")
@@ -392,14 +376,9 @@ fn verify_definition(xml: &str, command: &str, arguments: &str, sid: &str) -> io
         (principal, "LogonType", "InteractiveToken"),
         (principal, "RunLevel", "LeastPrivilege"),
         (trigger, "UserId", sid),
-        (trigger, "Enabled", "true"),
         (exec, "Command", command),
         (exec, "Arguments", arguments),
         (settings, "MultipleInstancesPolicy", "IgnoreNew"),
-        (settings, "AllowHardTerminate", "true"),
-        (settings, "AllowStartOnDemand", "true"),
-        (settings, "Enabled", "true"),
-        (settings, "ExecutionTimeLimit", "PT0S"),
     ] {
         let field = child(parent, name)?;
         if field.children().any(|n| n.is_element())
@@ -428,7 +407,7 @@ fn child<'a>(parent: roxmltree::Node<'a, 'a>, name: &str) -> io::Result<roxmltre
 
 fn reject_legacy(root: &Path) -> io::Result<()> {
     use windows_sys::Win32::System::Registry::{
-        HKEY_CURRENT_USER, KEY_QUERY_VALUE, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+        HKEY_CURRENT_USER, RRF_NOEXPAND, RRF_RT_ANY, RegGetValueW,
     };
     for entry in fs::read_dir(root)? {
         let name = entry?.file_name().to_string_lossy().to_ascii_lowercase();
@@ -445,36 +424,19 @@ fn reject_legacy(root: &Path) -> io::Result<()> {
     let wide = |value: &str| value.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
     let key_name = wide(r"Software\Microsoft\Windows\CurrentVersion\Run");
     let value_name = wide(&format!("HostLinkAgent-{}", root_digest(root)));
-    let mut key = std::ptr::null_mut();
-    // SAFETY: terminated name and writable handle; current user, query-only access.
+    // SAFETY: terminated names; current user, existence-only query with no data
+    // buffers or environment expansion. RegGetValueW is available since Vista.
     let result = unsafe {
-        RegOpenKeyExW(
+        RegGetValueW(
             HKEY_CURRENT_USER,
             key_name.as_ptr(),
-            0,
-            KEY_QUERY_VALUE,
-            &mut key,
-        )
-    };
-    if result == 2 {
-        return Ok(());
-    }
-    if result != 0 {
-        return Err(io::Error::from_raw_os_error(result as i32));
-    }
-    // SAFETY: live query-only handle; null data buffers query existence only.
-    let result = unsafe {
-        RegQueryValueExW(
-            key,
             value_name.as_ptr(),
-            std::ptr::null(),
+            RRF_RT_ANY | RRF_NOEXPAND,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         )
     };
-    // SAFETY: uniquely owned handle is no longer used.
-    unsafe { RegCloseKey(key) };
     match result {
         2 => Ok(()),
         0 | 234 => Err(invalid(
