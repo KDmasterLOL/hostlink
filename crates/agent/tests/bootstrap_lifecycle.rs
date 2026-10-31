@@ -1,6 +1,6 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use hostlink_agent::update::{finalize_fresh_install, verify_fresh_package};
+use hostlink_agent::bootstrap::{finalize_fresh_install, verify_fresh_package};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -20,7 +20,7 @@ fn identity(bytes: &[u8]) -> serde_json::Value {
 fn package(root: &Path, version: &str, executable: &[u8]) -> (PathBuf, String) {
     let files = BTreeMap::from([("hostlink-agent".to_owned(), identity(executable))]);
     let manifest = json!({
-        "format": 1,
+        "format": 2,
         "component": "agent",
         "target": TARGET,
         "version": version,
@@ -65,5 +65,5 @@ fn install_root() -> (TempDir, PathBuf) {
     (temp, root)
 }
 
-#[path = "update_cases/verifier/mod.rs"]
+#[path = "bootstrap_cases/verifier/mod.rs"]
 mod verifier;

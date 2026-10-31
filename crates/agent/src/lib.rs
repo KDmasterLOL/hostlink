@@ -1,9 +1,12 @@
 //! Embedded SSH Agent: authenticated transport, execution, and durable jobs.
 //! The former Agent JSONL listener and external OpenSSH process are absent.
 
+mod agent_files;
+pub mod bootstrap;
 pub mod enrollment;
 pub mod exec;
 pub mod jobs;
+mod package;
 mod private_fs;
 pub mod runtime;
 pub mod service;

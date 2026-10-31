@@ -1,14 +1,12 @@
 //! Windows offline admission only; self_update owns all bundle publication.
-use super::{
-    invalid,
-    private_fs::{is_reparse_point, validate_path_has_no_reparse_components},
-};
+use crate::agent_files::{is_reparse_point, validate_path_has_no_reparse_components};
+use crate::package::invalid;
 use std::{
     fs, io,
     path::{Path, PathBuf},
 };
 
-pub(super) fn ensure_offline(root: &Path) -> io::Result<()> {
+pub(crate) fn ensure_offline(root: &Path) -> io::Result<()> {
     crate::service::ensure_update_unregistered(root)?;
     let updater = std::env::current_exe()?;
     validate_path_has_no_reparse_components(&updater)?;

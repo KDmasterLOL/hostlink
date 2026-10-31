@@ -51,6 +51,7 @@ class PackageHostlinkAgentTests(unittest.TestCase):
                 "hostlink-agent-x86_64-unknown-linux-gnu/manifest.json",
             ])
             manifest = json.loads(zf.read(zf.namelist()[-1]))
+            self.assertEqual(manifest["format"], 2)
             self.assertEqual(manifest["target"], "x86_64-unknown-linux-gnu")
             self.assertEqual(manifest["component"], "agent")
             self.assertEqual(manifest["files"]["hostlink-agent"]["sha256"], hashlib.sha256(self.binary.read_bytes()).hexdigest())

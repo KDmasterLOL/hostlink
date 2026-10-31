@@ -161,7 +161,7 @@ def create_package(repo: Path, source_sha: str, target: str, version: str, binar
     if total > MAX_TOTAL:
         raise ValueError("uncompressed package exceeds total size limit")
     files = {name: {"size": size, "sha256": sha} for name, path in inputs for size, sha in [checked_regular(path)]}
-    manifest = {"format": 1, "component": "agent", "target": target, "version": version, "files": files}
+    manifest = {"format": 2, "component": "agent", "target": target, "version": version, "files": files}
     inputs.append(("manifest.json", None))  # manifest is materialized in private staging below
     parent = raw_parent
     if not parent.is_dir() or parent.stat().st_uid != uid:

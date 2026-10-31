@@ -18,7 +18,7 @@ fn fresh_package_verifier_extracts_exact_manifest_and_installed_metadata() {
     let version = env!("CARGO_PKG_VERSION");
     let files = BTreeMap::from([("hostlink-agent".to_owned(), identity(&sidecar))]);
     let manifest = json!({
-        "format": 1,
+        "format": 2,
         "component": "agent",
         "target": TARGET,
         "version": version,
@@ -80,7 +80,7 @@ fn fresh_package_verifier_extracts_exact_manifest_and_installed_metadata() {
     let metadata: serde_json::Value =
         serde_json::from_slice(&fs::read(output.join("install.json")).expect("metadata"))
             .expect("metadata JSON");
-    assert_eq!(metadata["format"], 1);
+    assert_eq!(metadata["format"], 2);
     assert_eq!(metadata["target"], TARGET);
     assert_eq!(metadata["installed_version"], version);
     assert_eq!(metadata["installed_package_sha256"], archive_sha256);
@@ -103,8 +103,9 @@ fn fresh_package_verifier_extracts_exact_manifest_and_installed_metadata() {
     .expect("pending marker");
     fs::copy(output.join("hostlink-agent"), bin.join("hostlink-agent"))
         .expect("publish verified executable");
-    fs::copy(output.join("install.json"), root.join("install.json"))
+    fs::copy(output.join("install.json"), root.join("bin/install.json"))
         .expect("publish install metadata");
+    assert!(!root.join("install.json").exists());
     fs::copy(
         output.join("bootstrap-receipt.json"),
         root.join("bootstrap-receipt.json"),
@@ -123,8 +124,11 @@ fn fresh_package_verifier_extracts_exact_manifest_and_installed_metadata() {
         .expect("private executable");
         fs::set_permissions(state.join("agent.json"), fs::Permissions::from_mode(0o600))
             .expect("private config");
-        fs::set_permissions(root.join("install.json"), fs::Permissions::from_mode(0o600))
-            .expect("private metadata");
+        fs::set_permissions(
+            root.join("bin/install.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("private metadata");
         fs::set_permissions(
             root.join("bootstrap-receipt.json"),
             fs::Permissions::from_mode(0o600),

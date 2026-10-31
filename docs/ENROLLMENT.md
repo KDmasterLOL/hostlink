@@ -65,17 +65,18 @@ the Agent in the foreground by default; `-NoRun` prints the same-user command.
 requires curl, sha256sum, stat, mktemp, and standard shell tools. It requires
 same-origin HTTPS package URLs, downloads without following redirects, checks
 both source digests and the sidecar version, then asks the sidecar to run
-`bootstrap-verify` before it reads the token. The sidecar shares the updater's
-ZIP parser, package inventory, manifest and member hash checks, size bounds,
-target checks, and safe member staging. It also proves its own executable bytes
+`bootstrap-verify` before it reads the token. The sidecar shares the upstream ZIP reader and current format-2 package
+inventory and manifest with the updater, then independently verifies
+extracted member hashes, target and source-sidecar identity before enrollment. It also proves its own executable bytes
 match the ZIP's `hostlink-agent` member. Verification creates only a new private
-staging directory and writes matching `install.json` metadata plus a finite
+staging directory and writes matching format-2 `install.json` metadata plus a finite
 `bootstrap-receipt.json` containing the selected source digest and validated
 manifest file identities. The installer publishes the binary extracted from the
 ZIP, never the sidecar copy, then enrolls into a fresh private root and starts
 the Agent in the foreground.
 
-Installer enrollment uses a hidden `--retain-pending` mode. After copying the
+The installer publishes metadata into `ROOT/bin/install.json`, never
+`ROOT/install.json`. Installer enrollment uses a hidden `--retain-pending` mode. After copying the
 ZIP executable and source receipt into the new root, it invokes
 `bootstrap-finalize --root ...`; that command revalidates the exact installed
 inventory, file digests, metadata, receipt, private state directory, and pending

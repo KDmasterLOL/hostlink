@@ -68,7 +68,7 @@ impl Drop for Server {
 }
 
 #[test]
-fn migration_idempotency_and_same_version_new_digest_use_real_high_level_update() {
+fn idempotency_and_same_version_new_digest_use_real_high_level_update() {
     let fixture = Fixture::new();
     let before = fixture.preserved();
     let body = package("2.0.0", b"new executable", false);
@@ -78,7 +78,12 @@ fn migration_idempotency_and_same_version_new_digest_use_real_high_level_update(
         apply(&request).unwrap(),
         AgentUpdateOutcome::Installed { .. }
     ));
-    assert_eq!(installed::read(&fixture.root).unwrap().format, 2);
+    assert_eq!(
+        crate::package::read_installed(&fixture.root)
+            .unwrap()
+            .format,
+        2
+    );
     assert_eq!(fixture.preserved(), before);
     assert!(!fixture.root.join("jobs/jobs.db").exists());
     assert!(matches!(
@@ -120,7 +125,9 @@ fn changed_download_wrong_manifest_symlink_and_redirect_preserve_install() {
         }
         assert!(apply(&request).is_err());
         assert_eq!(
-            installed::read(&fixture.root).unwrap().installed_version,
+            crate::package::read_installed(&fixture.root)
+                .unwrap()
+                .installed_version,
             "1.0.0"
         );
         assert_eq!(fixture.preserved(), before);
@@ -181,7 +188,9 @@ fn upstream_bundle_ordinary_publication_error_restores_old_tree() {
         "rollback fault hook must actually execute"
     );
     assert_eq!(
-        installed::read(&fixture.root).unwrap().installed_version,
+        crate::package::read_installed(&fixture.root)
+            .unwrap()
+            .installed_version,
         "1.0.0"
     );
     assert_eq!(
@@ -243,26 +252,21 @@ async fn pending_native_apalis_task_and_private_state_survive_update() {
 }
 
 #[test]
-fn legacy_same_archive_is_migrated_once() {
+fn already_current_format2_does_not_download_again() {
     let fixture = Fixture::new();
-    let body = package("1.0.0", b"old executable", false);
+    let current = package("1.0.0", b"old executable", false);
     assert_eq!(
-        installed::read(&fixture.root)
+        crate::package::read_installed(&fixture.root)
             .unwrap()
             .installed_package_sha256,
-        digest(&body)
+        digest(&current)
     );
-    let server = Server::start(body.clone(), None);
+    let server = Server::start(current.clone(), None);
     let url = format!("{}/v1.0.0/hostlink-agent-{TARGET}.zip", server.origin);
-    let request = fixture.request(&url, &body, "1.0.0");
-    assert!(matches!(
-        apply(&request).unwrap(),
-        AgentUpdateOutcome::Installed { .. }
-    ));
-    assert_eq!(installed::read(&fixture.root).unwrap().format, 2);
+    let request = fixture.request(&url, &current, "1.0.0");
     assert!(matches!(
         apply(&request).unwrap(),
         AgentUpdateOutcome::AlreadyCurrent { .. }
     ));
-    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(server.requests.load(Ordering::SeqCst), 0);
 }

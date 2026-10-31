@@ -2,10 +2,9 @@
 //! The independently pinned archive SHA-256 is verified by the caller;
 //! extracted file identities are verified before any bundle is published.
 
-use super::super::{
+use super::{
     MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_TOTAL_BYTES, PACKAGE_MANIFEST,
-    invalid, invalid_owned,
-    manifest::{PackageManifest, package_files},
+    PackageManifest, invalid, invalid_owned, package_files,
 };
 use std::{
     collections::BTreeSet,
@@ -15,7 +14,7 @@ use std::{
 };
 use zip::ZipArchive;
 
-pub(in crate::update) fn validate_contents(
+pub(crate) fn validate_contents(
     archive_path: &Path,
     target: &str,
     version: &str,
@@ -99,7 +98,7 @@ pub(in crate::update) fn validate_contents(
     let bytes = manifest_bytes.ok_or_else(|| invalid("Agent ZIP manifest is missing"))?;
     let manifest: PackageManifest = serde_json::from_slice(&bytes)
         .map_err(|error| invalid_owned(format!("invalid Agent package manifest: {error}")))?;
-    if manifest.format != 1
+    if manifest.format != 2
         || manifest.component != "agent"
         || manifest.target != target
         || manifest.version != version

@@ -1,10 +1,8 @@
 //! Private filesystem operations shared by Agent update paths.
 
-#[cfg(unix)]
-use super::EXECUTABLE_BASE;
-use super::manifest::FileIdentity;
-use super::{MAX_ENTRY_BYTES, MAX_TOTAL_BYTES, invalid};
-use private_fs::{PrivateDir, PrivateFile};
+use crate::package::FileIdentity;
+use crate::package::{MAX_ENTRY_BYTES, MAX_TOTAL_BYTES, invalid};
+use private_fs::PrivateDir;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -40,7 +38,7 @@ fn validate_windows_update_root(root: &Path) -> io::Result<()> {
             "Agent updater root must be the exact current-user LocalAppData/HostLink/Agent",
         ));
     }
-    crate::service::ensure_update_unregistered(&expected)
+    Ok(())
 }
 
 // The updater has an exact per-user install location; keep profile lookup
@@ -132,53 +130,6 @@ pub(super) fn hash_file(path: &Path, max_size: u64) -> io::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-pub(super) fn open_private_file(path: &Path) -> io::Result<PrivateFile> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| invalid("private file has no parent"))?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| invalid("private file has no name"))?;
-    PrivateDir::open(parent)
-        .and_then(|dir| dir.open_file(name))
-        .map_err(io::Error::other)
-}
-
-#[cfg(not(windows))]
-pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
-    PrivateDir::open(path)
-        .and_then(|dir| dir.sync_all())
-        .map_err(io::Error::other)
-}
-
-pub(super) fn set_staged_file_permissions(path: &Path, relative: &str) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        // Only freshly extracted files in our private staging tree are adopted here.
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-            .open(path)?;
-        private_fs::harden(&file).map_err(io::Error::other)?;
-        if relative == EXECUTABLE_BASE {
-            // private-fs requires regular files to be exactly 0600. The executable alone
-            // needs 0700 and is subsequently verified by the executable-specific contract.
-            file.set_permissions(fs::Permissions::from_mode(0o700))?;
-        } else {
-            private_fs::verify(&file).map_err(io::Error::other)?;
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = relative;
-        open_private_file(path)?
-            .verify()
-            .map_err(io::Error::other)?;
-    }
-    Ok(())
-}
-
 #[cfg(windows)]
 pub(super) fn is_reparse_point(metadata: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
@@ -210,14 +161,4 @@ pub(super) fn validate_path_has_no_reparse_components(path: &Path) -> io::Result
         }
     }
     Ok(())
-}
-
-// Fresh bootstrap still verifies its private output/state; installed update bundles do not use this.
-#[cfg(windows)]
-pub(super) fn verify_windows_private_path(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
-    if metadata.is_dir() {
-        PrivateDir::open(path).map(|_| ()).map_err(io::Error::other)
-    } else {
-        open_private_file(path)?.verify().map_err(io::Error::other)
-    }
 }

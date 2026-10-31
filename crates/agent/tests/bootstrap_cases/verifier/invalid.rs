@@ -6,7 +6,7 @@ fn fresh_package_verifier_rejects_unexpected_member() {
     let version = env!("CARGO_PKG_VERSION");
     let archive = temp.path().join("unexpected-member.zip");
     let manifest = json!({
-        "format": 1,
+        "format": 2,
         "component": "agent",
         "target": TARGET,
         "version": version,
@@ -103,7 +103,7 @@ fn fresh_package_verifier_rejects_duplicate_manifest_members() {
     let executable = b"small invalid package executable";
     let identity = serde_json::to_string(&identity(executable)).expect("file identity");
     let manifest = format!(
-        r#"{{"format":1,"component":"agent","target":"{TARGET}","version":"{version}","files":{{"hostlink-agent":{identity},"hostlink-agent":{identity}}}}}"#
+        r#"{{"format":2,"component":"agent","target":"{TARGET}","version":"{version}","files":{{"hostlink-agent":{identity},"hostlink-agent":{identity}}}}}"#
     );
     let archive = temp.path().join("duplicate-manifest.zip");
     let mut zip = zip::ZipWriter::new(File::create(&archive).expect("create archive"));
@@ -139,7 +139,7 @@ fn fresh_package_verifier_rejects_missing_required_member() {
     let version = env!("CARGO_PKG_VERSION");
     let archive = temp.path().join("missing-member.zip");
     let manifest = json!({
-        "format": 1,
+        "format": 2,
         "component": "agent",
         "target": TARGET,
         "version": version,

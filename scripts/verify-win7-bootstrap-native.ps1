@@ -271,7 +271,7 @@ function Assert-OutputReceipt([string]$Output, $Artifact, [Security.Principal.Se
     $receiptPath = Assert-RegularOwnedFile ([IO.Path]::Combine($Output, 'bootstrap-receipt.json')) $Sid
     $receipt = Read-JsonFile $receiptPath
     Assert-ReceiptKeys $receipt @('format','component','target','version','archive_sha256','sidecar_sha256','files')
-    if ([int](Get-JsonValue $receipt 'format') -ne 1 -or (Get-JsonValue $receipt 'component') -cne 'agent' -or (Get-JsonValue $receipt 'target') -cne $Artifact.Target -or (Get-JsonValue $receipt 'version') -cne $Version -or (Get-JsonValue $receipt 'archive_sha256') -cne $Artifact.ArchiveSha256 -or (Get-JsonValue $receipt 'sidecar_sha256') -cne $Artifact.AgentSha256) {
+    if ([int](Get-JsonValue $receipt 'format') -ne 2 -or (Get-JsonValue $receipt 'component') -cne 'agent' -or (Get-JsonValue $receipt 'target') -cne $Artifact.Target -or (Get-JsonValue $receipt 'version') -cne $Version -or (Get-JsonValue $receipt 'archive_sha256') -cne $Artifact.ArchiveSha256 -or (Get-JsonValue $receipt 'sidecar_sha256') -cne $Artifact.AgentSha256) {
         Stop-Harness 'native bootstrap receipt does not match the source-bound package'
     }
     $receiptFiles = Get-JsonValue $receipt 'files'
@@ -289,7 +289,7 @@ function Assert-OutputReceipt([string]$Output, $Artifact, [Security.Principal.Se
     $metadataPath = Assert-RegularOwnedFile ([IO.Path]::Combine($Output, 'install.json')) $Sid
     $metadata = Read-JsonFile $metadataPath
     Assert-ReceiptKeys $metadata @('format','target','installed_version','installed_package_sha256','installed_files')
-    if ([int](Get-JsonValue $metadata 'format') -ne 1 -or (Get-JsonValue $metadata 'target') -cne $Artifact.Target -or (Get-JsonValue $metadata 'installed_version') -cne $Version -or (Get-JsonValue $metadata 'installed_package_sha256') -cne $Artifact.ArchiveSha256) { Stop-Harness 'installed metadata does not bind exact package version and digest' }
+    if ([int](Get-JsonValue $metadata 'format') -ne 2 -or (Get-JsonValue $metadata 'target') -cne $Artifact.Target -or (Get-JsonValue $metadata 'installed_version') -cne $Version -or (Get-JsonValue $metadata 'installed_package_sha256') -cne $Artifact.ArchiveSha256) { Stop-Harness 'installed metadata does not bind exact package version and digest' }
     $installed = Get-JsonValue $metadata 'installed_files'
     if ($installed.Count -ne $Artifact.Files.Count) { Stop-Harness 'installed metadata inventory count mismatch' }
     foreach ($name in $Artifact.Files.Keys) {

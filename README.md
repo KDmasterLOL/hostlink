@@ -23,11 +23,13 @@ a separate updater beneath the private root, outside `bin`. The CLI uses
 `update --root ROOT --url URL --sha256 SHA --target TARGET --version VERSION`.
 Archive/bundle staging and nonsecret `bin` use upstream native permissions/ACLs.
 Private root/state/jobs/keys and process locks retain `private-fs` protection.
-New `bin/install.json` metadata is published with the complete bundle; legacy
-format-1 root metadata remains readable for migration. Ordinary publication errors
-use upstream best-effort in-process rollback. **A kill/power loss between renames
-can leave bin missing; there is no automatic crash recovery or restart.**
-See [updater contract](docs/SELF_UPDATE_REWRITE.md) and
+Fresh installs and updates both publish only the current format-2
+`bin/install.json`. There is no legacy root-metadata fallback or migration.
+Ordinary publication errors use upstream best-effort in-process rollback.
+**A kill/power loss between renames can leave bin missing; there is no
+automatic crash recovery or restart.**
+See [Agent update and bootstrap](docs/AGENT_INSTALLATION.md),
+[updater contract](docs/SELF_UPDATE_REWRITE.md) and
 [Windows operation](docs/AGENT_UPDATE_WINDOWS.md). Native acceptance remains open.
 
 The rewrite is being integrated into HostLink `dev` for testing. It is **not

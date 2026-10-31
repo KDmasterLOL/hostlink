@@ -36,7 +36,7 @@ independent SHA-256, not a version-only decision.
 
 The updater takes both exclusive update.lock and jobs/runner.lock for the entire
 operation. It requires a real private root with no alias; Windows also validates
-OS-resolved LocalAppData, absent Scheduler/legacy autorun registration and a
+OS-resolved LocalAppData, absent Scheduler registration and a
 separate updater outside bin, and checks matching installed-image processes.
 `same-file 1.0.6`, already in Cargo.lock, owns Windows file identity comparison.
 No job tables are read, no missing DB is initialized, and no service is restarted.
@@ -61,23 +61,22 @@ are outside the swapped tree. A returned success is read back against the pins.
 Post-publication read-back failure returns an error; the library stash is already
 released at that point, so there is no HostLink rollback for such an error.
 
-The reader prefers **validated** bin/install.json format 2. It falls back to
-private legacy root/install.json format 1 only when bin metadata is absent, and
-validates the old inventory too. Invalid new metadata never falls back. Legacy
-root metadata is retained unchanged. A same-digest legacy installation is
-republished once to migrate metadata; format-2 same version/SHA is idempotent and
-requires no download, after root/locks/offline admission and integrity validation.
+The reader accepts **only** validated `bin/install.json` format 2. A missing
+or old-format metadata file fails clearly; there is no root/install.json
+fallback, legacy migration or republishing solely to migrate metadata.
+Format-2 equal-version/equal-digest updates are idempotent and require no
+download after root/lock/offline and installed-file validation.
 
 ## Deletion and bootstrap compatibility
 
 The disabled probe, feature/example, platform publishers, update_handoff journal,
 transaction backups/cleanup/replay and their obsolete tests are removed. There is
-no second installed-update backend. A small refusal for retired journal files is
-retained; they are never interpreted/deleted. The minimal archive/manifest reader has
+no second installed-update backend. Compatibility with retired journal files
+is not implemented because no installed clients need migration. The minimal archive/manifest reader has
 one owner shared by update and bootstrap; `rawzip` and handwritten ZIP parsing are absent.
 
-Fresh bootstrap-verify/bootstrap-finalize retain their CLI and format-1 output,
-source-sidecar hash and receipt checks, enrollment pending marker and private
+Fresh bootstrap-verify/bootstrap-finalize retain their CLI and now emit only
+format-2 install metadata, with source-sidecar hash and receipt checks, enrollment pending marker and private
 state/output policy. PrivateTempDir and precreated private extraction files are
 now **bootstrap-only**, preserving the existing first-install contract; they are
 not another installed updater. Install scripts retain their first-install flow.
@@ -99,6 +98,21 @@ unsafe paths/symlinks, duplicated names, malformed headers and extracted
 file-identity mismatches. These checks protect against wrong installations,
 not ZIP-format canonicality. Fresh bootstrap still requires its separately
 pinned verifier executable before the invitation secret is entered.
+
+## 1C-1153: one updater file, fresh-only bootstrap, no installed legacy schema
+
+The pre-release Agent now has one installed-update source `crates/agent/src/update.rs`,
+a separate `bootstrap.rs` and shared `package/` modules. Both initial
+installation and updates publish only `bin/install.json` format 2.
+Initial package manifest and bootstrap receipt are likewise current format 2.
+There is **no** format-1 installed reader, root-install-metadata migration,
+retired-update journal guard or old HKCU Run compatibility lookup.
+Windows process and Task Scheduler stopped-only checks still apply.
+
+The installed updater is still exactly the upstream high-level
+`self_update::backends::custom::Update`; first-install private staging is
+not a second installed updater. For the current implementation and ownership
+see [Agent installation](AGENT_INSTALLATION.md).
 
 ## Verification
 

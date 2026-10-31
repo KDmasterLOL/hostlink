@@ -8,5 +8,5 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn execute(args: Args) -> io::Result<()> {
-    hostlink_agent::update::finalize_fresh_install(&args.root)
+    hostlink_agent::bootstrap::finalize_fresh_install(&args.root)
 }

@@ -9,7 +9,7 @@ pub(super) fn digest(bytes: &[u8]) -> String {
 }
 
 pub(super) fn package(version: &str, exe: &[u8], symlink: bool) -> Vec<u8> {
-    let files = manifest::package_files(TARGET)
+    let files = crate::package::package_files(TARGET)
         .into_iter()
         .map(|name| {
             let bytes = if name.starts_with("hostlink-agent") {
@@ -23,9 +23,9 @@ pub(super) fn package(version: &str, exe: &[u8], symlink: bool) -> Vec<u8> {
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    let manifest = serde_json::json!({"format":1,"component":"agent","target":TARGET,"version":version,"files":files});
+    let manifest = serde_json::json!({"format":2,"component":"agent","target":TARGET,"version":version,"files":files});
     let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    for name in manifest::package_files(TARGET) {
+    for name in crate::package::package_files(TARGET) {
         let path = format!("hostlink-agent-{TARGET}/{name}");
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
@@ -82,7 +82,7 @@ impl Fixture {
             .extract_into(&extracted)
             .unwrap();
         let bundle = extracted.join(format!("hostlink-agent-{TARGET}"));
-        let (manifest, _) = archive::validate_contents(&archive, TARGET, "1.0.0").unwrap();
+        let (manifest, _) = crate::package::validate_contents(&archive, TARGET, "1.0.0").unwrap();
         fs::remove_file(bundle.join(PACKAGE_MANIFEST)).unwrap();
         #[cfg(unix)]
         {
@@ -94,18 +94,18 @@ impl Fixture {
             .unwrap();
         }
         fs::rename(bundle, root.join("bin")).unwrap();
-        let metadata = manifest::InstallMetadata {
-            format: 1,
+        let metadata = crate::package::InstallMetadata {
+            format: 2,
             target: TARGET.into(),
             installed_version: "1.0.0".into(),
             installed_package_sha256: digest(&old),
             installed_files: manifest.files,
         };
-        private
-            .create(INSTALL_METADATA)
-            .unwrap()
-            .write_all(&serde_json::to_vec(&metadata).unwrap())
-            .unwrap();
+        fs::write(
+            root.join("bin").join(INSTALL_METADATA),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
         Self { temp, root }
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -118,14 +118,9 @@ impl Fixture {
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub(super) fn preserved(&self) -> Vec<Vec<u8>> {
-        [
-            "state/agent.json",
-            "state/enrollment.json",
-            "keys/host.key",
-            "install.json",
-        ]
-        .iter()
-        .map(|name| fs::read(self.root.join(name)).unwrap())
-        .collect()
+        ["state/agent.json", "state/enrollment.json", "keys/host.key"]
+            .iter()
+            .map(|name| fs::read(self.root.join(name)).unwrap())
+            .collect()
     }
 }

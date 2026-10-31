@@ -1,7 +1,68 @@
 //! Package and installed-file identity formats and integrity validation.
 
-use super::private_fs::open_private_file;
-use super::{EXECUTABLE_BASE, invalid, invalid_owned};
+mod contents;
+mod installed;
+pub(crate) use contents::validate_contents;
+pub(crate) use installed::{read_installed, read_regular, validate_installed, verify_executable};
+
+pub(crate) const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
+pub(crate) const PACKAGE_MANIFEST: &str = "manifest.json";
+pub(crate) const INSTALL_METADATA: &str = "install.json";
+pub(crate) const EXECUTABLE_BASE: &str = "hostlink-agent";
+
+pub(crate) fn validate_sha256(digest: &str) -> std::io::Result<()> {
+    if digest.len() != 64
+        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || digest.bytes().any(|byte| byte.is_ascii_uppercase())
+    {
+        return Err(invalid(
+            "SHA-256 must contain 64 lowercase hexadecimal characters",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn invalid(message: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
+}
+pub(crate) fn invalid_owned(message: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+}
+pub(crate) fn supported_targets() -> &'static [&'static str] {
+    &[
+        "x86_64-pc-windows-msvc",
+        "x86_64-win7-windows-msvc",
+        "i686-win7-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+    ]
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub(crate) fn target_matches_runtime(target: &str) -> bool {
+    target == "x86_64-unknown-linux-gnu"
+}
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub(crate) fn target_matches_runtime(target: &str) -> bool {
+    matches!(
+        target,
+        "x86_64-pc-windows-msvc" | "x86_64-win7-windows-msvc"
+    )
+}
+#[cfg(all(target_os = "windows", target_arch = "x86"))]
+pub(crate) fn target_matches_runtime(target: &str) -> bool {
+    target == "i686-win7-windows-msvc"
+}
+#[cfg(not(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "windows", target_arch = "x86")
+)))]
+pub(crate) fn target_matches_runtime(_target: &str) -> bool {
+    false
+}
+
 use serde::{
     Deserialize, Serialize,
     de::{self, MapAccess, Visitor},
@@ -9,13 +70,11 @@ use serde::{
 use std::{
     collections::{BTreeMap, btree_map::Entry},
     fmt,
-    io::{self, Read},
-    path::Path,
 };
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct PackageManifest {
+pub(crate) struct PackageManifest {
     pub(super) format: u32,
     pub(super) component: String,
     pub(super) target: String,
@@ -26,14 +85,14 @@ pub(super) struct PackageManifest {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct FileIdentity {
+pub(crate) struct FileIdentity {
     pub(super) size: u64,
     pub(super) sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct InstallMetadata {
+pub(crate) struct InstallMetadata {
     pub(super) format: u32,
     pub(super) target: String,
     pub(super) installed_version: String,
@@ -44,7 +103,7 @@ pub(super) struct InstallMetadata {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct BootstrapReceipt {
+pub(crate) struct BootstrapReceipt {
     pub(super) format: u32,
     pub(super) component: String,
     pub(super) target: String,
@@ -55,7 +114,7 @@ pub(super) struct BootstrapReceipt {
     pub(super) files: BTreeMap<String, FileIdentity>,
 }
 
-pub(super) fn deserialize_unique_file_map<'de, D>(
+fn deserialize_unique_file_map<'de, D>(
     deserializer: D,
 ) -> Result<BTreeMap<String, FileIdentity>, D::Error>
 where
@@ -91,18 +150,7 @@ where
 
     deserializer.deserialize_map(UniqueFileMapVisitor)
 }
-pub(super) fn read_install_metadata(path: &Path) -> io::Result<InstallMetadata> {
-    let file = open_private_file(path)?;
-    let mut bytes = Vec::new();
-    file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 64 * 1024 {
-        return Err(invalid("Agent install metadata exceeds its size limit"));
-    }
-    serde_json::from_slice(&bytes)
-        .map_err(|error| invalid_owned(format!("invalid Agent install metadata: {error}")))
-}
-
-pub(super) fn package_files(target: &str) -> Vec<String> {
+pub(crate) fn package_files(target: &str) -> Vec<String> {
     let mut files = vec![
         if target.contains("windows") {
             "hostlink-agent.exe"

@@ -9,7 +9,7 @@ hostlink-agent.exe update --root ROOT --url EXACT_HTTPS_URL --sha256 INDEPENDENT
 ```
 
 The updater does not stop/remove/register/start a task or change HKCU. An installed
-task (even stopped), legacy autorun registration, held runner/update lock or active
+task (even stopped), held runner/update lock or active
 installed Agent image is an error. It never kills a PID. The root remains the exact
 OS-resolved LocalAppData/HostLink/Agent, with private-fs protected root and parent,
 without symlink/reparse aliases. Win7 uses SHGetFolderPathW and existing process
@@ -31,18 +31,17 @@ open SQLite or interpret job state; pending tasks survive for the next Agent sta
 The verify_binary hook checks the extracted files, replaces manifest.json with
 format-2 install.json and validates the exact bin inventory before the library
 publishes the entire bundle. This updates the executable, all support scripts and
-metadata together. Validated bin/install.json takes precedence; only an absent
-bin metadata file permits validated legacy format-1 root/install.json. Malformed,
-symlinked or mismatching bin metadata is an error, never a fallback. Legacy root
-metadata is retained unchanged; fresh bootstrap interfaces/output remain format 1.
+metadata together. Both fresh installation and update use only
+`bin/install.json` format 2; an old `root/install.json` is not read or migrated.
+Missing, symlinked or invalid metadata is an error.
 
 On an ordinary publication error self_update attempts to restore the old bundle.
 Rollback is best-effort; a failed restoration is logged upstream and the original
 error is returned. **There is no durable journal or automatic recovery after kill
 or power loss. A kill between renames can leave bin absent and an unnamed stash.**
-Stop and reconcile the installation manually in that case; do not claim the Agent
-was updated. Existing retired `.updates/handoff.json` or `publication.json` causes
-a refusal and is never replayed/deleted by the new updater. No health restart runs.
+Stop and reconcile the installation manually in that case; do not claim the
+Agent was updated. There is no legacy journal compatibility engine or
+automatic restart.
 After success explicitly reinstall/start the owned task. Service status is OS
 registration/running state, not binary SHA or SSH health attestation.
 

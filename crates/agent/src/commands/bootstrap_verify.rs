@@ -16,7 +16,7 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn execute(args: Args) -> io::Result<()> {
-    hostlink_agent::update::verify_fresh_package(
+    hostlink_agent::bootstrap::verify_fresh_package(
         &args.archive,
         &args.sha256,
         &args.target,

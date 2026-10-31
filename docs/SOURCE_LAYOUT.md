@@ -33,26 +33,25 @@ does not certify production or registered Windows updater deployment.
 | Agent-local Apalis command queue and Board UI/API | `crates/agent/src/jobs/` (no Client jobs subsystem) |
 | Owner-only private files and Windows ACL | `Vendor/private-fs/` (pinned upstream + Win7 fallback) |
 | Verified-handle → standard `File` conversion for OS locks and Tokio | `crates/agent/src/private_fs.rs` (one extension trait) |
-| Windows 7 LocalAppData lookup for exact updater root | `crates/agent/src/update/private_fs.rs` |
+| Windows 7 LocalAppData lookup for exact updater root | `crates/agent/src/agent_files.rs` |
 | Hub v2 endpoints and authoritative registry | `crates/hub/src/server/`; `crates/hub/src/state.rs` |
 | Fresh enrollment and source-pinned installation | `crates/agent/src/enrollment/`; `crates/client/src/bootstrap/` |
 | Linux service lifecycle | `crates/agent/src/service/linux.rs` (`service-manager` + systemd --user) |
-| Windows current-user Task Scheduler | `crates/agent/src/service/windows.rs` (direct COM, owned task action, legacy collision rejection) |
-| Exact Agent URL update and ZIP security | `crates/agent/src/update/{artifact.rs,admission.rs,publication.rs,installed.rs,archive/}`; `windows/` owns offline admission only |
+| Windows current-user Task Scheduler | `crates/agent/src/service/windows.rs` (direct COM, owned task action) |
+| Installed Agent update | `crates/agent/src/update.rs`: exact artifact, offline admission and upstream `self_update` |
+| Initial Agent installation and receipt | `crates/agent/src/bootstrap.rs` |
+| Shared package identity and ZIP preflight | `crates/agent/src/package/` |
+| Shared private root/path and file identities | `crates/agent/src/agent_files.rs` |
+| Windows offline process identity admission | `crates/agent/src/service/offline.rs` |
 
-`update/publication.rs` calls high-level `self_update::backends::custom::Update`.
-`artifact.rs` supplies one pinned release; `installed.rs` owns validated format-2
-bin metadata with format-1 root fallback. `archive/contents.rs` is the one bounded
-ZIP/manifest validator shared by the updater and fresh bootstrap. Bootstrap-only
-private copying/extraction remains in `archive/mod.rs` and `staging/mod.rs` to
-preserve the existing installer output contract. There is no installed-update
-fallback, private staging backend, platform publisher or update_handoff journal.
-The cohesive bootstrap/profile filesystem file and end-to-end HTTP test module
-are permitted to exceed the approximate 200-line target. See
-[SELF_UPDATE_REWRITE.md](SELF_UPDATE_REWRITE.md) for the authorized durability change.
-For the distinction between the one installed-update `self_update` call and
-first-install bootstrap code, see the
-[Agent update module README](../crates/agent/src/update/README.md).
+`update.rs` invokes a single `self_update::backends::custom::Update` for already
+installed Agents. `bootstrap.rs` owns first-install verification/finalization,
+sharing only current format-2 package metadata and safe ZIP preflight in
+`package/`. There is no installed-format migration, old-journal guard, second
+publisher or custom ZIP parser. Private root/state/jobs/keys retain `private-fs`
+protection, while installed `bin/` is nonsecret.
+See [Agent installation ownership](AGENT_INSTALLATION.md) and
+[historical updater integration evidence](SELF_UPDATE_REWRITE.md).
 
 `jobs/mod.rs` exposes only the typed `CommandJob`, local queue and private
 updater contract. `jobs/store.rs` configures the native Apalis SQLite
@@ -69,7 +68,7 @@ Its pinned upstream revision and compatibility deviations are recorded in
 it verifies a private file, then clones the already-acquired OS handle for
 standard `File` locking or Tokio (without reopening a path). Lock owners
 open via `PrivateDir` directly; there is no generic `open_lock` wrapper.
-The updater owns Win7-compatible OS profile lookup in `update/private_fs.rs`.
+Win7-compatible OS profile lookup belongs to `agent_files.rs`.
 Converting to `File` does not retain vendored per-I/O revalidation; SFTP
 must treat this as an explicit verification boundary. There is no separate
 Agent ACL/parser implementation or root/elevation validator. Service install/start

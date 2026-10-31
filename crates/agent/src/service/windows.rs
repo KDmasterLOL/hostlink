@@ -31,7 +31,7 @@ use windows::{
 
 /// Register or refresh an owned task without starting it.
 /// # Errors
-/// Refuses unsafe inputs, legacy registrations, pending updates and foreign tasks.
+/// Refuses unsafe inputs, pending updates and foreign tasks.
 pub fn install(root: &Path, config: &Path) -> io::Result<()> {
     let _directory = PrivateDir::open(root).map_err(io::Error::other)?;
     let absolute = std::path::absolute(root)?;
@@ -40,16 +40,10 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
         .ok_or_else(|| invalid("Agent root has no parent"))?;
     let _parent = PrivateDir::open(parent).map_err(io::Error::other)?;
     let root = root.canonicalize()?;
-    if legacy_run_present(&root)? {
-        return Err(invalid(
-            "old HKCU Run startup is still registered; stop/remove that legacy Agent before installing Task Scheduler",
-        ));
-    }
     let _lock = mutation_lock(&root)?;
-    crate::update::ensure_no_legacy_update(&root)?;
     let (command, arguments) = action(&root)?;
     let executable = root.join("bin/hostlink-agent.exe");
-    crate::update::verify_executable(&root.join("bin/hostlink-agent.exe"))?;
+    crate::package::verify_executable(&root.join("bin/hostlink-agent.exe"))?;
     let config_parent = config
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -110,12 +104,6 @@ pub fn start(root: &Path) -> io::Result<()> {
     let _parent = PrivateDir::open(parent).map_err(io::Error::other)?;
     let root = root.canonicalize()?;
     let _lock = mutation_lock(&root)?;
-    crate::update::ensure_no_legacy_update(&root)?;
-    if legacy_run_present(&root)? {
-        return Err(invalid(
-            "old HKCU Run startup must be removed before starting Task Scheduler",
-        ));
-    }
     let _apartment = Apartment::new()?;
     let folder = task_folder()?;
     let task = owned(&folder, &root)?;
@@ -184,11 +172,6 @@ pub fn status(root: &Path) -> io::Result<ServiceStatus> {
 pub(crate) fn ensure_update_unregistered(root: &Path) -> io::Result<()> {
     // The updater validates its install root before calling this read-only guard.
     let root = root.canonicalize()?;
-    if legacy_run_present(&root)? {
-        return Err(invalid(
-            "old HKCU Run startup must be removed before an offline update",
-        ));
-    }
     let _apartment = Apartment::new()?;
     let folder = task_folder()?;
     if registered(&folder, &task_name(&root)?)?.is_some() {
@@ -454,32 +437,6 @@ fn child<'a>(parent: roxmltree::Node<'a, 'a>, name: &str) -> io::Result<roxmltre
     Ok(node)
 }
 
-fn legacy_run_present(root: &Path) -> io::Result<bool> {
-    use windows_sys::Win32::System::Registry::{
-        HKEY_CURRENT_USER, RRF_NOEXPAND, RRF_RT_ANY, RegGetValueW,
-    };
-    let wide = |value: &str| value.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-    let key_name = wide(r"Software\Microsoft\Windows\CurrentVersion\Run");
-    let value_name = wide(&format!("HostLinkAgent-{}", root_digest(root)));
-    // SAFETY: terminated names; current user, existence-only query with no data
-    // buffers or environment expansion. RegGetValueW is available since Vista.
-    let result = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            key_name.as_ptr(),
-            value_name.as_ptr(),
-            RRF_RT_ANY | RRF_NOEXPAND,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    match result {
-        2 => Ok(false),
-        0 | 234 => Ok(true),
-        _ => Err(io::Error::from_raw_os_error(result as i32)),
-    }
-}
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }

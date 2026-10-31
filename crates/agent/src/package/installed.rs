@@ -1,11 +1,11 @@
 //! Exact installed identity; format 2 metadata travels atomically inside nonsecret bin.
 
 use super::{
-    EXECUTABLE_BASE, INSTALL_METADATA, MAX_MANIFEST_BYTES, invalid,
-    manifest::{InstallMetadata, package_files, read_install_metadata},
-    private_fs::{file_identities, is_reparse_point},
-    supported_targets, target_matches_runtime, validate_sha256,
+    EXECUTABLE_BASE, INSTALL_METADATA, InstallMetadata, MAX_MANIFEST_BYTES, invalid, package_files,
+    validate_sha256,
 };
+use crate::agent_files::{file_identities, is_reparse_point};
+use crate::package::{supported_targets, target_matches_runtime};
 use std::{
     collections::BTreeSet,
     fs,
@@ -13,25 +13,12 @@ use std::{
     path::Path,
 };
 
-pub(super) fn read(root: &Path) -> io::Result<InstallMetadata> {
+pub(crate) fn read_installed(root: &Path) -> io::Result<InstallMetadata> {
     let path = root.join("bin").join(INSTALL_METADATA);
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(_) => {
-            let metadata: InstallMetadata = serde_json::from_slice(&read_regular(&path)?)?;
-            if metadata.format != 2 {
-                return Err(invalid("bin/install.json must have format 2"));
-            }
-            metadata
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let metadata = read_install_metadata(&root.join(INSTALL_METADATA))?;
-            if metadata.format != 1 {
-                return Err(invalid("legacy root/install.json must have format 1"));
-            }
-            metadata
-        }
-        Err(error) => return Err(error),
-    };
+    let metadata: InstallMetadata = serde_json::from_slice(&read_regular(&path)?)?;
+    if metadata.format != 2 {
+        return Err(invalid("installed Agent metadata must have format 2"));
+    }
     if !supported_targets().contains(&metadata.target.as_str())
         || !target_matches_runtime(&metadata.target)
     {
@@ -43,7 +30,7 @@ pub(super) fn read(root: &Path) -> io::Result<InstallMetadata> {
     Ok(metadata)
 }
 
-pub(super) fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
+pub(crate) fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() || is_reparse_point(&metadata) || metadata.len() > MAX_MANIFEST_BYTES {
         return Err(invalid("Agent metadata is not a bounded regular file"));
@@ -58,12 +45,12 @@ pub(super) fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub(super) fn validate_installed(
+pub(crate) fn validate_installed(
     bin: &Path,
     metadata: &InstallMetadata,
     target: &str,
 ) -> io::Result<()> {
-    if !matches!(metadata.format, 1 | 2) || metadata.target != target {
+    if metadata.format != 2 || metadata.target != target {
         return Err(invalid(
             "installed Agent metadata has a different format or target",
         ));
@@ -72,9 +59,7 @@ pub(super) fn validate_installed(
     validate_sha256(&metadata.installed_package_sha256)?;
     validate_directory(bin)?;
     let mut expected = package_files(target).into_iter().collect::<BTreeSet<_>>();
-    if metadata.format == 2 {
-        expected.insert(INSTALL_METADATA.into());
-    }
+    expected.insert(INSTALL_METADATA.into());
     let actual = fs::read_dir(bin)?
         .map(|entry| {
             let entry = entry?;

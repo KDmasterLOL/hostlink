@@ -56,13 +56,13 @@ fn source_and_public_https_pins_are_exact() {
 }
 
 #[test]
-fn staged_bundle_metadata_and_installed_precedence() {
+fn staged_bundle_metadata_is_required() {
     let fixture = Fixture::new();
     let body = package("2.0.0", b"new executable", false);
     let archive = fixture.temp.path().join("new.zip");
     fs::write(&archive, &body).unwrap();
-    let (manifest, bytes) = archive::validate_contents(&archive, TARGET, "2.0.0").unwrap();
-    assert!(archive::validate_contents(&archive, TARGET, "wrong version").is_err());
+    let (manifest, bytes) = crate::package::validate_contents(&archive, TARGET, "2.0.0").unwrap();
+    assert!(crate::package::validate_contents(&archive, TARGET, "wrong version").is_err());
     let staging = fixture.temp.path().join("stage");
     self_update::Extract::from_source(&archive)
         .extract_into(&staging)
@@ -75,22 +75,43 @@ fn staged_bundle_metadata_and_installed_precedence() {
         "2.0.0".into(),
     )
     .unwrap();
-    publication::prepare_bundle(&bundle, &selected, &manifest, &bytes).unwrap();
-    let metadata: manifest::InstallMetadata =
+    prepare_bundle(&bundle, &selected, &manifest, &bytes).unwrap();
+    let metadata: crate::package::InstallMetadata =
         serde_json::from_slice(&fs::read(bundle.join(INSTALL_METADATA)).unwrap()).unwrap();
     assert_eq!(metadata.format, 2);
-    installed::validate_installed(&bundle, &metadata, TARGET).unwrap();
+    crate::package::validate_installed(&bundle, &metadata, TARGET).unwrap();
     // Reader fixtures exercise format precedence, not a substitute update implementation.
     fs::rename(fixture.root.join("bin"), fixture.root.join("old-bin")).unwrap();
     fs::rename(bundle, fixture.root.join("bin")).unwrap();
     assert_eq!(
-        installed::read(&fixture.root).unwrap().installed_version,
+        crate::package::read_installed(&fixture.root)
+            .unwrap()
+            .installed_version,
         "2.0.0"
     );
     fs::write(fixture.root.join("bin/install.json"), b"invalid metadata").unwrap();
     assert!(
-        installed::read(&fixture.root).is_err(),
-        "corrupt new metadata must not fall back to stale root metadata"
+        crate::package::read_installed(&fixture.root).is_err(),
+        "corrupt installed metadata must be rejected"
+    );
+}
+
+#[test]
+fn legacy_root_metadata_is_not_an_installation() {
+    let fixture = Fixture::new();
+    let current = fixture.root.join("bin/install.json");
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&current).unwrap()).unwrap();
+    metadata["format"] = serde_json::json!(1);
+    fs::write(
+        fixture.root.join("install.json"),
+        serde_json::to_vec(&metadata).unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(&current).unwrap();
+    assert!(
+        crate::package::read_installed(&fixture.root).is_err(),
+        "format-1 metadata in the old root must not be adopted"
     );
 }
 
@@ -101,7 +122,7 @@ fn extracted_file_digest_is_checked_before_bundle_publication() {
     let archive_path = fixture.temp.path().join("new.zip");
     fs::write(&archive_path, &bytes).unwrap();
     let (manifest, manifest_bytes) =
-        archive::validate_contents(&archive_path, TARGET, "2.0.0").unwrap();
+        crate::package::validate_contents(&archive_path, TARGET, "2.0.0").unwrap();
     let extracted = fixture.temp.path().join("extracted");
     self_update::Extract::from_source(&archive_path)
         .extract_into(&extracted)
@@ -120,9 +141,11 @@ fn extracted_file_digest_is_checked_before_bundle_publication() {
         "2.0.0".into(),
     )
     .unwrap();
-    assert!(publication::prepare_bundle(&bundle, &selected, &manifest, &manifest_bytes).is_err());
+    assert!(prepare_bundle(&bundle, &selected, &manifest, &manifest_bytes).is_err());
     assert_eq!(
-        installed::read(&fixture.root).unwrap().installed_version,
+        crate::package::read_installed(&fixture.root)
+            .unwrap()
+            .installed_version,
         "1.0.0"
     );
 }
@@ -136,11 +159,11 @@ fn archive_manifest_and_symlink_gates_are_bounded() {
         package("2.0.0", b"new executable", true),
     ] {
         fs::write(&archive, bytes).unwrap();
-        assert!(archive::validate_contents(&archive, TARGET, "2.0.0").is_err());
+        assert!(crate::package::validate_contents(&archive, TARGET, "2.0.0").is_err());
     }
     let file = fs::File::create(&archive).unwrap();
     file.set_len(MAX_ARCHIVE_BYTES + 1).unwrap();
-    assert!(archive::validate_contents(&archive, TARGET, "2.0.0").is_err());
+    assert!(crate::package::validate_contents(&archive, TARGET, "2.0.0").is_err());
 }
 
 #[test]

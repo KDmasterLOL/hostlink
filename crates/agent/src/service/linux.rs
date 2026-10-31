@@ -28,7 +28,7 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
         Ok(_) => return Err(io::Error::other("legacy marker requires migration")),
     }
     let program = root.join("bin/hostlink-agent");
-    crate::update::verify_executable(&root.join("bin/hostlink-agent"))?;
+    crate::package::verify_executable(&root.join("bin/hostlink-agent"))?;
     let parent = config
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())

@@ -10,6 +10,8 @@ pub struct ServiceStatus {
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(windows)]
+mod offline;
+#[cfg(windows)]
 mod windows;
 
 #[cfg(target_os = "linux")]
@@ -21,3 +23,5 @@ pub use windows::{install, remove, start, status, stop};
 pub(crate) use windows::ensure_update_unregistered;
 #[cfg(not(any(target_os = "linux", windows)))]
 compile_error!("HostLink Agent service lifecycle supports Linux and Windows only");
+#[cfg(windows)]
+pub(crate) use offline::ensure_offline as ensure_agent_offline;
