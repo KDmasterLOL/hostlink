@@ -38,7 +38,18 @@ does not certify production or registered Windows updater deployment.
 | Fresh enrollment and source-pinned installation | `crates/agent/src/enrollment/`; `crates/client/src/bootstrap/` |
 | Linux service lifecycle | `crates/agent/src/service/linux.rs` (`service-manager` + systemd --user) |
 | Windows current-user Task Scheduler | `crates/agent/src/service/windows.rs` (direct COM, owned task action, legacy collision rejection) |
-| Agent update and ZIP security | `crates/agent/src/update/`, including `archive/`, `windows/` and `update_handoff/` for recovery |
+| Exact Agent URL update and ZIP security | `crates/agent/src/update/{artifact.rs,admission.rs,publication.rs,installed.rs,archive/}`; `windows/` owns offline admission only |
+
+`update/publication.rs` calls high-level `self_update::backends::custom::Update`.
+`artifact.rs` supplies one pinned release; `installed.rs` owns validated format-2
+bin metadata with format-1 root fallback. `archive/contents.rs` is the one bounded
+ZIP/manifest validator shared by the updater and fresh bootstrap. Bootstrap-only
+private copying/extraction remains in `archive/mod.rs` and `staging/mod.rs` to
+preserve the existing installer output contract. There is no installed-update
+fallback, private staging backend, platform publisher or update_handoff journal.
+The cohesive bootstrap/profile filesystem file and end-to-end HTTP test module
+are permitted to exceed the approximate 200-line target. See
+[SELF_UPDATE_REWRITE.md](SELF_UPDATE_REWRITE.md) for the authorized durability change.
 
 `jobs/mod.rs` exposes only the typed `CommandJob`, local queue and private
 updater contract. `jobs/store.rs` configures the native Apalis SQLite

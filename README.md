@@ -16,13 +16,19 @@ Target packages:
   enrollment, SSH authorization and revocation; **no execution RPC**. See
   [crates/hub/README.md](crates/hub/README.md) for server configuration/API.
 
-Updates pin the exact Agent archive SHA-256/version/target and reject unsafe
-roots. Windows uses `self_update 1.3.1` extraction/MoveAll and private durable
-crash recovery, **offline only**: stop/remove its Task Scheduler task, run the
-separate private updater, then explicitly install/start the task again.
-Archive/manifest/inventory verification and rollback remain required. Native
-Windows 11/Win7 acceptance for this replacement remains unrun. See
-[docs/AGENT_UPDATE_WINDOWS.md](docs/AGENT_UPDATE_WINDOWS.md).
+Updates use high-level `self_update 1.3.1` with one exact HTTPS artifact URL,
+independent SHA-256, version and runtime target. The Agent must be fully stopped;
+Windows additionally requires removing its Task Scheduler registration and running
+a separate updater beneath the private root, outside `bin`. The CLI uses
+`update --root ROOT --url URL --sha256 SHA --target TARGET --version VERSION`.
+Archive/bundle staging and nonsecret `bin` use upstream native permissions/ACLs.
+Private root/state/jobs/keys and process locks retain `private-fs` protection.
+New `bin/install.json` metadata is published with the complete bundle; legacy
+format-1 root metadata remains readable for migration. Ordinary publication errors
+use upstream best-effort in-process rollback. **A kill/power loss between renames
+can leave bin missing; there is no automatic crash recovery or restart.**
+See [updater contract](docs/SELF_UPDATE_REWRITE.md) and
+[Windows operation](docs/AGENT_UPDATE_WINDOWS.md). Native acceptance remains open.
 
 The rewrite is being integrated into HostLink `dev` for testing. It is **not
 ready for release, deployment or fleet migration**.

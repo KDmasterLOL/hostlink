@@ -1,6 +1,6 @@
 //! Private filesystem operations shared by Agent update paths.
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 use super::EXECUTABLE_BASE;
 use super::manifest::FileIdentity;
 use super::{MAX_ENTRY_BYTES, MAX_TOTAL_BYTES, invalid};
@@ -14,6 +14,7 @@ use std::{
 };
 
 pub(super) fn validate_user_owned_root(root: &Path) -> io::Result<()> {
+    validate_path_has_no_reparse_components(root)?;
     #[cfg(not(windows))]
     {
         PrivateDir::open(root).map_err(io::Error::other)?;
@@ -95,37 +96,10 @@ pub(super) fn file_identities(
                 "installed Agent package exceeds its total size limit",
             ));
         }
+        // Binaries and support scripts are nonsecret. Persistent state/keys retain private-fs.
         let mut hasher = Sha256::new();
-        #[cfg(unix)]
-        let size = if name == EXECUTABLE_BASE {
-            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-            let executable = fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-                .open(&path)?;
-            let metadata = executable.metadata()?;
-            // This is the sole exception to private-fs's exact 0600 file contract.
-            // Published executables may be owner-readable/executable (0500 or 0700).
-            if !metadata.is_file()
-                || metadata.nlink() != 1
-                // SAFETY: geteuid has no preconditions and only reads process identity.
-                || metadata.uid() != unsafe { libc::geteuid() }
-                || !matches!(metadata.mode() & 0o7777, 0o500 | 0o700)
-            {
-                return Err(invalid(
-                    "installed Agent executable ownership or permissions are unsafe",
-                ));
-            }
-            io::copy(&mut executable.take(MAX_ENTRY_BYTES + 1), &mut hasher)?
-        } else {
-            io::copy(
-                &mut open_private_file(&path)?.take(MAX_ENTRY_BYTES + 1),
-                &mut hasher,
-            )?
-        };
-        #[cfg(not(unix))]
         let size = io::copy(
-            &mut open_private_file(&path)?.take(MAX_ENTRY_BYTES + 1),
+            &mut File::open(&path)?.take(MAX_ENTRY_BYTES + 1),
             &mut hasher,
         )?;
         if size > MAX_ENTRY_BYTES {
@@ -167,20 +141,6 @@ pub(super) fn open_private_file(path: &Path) -> io::Result<PrivateFile> {
         .ok_or_else(|| invalid("private file has no name"))?;
     PrivateDir::open(parent)
         .and_then(|dir| dir.open_file(name))
-        .map_err(io::Error::other)
-}
-
-#[cfg(not(windows))]
-pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| invalid("metadata path has no parent"))?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| invalid("metadata path has no name"))?;
-    // An error may follow publication; callers preserve the journal and recover by hashes.
-    PrivateDir::open(parent)
-        .and_then(|dir| dir.write_atomic_durable(name, bytes))
         .map_err(io::Error::other)
 }
 
@@ -263,4 +223,14 @@ pub(super) fn validate_path_has_no_reparse_components(path: &Path) -> io::Result
         }
     }
     Ok(())
+}
+
+// Fresh bootstrap still verifies its private output/state; installed update bundles do not use this.
+#[cfg(windows)]
+pub(super) fn verify_windows_private_path(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+    if metadata.is_dir() {
+        PrivateDir::open(path).map(|_| ()).map_err(io::Error::other)
+    } else {
+        open_private_file(path)?.verify().map_err(io::Error::other)
+    }
 }

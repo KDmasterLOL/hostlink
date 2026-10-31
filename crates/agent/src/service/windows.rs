@@ -33,7 +33,7 @@ use windows::{
 /// # Errors
 /// Refuses unsafe inputs, legacy registrations, pending updates and foreign tasks.
 pub fn install(root: &Path, config: &Path) -> io::Result<()> {
-    let directory = PrivateDir::open(root).map_err(io::Error::other)?;
+    let _directory = PrivateDir::open(root).map_err(io::Error::other)?;
     let absolute = std::path::absolute(root)?;
     let parent = absolute
         .parent()
@@ -46,12 +46,10 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
         ));
     }
     let _lock = mutation_lock(&root)?;
-    crate::update_handoff::ensure_no_pending_windows_handoff(&root)?;
+    crate::update::ensure_no_legacy_update(&root)?;
     let (command, arguments) = action(&root)?;
     let executable = root.join("bin/hostlink-agent.exe");
-    directory
-        .open_file("bin/hostlink-agent.exe")
-        .map_err(io::Error::other)?;
+    crate::update::verify_executable(&root.join("bin/hostlink-agent.exe"))?;
     let config_parent = config
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -112,7 +110,7 @@ pub fn start(root: &Path) -> io::Result<()> {
     let _parent = PrivateDir::open(parent).map_err(io::Error::other)?;
     let root = root.canonicalize()?;
     let _lock = mutation_lock(&root)?;
-    crate::update_handoff::ensure_no_pending_windows_handoff(&root)?;
+    crate::update::ensure_no_legacy_update(&root)?;
     if legacy_run_present(&root)? {
         return Err(invalid(
             "old HKCU Run startup must be removed before starting Task Scheduler",

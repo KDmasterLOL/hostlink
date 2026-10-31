@@ -24,11 +24,17 @@ forwarding for remote browser access. No unauthenticated public bind.
 Use exact host key pins, controller authorized Ed25519 keys, private owned paths,
 bounded concurrency and byte streams, fail-closed security and Windows 7 PS2 support.
 No unmanaged background processes, false success or unbounded retries.
-A minimal Agent-only updater is REQUIRED: exact version/target/SHA, private
-staging, an exclusive updater lock, Agent process shutdown before Linux
-publication, installed-file integrity, recovery on failed publication and
-offline stopped-only Windows update after removal of the current-user Task Scheduler task. Apalis alone
-owns its SQLite job state; service and updater must not inspect its tables.
+A minimal Agent-only updater is REQUIRED: exact version/target/SHA,
+self_update-managed nonsecret archive/bundle staging (native permissions/ACL),
+an exclusive updater lock, Agent process shutdown before Linux publication,
+installed-file integrity, upstream in-process rollback on failed publication,
+and offline stopped-only Windows update after removal of the current-user
+Task Scheduler task. Apalis alone owns its SQLite job state; service and
+updater must not inspect its tables.
+Under the explicit 2026-10-31 user trade-off for 1C-1147, no bespoke Windows
+staging ACL hardening or durable update journal is required. Sudden kill/power loss
+may leave bin missing; there is no automatic crash recovery. Persistent
+state/jobs/keys and the install root remain private-fs protected.
 Queued tasks may resume after the Agent restarts. It is NOT
 another SSH transport, not a general release engine and not the Toolkit updater.
 Changes to real servers require independently verified disposable scope; do not

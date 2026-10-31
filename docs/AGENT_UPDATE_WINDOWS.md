@@ -1,63 +1,56 @@
-# Windows Agent offline update (1C-1114)
+# Windows Agent offline URL update (1C-1147)
 
-Windows updates require a fully stopped, unregistered Agent. Live update,
-maintenance mode, one-use candidate admission, automatic restart and health
-handoff have been removed. The updater never changes Task Scheduler or HKCU.
-An installed task (even stopped) or an old root-derived HKCU Run registration
-is an error. Historical marker/VBS files alone do not block an offline update.
-Remove the owned task before updating and explicitly reinstall/start it
-afterwards. Existing active legacy installations require stopping and removing
-their old autorun registration with the matching old executable.
-Service status does not attest the installed binary SHA or probe SSH. Package
-integrity is checked by this updater's exact manifest and journal verification.
+Use a fully stopped, unregistered Agent. Stop/remove its current-user Task Scheduler
+task with the existing service commands, then invoke a verified separate copy of
+hostlink-agent.exe beneath the private root, **outside bin**, with:
 
-The supported updater root remains the exact OS-resolved LocalAppData/HostLink/Agent
-with protected owner-only ACLs on Agent and its immediate parent.
-Vendored `private-fs` opens and verifies these directories without following
-symlink/reparse components. Its strict Windows DACL policy is described in
-[`VENDOR.md`](../Vendor/private-fs/VENDOR.md); directories use protected
-owner-only `OICI` inheritance and regular files use noninheritable
-owner-only ACLs. Archive staging files are created privately at birth,
-the recovery journal uses the crate's durable atomic publication, and the
-same update/runner locks remain mandatory.
-Run the update command from a separate private executable beneath that root
-on the same volume, not from the executable being replaced. Keep the existing
-CLI syntax: `update --root ROOT --archive ZIP --sha256 SHA --target TARGET
---version VERSION`. No package lookup, implicit download or version guessing.
-The archive must be beneath ROOT.
+```text
+hostlink-agent.exe update --root ROOT --url EXACT_HTTPS_URL --sha256 INDEPENDENT_SHA256 --target EXACT_TARGET --version EXACT_VERSION
+```
 
-The updater holds the exclusive update lock and the existing Agent process
-lifetime lock for the entire transaction. The latter is an OS file lock, not
-an Apalis lock/table or a custom PID ownership record. It refuses a running
-Agent and conservatively checks the installed image against the OS process
-snapshot; an unreadable matching image is an error. Registration absence and
-stopped state are checked again before publication. Concurrent official Agent
-startup cannot acquire the runtime lock. Service install/start are serialized
-against update, and foreground/logon startup rejects any pending journal.
+The updater does not stop/remove/register/start a task or change HKCU. An installed
+task (even stopped), legacy autorun registration, held runner/update lock or active
+installed Agent image is an error. It never kills a PID. The root remains the exact
+OS-resolved LocalAppData/HostLink/Agent, with private-fs protected root and parent,
+without symlink/reparse aliases. Win7 uses SHGetFolderPathW and existing process
+snapshot APIs. `same-file 1.0.6` compares file identities for the separate updater
+and matching running images, avoiding a second hand-written Windows file-ID API.
 
-Archive SHA-256, exact version/target, bounded ZIP structure and member digests,
-installed inventory, private staging/ACLs and hardlink/reparse defenses remain.
-`self_update` Extract/MoveAll remains the publication implementation. Existing
-support scripts must match both old and new manifests; changing package support
-files in this transaction is still unsupported and fails closed.
+Only one installed updater exists: high-level self_update custom::Update, pinned to
+1.3.1. Its ReleaseSource contains exactly the supplied URL/version/target. SHA-256,
+bounded ZIP/member/manifest checks and installed inventory are mandatory. Redirects
+and retries are disabled; the download timeout is 30 seconds. There is no remote
+release discovery, local ZIP fallback, provider fallback or "latest" selection.
 
-Before publication, the updater durably records exact old/new executable and
-metadata hashes plus verified private backups under `.updates`. It reads back
-the full published inventory before success. Failed publication restores and
-verifies the old inventory. On interruption, retrying offline uses the journal
-and hashes to finish a fully published installation, restore a partial one, or
-preserve ambiguous state with an error. Recovery never starts an Agent.
-Retired `RESTARTED` live-handoff journals are rejected for manual investigation;
-legacy maintenance state is never silently converted. Unknown artifacts,
-untrusted backups and changed metadata remain errors. Enrollment, credentials
-and Apalis jobs are retained and no SQLite tables are inspected.
+Downloaded archives, temporary bundles and installed bin are **nonsecret**, using
+upstream native temporary filesystem permissions/ACLs. No private-fs ACL hardening
+is applied to those updater files. Persistent root, state, jobs, keys, configuration
+and OS lock files retain their existing private-fs protection. The updater does not
+open SQLite or interpret job state; pending tasks survive for the next Agent start.
 
-`service stop` delegates to Task Scheduler termination and does **not** guarantee
-graceful shutdown or descendant cleanup. Interrupted Apalis commands may replay
-with repeated side effects. Prefer foreground Ctrl+C when a cooperative shutdown
-is required; offline update still requires task removal and stopped evidence.
+The verify_binary hook checks the extracted files, replaces manifest.json with
+format-2 install.json and validates the exact bin inventory before the library
+publishes the entire bundle. This updates the executable, all support scripts and
+metadata together. Validated bin/install.json takes precedence; only an absent
+bin metadata file permits validated legacy format-1 root/install.json. Malformed,
+symlinked or mismatching bin metadata is an error, never a fallback. Legacy root
+metadata is retained unchanged; fresh bootstrap interfaces/output remain format 1.
 
-Native Windows 11 and Win7 SP1 x64/x86 offline update/recovery, task logon,
-termination, concurrency and rollback acceptance is **NOT RUN** for this change.
-Linux tests and generic MSVC check/clippy only establish their stated evidence.
-No installed Agent, real profile or production machine is a permitted test target.
+On an ordinary publication error self_update attempts to restore the old bundle.
+Rollback is best-effort; a failed restoration is logged upstream and the original
+error is returned. **There is no durable journal or automatic recovery after kill
+or power loss. A kill between renames can leave bin absent and an unnamed stash.**
+Stop and reconcile the installation manually in that case; do not claim the Agent
+was updated. Existing retired `.updates/handoff.json` or `publication.json` causes
+a refusal and is never replayed/deleted by the new updater. No health restart runs.
+After success explicitly reinstall/start the owned task. Service status is OS
+registration/running state, not binary SHA or SSH health attestation.
+
+The PowerShell 2-compatible Update-HostLink-Agent.ps1 wrapper forwards the URL pins
+to the supplied separate updater and propagates failure. Run-HostLink-Agent.ps1
+accepts a native-ACL bundle while retaining private root/config checks. The
+first-install scripts and bootstrap-verify/bootstrap-finalize commands are retained.
+
+Native Windows11/Win7 x64/x86, PowerShell 2, Scheduler concurrency and actual process
+checks remain separate acceptance gates. Cross checks are compile/static evidence.
+See [implementation and verification](SELF_UPDATE_REWRITE.md).

@@ -8,7 +8,6 @@ use std::{
 
 pub(in crate::update) struct PrivateTempDir {
     path: PathBuf,
-    cleanup: bool,
 }
 
 impl PrivateTempDir {
@@ -20,25 +19,16 @@ impl PrivateTempDir {
             .map_err(io::Error::other)?;
         Ok(Self {
             path: parent.join(name),
-            cleanup: true,
         })
     }
 
     pub(in crate::update) fn path(&self) -> &Path {
         &self.path
     }
-
-    #[cfg(windows)]
-    pub(in crate::update) fn preserve(&mut self) {
-        self.cleanup = false;
-    }
 }
 
 impl Drop for PrivateTempDir {
     fn drop(&mut self) {
-        if !self.cleanup {
-            return;
-        }
         // Refuse cleanup if the owned staging root has become a link or lost privacy.
         let cleanup = PrivateDir::open(&self.path)
             .map_err(io::Error::other)

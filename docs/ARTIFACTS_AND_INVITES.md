@@ -67,6 +67,6 @@ All fixture processes, keys, Hub state, Caddy data, SSH authorization projection
 
 ## Windows package scripts
 
-`Run-HostLink-Agent.ps1` starts the installed executable in the current interactive user session using the root's `state/agent.json`, and checks owner identity and reparse points. It does not install or create a service. `Update-HostLink-Agent.ps1` validates the requested local selection and then returns explicit `Unsupported`; Windows executable replacement stays unavailable until the Agent-owned stopped-process handoff exists. It never reports update success or changes installed files.
+`Run-HostLink-Agent.ps1` starts the installed executable unelevated with the root's private `state/agent.json`. Root/config retain owner-only checks; the nonsecret bundle rejects reparse points and uses native permissions/ACLs. `Update-HostLink-Agent.ps1 -Url ... -Sha256 ... -Target ... -Version ... -Updater ...` invokes the real high-level updater after the operator stops/removes the current-user task and supplies a verified separate executable beneath the root, outside bin. It performs no task registration/removal or automatic restart. See [the updater contract](SELF_UPDATE_REWRITE.md).
 
 The scripts use Windows PowerShell 2 syntax. A source review or modern PowerShell parser does not replace a native PS2 run on Windows 7 x64 and true 32-bit Windows 7 x86.

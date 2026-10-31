@@ -54,7 +54,7 @@ where
     lifetime.try_lock().map_err(io::Error::other)?;
     #[cfg(windows)]
     if let Some(root) = config.jobs_root.parent() {
-        crate::update_handoff::ensure_no_pending_windows_handoff(root)?;
+        crate::update::ensure_no_legacy_update(root)?;
     }
     let prepared = ssh::prepare(config)?;
     let cancellation = processkit::CancellationToken::new();

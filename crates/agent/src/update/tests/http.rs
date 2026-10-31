@@ -1,0 +1,268 @@
+//! Real HTTP, real high-level self_update and disposable Agent roots; no transport mocks.
+use super::*;
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    thread,
+    time::Duration,
+};
+
+struct Server {
+    origin: String,
+    stop: Arc<AtomicBool>,
+    requests: Arc<AtomicUsize>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+impl Server {
+    fn start(body: Vec<u8>, redirect: Option<&str>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::clone(&stop);
+        let received = Arc::clone(&requests);
+        let headers=redirect.map_or_else(||format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()),
+            |url|format!("HTTP/1.1 302 Found\r\nLocation: {url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"));
+        let worker = thread::spawn(move || {
+            while !stopped.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let mut request = [0; 8192];
+                        let count = stream.read(&mut request).unwrap();
+                        assert!(count > 0);
+                        received.fetch_add(1, Ordering::SeqCst);
+                        stream.write_all(headers.as_bytes()).unwrap();
+                        stream.write_all(&body).unwrap();
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(e) => panic!("fixture accept: {e}"),
+                }
+            }
+        });
+        Self {
+            origin,
+            stop,
+            requests,
+            worker: Some(worker),
+        }
+    }
+    fn url(&self) -> String {
+        format!("{}/v2.0.0/hostlink-agent-{TARGET}.zip", self.origin)
+    }
+}
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.worker.take().unwrap().join().unwrap();
+    }
+}
+
+#[test]
+fn migration_idempotency_and_same_version_new_digest_use_real_high_level_update() {
+    let fixture = Fixture::new();
+    let before = fixture.preserved();
+    let body = package("2.0.0", b"new executable", false);
+    let server = Server::start(body.clone(), None);
+    let request = fixture.request(&server.url(), &body, "2.0.0");
+    assert!(matches!(
+        apply(&request).unwrap(),
+        AgentUpdateOutcome::Installed { .. }
+    ));
+    assert_eq!(installed::read(&fixture.root).unwrap().format, 2);
+    assert_eq!(fixture.preserved(), before);
+    assert!(!fixture.root.join("jobs/jobs.db").exists());
+    assert!(matches!(
+        apply(&request).unwrap(),
+        AgentUpdateOutcome::AlreadyCurrent { .. }
+    ));
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+    let replacement = package("2.0.0", b"different exact executable", false);
+    let other = Server::start(replacement.clone(), None);
+    assert!(matches!(
+        apply(&fixture.request(&other.url(), &replacement, "2.0.0")).unwrap(),
+        AgentUpdateOutcome::Installed { .. }
+    ));
+    assert_eq!(
+        fs::read(fixture.root.join("bin/hostlink-agent")).unwrap(),
+        b"different exact executable"
+    );
+    assert_eq!(fixture.preserved(), before);
+    let mut conflict = request.clone();
+    conflict.artifact.sha256 = digest(&replacement);
+    conflict.artifact.version = "2.0.1".into();
+    assert!(apply(&conflict).is_err());
+}
+
+#[test]
+fn changed_download_wrong_manifest_symlink_and_redirect_preserve_install() {
+    let good = package("2.0.0", b"new executable", false);
+    for body in [
+        package("2.0.0", b"changed executable", false),
+        package("2.0.1", b"new executable", false),
+        package("2.0.0", b"new executable", true),
+    ] {
+        let fixture = Fixture::new();
+        let before = fixture.preserved();
+        let server = Server::start(body.clone(), None);
+        let mut request = fixture.request(&server.url(), &body, "2.0.0");
+        if body == package("2.0.0", b"changed executable", false) {
+            request.artifact.sha256 = digest(&good);
+        }
+        assert!(apply(&request).is_err());
+        assert_eq!(
+            installed::read(&fixture.root).unwrap().installed_version,
+            "1.0.0"
+        );
+        assert_eq!(fixture.preserved(), before);
+    }
+    let destination = Server::start(good.clone(), None);
+    let redirect = Server::start(Vec::new(), Some(&destination.url()));
+    let fixture = Fixture::new();
+    assert!(apply(&fixture.request(&redirect.url(), &good, "2.0.0")).is_err());
+    assert_eq!(destination.requests.load(Ordering::SeqCst), 0);
+    // The library normally resolves symlink bundle destinations; HostLink rejects them first.
+    fs::rename(fixture.root.join("bin"), fixture.root.join("alias-target")).unwrap();
+    std::os::unix::fs::symlink(fixture.root.join("alias-target"), fixture.root.join("bin"))
+        .unwrap();
+    assert!(apply(&fixture.request(&destination.url(), &good, "2.0.0")).is_err());
+    assert_eq!(destination.requests.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn upstream_bundle_ordinary_publication_error_restores_old_tree() {
+    let fixture = Fixture::new();
+    let body = package("2.0.0", b"new executable", false);
+    let server = Server::start(body.clone(), None);
+    let request = fixture.request(&server.url(), &body, "2.0.0");
+    // Fault through the public upstream hook: after staging, remove the source name.
+    // swap_bundle then stashes old bin, fails to rename this source and restores old bin.
+    let reached = Arc::new(AtomicBool::new(false));
+    let hook_reached = Arc::clone(&reached);
+    let transport = ureq::Agent::config_builder()
+        .proxy(None)
+        .max_redirects(0)
+        .timeout_global(Some(Duration::from_secs(5)))
+        .build()
+        .new_agent();
+    let result = self_update::backends::custom::Update::configure()
+        .source(request.artifact.clone())
+        .release_tag("2.0.0")
+        .current_version("1.0.0")
+        .target(TARGET)
+        .bin_name("hostlink-agent")
+        .bundle_path_in_archive(format!("hostlink-agent-{TARGET}"))
+        .bundle_install_path(fixture.root.join("bin"))
+        .no_confirm(true)
+        .show_output(false)
+        .retries(0)
+        .verify_checksum(self_update::Checksum::Sha256(digest(&body)))
+        .ureq_agent(transport)
+        .verify_binary(move |path| {
+            hook_reached.store(true, Ordering::SeqCst);
+            fs::rename(path, path.with_file_name("removed-by-fault"))?;
+            Ok(())
+        })
+        .build()
+        .unwrap()
+        .update();
+    assert!(result.is_err());
+    assert!(
+        reached.load(Ordering::SeqCst),
+        "rollback fault hook must actually execute"
+    );
+    assert_eq!(
+        installed::read(&fixture.root).unwrap().installed_version,
+        "1.0.0"
+    );
+    assert_eq!(
+        fs::read(fixture.root.join("bin/hostlink-agent")).unwrap(),
+        b"old executable"
+    );
+}
+
+#[tokio::test]
+async fn pending_native_apalis_task_and_private_state_survive_update() {
+    use crate::jobs::{CommandJob, JobStore};
+    use apalis_core::{backend::TaskSink, task::builder::TaskBuilder};
+    use apalis_sqlite::{Config, SqliteStorage};
+    let fixture = Fixture::new();
+    let jobs = fixture.root.join("jobs");
+    JobStore::initialize_fresh(&jobs)
+        .await
+        .unwrap()
+        .close()
+        .await;
+    let pool = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new().filename(jobs.join("jobs.db")),
+    )
+    .await
+    .unwrap();
+    let id = ulid::Ulid::generate().to_string();
+    let task = TaskBuilder::new(CommandJob {
+        program: "echo".into(),
+        args: vec!["disposable".into()],
+        cwd: None,
+    })
+    .task_id(id.parse().unwrap())
+    .build();
+    let mut storage =
+        SqliteStorage::<CommandJob>::new(&pool).with_config(Config::default().queue("commands"));
+    storage.push_task(task).await.unwrap();
+    pool.close().await;
+    let db = fs::read(jobs.join("jobs.db")).unwrap();
+    let state = fixture.preserved();
+    let body = package("2.0.0", b"new executable", false);
+    let server = Server::start(body.clone(), None);
+    apply(&fixture.request(&server.url(), &body, "2.0.0")).unwrap();
+    assert_eq!(fs::read(jobs.join("jobs.db")).unwrap(), db);
+    assert_eq!(fixture.preserved(), state);
+    let pool = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(jobs.join("jobs.db"))
+            .read_only(true),
+    )
+    .await
+    .unwrap();
+    let saved: String = sqlx::query_scalar("SELECT id FROM Jobs WHERE id=?")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(saved, id);
+    pool.close().await;
+}
+
+#[test]
+fn legacy_same_archive_is_migrated_once() {
+    let fixture = Fixture::new();
+    let body = package("1.0.0", b"old executable", false);
+    assert_eq!(
+        installed::read(&fixture.root)
+            .unwrap()
+            .installed_package_sha256,
+        digest(&body)
+    );
+    let server = Server::start(body.clone(), None);
+    let url = format!("{}/v1.0.0/hostlink-agent-{TARGET}.zip", server.origin);
+    let request = fixture.request(&url, &body, "1.0.0");
+    assert!(matches!(
+        apply(&request).unwrap(),
+        AgentUpdateOutcome::Installed { .. }
+    ));
+    assert_eq!(installed::read(&fixture.root).unwrap().format, 2);
+    assert!(matches!(
+        apply(&request).unwrap(),
+        AgentUpdateOutcome::AlreadyCurrent { .. }
+    ));
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+}

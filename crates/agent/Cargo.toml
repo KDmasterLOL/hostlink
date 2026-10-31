@@ -26,9 +26,10 @@ ulid.workspace = true
 secrecy.workspace = true
 processkit.workspace = true
 rand.workspace = true
-self_update = { version = "=1.3.1", default-features = false, features = ["archive-zip", "compression-zip-deflate", "rustls", "ureq"] }
+self_update = { version = "=1.3.1", default-features = false, features = ["archive-zip", "compression-zip-deflate", "rustls", "ureq", "checksums"] }
 hostlink-hub = { path = "../hub", default-features = false }
 reqwest.workspace = true
+ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
 
 apalis-board-api.workspace = true
 axum.workspace = true
@@ -47,6 +48,7 @@ libc = "0.2.189"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "=0.62.2", default-features = false, features = ["Win32_System_Com", "Win32_System_TaskScheduler", "Win32_System_Variant", "Win32_System_Ole"] }
+same-file = "=1.0.6"
 roxmltree = "=0.21.1"
 windows-permissions = "0.2.4"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell"] }

@@ -1,17 +1,14 @@
 //! Package and installed-file identity formats and integrity validation.
 
-use super::private_fs::is_reparse_point;
-use super::private_fs::{file_identities, open_private_file};
-#[cfg(windows)]
-use super::windows::verify_windows_private_path;
-use super::{EXECUTABLE_BASE, invalid, invalid_owned, validate_sha256};
+use super::private_fs::open_private_file;
+use super::{EXECUTABLE_BASE, invalid, invalid_owned};
 use serde::{
     Deserialize, Serialize,
     de::{self, MapAccess, Visitor},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
-    fmt, fs,
+    collections::{BTreeMap, btree_map::Entry},
+    fmt,
     io::{self, Read},
     path::Path,
 };
@@ -103,73 +100,6 @@ pub(super) fn read_install_metadata(path: &Path) -> io::Result<InstallMetadata> 
     }
     serde_json::from_slice(&bytes)
         .map_err(|error| invalid_owned(format!("invalid Agent install metadata: {error}")))
-}
-
-pub(super) fn validate_installed(
-    bin_root: &Path,
-    metadata: &InstallMetadata,
-    target: &str,
-) -> io::Result<()> {
-    if metadata.format != 1 || metadata.target != target {
-        return Err(invalid(
-            "installed Agent metadata has a different format or target",
-        ));
-    }
-    semver::Version::parse(&metadata.installed_version)
-        .map_err(|_| invalid("installed Agent version metadata is malformed"))?;
-    validate_sha256(&metadata.installed_package_sha256)
-        .map_err(|_| invalid("installed Agent archive digest metadata is malformed"))?;
-    let bin_metadata = fs::symlink_metadata(bin_root)?;
-    if !bin_metadata.is_dir()
-        || bin_metadata.file_type().is_symlink()
-        || is_reparse_point(&bin_metadata)
-    {
-        return Err(invalid(
-            "installed Agent bin directory is missing or unsafe",
-        ));
-    }
-    #[cfg(windows)]
-    verify_windows_private_path(bin_root, &bin_metadata)?;
-    private_fs::PrivateDir::open(bin_root).map_err(io::Error::other)?;
-    let expected = package_files(target).into_iter().collect::<BTreeSet<_>>();
-    let mut actual_names = BTreeSet::new();
-    for entry in fs::read_dir(bin_root)? {
-        let entry = entry?;
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| invalid("installed Agent filename is not valid UTF-8"))?;
-        let file_type = entry.file_type()?;
-        if !file_type.is_file() || file_type.is_symlink() || !actual_names.insert(name) {
-            return Err(invalid(
-                "installed Agent bin contains an unsafe or unexpected entry",
-            ));
-        }
-        #[cfg(windows)]
-        verify_windows_private_path(&entry.path(), &entry.metadata()?)?;
-    }
-    if actual_names != expected {
-        return Err(invalid(
-            "installed Agent bin inventory differs from its exact package",
-        ));
-    }
-    let actual = file_identities(bin_root, &package_files(target))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        for name in package_files(target) {
-            let mode = fs::metadata(bin_root.join(&name))?.mode();
-            if mode & 0o022 != 0 || (name == EXECUTABLE_BASE && mode & 0o100 == 0) {
-                return Err(invalid("installed Agent package permissions are unsafe"));
-            }
-        }
-    }
-    if actual != metadata.installed_files {
-        return Err(invalid(
-            "installed Agent files do not match their recorded integrity metadata",
-        ));
-    }
-    Ok(())
 }
 
 pub(super) fn package_files(target: &str) -> Vec<String> {

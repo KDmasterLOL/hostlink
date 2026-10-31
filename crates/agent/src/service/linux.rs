@@ -28,21 +28,7 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
         Ok(_) => return Err(io::Error::other("legacy marker requires migration")),
     }
     let program = root.join("bin/hostlink-agent");
-    let directory = PrivateDir::open(&root).map_err(io::Error::other)?;
-    directory.open_dir("bin").map_err(io::Error::other)?;
-    // private-fs requires data files to be exactly 0600, so it cannot acquire
-    // a runnable Agent (0700). Keep this executable-only service invariant;
-    // current_exe below also requires its exact canonical installed identity.
-    let executable = fs::symlink_metadata(&program)?;
-    // SAFETY: geteuid only reads this process's effective user identity.
-    let uid = unsafe { libc::geteuid() };
-    if !executable.is_file()
-        || executable.uid() != uid
-        || executable.mode() & 0o077 != 0
-        || executable.nlink() != 1
-    {
-        return Err(io::Error::other("unsafe installed Agent executable"));
-    }
+    crate::update::verify_executable(&root.join("bin/hostlink-agent"))?;
     let parent = config
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())

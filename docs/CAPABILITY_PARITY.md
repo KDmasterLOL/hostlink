@@ -1,5 +1,9 @@
 # HostLink rewrite тАФ externally observable capability parity
 
+> 1C-1147 supersedes prior updater staging, CLI and journal guarantees. See
+> [the current updater contract](SELF_UPDATE_REWRITE.md); historical evidence below
+> does not attest this source revision.
+
 > 1C-1114 supersedes the historical Windows maintenance/live-handoff details below:
 > Windows now uses a current-user Task Scheduler logon task and offline stopped-only
 > update after task removal. See [lifecycle](AGENT_LIFECYCLE.md) and

@@ -1,21 +1,22 @@
 //! Fresh-install package verification and enrollment finalization.
 
+use super::installed::validate_installed;
 use super::{
     INSTALL_METADATA, MAX_ENTRY_BYTES, MAX_MANIFEST_BYTES, PACKAGE_MANIFEST, invalid,
     invalid_owned, supported_targets, target_matches_runtime, validate_sha256,
 };
 use crate::update::archive::validate_and_stage_archive;
 use crate::update::manifest::{
-    BootstrapReceipt, InstallMetadata, package_files, read_install_metadata, validate_installed,
+    BootstrapReceipt, InstallMetadata, package_files, read_install_metadata,
 };
 #[cfg(not(windows))]
 use crate::update::private_fs::sync_directory;
+#[cfg(windows)]
+use crate::update::private_fs::verify_windows_private_path;
 use crate::update::private_fs::{
     hash_file, is_reparse_point, open_private_file, validate_path_has_no_reparse_components,
     validate_user_owned_root,
 };
-#[cfg(windows)]
-use crate::update::windows::verify_windows_private_path;
 use private_fs::PrivateDir;
 use std::{
     fs,
@@ -162,7 +163,8 @@ pub fn finalize_fresh_install(root: &Path) -> io::Result<()> {
 
     let metadata_path = root.join(INSTALL_METADATA);
     let installed = read_install_metadata(&metadata_path)?;
-    if !supported_targets().contains(&installed.target.as_str())
+    if installed.format != 1
+        || !supported_targets().contains(&installed.target.as_str())
         || !target_matches_runtime(&installed.target)
         || installed.installed_version != env!("CARGO_PKG_VERSION")
     {
