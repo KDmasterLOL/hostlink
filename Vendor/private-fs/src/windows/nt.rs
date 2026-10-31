@@ -18,8 +18,7 @@ use std::{
 
 // Pure identity policy is kept separate from the native queries for testing.
 pub(super) mod identity {
-    use super::super::bindings::*;
-    use crate::{Error, Result};
+    use super::*;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(in super::super) enum Identity {
@@ -51,39 +50,26 @@ pub(super) mod identity {
         volume_flags(flags)?;
         // ReFS needs all 128 bits; remote NTFS cannot supply local identity guarantees.
         local_disk(device)?;
-        if filesystem != [b'N' as u16, b'T' as u16, b'F' as u16, b'S' as u16] {
-            return Err(Error::UnsupportedFilesystem {
+        (filesystem == (*b"NTFS").map(u16::from))
+            .then_some(())
+            .ok_or(Error::UnsupportedFilesystem {
                 capability: "local NTFS file identity on legacy Windows",
-            });
-        }
-        Ok(())
+            })
     }
 
     pub(in super::super) fn local_disk(device: &FILE_FS_DEVICE_INFORMATION) -> Result<()> {
-        if device.DeviceType != FILE_DEVICE_DISK as u32
-            || device.Characteristics & FILE_REMOTE_DEVICE as u32 != 0
-        {
-            return Err(Error::UnsupportedFilesystem {
+        (device.DeviceType == FILE_DEVICE_DISK as u32
+            && device.Characteristics & FILE_REMOTE_DEVICE as u32 == 0)
+            .then_some(())
+            .ok_or(Error::UnsupportedFilesystem {
                 capability: "local Windows disk device",
-            });
-        }
-        Ok(())
-    }
-
-    pub(in super::super) fn volume_flags(flags: u32) -> Result<()> {
-        if flags & FILE_PERSISTENT_ACLS as u32 == 0 {
-            return Err(Error::UnsupportedFilesystem {
-                capability: "persistent Windows ACLs",
-            });
-        }
-        Ok(())
+            })
     }
 }
-pub(super) use identity::{Identity, volume_flags};
+pub(super) use identity::Identity;
 
 pub(super) mod open_policy {
-    use super::super::bindings::*;
-    use crate::{Error, Result};
+    use super::*;
 
     pub(in super::super) fn unsupported_flag(status: NTSTATUS) -> bool {
         matches!(status, STATUS_INVALID_PARAMETER | STATUS_INVALID_INFO_CLASS)
@@ -113,17 +99,16 @@ pub(super) mod open_policy {
     }
 
     pub(in super::super) fn volume_root(target: &[u16]) -> Result<Vec<u16>> {
-        let prefix: Vec<_> = r"\Device\HarddiskVolume".encode_utf16().collect();
-        let Some(number) = target.strip_prefix(prefix.as_slice()) else {
-            return Err(Error::InvalidRelativePath);
-        };
-        if number.is_empty()
-            || !number
-                .iter()
-                .all(|&unit| u8::try_from(unit).is_ok_and(|byte| byte.is_ascii_digit()))
-        {
-            return Err(Error::InvalidRelativePath);
-        }
+        let prefix = (*b"\\Device\\HarddiskVolume").map(u16::from);
+        target
+            .strip_prefix(prefix.as_slice())
+            .filter(|number| {
+                !number.is_empty()
+                    && number
+                        .iter()
+                        .all(|&unit| (b'0' as u16..=b'9' as u16).contains(&unit))
+            })
+            .ok_or(Error::InvalidRelativePath)?;
         let mut root = target.to_vec();
         root.push(b'\\' as u16);
         Ok(root)
@@ -157,21 +142,8 @@ fn identity(handle: impl AsHandle) -> Result<Identity> {
 }
 
 fn legacy_identity(handle: impl AsHandle) -> Result<Identity> {
-    let mut flags = 0;
     let mut filesystem = [0u16; 261];
-    // SAFETY: live handle and writable scalar/UTF-16 outputs of the stated sizes.
-    security::bool_result(unsafe {
-        GetVolumeInformationByHandleW(
-            handle.as_handle().as_raw_handle(),
-            ptr::null_mut(),
-            0,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &mut flags,
-            filesystem.as_mut_ptr(),
-            filesystem.len() as u32,
-        )
-    })?;
+    let flags = volume_information(handle.as_handle(), &mut filesystem)?;
     let device = device_information(handle.as_handle())?;
     let end = filesystem
         .iter()
@@ -309,12 +281,8 @@ fn open_access(
     let desired = if creating {
         FILE_ALL_ACCESS as u32
     } else {
-        (FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE) as u32
-            | if directory {
-                FILE_LIST_DIRECTORY as u32
-            } else {
-                FILE_READ_DATA as u32
-            }
+        // FILE_READ_DATA and FILE_LIST_DIRECTORY are the same access bit.
+        (FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE) as u32
     };
     let desired = desired_override.unwrap_or(desired);
     let mut handle = ptr::null_mut();
@@ -425,8 +393,14 @@ pub(super) fn kind(handle: impl AsHandle, directory: bool) -> Result<()> {
     Ok(())
 }
 pub(super) fn volume(handle: impl AsHandle) -> Result<()> {
+    volume_flags(volume_information(handle, &mut [])?)
+}
+fn volume_information(handle: impl AsHandle, filesystem: &mut [u16]) -> Result<u32> {
     let mut flags = 0;
-    // SAFETY: optional buffers are null/zero; flags is a writable u32 output.
+    let name = filesystem
+        .first_mut()
+        .map_or(ptr::null_mut(), ptr::from_mut);
+    // SAFETY: live handle, writable flags and bounded optional UTF-16 output.
     security::bool_result(unsafe {
         GetVolumeInformationByHandleW(
             handle.as_handle().as_raw_handle(),
@@ -435,11 +409,19 @@ pub(super) fn volume(handle: impl AsHandle) -> Result<()> {
             ptr::null_mut(),
             ptr::null_mut(),
             &mut flags,
-            ptr::null_mut(),
-            0,
+            name,
+            filesystem.len() as u32,
         )
     })?;
-    volume_flags(flags)
+    Ok(flags)
+}
+pub(super) fn volume_flags(flags: u32) -> Result<()> {
+    if flags & FILE_PERSISTENT_ACLS as u32 == 0 {
+        return Err(Error::UnsupportedFilesystem {
+            capability: "persistent Windows ACLs",
+        });
+    }
+    Ok(())
 }
 pub(super) fn metadata(
     handle: impl AsHandle,
