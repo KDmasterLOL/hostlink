@@ -8,12 +8,12 @@ use crate::update::archive::validate_and_stage_archive;
 use crate::update::manifest::{
     BootstrapReceipt, InstallMetadata, package_files, read_install_metadata, validate_installed,
 };
+#[cfg(not(windows))]
+use crate::update::private_fs::sync_directory;
 use crate::update::private_fs::{
     hash_file, is_reparse_point, open_private_file, validate_path_has_no_reparse_components,
     validate_user_owned_root,
 };
-#[cfg(not(windows))]
-use crate::update::private_fs::{sync_directory, validate_private_directory};
 #[cfg(windows)]
 use crate::update::windows::verify_windows_private_path;
 use private_fs::PrivateDir;
@@ -146,7 +146,7 @@ pub fn finalize_fresh_install(root: &Path) -> io::Result<()> {
         return Err(invalid("fresh Agent state directory is missing or unsafe"));
     }
     #[cfg(not(windows))]
-    validate_private_directory(&state, &state_metadata)?;
+    PrivateDir::open(&state).map_err(io::Error::other)?;
     #[cfg(windows)]
     verify_windows_private_path(&state, &state_metadata)?;
     let config = state.join("agent.json");

@@ -8,9 +8,9 @@ use super::{
 };
 use crate::update::manifest::{InstallMetadata, read_install_metadata, validate_installed};
 use crate::update::private_fs::{
-    create_private_directory, is_reparse_point, open_private_file, sync_directory,
-    validate_private_directory, write_atomic,
+    create_private_directory, is_reparse_point, open_private_file, sync_directory, write_atomic,
 };
+use private_fs::PrivateDir;
 use std::{
     fs::{self, File},
     io::{self, Read},
@@ -188,7 +188,9 @@ pub(super) fn recover_interrupted_publication(root: &Path) -> io::Result<()> {
         {
             return Err(invalid("Agent update recovery directory is unsafe"));
         }
-        Ok(metadata) => validate_private_directory(&updates, &metadata)?,
+        Ok(_) => {
+            PrivateDir::open(&updates).map_err(io::Error::other)?;
+        }
     }
     let journal_path = updates.join("publication.json");
     match fs::symlink_metadata(&journal_path) {

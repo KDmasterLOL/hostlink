@@ -2,7 +2,7 @@
 
 use super::super::invalid;
 pub(in crate::update) use super::super::private_fs::create_private_directory;
-use super::super::private_fs::open_private_file;
+use super::super::private_fs::{is_reparse_point, open_private_file};
 use private_fs::PrivateDir;
 use sha2::{Digest, Sha256};
 use std::{
@@ -212,17 +212,6 @@ pub(super) fn verify_windows_private_file(path: &Path) -> io::Result<()> {
 #[cfg(windows)]
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
-}
-
-#[cfg(windows)]
-fn is_reparse_point(metadata: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    metadata.file_attributes() & 0x400 != 0
-}
-
-#[cfg(not(windows))]
-fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
-    false
 }
 
 #[cfg(windows)]

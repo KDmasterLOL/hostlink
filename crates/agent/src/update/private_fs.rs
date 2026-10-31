@@ -204,11 +204,6 @@ pub(super) fn create_private_directory(path: &Path) -> io::Result<()> {
         .map_err(io::Error::other)
 }
 
-#[cfg(not(windows))]
-pub(super) fn validate_private_directory(path: &Path, _metadata: &fs::Metadata) -> io::Result<()> {
-    PrivateDir::open(path).map(|_| ()).map_err(io::Error::other)
-}
-
 pub(super) fn set_staged_file_permissions(path: &Path, relative: &str) -> io::Result<()> {
     #[cfg(unix)]
     {

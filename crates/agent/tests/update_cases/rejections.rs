@@ -38,6 +38,30 @@ fn symlinked_archive_is_rejected_without_changes() {
     );
     drop(outside_temp);
 }
+#[cfg(unix)]
+#[test]
+fn archive_with_symlinked_parent_inside_install_root_is_rejected() {
+    use std::os::unix::fs::symlink;
+    let (_temp, root) = install_root();
+    let (archive, digest) = package(&root, "2.0.0", b"new exact Agent binary");
+    let archive_dir = root.join("archives");
+    private_fs::PrivateDir::open(&root)
+        .unwrap()
+        .create_dir("archives")
+        .unwrap();
+    let relocated = archive_dir.join("package.zip");
+    fs::rename(&archive, &relocated).unwrap();
+    let alias = root.join("archive-alias");
+    symlink(&archive_dir, &alias).unwrap();
+
+    let update = request(&root, &alias.join("package.zip"), "2.0.0", digest);
+    assert!(apply_empty_jobs(&update).is_err());
+    assert_eq!(
+        fs::read(root.join("bin/hostlink-agent")).unwrap(),
+        b"old installed Agent binary"
+    );
+}
+
 #[test]
 fn archive_manifest_must_bind_exact_version_and_target() {
     let (_temp, root) = install_root();

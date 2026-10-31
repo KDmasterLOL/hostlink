@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::{self, Read, Write},
+    io::{self, Read},
     path::{Component, Path, PathBuf},
 };
 use zip::ZipArchive;
@@ -32,21 +32,8 @@ pub(super) fn validate_archive_path(root: &Path, archive: &Path) -> io::Result<P
         ));
     }
     let canonical_root = fs::canonicalize(root)?;
-    let mut current = PathBuf::new();
-    for component in archive.components() {
-        current.push(component.as_os_str());
-        if current == canonical_root {
-            continue;
-        }
-        if current.starts_with(&canonical_root) {
-            let metadata = fs::symlink_metadata(&current)?;
-            if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
-                return Err(invalid(
-                    "Agent archive path contains a link or reparse point",
-                ));
-            }
-        }
-    }
+    // Exact-component no-reparse checking is performed below, after
+    // establishing that the canonical archive belongs to this install root.
     let canonical_archive = fs::canonicalize(archive)?;
     if !canonical_archive.starts_with(&canonical_root) {
         return Err(invalid("Agent archive must be beneath the install root"));
@@ -77,25 +64,19 @@ pub(super) fn validate_and_stage_archive(
         ));
     }
     let mut archive_copy = stage_dir.create("package.zip").map_err(io::Error::other)?;
-    let mut copied = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let count = source.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        copied = copied
-            .checked_add(count as u64)
-            .ok_or_else(|| invalid("Agent archive size overflow"))?;
-        if copied > MAX_ARCHIVE_BYTES {
-            return Err(invalid(
-                "Agent package archive exceeds its compressed size limit",
-            ));
-        }
-        archive_copy.write_all(&buffer[..count])?;
-    }
+    // Enforce the bound before writing a byte beyond it, even if the source
+    // grows after its initial metadata check.
+    let copied = io::copy(
+        &mut (&mut source).take(MAX_ARCHIVE_BYTES),
+        &mut archive_copy,
+    )?;
     if copied == 0 {
         return Err(invalid("Agent package archive is empty"));
+    }
+    if copied == MAX_ARCHIVE_BYTES && source.read(&mut [0_u8; 1])? != 0 {
+        return Err(invalid(
+            "Agent package archive exceeds its compressed size limit",
+        ));
     }
     archive_copy.sync_all().map_err(io::Error::other)?;
     drop(archive_copy);
