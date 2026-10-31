@@ -1,4 +1,5 @@
 //! Bounded SFTP rooted in the configured Agent-owned directory.
+use crate::private_fs::PrivateFileExt;
 use private_fs::{Durability, FileAccess, FileCreation, OpenOptions, PrivateDir};
 use russh_sftp::protocol::{
     Attrs, Data, FileAttributes, Handle, OpenFlags, Status, StatusCode, Version,
@@ -69,7 +70,8 @@ impl SftpSession {
         }
         match directory.open_file(relative) {
             Ok(file) => {
-                let metadata = crate::private_fs::open_file_std(&file)
+                let metadata = file
+                    .try_clone_std()
                     .and_then(|file| file.metadata())
                     .map_err(status_from_io)?;
                 if metadata.len() > MAX_TRANSFER_BYTES {

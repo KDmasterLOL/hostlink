@@ -32,7 +32,8 @@ does not certify production or registered Windows updater deployment.
 | Agent process supervision (SSH, Apalis, tunnel, updater lifetime lock) | `crates/agent/src/runtime.rs` |
 | Agent-local Apalis command queue and Board UI/API | `crates/agent/src/jobs/` (no Client jobs subsystem) |
 | Owner-only private files and Windows ACL | `Vendor/private-fs/` (pinned upstream + Win7 fallback) |
-| Standard OS file locks and OS profile lookup | `crates/agent/src/private_fs/` (small integration only) |
+| Verified-handle → standard `File` conversion for OS locks and Tokio | `crates/agent/src/private_fs.rs` (one extension trait) |
+| Windows 7 LocalAppData lookup for exact updater root | `crates/agent/src/update/private_fs.rs` |
 | Hub v2 endpoints and authoritative registry | `crates/hub/src/server/`; `crates/hub/src/state.rs` |
 | Fresh enrollment and source-pinned installation | `crates/agent/src/enrollment/`; `crates/client/src/bootstrap/` |
 | Linux service lifecycle | `crates/agent/src/service/linux.rs` (`service-manager` + systemd --user) |
@@ -50,11 +51,14 @@ schema using upstream Apalis migrations only. `Vendor/private-fs/` supplies
 nofollow/reparse and hardlink checks, and durable atomic publication.
 Its pinned upstream revision and compatibility deviations are recorded in
 [`Vendor/private-fs/VENDOR.md`](../Vendor/private-fs/VENDOR.md).
-`private_fs/mod.rs` only converts verified file capabilities to standard
-handles for `File::lock`/`File::unlock` and Tokio, preserving exact object
-identity without reopening the path. `private_fs/windows.rs` only resolves
-the OS profile's LocalAppData directory on Win7. There is no separate Agent
-ACL/parser implementation or root/elevation validator. Service install/start
+`private_fs.rs` defines a single `PrivateFileExt::try_clone_std` method:
+it verifies a private file, then clones the already-acquired OS handle for
+standard `File` locking or Tokio (without reopening a path). Lock owners
+open via `PrivateDir` directly; there is no generic `open_lock` wrapper.
+The updater owns Win7-compatible OS profile lookup in `update/private_fs.rs`.
+Converting to `File` does not retain vendored per-I/O revalidation; SFTP
+must treat this as an explicit verification boundary. There is no separate
+Agent ACL/parser implementation or root/elevation validator. Service install/start
 validate the private Agent root and its immediate parent; runtime privilege
 policy belongs to `runtime.rs`. Read-only Task Scheduler status does not
 inspect filesystem permissions. Win7 compatibility uses a local-NTFS legacy

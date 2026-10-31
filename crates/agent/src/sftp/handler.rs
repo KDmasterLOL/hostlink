@@ -60,9 +60,7 @@ impl russh_sftp::server::Handler for SftpSession {
                 },
             )
             .map_err(status_from_private)?;
-        let file = tokio::fs::File::from_std(
-            crate::private_fs::open_file_std(&file).map_err(status_from_io)?,
-        );
+        let file = tokio::fs::File::from_std(file.try_clone_std().map_err(status_from_io)?);
         if create {
             let over_limit = match self.upload_count().await {
                 Ok(count) => count > MAX_TRANSFERS,
@@ -163,7 +161,8 @@ impl russh_sftp::server::Handler for SftpSession {
             .private_directory()?
             .open_file(path.file_name().ok_or(StatusCode::PermissionDenied)?)
             .map_err(status_from_private)?;
-        let m = crate::private_fs::open_file_std(&file)
+        let m = file
+            .try_clone_std()
             .and_then(|file| file.metadata())
             .map_err(status_from_io)?;
         Ok(Attrs {

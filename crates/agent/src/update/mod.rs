@@ -5,6 +5,8 @@
 //! Windows publication is limited to a separately invoked, current-user-private updater. A
 //! registered Agent must be stopped and its task removed before an offline update.
 
+use crate::private_fs::PrivateFileExt;
+use ::private_fs::{FileAccess, FileCreation, OpenOptions, PrivateDir};
 #[cfg(not(windows))]
 use manifest::InstallMetadata;
 #[cfg(not(windows))]
@@ -75,14 +77,36 @@ pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
     private_fs::validate_user_owned_root(&request.install_root)?;
     let archive_path =
         archive::validate_archive_path(&request.install_root, &request.archive_file)?;
-    let update_file = crate::private_fs::open_lock(&request.install_root.join("update.lock"))?;
+    let update_file = PrivateDir::open(std::path::absolute(&request.install_root)?)
+        .map_err(io::Error::other)?
+        .open_file_with(
+            "update.lock",
+            OpenOptions {
+                access: FileAccess::ReadWrite,
+                creation: FileCreation::OpenOrCreate,
+                ..OpenOptions::default()
+            },
+        )
+        .map_err(io::Error::other)?
+        .try_clone_std()?;
     #[cfg(not(windows))]
     update_file.lock()?;
     #[cfg(windows)]
     update_file.try_lock().map_err(io::Error::other)?;
     let _stopped_agent = {
         // This lock describes the Agent process, not any SQLite state.
-        let file = crate::private_fs::open_lock(&request.install_root.join("jobs/runner.lock"))?;
+        let file = PrivateDir::open(std::path::absolute(request.install_root.join("jobs"))?)
+            .map_err(io::Error::other)?
+            .open_file_with(
+                "runner.lock",
+                OpenOptions {
+                    access: FileAccess::ReadWrite,
+                    creation: FileCreation::OpenOrCreate,
+                    ..OpenOptions::default()
+                },
+            )
+            .map_err(io::Error::other)?
+            .try_clone_std()?;
         file.try_lock().map_err(|error| {
             io::Error::new(
                 io::ErrorKind::WouldBlock,

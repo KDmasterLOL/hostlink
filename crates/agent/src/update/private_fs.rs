@@ -29,8 +29,6 @@ pub(super) fn validate_user_owned_root(root: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn validate_windows_update_root(root: &Path) -> io::Result<()> {
-    use crate::private_fs::windows::local_app_data_path;
-
     let profile = local_app_data_path()?;
     let parent = profile.join("HostLink");
     let expected = parent.join("Agent");
@@ -42,6 +40,34 @@ fn validate_windows_update_root(root: &Path) -> io::Result<()> {
         ));
     }
     crate::service::ensure_update_unregistered(&expected)
+}
+
+// The updater has an exact per-user install location; keep profile lookup
+// independent of caller-provided environment variables. SHGetFolderPathW
+// avoids importing newer Known Folder functions on the Win7 build.
+#[cfg(windows)]
+fn local_app_data_path() -> io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::UI::Shell::{CSIDL_LOCAL_APPDATA, SHGetFolderPathW};
+
+    let mut buffer = [0u16; 260];
+    // SAFETY: SHGetFolderPathW writes at most MAX_PATH UTF-16 units.
+    let result = unsafe {
+        SHGetFolderPathW(
+            std::ptr::null_mut(),
+            CSIDL_LOCAL_APPDATA as i32,
+            std::ptr::null_mut(),
+            0,
+            buffer.as_mut_ptr(),
+        )
+    };
+    windows::core::HRESULT(result)
+        .ok()
+        .map_err(io::Error::other)?;
+    let end = buffer.iter().position(|&unit| unit == 0).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "unterminated LocalAppData path")
+    })?;
+    PathBuf::from(std::ffi::OsString::from_wide(&buffer[..end])).canonicalize()
 }
 
 pub(super) fn file_identities(

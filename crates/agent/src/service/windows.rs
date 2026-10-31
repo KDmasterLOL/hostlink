@@ -3,7 +3,8 @@
 //! planif 1.0 only builds registrations, leaving lifecycle ownership here.
 //! windows 0.62's typed property out-parameters exceed this XML identity check.
 use super::ServiceStatus;
-use private_fs::PrivateDir;
+use crate::private_fs::PrivateFileExt;
+use private_fs::{FileAccess, FileCreation, OpenOptions, PrivateDir};
 use sha2::{Digest, Sha256};
 use std::{
     fs::File,
@@ -202,7 +203,18 @@ pub(crate) fn ensure_update_unregistered(root: &Path) -> io::Result<()> {
 }
 
 fn mutation_lock(root: &Path) -> io::Result<File> {
-    let file = crate::private_fs::open_lock(&root.join("update.lock"))?;
+    let file = PrivateDir::open(std::path::absolute(root)?)
+        .map_err(io::Error::other)?
+        .open_file_with(
+            "update.lock",
+            OpenOptions {
+                access: FileAccess::ReadWrite,
+                creation: FileCreation::OpenOrCreate,
+                ..OpenOptions::default()
+            },
+        )
+        .map_err(io::Error::other)?
+        .try_clone_std()?;
     file.try_lock().map_err(io::Error::other)?;
     Ok(file)
 }

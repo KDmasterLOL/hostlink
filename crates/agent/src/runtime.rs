@@ -1,7 +1,8 @@
 //! Process-lifetime Agent supervision: SSH, Apalis jobs and reverse SSH tunnel.
 //! This is not part of the embedded SSH protocol handler.
 
-use crate::{AgentConfig, ssh};
+use crate::{AgentConfig, private_fs::PrivateFileExt, ssh};
+use private_fs::{FileAccess, FileCreation, OpenOptions, PrivateDir};
 use std::{future::Future, io};
 
 /// Serves authenticated SSH/SFTP traffic on the configured loopback listener until shutdown.
@@ -38,7 +39,18 @@ where
     }
     // The Agent owns this process-lifetime lock, not the Apalis job backend.
     // An updater must not replace its executable while it is running.
-    let lifetime = crate::private_fs::open_lock(&config.jobs_root.join("runner.lock"))?;
+    let lifetime = PrivateDir::open(std::path::absolute(&config.jobs_root)?)
+        .map_err(io::Error::other)?
+        .open_file_with(
+            "runner.lock",
+            OpenOptions {
+                access: FileAccess::ReadWrite,
+                creation: FileCreation::OpenOrCreate,
+                ..OpenOptions::default()
+            },
+        )
+        .map_err(io::Error::other)?
+        .try_clone_std()?;
     lifetime.try_lock().map_err(io::Error::other)?;
     #[cfg(windows)]
     if let Some(root) = config.jobs_root.parent() {
