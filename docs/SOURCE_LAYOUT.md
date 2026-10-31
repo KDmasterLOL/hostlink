@@ -50,6 +50,9 @@ fallback, private staging backend, platform publisher or update_handoff journal.
 The cohesive bootstrap/profile filesystem file and end-to-end HTTP test module
 are permitted to exceed the approximate 200-line target. See
 [SELF_UPDATE_REWRITE.md](SELF_UPDATE_REWRITE.md) for the authorized durability change.
+For the distinction between the one installed-update `self_update` call and
+first-install bootstrap code, see the
+[Agent update module README](../crates/agent/src/update/README.md).
 
 `jobs/mod.rs` exposes only the typed `CommandJob`, local queue and private
 updater contract. `jobs/store.rs` configures the native Apalis SQLite
