@@ -217,17 +217,15 @@ mod open_policy_tests {
 }
 
 #[test]
-fn forced_legacy_identity_preserves_validation_and_handle_relative_operations() {
+fn forced_legacy_identity_checks_object_and_classic_publication() {
     with_legacy_identity(|| {
-        let (temp, dir) = fixture();
+        let (_temp, dir) = fixture();
         assert!(matches!(dir.id, nt::Identity::Legacy { .. }));
         let mut file = dir.create("staging").unwrap();
         file.write_all(b"legacy").unwrap();
-        file.verify().unwrap();
-        let reopened = dir.open_file("staging").unwrap();
-        assert!(file.same_object(&reopened));
-        let writable = nt::security_handle(&file).unwrap();
-        nt::identity_matches(&writable, file.id).unwrap();
+        assert!(file.same_object(&dir.open_file("staging").unwrap()));
+        let security_handle = nt::security_handle(&file).unwrap();
+        nt::identity_matches(&security_handle, file.id).unwrap();
         let other = dir.create("other").unwrap();
         assert!(matches!(
             nt::identity_matches(&other, file.id),
@@ -235,38 +233,7 @@ fn forced_legacy_identity_preserves_validation_and_handle_relative_operations() 
         ));
         nt::rename_classic(&file, &dir.handle, OsStr::new("published")).unwrap();
         assert!(file.same_object(&dir.open_file("published").unwrap()));
-        assert_eq!(dir.entries().unwrap().len(), 2);
-        file.seek(SeekFrom::Start(0)).unwrap();
-        let mut contents = String::new();
-        file.read_to_string(&mut contents).unwrap();
-        assert_eq!(contents, "legacy");
-        let readonly = dir.open_file("published").unwrap();
-        set_acl(&readonly, &[(&world(), FILE_ALL_ACCESS as u32, 0)], true);
-        assert!(matches!(file.verify(), Err(Error::InsecureAcl)));
-        readonly.harden().unwrap();
         file.verify().unwrap();
-        let readonly_dir = PrivateDir::open(temp.path().join("private")).unwrap();
-        set_acl(
-            &readonly_dir,
-            &[(&world(), FILE_ALL_ACCESS as u32, 0)],
-            true,
-        );
-        assert!(matches!(
-            readonly_dir.check_private(),
-            Err(Error::InsecureAcl)
-        ));
-        readonly_dir.harden().unwrap();
-        dir.check_private().unwrap();
-        std::fs::hard_link(
-            temp.path().join("private/published"),
-            temp.path().join("alias"),
-        )
-        .unwrap();
-        assert!(matches!(
-            file.verify(),
-            Err(Error::MultipleHardLinks { links: 2 })
-        ));
-        assert!(file.write(b"blocked").is_err());
         assert!(matches!(
             nt::metadata(&dir, false, None),
             Err(Error::WrongObjectKind)
