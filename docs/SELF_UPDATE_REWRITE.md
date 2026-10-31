@@ -88,7 +88,7 @@ proof is still required; static source/packaging tests do not establish it.
 | `cargo fmt --all -- --check`, `git diff --check` | PASS |
 | `cargo check --offline --locked --workspace --all-targets` | PASS |
 | `cargo clippy --offline --locked --workspace --all-targets -- -D warnings` | PASS |
-| `cargo test --offline --locked -p hostlink-agent --lib` | PASS: 49/49, including 8/8 high-level URL updater tests |
+| `cargo test --offline --locked -p hostlink-agent --lib` | PASS: 50/50, including 9/9 high-level URL updater tests |
 | `cargo test --offline --locked -p hostlink-agent --test update_lifecycle` | PASS: 8/8 bootstrap and strict ZIP regressions |
 | `cargo test --offline --locked -p private-fs --lib` | PASS: 91/91 |
 | Agent Windows x64/i686 MSVC `cargo xwin check` and strict Clippy `--all-targets` | PASS: both targets |
@@ -98,7 +98,7 @@ proof is still required; static source/packaging tests do not establish it.
 | Entire Python contract suite | NOT VERIFIED: remote execution timed out after 85 seconds |
 | Native Win7/Win11, PowerShell 2, Task Scheduler update, power-loss injection | NOT RUN |
 
-The eight high-level updater tests use real loopback HTTP and disposable
+The nine high-level updater tests use real loopback HTTP and disposable
 directories. They cover exact URL/digest/manifest, legacy-to-bundle metadata
 migration, same-version new digest, idempotence, refusal of redirects/symlinks,
 upstream in-process rollback and preservation of actual queued Apalis SQLite
