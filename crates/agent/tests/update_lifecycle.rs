@@ -50,63 +50,6 @@ fn package(root: &Path, version: &str, executable: &[u8]) -> (PathBuf, String) {
     (path, digest)
 }
 
-fn duplicate_first_central_record(path: &Path, copies: usize, declared_count: u16) -> String {
-    let mut bytes = fs::read(path).expect("read package bytes");
-    let eocd = bytes.len().checked_sub(22).expect("EOCD in fixture");
-    let central_offset = usize::try_from(u32::from_le_bytes(
-        bytes[eocd + 16..eocd + 20]
-            .try_into()
-            .expect("central directory offset"),
-    ))
-    .expect("central directory offset fits usize");
-    let name_size = u16::from_le_bytes(
-        bytes[central_offset + 28..central_offset + 30]
-            .try_into()
-            .expect("central name length"),
-    );
-    let name_size = usize::from(name_size);
-    let extra_size = u16::from_le_bytes(
-        bytes[central_offset + 30..central_offset + 32]
-            .try_into()
-            .expect("central extra length"),
-    );
-    let extra_size = usize::from(extra_size);
-    let comment_size = u16::from_le_bytes(
-        bytes[central_offset + 32..central_offset + 34]
-            .try_into()
-            .expect("central comment length"),
-    );
-    let comment_size = usize::from(comment_size);
-    let first_record_size = 46 + name_size + extra_size + comment_size;
-    let record = bytes[central_offset..central_offset + first_record_size].to_vec();
-    let insertion = central_offset + first_record_size;
-    for _ in 0..copies {
-        bytes.splice(insertion..insertion, record.iter().copied());
-    }
-    let eocd = bytes
-        .len()
-        .checked_sub(22)
-        .expect("EOCD in mutated fixture");
-    bytes[eocd + 8..eocd + 10].copy_from_slice(&declared_count.to_le_bytes());
-    bytes[eocd + 10..eocd + 12].copy_from_slice(&declared_count.to_le_bytes());
-    let old_size = u32::from_le_bytes(
-        bytes[eocd + 12..eocd + 16]
-            .try_into()
-            .expect("central directory size"),
-    );
-    let added_size = record
-        .len()
-        .checked_mul(copies)
-        .and_then(|size| u32::try_from(size).ok())
-        .expect("mutated central directory size fits u32");
-    let new_size = old_size
-        .checked_add(added_size)
-        .expect("mutated central directory size does not overflow");
-    bytes[eocd + 12..eocd + 16].copy_from_slice(&new_size.to_le_bytes());
-    fs::write(path, &bytes).expect("write package with duplicated central record");
-    format!("{:x}", Sha256::digest(&bytes))
-}
-
 fn install_root() -> (TempDir, PathBuf) {
     let temp = tempfile::Builder::new()
         .prefix("hostlink-agent-test-")

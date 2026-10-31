@@ -26,12 +26,7 @@ fn fresh_package_verifier_extracts_exact_manifest_and_installed_metadata() {
     });
     let archive = temp.path().join("fresh-package.zip");
     let mut zip = zip::ZipWriter::new(File::create(&archive).expect("create archive"));
-    zip.start_file(
-        format!("hostlink-agent-{TARGET}/hostlink-agent"),
-        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated),
-    )
-    .expect("start executable member");
-    zip.write_all(&sidecar).expect("write executable");
+    // Verify that the safe package contract is independent of ZIP member order.
     zip.start_file(
         format!("hostlink-agent-{TARGET}/manifest.json"),
         SimpleFileOptions::default(),
@@ -39,6 +34,12 @@ fn fresh_package_verifier_extracts_exact_manifest_and_installed_metadata() {
     .expect("start manifest member");
     zip.write_all(&serde_json::to_vec(&manifest).expect("manifest JSON"))
         .expect("write manifest");
+    zip.start_file(
+        format!("hostlink-agent-{TARGET}/hostlink-agent"),
+        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated),
+    )
+    .expect("start executable member");
+    zip.write_all(&sidecar).expect("write executable");
     zip.finish().expect("finish archive");
     let archive_sha256 = format!("{:x}", Sha256::digest(fs::read(&archive).expect("archive")));
     let output = temp.path().join("fresh-stage");

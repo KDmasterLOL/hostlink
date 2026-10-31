@@ -90,13 +90,15 @@ with temporary objects.
   arbitrary commands with Agent privileges.
 * **ProcessKit cancellation, containment and bounded worker concurrency:**
   Apalis schedules jobs but does not contain the OS child process tree.
-* **Raw ZIP central-directory and duplicate-entry validation:**
-  `agent/update/archive/zip_index.rs` protects against contradictory package
-  identities that are not safely represented by a filename-keyed map.
-* **Updater SHA/target/installed-inventory verification, journal, rollback,
-  stopped-runtime locks and exact Windows task XML/image checks:**
-  `self_update::MoveAll` does not provide crash-durable multi-file
-  publication or a stopped Agent. Windows automatic restart/admission is retired.
+* **Agent package identity and safe extraction:** the 2026-10-31 1C-1149
+  reduction removed the bespoke ZIP central parser. The patched `zip` crate
+  handles header consistency, while the pinned archive digest, required-file
+  inventory and post-extraction identity validation protect installation.
+* **Updater SHA/target/installed-inventory verification, stopped-runtime
+  locks and exact Windows task XML/image checks:** `self_update` handles the
+  bundle swap and in-process rollback, but does not stop the Agent or manage
+  Scheduler registrations. Durable crash recovery was explicitly retired in
+  1C-1147; automatic restart is not part of the updater.
 * **Hub JSON state writer lock / commit admission:** concurrency and cancelled
   HTTP request futures must not lose or duplicate authoritative invitations,
   enrollments or revocations. SQLite queue locks cannot replace these.

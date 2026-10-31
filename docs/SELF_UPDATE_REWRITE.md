@@ -41,13 +41,17 @@ separate updater outside bin, and checks matching installed-image processes.
 `same-file 1.0.6`, already in Cargo.lock, owns Windows file identity comparison.
 No job tables are read, no missing DB is initialized, and no service is restarted.
 
-The archive hook enforces the existing exact ZIP index/member order, no symlinks
-or traversal, bounded compressed/expanded sizes, unique manifest entries,
-version/target and all file hashes. Limits: 512 MiB compressed/total expanded,
-256 MiB per entry and 64 KiB manifest/metadata. **The compressed cap is checked
-after download**: high-level self_update 1.3.1 does not forward low-level
-Download::max_download_size. The timeout is not a byte cap. No streaming bound
-or custom download implementation is invented.
+The archive hook uses the same patched `zip 9.1.3` crate as self_update. It
+checks local-header consistency, duplicate names, safe required regular-file
+inventory, declared size bounds and the manifest's exact target/version.
+Physical central-record counts, comments, prefixes and member ordering are not
+part of the trusted-package contract. Before publication the extracted files
+are verified against the manifest, rather than hashing each ZIP member during
+preflight. Limits: 512 MiB compressed/declared total expanded, 256 MiB per
+entry and 64 KiB manifest/metadata. **The compressed cap is checked after
+download**: self_update 1.3.1 does not forward low-level
+Download::max_download_size. Declared expanded sizes are not a strict
+streaming output quota for malformed archives. The timeout is not a byte cap.
 
 The bundle hook verifies extracted identities, makes the Linux Agent executable,
 replaces manifest.json with format-2 install.json and validates its exact inventory.
@@ -69,8 +73,8 @@ requires no download, after root/locks/offline admission and integrity validatio
 The disabled probe, feature/example, platform publishers, update_handoff journal,
 transaction backups/cleanup/replay and their obsolete tests are removed. There is
 no second installed-update backend. A small refusal for retired journal files is
-retained; they are never interpreted/deleted. The bounded content validator has
-one owner shared by update and bootstrap.
+retained; they are never interpreted/deleted. The minimal archive/manifest reader has
+one owner shared by update and bootstrap; `rawzip` and handwritten ZIP parsing are absent.
 
 Fresh bootstrap-verify/bootstrap-finalize retain their CLI and format-1 output,
 source-sidecar hash and receipt checks, enrollment pending marker and private
@@ -81,7 +85,25 @@ The PS2 Run wrapper and service registration accept nonsecret bin; the Update
 wrapper invokes the URL CLI rather than returning Unsupported. Native PS2 runtime
 proof is still required; static source/packaging tests do not establish it.
 
+
+## 1C-1149: one ZIP reader, no handwritten central parser
+
+The 2026-10-31 user decision makes independently pinned archive identity and
+safe extraction the product requirement, **not** canonical physical ZIP bytes.
+The direct Agent ZIP dependency and self_update both resolve to `zip 9.1.3`
+(patched for GHSA-m665-v7pm-7grj). The old `zip 6.0.0`, extra `rawzip`
+probe and `archive/zip_index.rs` are removed. Validation requires the expected
+set of files but accepts their order and benign ZIP comments/prefixes.
+Negative tests remain for wrong pin/target/version, extra or missing members,
+unsafe paths/symlinks, duplicated names, malformed headers and extracted
+file-identity mismatches. These checks protect against wrong installations,
+not ZIP-format canonicality. Fresh bootstrap still requires its separately
+pinned verifier executable before the invitation secret is entered.
+
 ## Verification
+
+The following receipt records the original `1C-1147@ba0e34a` cutover; it is
+not a claim of re-running the full matrix after `1C-1149`.
 
 | Check | Result |
 | --- | --- |

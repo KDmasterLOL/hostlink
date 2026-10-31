@@ -95,6 +95,39 @@ fn staged_bundle_metadata_and_installed_precedence() {
 }
 
 #[test]
+fn extracted_file_digest_is_checked_before_bundle_publication() {
+    let fixture = Fixture::new();
+    let bytes = package("2.0.0", b"expected executable", false);
+    let archive_path = fixture.temp.path().join("new.zip");
+    fs::write(&archive_path, &bytes).unwrap();
+    let (manifest, manifest_bytes) =
+        archive::validate_contents(&archive_path, TARGET, "2.0.0").unwrap();
+    let extracted = fixture.temp.path().join("extracted");
+    self_update::Extract::from_source(&archive_path)
+        .extract_into(&extracted)
+        .unwrap();
+    let bundle = extracted.join(format!("hostlink-agent-{TARGET}"));
+    let executable = if TARGET.contains("windows") {
+        "hostlink-agent.exe"
+    } else {
+        "hostlink-agent"
+    };
+    fs::write(bundle.join(executable), b"tampered after extraction").unwrap();
+    let selected = Artifact::new(
+        &format!("https://artifacts.example/v2.0.0/hostlink-agent-{TARGET}.zip"),
+        digest(&bytes),
+        TARGET.into(),
+        "2.0.0".into(),
+    )
+    .unwrap();
+    assert!(publication::prepare_bundle(&bundle, &selected, &manifest, &manifest_bytes).is_err());
+    assert_eq!(
+        installed::read(&fixture.root).unwrap().installed_version,
+        "1.0.0"
+    );
+}
+
+#[test]
 fn archive_manifest_and_symlink_gates_are_bounded() {
     let root = tempfile::tempdir().unwrap();
     let archive = root.path().join("package.zip");

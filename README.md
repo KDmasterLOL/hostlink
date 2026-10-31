@@ -101,7 +101,7 @@ v2 `/v2/enroll` DTO, creates distinct machine and SSH host Ed25519 keys, and
 publishes a private config only after validating the Hub response. The Win7
 PowerShell 2 and Linux bootstrap scripts require independent exact source pins
 for the package ZIP and target-specific verifier sidecar. The sidecar shares the
-updater's strict ZIP/member manifest validator, verifies its own bytes match the
+updater's bounded required-file/manifest validator, verifies its own bytes match the
 ZIP executable, and writes install integrity metadata plus a source-bound
 bootstrap receipt before the token prompt. See
 [docs/ENROLLMENT.md](docs/ENROLLMENT.md) for the full bootstrap contract and

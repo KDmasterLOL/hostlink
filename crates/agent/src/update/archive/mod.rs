@@ -1,6 +1,5 @@
-//! Archive path validation, strict ZIP index validation, and private package staging.
+//! Bounded fresh-install ZIP staging in a private directory.
 
-use super::private_fs::create_private_directory;
 use super::staging::PrivateTempDir;
 use super::{
     MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, PACKAGE_MANIFEST, invalid, invalid_owned,
@@ -17,7 +16,6 @@ use std::{
 };
 
 mod contents;
-mod zip_index;
 
 pub(super) use contents::validate_contents;
 
@@ -65,15 +63,17 @@ pub(super) fn validate_and_stage_archive(
         .collect::<Vec<_>>();
     let expected = expected_order.iter().cloned().collect::<BTreeSet<_>>();
 
-    // The raw central directory, complete member inventory, bounded expanded sizes, member
-    // types, and content digests are validated above before the library is allowed to extract.
-    // Extraction is confined to this private directory; its output is independently checked
-    // against those exact identities before publication.
+    // The ZIP reader validates member names, types and declared sizes before extraction.
+    // After extraction, verify actual file hashes against the package manifest
+    // before publishing the fresh installation.
     let extraction_root = stage.path().join("extracted");
-    create_private_directory(&extraction_root)?;
+    let extraction_dir = stage_dir
+        .ensure_dir("extracted")
+        .map_err(io::Error::other)?;
     let package_root = extraction_root.join(format!("hostlink-agent-{target}"));
-    create_private_directory(&package_root)?;
-    let package_dir = PrivateDir::open(&package_root).map_err(io::Error::other)?;
+    let package_dir = extraction_dir
+        .ensure_dir(format!("hostlink-agent-{target}"))
+        .map_err(io::Error::other)?;
     // self_update truncates these exact precreated files. It must not create Windows
     // files/directories with inherited ACLs and then repair them after exposure.
     for name in &expected_order {

@@ -1,15 +1,15 @@
-//! Read-only ZIP/member/manifest validation shared by bootstrap and the URL probe.
+//! Minimal ZIP package preflight shared by the updater and fresh enrollment.
+//! The independently pinned archive SHA-256 is verified by the caller;
+//! extracted file identities are verified before any bundle is published.
 
 use super::super::{
     MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_TOTAL_BYTES, PACKAGE_MANIFEST,
     invalid, invalid_owned,
-    manifest::{FileIdentity, PackageManifest, package_files},
+    manifest::{PackageManifest, package_files},
 };
-use super::zip_index;
-use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs::File,
+    collections::BTreeSet,
+    fs::{self, File},
     io::{self, Read},
     path::Path,
 };
@@ -20,149 +20,95 @@ pub(in crate::update) fn validate_contents(
     target: &str,
     version: &str,
 ) -> io::Result<(PackageManifest, Vec<u8>)> {
-    let archive_size = std::fs::symlink_metadata(archive_path)?;
-    if !archive_size.is_file() || archive_size.len() == 0 || archive_size.len() > MAX_ARCHIVE_BYTES
+    let archive_metadata = fs::symlink_metadata(archive_path)?;
+    if !archive_metadata.is_file()
+        || archive_metadata.len() == 0
+        || archive_metadata.len() > MAX_ARCHIVE_BYTES
     {
         return Err(invalid("Agent archive is not a bounded regular file"));
     }
-    let archive_size = archive_size.len();
-    let prefix = format!("hostlink-agent-{target}/");
-    let expected_order = package_files(target)
-        .into_iter()
-        .chain(std::iter::once(PACKAGE_MANIFEST.to_owned()))
-        .collect::<Vec<_>>();
-    let expected_names = expected_order
-        .iter()
-        .map(|name| format!("{prefix}{name}"))
-        .collect::<Vec<_>>();
-    zip_index::validate_central_directory(
-        &mut File::open(archive_path)?,
-        archive_size,
-        &expected_names,
-    )?;
+
     let mut archive = ZipArchive::new(File::open(archive_path)?)
         .map_err(|error| invalid_owned(format!("invalid Agent ZIP archive: {error}")))?;
-    let expected = expected_order.iter().cloned().collect::<BTreeSet<_>>();
+    // Use the same ZIP reader as self_update: reject conflicting local headers,
+    // overlapping entries and duplicate names, not irrelevant ZIP layout details.
+    archive
+        .validate_header_consistency()
+        .map_err(|error| invalid_owned(format!("invalid Agent ZIP headers: {error}")))?;
+
+    let expected_files = package_files(target);
+    let expected = expected_files
+        .iter()
+        .cloned()
+        .chain(std::iter::once(PACKAGE_MANIFEST.to_owned()))
+        .collect::<BTreeSet<_>>();
     if archive.len() != expected.len() {
         return Err(invalid(
-            "Agent archive member inventory does not match the package contract",
+            "Agent ZIP does not contain the required file inventory",
         ));
     }
-    let mut seen = BTreeSet::new();
-    let mut identities = BTreeMap::new();
-    let mut total = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
+
+    let prefix = format!("hostlink-agent-{target}/");
+    let mut total_size = 0_u64;
     let mut manifest_bytes = None;
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
             .map_err(|error| invalid_owned(format!("invalid Agent ZIP member: {error}")))?;
-        let name = std::str::from_utf8(entry.name_raw())
-            .map_err(|_| invalid("Agent ZIP entry name is not UTF-8"))?
-            .to_owned();
-        let relative = name
+        let relative = std::str::from_utf8(entry.name_raw())
+            .map_err(|_| invalid("Agent ZIP member name is not UTF-8"))?
             .strip_prefix(&prefix)
-            .ok_or_else(|| invalid("Agent ZIP entry has an unexpected package root"))?;
-        if relative.contains('/')
-            || relative.contains('\\')
-            || relative.is_empty()
-            || expected_order.get(index).map(String::as_str) != Some(relative)
-            || !expected.contains(relative)
+            .ok_or_else(|| invalid("Agent ZIP member has an unexpected package root"))?;
+        if !expected.contains(relative)
             || !entry.is_file()
             || entry.enclosed_name().is_none()
-            || !seen.insert(relative.to_owned())
-        {
-            return Err(invalid("Agent ZIP contains an unsafe or unexpected entry"));
-        }
-        if entry.is_symlink()
             || entry
                 .unix_mode()
                 .is_some_and(|mode| mode & 0o170000 != 0 && mode & 0o170000 != 0o100000)
         {
-            return Err(invalid(
-                "Agent ZIP contains a symlink or non-regular member",
-            ));
+            return Err(invalid("Agent ZIP contains an unexpected or unsafe member"));
         }
-        if !matches!(
-            entry.compression(),
-            zip::CompressionMethod::Stored | zip::CompressionMethod::Deflated
-        ) {
-            return Err(invalid("Agent ZIP uses an unsupported compression method"));
-        }
-        let declared = entry.size();
-        if declared > MAX_ENTRY_BYTES || entry.compressed_size() > MAX_ARCHIVE_BYTES {
+
+        let size = entry.size();
+        if size > MAX_ENTRY_BYTES {
             return Err(invalid("Agent ZIP member exceeds its size limit"));
         }
-        total = total
-            .checked_add(declared)
+        total_size = total_size
+            .checked_add(size)
             .ok_or_else(|| invalid("Agent ZIP size overflow"))?;
-        if total > MAX_TOTAL_BYTES {
+        if total_size > MAX_TOTAL_BYTES {
             return Err(invalid(
                 "Agent ZIP exceeds its total uncompressed size limit",
             ));
         }
-        let mut hasher = Sha256::new();
-        let mut written = 0_u64;
-        let mut manifest_capture = (relative == PACKAGE_MANIFEST).then(Vec::new);
-        loop {
-            let count = entry.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            written = written
-                .checked_add(count as u64)
-                .ok_or_else(|| invalid("Agent ZIP size overflow"))?;
-            if written > declared || written > MAX_ENTRY_BYTES {
-                return Err(invalid("Agent ZIP member exceeds its declared size"));
-            }
-            hasher.update(&buffer[..count]);
-            if let Some(capture) = &mut manifest_capture {
-                if written > MAX_MANIFEST_BYTES {
-                    return Err(invalid("Agent package manifest exceeds its size limit"));
-                }
-                capture.extend_from_slice(&buffer[..count]);
-            }
-        }
-        if written != declared {
-            return Err(invalid(
-                "Agent ZIP member size does not match its declaration",
-            ));
-        }
+
         if relative == PACKAGE_MANIFEST {
-            manifest_bytes = manifest_capture;
-        } else {
-            identities.insert(
-                relative.to_owned(),
-                FileIdentity {
-                    size: written,
-                    sha256: format!("{:x}", hasher.finalize()),
-                },
-            );
+            if size > MAX_MANIFEST_BYTES {
+                return Err(invalid("Agent ZIP manifest exceeds its size limit"));
+            }
+            let mut bytes = Vec::new();
+            (&mut entry)
+                .take(MAX_MANIFEST_BYTES + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() as u64 != size {
+                return Err(invalid("Agent ZIP manifest differs from its declared size"));
+            }
+            manifest_bytes = Some(bytes);
         }
     }
-    if seen != expected {
-        return Err(invalid("Agent archive is missing required package files"));
-    }
-    let bytes = manifest_bytes.ok_or_else(|| invalid("Agent package manifest is missing"))?;
+    let bytes = manifest_bytes.ok_or_else(|| invalid("Agent ZIP manifest is missing"))?;
     let manifest: PackageManifest = serde_json::from_slice(&bytes)
         .map_err(|error| invalid_owned(format!("invalid Agent package manifest: {error}")))?;
     if manifest.format != 1
         || manifest.component != "agent"
         || manifest.target != target
         || manifest.version != version
-    {
-        return Err(invalid(
-            "Agent package manifest does not match the selected version and target",
-        ));
-    }
-    if manifest.files != identities
         || manifest.files.keys().cloned().collect::<BTreeSet<_>>()
-            != package_files(target).into_iter().collect()
+            != expected_files.into_iter().collect()
     {
         return Err(invalid(
-            "Agent package manifest file identities do not match the archive",
+            "Agent package manifest differs from the requested package",
         ));
     }
-
     Ok((manifest, bytes))
 }

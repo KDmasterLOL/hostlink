@@ -1,61 +1,43 @@
 use super::*;
 
 #[test]
-fn fresh_package_verifier_rejects_duplicate_central_record_before_output() {
+fn fresh_package_verifier_rejects_unexpected_member() {
     let (temp, _root) = install_root();
-    let sidecar = fs::read(env!("CARGO_BIN_EXE_hostlink-agent")).expect("read Agent sidecar");
     let version = env!("CARGO_PKG_VERSION");
-    let (archive, _) = package(temp.path(), version, &sidecar);
-    let archive_sha256 = duplicate_first_central_record(&archive, 1, 3);
-    let output = temp.path().join("duplicate-central-stage");
+    let archive = temp.path().join("unexpected-member.zip");
+    let manifest = json!({
+        "format": 1,
+        "component": "agent",
+        "target": TARGET,
+        "version": version,
+        "files": {"hostlink-agent": identity(b"unreached")},
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
+    for (name, body) in [
+        ("hostlink-agent", b"unreached".as_slice()),
+        ("extra.txt", b"not part of the Agent".as_slice()),
+        ("manifest.json", manifest_bytes.as_slice()),
+    ] {
+        zip.start_file(
+            format!("hostlink-agent-{TARGET}/{name}"),
+            SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(body).unwrap();
+    }
+    zip.finish().unwrap();
+    let digest = format!("{:x}", Sha256::digest(fs::read(&archive).unwrap()));
+    let output = temp.path().join("unexpected-stage");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
-            .expect("private output parent");
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
     }
-
-    assert!(verify_fresh_package(&archive, &archive_sha256, TARGET, version, &output).is_err());
+    assert!(verify_fresh_package(&archive, &digest, TARGET, version, &output).is_err());
     assert!(!output.exists());
 }
-#[test]
-fn fresh_package_verifier_rejects_hidden_duplicate_after_declared_records() {
-    let (temp, _root) = install_root();
-    let sidecar = fs::read(env!("CARGO_BIN_EXE_hostlink-agent")).expect("read Agent sidecar");
-    let version = env!("CARGO_PKG_VERSION");
-    let (archive, _) = package(temp.path(), version, &sidecar);
-    // Keep the canonical count of two while the central directory physically contains three.
-    let archive_sha256 = duplicate_first_central_record(&archive, 1, 2);
-    let output = temp.path().join("hidden-duplicate-central-stage");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
-            .expect("private output parent");
-    }
 
-    assert!(verify_fresh_package(&archive, &archive_sha256, TARGET, version, &output).is_err());
-    assert!(!output.exists());
-}
-#[test]
-fn fresh_package_verifier_rejects_forged_central_record_count_before_output() {
-    let (temp, _root) = install_root();
-    let sidecar = fs::read(env!("CARGO_BIN_EXE_hostlink-agent")).expect("read Agent sidecar");
-    let version = env!("CARGO_PKG_VERSION");
-    let (archive, _) = package(temp.path(), version, &sidecar);
-    // The fixture has two records; add four duplicate physical records but declare only five.
-    let archive_sha256 = duplicate_first_central_record(&archive, 4, 5);
-    let output = temp.path().join("forged-central-count-stage");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
-            .expect("private output parent");
-    }
-
-    assert!(verify_fresh_package(&archive, &archive_sha256, TARGET, version, &output).is_err());
-    assert!(!output.exists());
-}
 #[test]
 fn fresh_package_verifier_rejects_wrong_source_target_and_sidecar_before_output() {
     let (temp, _root) = install_root();
@@ -112,48 +94,6 @@ fn fresh_package_verifier_rejects_wrong_source_target_and_sidecar_before_output(
         )
         .is_err()
     );
-    assert!(!output.exists());
-}
-#[test]
-fn fresh_package_verifier_rejects_out_of_order_zip_members() {
-    let (temp, _root) = install_root();
-    let version = env!("CARGO_PKG_VERSION");
-    let archive = temp.path().join("out-of-order.zip");
-    let manifest = json!({
-        "format": 1,
-        "component": "agent",
-        "target": TARGET,
-        "version": version,
-        "files": {"hostlink-agent": identity(b"unreached")},
-    });
-    let mut zip = zip::ZipWriter::new(File::create(&archive).expect("create archive"));
-    zip.start_file(
-        format!("hostlink-agent-{TARGET}/manifest.json"),
-        SimpleFileOptions::default(),
-    )
-    .expect("start manifest first");
-    zip.write_all(&serde_json::to_vec(&manifest).expect("manifest JSON"))
-        .expect("write manifest");
-    zip.start_file(
-        format!("hostlink-agent-{TARGET}/hostlink-agent"),
-        SimpleFileOptions::default(),
-    )
-    .expect("start executable second");
-    zip.write_all(b"unreached").expect("write executable");
-    zip.finish().expect("finish archive");
-    let digest = format!(
-        "{:x}",
-        Sha256::digest(fs::read(&archive).expect("archive bytes"))
-    );
-    let output = temp.path().join("out-of-order-stage");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
-            .expect("private output parent");
-    }
-
-    assert!(verify_fresh_package(&archive, &digest, TARGET, version, &output).is_err());
     assert!(!output.exists());
 }
 #[test]

@@ -116,9 +116,8 @@ source/target/version, and pre-existing output. It then executes each actual
 target `hostlink-agent.exe bootstrap-verify --archive ... --sha256 ... --target
 ... --version ... --output ...`, checks the published `bootstrap-receipt.json`
 and extracted file identities, and runs negative checks for a wrong archive
-digest, wrong target, and output overwrite. The Agent's strict ZIP validator
-rejects duplicate, missing, malformed, unexpected, and unsafe archive entries
-before publication. For each target the harness also creates a disposable ZIP
+digest, wrong target, and output overwrite. The Agent uses the patched ZIP reader to reject conflicting headers and
+duplicate, missing, unexpected or unsafe files before publication. For each target the harness also creates a disposable ZIP
 with a duplicated central-directory entry, recomputes its digest, and verifies
 that the actual target binary rejects it without publishing output. The harness
 accepts a candidate only when the real binary successfully validates the

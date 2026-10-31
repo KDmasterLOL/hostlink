@@ -151,19 +151,6 @@ pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
         .map_err(io::Error::other)
 }
 
-pub(super) fn create_private_directory(path: &Path) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| invalid("private directory has no parent"))?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| invalid("private directory has no name"))?;
-    PrivateDir::open(parent)
-        .and_then(|dir| dir.ensure_dir(name))
-        .map(|_| ())
-        .map_err(io::Error::other)
-}
-
 pub(super) fn set_staged_file_permissions(path: &Path, relative: &str) -> io::Result<()> {
     #[cfg(unix)]
     {
