@@ -69,14 +69,15 @@ hl_provision_credential() {
         unset hl_github_token
         return
     fi
-    printf 'GitHub fine-grained PAT (HostLink Contents:Read only): ' >/dev/tty
     hl_tty_state=$(stty -g </dev/tty) || hl_fail 'An interactive target terminal is required.'
-    trap 'stty "$hl_tty_state" </dev/tty; exit 130' HUP INT TERM
+    trap 'stty "$hl_tty_state" </dev/tty' EXIT
+    trap 'exit 130' HUP INT TERM
     stty -echo </dev/tty
+    printf 'GitHub fine-grained PAT (HostLink Contents:Read only): ' >/dev/tty
     hl_read_ok=0
     IFS= read -r hl_github_token </dev/tty || hl_read_ok=$?
     stty "$hl_tty_state" </dev/tty
-    trap - HUP INT TERM
+    trap - EXIT HUP INT TERM
     printf '\n' >/dev/tty
     [ "$hl_read_ok" -eq 0 ] || hl_fail 'GitHub credential prompt failed.'
     case "$hl_github_token" in ''|*[!A-Za-z0-9_]*) unset hl_github_token; hl_fail 'Invalid GitHub credential format.' ;; esac

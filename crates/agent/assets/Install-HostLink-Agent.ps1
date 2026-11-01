@@ -60,12 +60,22 @@ function Get-GitHubCredential([bool]$Provision) {
     $appData = $env:APPDATA
     if ([string]::IsNullOrEmpty($appData) -or -not [IO.Path]::IsPathRooted($appData) -or -not [IO.Directory]::Exists($appData)) { throw 'Current-user APPDATA is unavailable.' }
     Assert-NoReparse $appData
-    $base = New-Object IO.DirectoryInfo($appData)
-    $baseAcl = $base.GetAccessControl()
-    if (-not $baseAcl.GetOwner([Security.Principal.SecurityIdentifier]).Equals($sid)) { throw 'APPDATA must be owned by the current user.' }
+    $ancestor = New-Object IO.DirectoryInfo($appData)
     $writeMask = [Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
-    foreach ($rule in $baseAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
-        if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and ($rule.FileSystemRights -band $writeMask) -ne 0 -and -not $rule.IdentityReference.Equals($sid) -and @('S-1-5-18','S-1-5-32-544') -notcontains $rule.IdentityReference.Value) { throw 'APPDATA is writable by another user.' }
+    while ($null -ne $ancestor) {
+        $acl = $ancestor.GetAccessControl()
+        $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier])
+        # Windows volume/profile ancestors may be owned by SYSTEM or Administrators.
+        # TrustedInstaller is also the normal owner of protected Windows directories.
+        $trustedOwners = @('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+        if (-not $owner.Equals($sid) -and $trustedOwners -notcontains $owner.Value) { throw 'Unsafe credential ancestor owner.' }
+        if ($ancestor.FullName -eq $appData -and -not $owner.Equals($sid)) { throw 'APPDATA must be owned by the current user.' }
+        foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+            # Ignore inherit-only ACEs: they do not grant mutation of this ancestor.
+            if (($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
+            if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and ($rule.FileSystemRights -band $writeMask) -ne 0 -and -not $rule.IdentityReference.Equals($sid) -and $trustedOwners -notcontains $rule.IdentityReference.Value) { throw 'Credential ancestor is writable by another user.' }
+        }
+        $ancestor = $ancestor.Parent
     }
     $hostDirectory = Join-Path $appData 'HostLink'
     $credentialDirectory = Join-Path $hostDirectory 'credentials'
