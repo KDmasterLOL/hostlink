@@ -35,6 +35,6 @@ invokes Rust install for enrollment and executable publication. It never
 installs Git or default commands.
 
 Native Windows 7 x86/x64, Windows 11, PowerShell 2, ACL and Task Scheduler
-acceptance is **NOT RUN by this packaging lane**. The retired ZIP harness
+acceptance is **NOT RUN**. The retired ZIP harness
 cannot supply that evidence. See [Win7 gates](WIN7_REWRITE_ACCEPTANCE.md),
 [release contract](GITHUB_RELEASES.md) and [installation](AGENT_INSTALLATION.md).

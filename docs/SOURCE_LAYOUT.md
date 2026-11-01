@@ -55,11 +55,9 @@ ZIP/package parser, release manifest, archive hash or bootstrap receipt in
 the binary-only contract. **Keep `state/manifest.json`** for private enrollment
 keys. See [installation](AGENT_INSTALLATION.md) for stable per-user roots.
 
-This packaging lane owns scripts/assets/docs only. Baseline Rust still has
-legacy package/bootstrap references; their removal belongs to the Agent and
-Controller lanes. Runtime module names and full build acceptance must be
-verified after coordinator integration. Local raw packaging tests do not
-establish that gate. Credentials stay target-owned and private; offline locks,
+Agent, Controller and packaging source changes are integrated; the Linux
+workspace build and tests pass. Local raw packaging tests do not prove a
+published GitHub Release or native Windows acceptance. Credentials stay target-owned and private; offline locks,
 Windows stopped-task checks and private state boundaries remain required.
 See [GitHub Releases](GITHUB_RELEASES.md).
 

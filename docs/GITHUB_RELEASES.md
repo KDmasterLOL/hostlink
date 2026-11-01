@@ -66,6 +66,6 @@ No durable crash journal or automatic crash recovery is promised. Native Win7
 x86/x64, Win11, PowerShell 2, ACLs and Task Scheduler acceptance remain separate
 release gates. Cross-builds and offline fixtures do not establish them.
 
-This packaging lane replaces local artifact production and deletes obsolete
-Agent assets. Rust Agent and Controller changes are integrated by their owning
-lanes; this lane alone does not establish runtime binary-only acceptance.
+The binary-only source is integrated across Agent, Controller and packaging,
+with Linux workspace and synthetic fixture checks. No actual GitHub Release
+or native Windows installation/update has been accepted yet.

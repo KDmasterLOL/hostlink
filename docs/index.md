@@ -1,7 +1,8 @@
 # HostLink documentation
 
-The maintained installation/distribution contract is Huly 1C-1164. Packaging,
-Agent and Controller lanes require integration before runtime acceptance.
+The maintained installation/distribution contract is Huly 1C-1164. The
+Agent, Controller and packaging changes are integrated for source testing;
+native Windows and real private-release acceptance remain outstanding.
 
 - [Getting started](getting-started.md): source-only development entry point.
 - [GitHub Releases](GITHUB_RELEASES.md): raw asset names, credentials and bootstrap.

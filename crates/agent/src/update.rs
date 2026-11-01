@@ -79,14 +79,18 @@ pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
     if requested.is_some_and(|requested| *requested != version) {
         return Err(invalid("GitHub release differs from the requested version"));
     }
-    if requested.is_none()
-        && !version
-            .cmp_precedence(&Version::parse(&installed.version).map_err(io::Error::other)?)
-            .is_gt()
-    {
-        return Ok(false);
-    }
     let (asset, sha) = selected_asset(release.assets(), &installed.target)?;
+    if requested.is_none() {
+        let current = Version::parse(&installed.version).map_err(io::Error::other)?;
+        if !version.cmp_precedence(&current).is_gt() {
+            if version == current && installed_sha != sha {
+                return Err(invalid(
+                    "installed Agent digest differs from the latest published executable",
+                ));
+            }
+            return Ok(false);
+        }
+    }
     if installed_sha == sha {
         if installed.version != version.to_string() {
             return Err(invalid(

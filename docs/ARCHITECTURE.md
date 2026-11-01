@@ -48,7 +48,8 @@ Git/default tools. Agent update uses the `self_update` GitHub RAW backend
 with exact asset/version/digest and offline locks. Preserve private
 `state/manifest.json` for enrollment keys; remove release manifests, archives
 and bootstrap receipts. See [installation](AGENT_INSTALLATION.md).
-This packaging lane does not prove the separate runtime implementation.
+The integrated source passes Linux workspace tests; native Windows and
+private-release end-to-end acceptance remain outstanding.
 
 ## Job execution contract
 

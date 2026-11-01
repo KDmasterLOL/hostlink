@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 MAX_FILE = 256 * 1024 * 1024
@@ -126,6 +127,12 @@ def create_package(repo: Path, source_sha: str, target: str, version: str, binar
         raise ValueError("source SHA does not match this worktree HEAD")
     if subprocess.check_output(["git", "-C", str(repo), "status", "--porcelain=v1", "--untracked-files=all"], text=True):
         raise ValueError("source worktree must be clean, including untracked files")
+    try:
+        source_version = tomllib.loads((repo / "Cargo.toml").read_text("utf-8"))["workspace"]["package"]["version"]
+    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as error:
+        raise ValueError("source workspace package version is missing or invalid") from error
+    if version != source_version:
+        raise ValueError("release version must match source workspace package version")
     binary = Path(os.path.abspath(binary))
     if not binary.exists() and not binary.is_symlink():
         raise ValueError("binary path does not exist")

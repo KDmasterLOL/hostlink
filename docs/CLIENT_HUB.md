@@ -61,7 +61,7 @@ use hostlink::{
 // Loading owner-only configuration does not contact Hub.
 let (hub, config) = HubClient::from_file(config_path)?;
 
-// Only after validating the exact source pins and verifying the installer:
+// Only after validating the authenticated release selection:
 let pending = Host::create(&hub, Some("lab-win7".into()), 900).await?;
 let invitation = pending.into_invitation();
 // Deliver the one-use invitation at an explicitly controlled secret boundary.
@@ -73,7 +73,7 @@ let response = ssh.exec("hostname", &[]).await?;
 ssh.close().await?;
 ```
 
-`Host::create` does **not** upload artifacts, install an Agent, wait for enrollment or imply that a host is online. The high-level CLI validates its source-pinned installer *before* requesting the invitation; library callers must establish equivalent artifact trust themselves. The `PendingHost` holds the invitation, not an SSH identity. `Host::connect` resolves a current Hub record and approved gateway list for every call, returns the registered `Host` identity with the existing authenticated `HostConnection`, and never falls back to a cached or unmanaged route when Hub is unavailable. Neither operation creates another SSH engine.
+`Host::create` does **not** upload artifacts, install an Agent, wait for enrollment or imply that a host is online. The high-level CLI validates the private GitHub release metadata and target binary digest before requesting an invitation; the target downloads and verifies the actual executable **before consuming** the one-use token. Library callers must establish equivalent artifact trust themselves. The `PendingHost` holds the invitation, not an SSH identity. `Host::connect` resolves a current Hub record and approved gateway list for every call, returns the registered `Host` identity with the existing authenticated `HostConnection`, and never falls back to a cached or unmanaged route when Hub is unavailable. Neither operation creates another SSH engine.
 
 The Linux process-level domain regressions require Caddy, OpenSSL and available
 disposable loopback ports, so they are intentionally opt-in rather than a
@@ -142,8 +142,8 @@ current-user-only ACL. No Git/default command installation is performed.
 
 `--token-only` remains for manual enrollment. No arbitrary-site installer,
 agent or archive URL flags or alternate publisher fallback. Missing private
-credentials, assets or digests fail closed. This packaging lane's tests do not
-validate the separate Controller runtime implementation or native PS2 flow.
+credentials, assets or digests fail closed. Controller unit tests verify
+rendered bootstraps; native Windows PowerShell 2 execution is still untested.
 
 See [GitHub Releases](GITHUB_RELEASES.md),
 [Artifact publication](ARTIFACTS_AND_INVITES.md), and

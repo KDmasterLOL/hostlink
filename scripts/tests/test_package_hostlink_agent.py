@@ -27,6 +27,9 @@ class PackageHostlinkAgentTests(unittest.TestCase):
         self.git("config", "user.email", "test@example.invalid")
         self.git("config", "user.name", "Package Test")
         (self.root / "fixture.txt").write_text("source", encoding="utf-8")
+        (self.root / "Cargo.toml").write_text(
+            '[workspace]\n[workspace.package]\nversion = "1.2.3"\n', encoding="utf-8"
+        )
         self.git("add", ".")
         self.git("commit", "-qm", "fixture")
         self.sha = self.git("rev-parse", "HEAD").strip()
@@ -111,6 +114,14 @@ class PackageHostlinkAgentTests(unittest.TestCase):
         self.make()
         with self.assertRaisesRegex(ValueError, "must be new"):
             self.make()
+
+    def test_release_version_must_match_source_workspace_version(self):
+        with self.assertRaisesRegex(ValueError, "release version must match source workspace package version"):
+            package.create_package(
+                self.root, self.sha, "x86_64-unknown-linux-gnu", "9.9.9",
+                self.binary, self.out,
+            )
+        self.assertFalse(self.out.exists())
 
     def test_every_windows_raw_asset_and_win7_build_binding(self):
         for target in package.TARGETS:

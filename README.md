@@ -4,9 +4,9 @@ Managed HostLink rewrite for development integration testing under Huly 1C-987.
 The workspace contains three crates: Agent, Client and the required Hub. This
 integration is not a release, deployment or installed fleet cutover.
 See the [documentation index](docs/index.md) for maintained contracts.
-Huly 1C-1164 defines binary-only distribution. This packaging lane changes
-scripts/assets/docs; Agent and Controller runtime changes require integration
-with their owning lanes before executable acceptance can be claimed.
+Huly 1C-1164 defines binary-only distribution. Agent, Controller and
+packaging changes are integrated and pass the Linux workspace tests; native
+Windows and real private-release acceptance remain separate release gates.
 
 Target packages:
 
@@ -28,8 +28,9 @@ existing PAT in the printed bootstrap command, so the target provisions it
 without another prompt. This opt-in **exposes the PAT in stdout, copied
 commands and potentially shell history or saved PowerShell scripts**;
 otherwise the token never appears in the generated invitation. Controller uses its own
-corresponding user-local credential to resolve and preflight the release
-**before issuing an invitation**. The updater supports
+corresponding user-local credential to resolve the release metadata and
+published binary digest **before issuing an invitation**. The target verifies
+downloaded bytes before consuming the one-use Hub token. The updater supports
 `hostlink-agent update [--version X.Y.Z] [--root ROOT]` and no arbitrary
 `--url`, `--sha256` or `--target` flags. Distribution contains exactly four
 raw Agent executables, with GitHub-published SHA-256; see
@@ -196,7 +197,7 @@ verifies receipts and emits only raw assets plus a hidden local receipt.
 Receipts must not be published. These tools do not upload, tag or deploy.
 Run `python3 -m unittest discover -s scripts/tests -v` for local script checks.
 The old asset-sourced bootstrap credential/download tests were deleted with
-the installers; generated-bootstrap tests belong to the Controller lane.
+the installers; Controller-generated bootstrap has its own tests.
 
 ## Agent lifecycle
 
