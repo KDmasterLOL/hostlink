@@ -71,13 +71,10 @@ target triples, binary hashes, PE machine/subsystem, and imported DLL sets. Its
 `NOT_RUN`. The receipt is evidence for the source-bound build and static PE
 inspection only. It does not claim runtime compatibility.
 
-## Run the source-bound bootstrap verifier on disposable Windows
+## Raw artifact packaging and native harness retirement (1C-1164)
 
-After building one source SHA, package each exact Agent target separately with
-the matching target binary and the build `receipt.json`. Keep both build
-directories and package directories intact; each package directory contains
-`artifact-receipt.json`, the target Agent sidecar and its `.sha256`, and the ZIP
-with its `.zip.sha256` file.
+Package each exact Agent executable with the matching source SHA and
+`receipt.json` from the builder:
 
 ```sh
 SOURCE_SHA="$(git rev-parse HEAD)"
@@ -93,47 +90,29 @@ for TARGET in x86_64-win7-windows-msvc i686-win7-windows-msvc; do
 done
 ```
 
-Copy the shared build output directory, both package output directories, and
-the harness script to a Windows test machine through the approved operator
-channel. Create a new, empty disposable directory owned by the
-interactive test user with a protected ACL granting access only to that user.
-Run Windows PowerShell 2 unelevated and pass the exact paths and source SHA:
+Output contains the exact raw `hostlink-agent-TARGET.exe` and a local
+`artifact-receipt.json`. PE/build provenance remains required; no ZIP, SHA
+sidecar, installer PS1, release manifest or bootstrap receipt is generated.
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\verify-win7-bootstrap-native.ps1 `
-  -SourceSha 0123456789abcdef0123456789abcdef01234567 `
-  -Version 1.2.3 `
-  -BuildRoot C:\HostLinkEvidence\build `
-  -X64PackageRoot C:\HostLinkEvidence\package-x64 `
-  -X86PackageRoot C:\HostLinkEvidence\package-x86 `
-  -DisposableRoot C:\HostLinkEvidence\empty-private-root
-```
+`scripts/verify-win7-bootstrap-native.ps1` is **RETIRED**: it throws before
+reading inputs or executing any binary. Its archive-based `bootstrap-verify`
+flow cannot validate the new binary-only install. The old ZIP harness and
+asset-sourced bootstrap tests have been removed; no native replacement run is
+claimed. Controller-generated bootstrap needs tests in its owning lane.
 
-The harness rejects elevated/service identities, nonempty or unsafe disposable
-roots, inherited or foreign ACL grants, reparse paths, foreign-owned inputs,
-malformed or mismatched build/package receipts and SHA-256 sidecars, wrong
-source/target/version, and pre-existing output. It then executes each actual
-target `hostlink-agent.exe bootstrap-verify --archive ... --sha256 ... --target
-... --version ... --output ...`, checks the published `bootstrap-receipt.json`
-and extracted file identities, and runs negative checks for a wrong archive
-digest, wrong target, and output overwrite. The Agent uses the patched ZIP reader to reject conflicting headers and
-duplicate, missing, unexpected or unsafe files before publication. For each target the harness also creates a disposable ZIP
-with a duplicated central-directory entry, recomputes its digest, and verifies
-that the actual target binary rejects it without publishing output. The harness
-accepts a candidate only when the real binary successfully validates the
-packaged ZIP and its embedded manifest.
+New native acceptance must use an independently verified disposable target
+and source-exact raw assets after Agent/Controller integration. Exercise the
+generated PS2 bootstrap with synthetic credentials, default hidden prompt and
+explicit PAT opt-in; hash failure before Hub invite consumption; stable
+LocalAppData/HostLink/Agent root; Rust install enrollment and executable
+publication; no installed wrappers/default tools; protected target credential
+ACL; preserved private `state/manifest.json`; and stopped-task/exclusive-lock
+RAW update and ordinary rollback. Real release/network tests need separate
+authorization; this source-only task uses no live machines or real PAT.
 
-The disposable root must be empty and on a local filesystem. The harness retains
-its unique private run directory and verified output receipts under that root;
-use a new empty disposable root for each run. Preserve the builder receipt,
-both package receipts, both `.zip.sha256` and executable `.sha256` files, exact
-source SHA, Windows version/architecture, PowerShell version, exit status and
-the verified bootstrap receipts as follow-up evidence. Do not copy token,
-credential, enrollment, or public-key material into the evidence bundle. A
-Windows 11 x86 run is **WoW64 evidence only**; it does not prove a 32-bit
-Windows 7 OS or native NT6.1 acceptance. This bootstrap verification procedure
-does not install or start the Agent and does not cover the broader NT6.1
-acceptance matrix below.
+Record source/build/artifact digests, Windows OS/architecture, PowerShell
+version, exit status and nonsecret results. Windows 11 x86/WoW64 is not a
+native 32-bit Windows 7 or NT6.1 pass. **Native acceptance for 1C-1164: NOT RUN.**
 
 ## Builder guard cases
 
@@ -199,9 +178,8 @@ this matrix:
   and does not prove the 32-bit OS target.
 - Exact artifact SHA match and `--version`, user-owned configuration and SSH
   key setup, authenticated SSH exec with binary stdin/stdout/stderr and exit 7.
-- SFTP Seal/run, durable job start then disconnect/reconnect/cancel with full
-  process-tree cleanup, reverse gateway operation, and owned temporary-file
-  cleanup.
+- Pinned SSH exec/SFTP/forward, local Apalis Board jobs and crash replay
+  boundaries, reverse gateway operation, and owned temporary-file cleanup.
 - Explicit evidence that no installed service, production host, gateway, or
   1C database was changed.
 

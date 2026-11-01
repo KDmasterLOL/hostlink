@@ -1,15 +1,14 @@
-# HostLink Agent artifacts and invitations — GitHub Releases only
+# Raw Agent artifact packaging and invitation contract
 
-The only production artifact origin is the private
-`KDmasterLOL/hostlink` GitHub Releases repository. There is **no**
-artifact website, mutable download mirror, operator-specified URL, or
-alternate release provider. GitHub must have a published stable release
-for latest selection; a private inaccessible or absent Release fails.
+Only private `KDmasterLOL/hostlink` GitHub Releases supply production binaries.
+The exact four names and credential policy are in [GitHub Releases](GITHUB_RELEASES.md).
+These scripts operate locally: they never create tags, upload or deploy.
 
-## Local package build (no publication)
+## Source-exact packaging
 
-`scripts/package-hostlink-agent.py` still produces a deterministic,
-source-bound package for one supported target:
+Run from a clean source worktree at the selected full lowercase Git SHA.
+The binary must be a current-user-owned regular file, nonempty and bounded.
+The command preserves the existing packaging CLI:
 
 ```sh
 SOURCE_SHA="$(git rev-parse HEAD)"
@@ -22,15 +21,21 @@ python3 scripts/package-hostlink-agent.py \
   --output-dir target/agent-package-linux-x64
 ```
 
-For Windows7 x64/x86, produce the exact matching build receipt from
-`scripts/build-win7-candidate.sh` and supply `--build-receipt`.
-Validate the PE machine/subsystem/native compatibility independently.
-Each package includes exact `manifest.json`, individual file SHA-256
-and an external ZIP SHA pin. The ZIP contains
-`hostlink-agent-TARGET/<member>` and is never repacked by the updater.
+Output is a new private directory containing exactly the raw named executable
+and `artifact-receipt.json`. Receipt format 2 records source SHA, target,
+version, asset name, size, SHA-256 and optional build receipt provenance.
+The copied asset is rehashed against the selected source binary; the source
+HEAD and clean-worktree checks run before and after staging. No transformations
+are applied to binary bytes. Source provenance identifies the selected clean
+worktree and exact input hash; it is not a reproducible-build attestation.
 
-After all target builds pass the required source/build evidence, create
-a **flat uniquely named** upload directory:
+For both Win7 targets supply `--build-receipt` from
+`scripts/build-win7-candidate.sh`. It must bind the exact source, target and
+binary digest to `PE_BUILD_AND_INSPECTION_PASS`, the matching PE machine,
+subsystem 6.0 and successful static CRT import check. Packaging also checks the
+actual PE machine. A receipt never substitutes for native Windows execution.
+
+## Stage a complete release locally
 
 ```sh
 python3 scripts/stage-hostlink-github-release.py \
@@ -42,68 +47,30 @@ python3 scripts/stage-hostlink-github-release.py \
   --require-all-targets
 ```
 
-The stage script checks each source revision/version/target receipt,
-verifies packaged ZIP manifest, sidecar identity and every archive/file
-SHA-256, and rejects duplicate/conflicting assets or incomplete targets.
-The result contains exactly the flat assets documented in
-[GitHub Releases](GITHUB_RELEASES.md): one target ZIP and one verifier
-executable per target, plus a shared POSIX installer and PowerShell 2
-installer. The hidden `.release-receipt.json` is local evidence only;
-it is not an Agent download or replacement for GitHub's asset digest.
-**Neither script creates or uploads a GitHub Release.**
+Staging requires matching source/version, unique supported targets, exact
+raw asset paths, sizes and SHA-256, and rejects symlinks, hardlinks and extra
+legacy files. It rechecks copied bytes before publishing the output directory.
+`--require-all-targets` requires all four; partial staging remains available
+for local checks. Output contains raw assets plus `.release-receipt.json`.
+The hidden receipt is local provenance and **must not be uploaded**. There is
+no ZIP, release manifest, archive hash sidecar or installer script output.
 
-A separately approved immutable release must publish those unchanged
-assets with an exact `vX.Y.Z` tag. The GitHub API must expose each
-asset's `sha256:<hex>` digest. Hashes prove content integrity relative to
-GitHub's authenticated metadata, not an independent publisher signature.
+A separately authorized publication must upload the unchanged raw assets and
+expose GitHub-published SHA-256 digests. This source task does not publish.
 
-## Managed invitation
+## Invite and bootstrap
 
 ```sh
 hostlink invite --name lab-win7 --target x86_64-win7-windows-msvc
 hostlink invite --name lab-win7 --target x86_64-win7-windows-msvc --version 0.1.0
 ```
 
-The Controller reads its current user's separate private
-`hostlink/credentials/github-token`, accesses the **fixed** GitHub
-release API, selects the matching published release, demands exact
-installer, verifier and archive names/digests, and downloads/verifies the
-installer **before POST /v2/invites**. Caller-supplied
-`--installer-url`, `--agent-url`, `--archive-url`, and independent
-SHA CLI flags were removed from the managed production flow.
+Controller-generated disposable PS2/POSIX bootstrap replaces released and
+installed scripts. Default hidden target PAT prompt and explicit
+`--embed-github-token` are distinct choices. Download and verify the single
+raw executable before consuming the one-use Hub invite. Rust Agent install
+owns enrollment and executable publication; no Git/default tools are installed.
+An uncertain enrollment must be reconciled rather than automatically replayed.
 
-The generated target bootstrap command contains ONLY selected GitHub API
-asset URLs/digests, Hub endpoint, target/name and nonsecret metadata. On
-the target it prompts without echoing for a GitHub Fine-grained PAT
-(repository-scoped `Contents: Read`) or reuses an existing verified,
-user-owned credential file. Neither the token nor the secret's path is
-sent to the Hub or embedded in release files.
-
-After the installer and sidecar/ZIP hashes and manifest validate, the
-**different, one-use Hub invitation token** is prompted and consumed.
-All such installations are unprivileged and limited to the user's own
-private root. A failed or uncertain enrollment is not retried
-automatically because the Hub may have committed it.
-
-`--token-only` remains for explicit manual enrollment and does not
-create a runnable installer command. The obsolete opt-in Caddy/manual-URL
-bootstrap test was removed; GitHub-only byte/credential tests remain. Full
-private-release/native Windows first-install acceptance is still pending.
-
-## Security / validation
-
-- No token is compiled into binary, put in command arguments or URLs,
-  written to Hub, or printed in logs.
-- The target credential uses `0600` with owner-only directory permissions
-  (Linux) or protected current-user DACL (Windows). Stolen credentials
-  expose the private repository's **source as well as binaries**.
-- Auth is sent to `api.github.com` only; the one bounded HTTPS GitHub
-  CDN follow-up never receives Authorization.
-- The exact source SHA, ZIP digest, target, version and file identities
-  are validated. Missing assets/digests or invalid metadata fail closed.
-- No real GitHub release, Windows native deployment, or production
-  Agent change is performed by this staging documentation.
-
-See [GitHub lifecycle](GITHUB_RELEASES.md),
-[Agent identity and installed updater](AGENT_INSTALLATION.md), and
-[Fresh enrollment](ENROLLMENT.md).
+See [installation](AGENT_INSTALLATION.md), [enrollment](ENROLLMENT.md) and
+[Win7 build/native gates](WIN7_REWRITE_ACCEPTANCE.md).

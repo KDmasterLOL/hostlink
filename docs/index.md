@@ -1,0 +1,19 @@
+# HostLink documentation
+
+The maintained installation/distribution contract is Huly 1C-1164. Packaging,
+Agent and Controller lanes require integration before runtime acceptance.
+
+- [Getting started](getting-started.md): source-only development entry point.
+- [GitHub Releases](GITHUB_RELEASES.md): raw asset names, credentials and bootstrap.
+- [Artifact packaging](ARTIFACTS_AND_INVITES.md): source-exact local build and staging.
+- [Agent installation](AGENT_INSTALLATION.md): stable root, identity and update.
+- [Enrollment](ENROLLMENT.md): private keys, Hub invitation and reconciliation.
+- [Windows offline update](AGENT_UPDATE_WINDOWS.md): stopped-task gate.
+- [Win7 acceptance](WIN7_REWRITE_ACCEPTANCE.md): PE evidence and native limits.
+- [Architecture](ARCHITECTURE.md) and [source layout](SOURCE_LAYOUT.md): owners.
+- [Client/Hub](CLIENT_HUB.md): managed inventory and Controller operations.
+- [Agent lifecycle](AGENT_LIFECYCLE.md) and [jobs](AGENT_MINIMAL_JOBS.md).
+- [Release history and gates](REWRITE_RELEASE_PLAN.md): historical source-bound evidence.
+
+Historical ZIP/bootstrap receipts do not prove raw installation. Native Windows
+acceptance and publication require separate evidence and authorization.

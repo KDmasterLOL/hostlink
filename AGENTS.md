@@ -25,7 +25,7 @@ Use exact host key pins, controller authorized Ed25519 keys, private owned paths
 bounded concurrency and byte streams, fail-closed security and Windows 7 PS2 support.
 No unmanaged background processes, false success or unbounded retries.
 A minimal Agent-only updater is REQUIRED: exact version/target/SHA,
-self_update-managed nonsecret archive/bundle staging (native permissions/ACL),
+self_update GitHub backend with RAW binary staging (native permissions/ACL),
 an exclusive updater lock, Agent process shutdown before Linux publication,
 installed-file integrity, upstream in-process rollback on failed publication,
 and offline stopped-only Windows update after removal of the current-user
@@ -41,10 +41,19 @@ may instead print the Controller's PAT in the bootstrap command and provision
 the target credential without prompting. Treat printed commands and any
 saved PowerShell helper as secret material and dispose of them after use.
 Without this explicit opt-in no PAT is included. PATs are never committed
-in source, binaries, Hub records, download URLs or release bundles. No
+in source, binaries, Hub records, download URLs or release assets. No
 arbitrary-site `invite` or `update` flags and no alternate publisher fallback.
-GitHub-digest checks do not replace HostLink ZIP, manifest, filesystem, locks
-or stopped-Agent checks; native Windows 7/11 acceptance remains a release gate.
+Under 1C-1164, publish only the four exact raw hostlink-agent-{target}[.exe]
+assets: no ZIP, installed installer/wrapper scripts, release manifest,
+archive.sha256 or bootstrap receipt. Local packaging/release receipts are
+provenance only and must not be uploaded. Keep DISTINCT state/manifest.json
+for private enrollment keys. Controller renders disposable Win7 PowerShell 2
+or POSIX bootstrap; verify the single binary SHA-256 before consuming a Hub invite.
+Rust Agent install owns enrollment and executable publication; never install Git
+or default tools. Use one stable per-user root: absolute XDG_DATA_HOME/hostlink/Agent
+or HOME/.local/share/hostlink/Agent on Linux, LocalAppData/HostLink/Agent on Windows.
+No random installation roots. GitHub-digest checks do not replace filesystem,
+locks or stopped-Agent checks; native Windows 7/11 acceptance remains a release gate.
 Under the explicit 2026-10-31 user trade-off for 1C-1147, no bespoke Windows
 staging ACL hardening or durable update journal is required. Sudden kill/power loss
 may leave bin missing; there is no automatic crash recovery. Persistent

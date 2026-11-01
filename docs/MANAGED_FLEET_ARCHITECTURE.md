@@ -1,5 +1,10 @@
 # HostLink managed fleet — mandatory control plane
 
+> 1C-1164 supersedes historical ZIP/installer/release-manifest guarantees below.
+> The binary-only contract is [GitHub Releases](GITHUB_RELEASES.md) and
+> [installation](AGENT_INSTALLATION.md). Keep private `state/manifest.json`.
+> Historical test counts do not validate this source or native raw installation.
+
 > 1C-1147 supersedes prior updater staging, CLI and journal guarantees. See
 > [the current updater contract](SELF_UPDATE_REWRITE.md); historical evidence below
 > does not attest this source revision.
@@ -84,7 +89,7 @@ The Board-forward port above is illustrative; use `board_listen` from the Agent'
 
 ### Fresh Agent bootstrap
 
-`hostlink invite` first validates exact installer/package target/version/SHA-256 from an independently trusted source. The generated Windows PowerShell 2/Win7-compatible or Linux bootstrap is run **on the target by its authorized non-elevated user**. A separate one-use secret is entered interactively or read from an owner-only token file, **never embedded in the command line, URL or logs**. The installer rejects an existing/foreign Agent root, symlink/reparse/unsafe ACL, wrong digest/target/version, ZIP traversal and package member mismatch. The Agent then:
+`hostlink invite` first validates the exact raw target/version/SHA-256 from private `KDmasterLOL/hostlink` GitHub Releases (1C-1164). The generated Windows PowerShell 2/Win7-compatible or Linux bootstrap is run **on the target by its authorized non-elevated user**. A separate one-use secret is entered interactively or read from an owner-only token file, **never embedded in the command line, URL or logs**. Disposable Controller-generated bootstrap verifies the single binary digest before consuming an invite. Rust Agent install owns enrollment and executable publication at the stable per-user root; no installed wrappers or Git/default tools. Preserve private `state/manifest.json` for enrollment keys; no release manifest/archive/bootstrap receipt. See [installation](AGENT_INSTALLATION.md). The Agent then:
 1. Creates fresh private machine identity and distinct Ed25519 gateway and embedded SSH host keys.
 2. Explicitly enrolls using pinned HTTPS and a one-use token, validating the complete reply and gateway pins. An uncertain enrollment result requires reconciliation, not blind token replay.
 3. Atomically publishes its own private Agent configuration, authorized controller public keys and job/storage roots, all outside the old installation.

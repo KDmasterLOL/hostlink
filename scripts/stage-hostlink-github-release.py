@@ -6,11 +6,11 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import sys
 import tempfile
-import zipfile
 from pathlib import Path
 
 TARGETS = {
@@ -27,7 +27,7 @@ def checked_file(path: Path, expected_sha: str, max_bytes: int) -> None:
         raise ValueError(f"invalid release input: {path}")
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise ValueError(f"release input is not owned by current user: {path}")
-    if len(expected_sha) != 64 or any(char not in "0123456789abcdef" for char in expected_sha):
+    if not isinstance(expected_sha, str) or len(expected_sha) != 64 or any(char not in "0123456789abcdef" for char in expected_sha):
         raise ValueError(f"invalid pinned checksum: {path}")
     hasher = hashlib.sha256()
     with path.open("rb") as data:
@@ -36,38 +36,34 @@ def checked_file(path: Path, expected_sha: str, max_bytes: int) -> None:
     if hasher.hexdigest() != expected_sha:
         raise ValueError(f"release input differs from package receipt: {path}")
 
-def file_digest(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as data:
-        for block in iter(lambda: data.read(1024 * 1024), b""):
-            hasher.update(block)
-    return hasher.hexdigest()
-
-
 def stage(packages: list[Path], output: Path, require_all_targets: bool = False) -> dict:
     if not packages:
         raise ValueError("at least one package receipt is required")
     if output.exists() or output.is_symlink():
         raise ValueError("release output must be a new directory")
     parent = output.absolute().parent
-    if not parent.is_dir() or parent.is_symlink():
+    if not parent.is_dir() or any(p.is_symlink() for p in (parent, *parent.parents)):
         raise ValueError("release output parent must be an existing directory")
     if hasattr(os, "getuid") and parent.stat().st_uid != os.getuid():
         raise ValueError("release output parent must be user-owned")
     version = source_sha = None
-    staged: dict[str, Path] = {}
+    staged: dict[str, tuple[Path, str, int]] = {}
     seen_targets: set[str] = set()
     for package in packages:
-        if package.is_symlink() or not package.is_dir():
+        if any(p.is_symlink() for p in (package.absolute(), *package.absolute().parents)) or not package.is_dir():
             raise ValueError("package input must be a directory, not a symlink")
         receipt_path = package / "artifact-receipt.json"
         if not receipt_path.is_file() or receipt_path.is_symlink() or receipt_path.stat().st_size > 65536:
             raise ValueError("missing or unsafe artifact receipt")
         receipt = json.loads(receipt_path.read_text("utf-8"))
+        if not isinstance(receipt, dict):
+            raise ValueError("artifact receipt must be a JSON object")
         target = receipt.get("target")
         v = receipt.get("version")
         source = receipt.get("source_sha")
-        if target not in TARGETS or not isinstance(v, str) or not isinstance(source, str):
+        if (not isinstance(target, str) or target not in TARGETS or not isinstance(v, str)
+                or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", v) is None
+                or not isinstance(source, str) or re.fullmatch(r"[0-9a-f]{40}", source) is None):
             raise ValueError("invalid source, version or target")
         if target in seen_targets:
             raise ValueError(f"duplicate release target: {target}")
@@ -76,50 +72,34 @@ def stage(packages: list[Path], output: Path, require_all_targets: bool = False)
             version, source_sha = v, source
         elif version != v or source_sha != source:
             raise ValueError("release packages come from different versions or source revisions")
-        executable = TARGETS[target]
-        zip_name = f"hostlink-agent-{target}.zip"
-        sidecar_name = f"hostlink-agent-{target}" + (".exe" if executable.endswith(".exe") else "")
-        installer_name = "Install-HostLink-Agent.ps1" if executable.endswith(".exe") else "install-hostlink-agent.sh"
-        if receipt.get("archive") != zip_name or receipt.get("sidecar") != f"{v}/{target}/{executable}" or receipt.get("installer") != installer_name:
-            raise ValueError("package receipt paths disagree with the GitHub release convention")
-        sources = (
-            (zip_name, package / v / zip_name, receipt.get("archive_sha256"), 512 * 1024 * 1024),
-            (sidecar_name, package / v / target / executable, receipt.get("sidecar_sha256"), 256 * 1024 * 1024),
-            (installer_name, package / v / installer_name, receipt.get("installer_sha256"), 1024 * 1024),
-        )
-        for name, file, sha, limit in sources:
-            checked_file(file, sha, limit)
-            if name in staged:
-                # Shared installer script must be identical across all packages.
-                if name != installer_name and name not in ("Install-HostLink-Agent.ps1", "install-hostlink-agent.sh"):
-                    raise ValueError(f"duplicate GitHub asset: {name}")
-                if file_digest(staged[name]) != sha:
-                    raise ValueError(f"same-name installer differs between targets: {name}")
-            else:
-                staged[name] = file
-        with zipfile.ZipFile(package / v / zip_name) as archive:
-            package_manifest = f"hostlink-agent-{target}/manifest.json"
-            try:
-                if archive.getinfo(package_manifest).file_size > 65536:
-                    raise ValueError("package manifest exceeds bound")
-                metadata = json.loads(archive.read(package_manifest))
-            except (KeyError, json.JSONDecodeError) as error:
-                raise ValueError("missing/invalid package manifest") from error
-            if metadata.get("format") != 2 or metadata.get("component") != "agent" or metadata.get("target") != target or metadata.get("version") != v:
-                raise ValueError("ZIP metadata does not match release selection")
-            if metadata.get("files", {}).get(executable, {}).get("sha256") != receipt.get("sidecar_sha256"):
-                raise ValueError("ZIP executable identity differs from sidecar")
+        asset_name = f"hostlink-agent-{target}" + (".exe" if TARGETS[target].endswith(".exe") else "")
+        expected_fields = {"format", "source_sha", "target", "version", "asset", "asset_sha256", "asset_size", "build_receipt"}
+        if receipt.get("format") != 2 or set(receipt) != expected_fields or receipt.get("asset") != asset_name:
+            raise ValueError("package receipt disagrees with the raw binary convention")
+        if {entry.name for entry in package.iterdir()} != {asset_name, "artifact-receipt.json"}:
+            raise ValueError("package must contain exactly one raw binary and its local receipt")
+        size = receipt.get("asset_size")
+        if type(size) is not int or not 0 < size <= 256 * 1024 * 1024:
+            raise ValueError("invalid raw binary size")
+        file = package / asset_name
+        sha = receipt.get("asset_sha256")
+        checked_file(file, sha, 256 * 1024 * 1024)
+        if file.stat().st_size != size:
+            raise ValueError("raw binary size differs from package receipt")
+        staged[asset_name] = (file, sha, size)
     if require_all_targets and seen_targets != set(TARGETS):
         raise ValueError("release must include every supported Agent target")
     staging = Path(tempfile.mkdtemp(prefix=".hostlink-github-release-", dir=parent))
     try:
         files = {}
-        for name, source in sorted(staged.items()):
+        for name, (source, expected_sha, expected_size) in sorted(staged.items()):
             target = staging / name
             shutil.copyfile(source, target)
             target.chmod(0o600)
-            checksum = file_digest(target)
-            files[name] = checksum
+            checked_file(target, expected_sha, 256 * 1024 * 1024)
+            if target.stat().st_size != expected_size:
+                raise ValueError("raw binary changed during release staging")
+            files[name] = expected_sha
         # Hidden receipt stays local; a shell glob used to upload release assets
         # must not accidentally publish build-machine provenance metadata.
         (staging / ".release-receipt.json").write_text(
@@ -142,7 +122,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         result = stage(args.packages, args.output_dir, args.require_all_targets)
-    except (ValueError, OSError, zipfile.BadZipFile, json.JSONDecodeError) as error:
+    except (ValueError, OSError) as error:
         print(f"stage-hostlink-github-release: {error}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2, sort_keys=True))

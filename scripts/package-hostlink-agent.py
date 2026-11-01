@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create deterministic, source-bound HostLink Agent package artifacts."""
+"""Stage one source-bound raw HostLink Agent executable and local provenance."""
 from __future__ import annotations
 
 import argparse
@@ -12,19 +12,15 @@ import stat
 import subprocess
 import sys
 import tempfile
-import zipfile
 from pathlib import Path
 
 MAX_FILE = 256 * 1024 * 1024
-MAX_TOTAL = 512 * 1024 * 1024
 TARGETS = {
     "x86_64-unknown-linux-gnu": ("linux", "hostlink-agent"),
     "x86_64-pc-windows-msvc": ("windows", "hostlink-agent.exe"),
     "x86_64-win7-windows-msvc": ("windows", "hostlink-agent.exe"),
     "i686-win7-windows-msvc": ("windows", "hostlink-agent.exe"),
 }
-WINDOWS_ASSETS = ("Install-HostLink-Agent.ps1", "Run-HostLink-Agent.ps1", "Update-HostLink-Agent.ps1")
-EPOCH = (1980, 1, 1, 0, 0, 0)
 
 
 def digest(path: Path) -> str:
@@ -66,14 +62,6 @@ def checked_regular(path: Path, limit: int = MAX_FILE) -> tuple[int, str]:
 def valid_semver(value: str) -> bool:
     pattern = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
     return re.fullmatch(pattern, value) is not None
-
-
-def verify_installer(path: Path, platform: str) -> None:
-    content = path.read_text(encoding="utf-8")
-    required = ("HubUrl", "AgentUri", "AgentSha256", "AgentVersion", "ArchiveUri", "ArchiveSha256", "Target", "AsSecureString", "AllowAutoRedirect", "bootstrap-verify", "bootstrap-finalize") if platform == "windows" else ("--hub-url", "--agent-url", "--agent-sha256", "--agent-version", "--archive-url", "--archive-sha256", "--target", "bootstrap-verify", "bootstrap-finalize")
-    missing = [token for token in required if token not in content]
-    if missing:
-        raise ValueError(f"installer contract is incomplete: {path.name}")
 
 
 def verify_build_receipt(path: Path, source_sha: str, target: str, binary_sha: str) -> dict:
@@ -148,82 +136,23 @@ def create_package(repo: Path, source_sha: str, target: str, version: str, binar
         if target.endswith("win7-windows-msvc") and build_receipt is None:
             raise ValueError("Win7 packages require the same-source PE build receipt")
     receipt_info = verify_build_receipt(build_receipt, source_sha, target, binary_sha) if build_receipt else None
-    inputs: list[tuple[str, Path]] = [(executable, binary)]
-    installer_asset = repo / "crates" / "agent" / "assets" / ("Install-HostLink-Agent.ps1" if platform == "windows" else "install-hostlink-agent.sh")
-    checked_regular(installer_asset)
-    verify_installer(installer_asset, platform)
-    if platform == "windows":
-        for name in WINDOWS_ASSETS:
-            path = repo / "crates" / "agent" / "assets" / name
-            checked_regular(path)
-            inputs.append((name, path))
-    total = sum(checked_regular(path)[0] for _, path in inputs)
-    if total > MAX_TOTAL:
-        raise ValueError("uncompressed package exceeds total size limit")
-    files = {name: {"size": size, "sha256": sha} for name, path in inputs for size, sha in [checked_regular(path)]}
-    manifest = {"format": 2, "component": "agent", "target": target, "version": version, "files": files}
-    inputs.append(("manifest.json", None))  # manifest is materialized in private staging below
+    asset_name = f"hostlink-agent-{target}" + (".exe" if executable.endswith(".exe") else "")
     parent = raw_parent
     if not parent.is_dir() or parent.stat().st_uid != uid:
         raise ValueError("output parent must exist and be owned by current user")
     temp = Path(tempfile.mkdtemp(prefix=".hostlink-package-", dir=parent))
     try:
-        package_name = f"hostlink-agent-{target}"
-        zip_path = temp / f"{package_name}.zip"
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, strict_timestamps=True) as archive:
-            ordered = [(name, path) for name, path in inputs if path is not None]
-            ordered.append(("manifest.json", None))
-            for name, path in ordered:
-                content = canonical_json(manifest) if path is None else path.read_bytes()
-                if path is not None:
-                    expected_identity = manifest["files"][name]
-                    if len(content) != expected_identity["size"] or hashlib.sha256(content).hexdigest() != expected_identity["sha256"]:
-                        raise ValueError(f"package input changed while packaging: {name}")
-                info = zipfile.ZipInfo(f"{package_name}/{name}", EPOCH)
-                info.compress_type = zipfile.ZIP_DEFLATED
-                info.create_system = 3
-                info.external_attr = (stat.S_IFREG | (0o755 if name == executable else 0o644)) << 16
-                info.flag_bits |= 0x800
-                archive.writestr(info, content, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
-        with zipfile.ZipFile(zip_path, "r") as archive:
-            expected_names = [f"{package_name}/{name}" for name, _ in inputs]
-            if archive.namelist() != expected_names:
-                raise ValueError("generated ZIP member order does not match the package contract")
-            for index, (name, path) in enumerate(inputs):
-                item = archive.infolist()[index]
-                if stat.S_IFMT(item.external_attr >> 16) != stat.S_IFREG:
-                    raise ValueError("generated ZIP contains a non-regular member")
-                if path is None and archive.read(item) != canonical_json(manifest):
-                    raise ValueError("generated ZIP manifest bytes are not canonical")
-                if path is not None:
-                    data = archive.read(item)
-                    identity = manifest["files"][name]
-                    if len(data) != identity["size"] or hashlib.sha256(data).hexdigest() != identity["sha256"]:
-                        raise ValueError(f"generated ZIP member does not match manifest: {name}")
-        archive_sha = digest(zip_path)
-        semver_dir = temp / version
-        target_dir = semver_dir / target
-        target_dir.mkdir(parents=True, mode=0o700)
-        sidecar = target_dir / executable
-        shutil.copyfile(binary, sidecar)
-        sidecar.chmod(0o700)
-        shutil.copyfile(zip_path, semver_dir / zip_path.name)
-        shutil.copyfile(repo / "crates/agent/assets/Install-HostLink-Agent.ps1" if platform == "windows" else repo / "crates/agent/assets/install-hostlink-agent.sh", semver_dir / ("Install-HostLink-Agent.ps1" if platform == "windows" else "install-hostlink-agent.sh"))
-        installer = semver_dir / ("Install-HostLink-Agent.ps1" if platform == "windows" else "install-hostlink-agent.sh")
-        installer.chmod(0o600)
-        verify_installer(installer, platform)
-        (semver_dir / (zip_path.name + ".sha256")).write_text(f"{archive_sha}  {zip_path.name}\n", encoding="ascii")
-        sidecar_sha = digest(sidecar)
-        if sidecar_sha != files[executable]["sha256"] or sidecar.stat().st_size != files[executable]["size"]:
-            raise ValueError("sidecar bytes do not match packaged executable identity")
-        (target_dir / (executable + ".sha256")).write_text(f"{sidecar_sha}  {executable}\n", encoding="ascii")
-        receipt = {"format": 1, "source_sha": source_sha, "target": target, "version": version,
-                   "archive": zip_path.name, "archive_sha256": archive_sha,
-                   "sidecar": f"{version}/{target}/{executable}", "sidecar_sha256": sidecar_sha,
-                   "installer": installer.name, "installer_sha256": digest(installer),
-                   "files": manifest["files"], "build_receipt": receipt_info}
+        asset = temp / asset_name
+        shutil.copyfile(binary, asset)
+        asset.chmod(0o700)
+        if checked_regular(asset) != (binary_size, binary_sha):
+            raise ValueError("binary changed while packaging")
+        receipt = {"format": 2, "source_sha": source_sha, "target": target, "version": version,
+                   "asset": asset_name, "asset_sha256": binary_sha, "asset_size": binary_size,
+                   "build_receipt": receipt_info}
+        # Local provenance only: never publish this file as a release asset.
         (temp / "artifact-receipt.json").write_bytes(canonical_json(receipt))
-        (temp / "invite-inputs.json").write_bytes(canonical_json({"version":version,"target":target,"installer_sha256":receipt["installer_sha256"],"agent_sha256":sidecar_sha,"archive_sha256":archive_sha}))
+        (temp / "artifact-receipt.json").chmod(0o600)
         current_head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
         current_status = subprocess.check_output(["git", "-C", str(repo), "status", "--porcelain=v1", "--untracked-files=all"], text=True)
         if current_head != source_sha or current_status:
@@ -250,7 +179,7 @@ def main() -> int:
         result = create_package(repo, args.source_sha, args.target, args.version, args.binary, args.output_dir, args.build_receipt)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
-    except (OSError, ValueError, subprocess.CalledProcessError, zipfile.BadZipFile) as error:
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"package-hostlink-agent: {error}", file=sys.stderr)
         return 1
 

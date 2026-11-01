@@ -224,12 +224,6 @@ class PilotLifecycleTests(unittest.TestCase):
         with self.assertRaises(helper.PilotError):
             helper.private_text(path)
 
-    def test_artifact_receipt_archive_layout_matches_packager(self):
-        source = HELPER.read_text()
-        self.assertIn("archive = artifacts.joinpath(VERSION, *archive_rel.parts)", source)
-        self.assertIn("sidecar = artifacts.joinpath(*sidecar_rel.parts)", source)
-        self.assertIn("installer = artifacts.joinpath(VERSION, *installer_rel.parts)", source)
-
     def test_partial_start_rollback_stops_only_ledger_owned_child(self):
         spec = importlib.util.spec_from_file_location("pilot_helper", HELPER)
         helper = importlib.util.module_from_spec(spec)

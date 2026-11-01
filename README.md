@@ -2,12 +2,14 @@
 
 Managed HostLink rewrite for development integration testing under Huly 1C-987.
 The workspace contains three crates: Agent, Client and the required Hub. This
-integration is not a release, deployment or installed fleet cutover. The source
-code evidence documented in [the release plan](docs/REWRITE_RELEASE_PLAN.md) is
-for `37fd3663f91dad0ceefd933862a4ec595e4765ce`; a documentation-only commit has
-a different SHA and does not change the tested executable source.
+integration is not a release, deployment or installed fleet cutover.
+See the [documentation index](docs/index.md) for maintained contracts.
+Huly 1C-1164 defines binary-only distribution. This packaging lane changes
+scripts/assets/docs; Agent and Controller runtime changes require integration
+with their owning lanes before executable acceptance can be claimed.
 
 Target packages:
+
 - hostlink-agent: embedded SSH server, outbound reverse tunnel, SFTP,
   short exec, Agent-local Apalis jobs/Board, fresh enrollment and Agent-only updater.
 - hostlink: Hub-managed host selection/invite/list/revoke plus pinned SSH
@@ -29,21 +31,28 @@ otherwise the token never appears in the generated invitation. Controller uses i
 corresponding user-local credential to resolve and preflight the release
 **before issuing an invitation**. The updater supports
 `hostlink-agent update [--version X.Y.Z] [--root ROOT]` and no arbitrary
-`--url`, `--sha256` or `--target` flags. ZIPs require GitHub-published
-SHA-256 and exact target/version/manifest identity, and one upstream
-`self_update` publisher installs a verified bundle.
+`--url`, `--sha256` or `--target` flags. Distribution contains exactly four
+raw Agent executables, with GitHub-published SHA-256; see
+[GitHub Releases](docs/GITHUB_RELEASES.md) for exact asset names.
+The updater uses the `self_update` GitHub RAW backend for one exact target
+asset and version, with exclusive offline locks and Windows stopped-task gate.
 
-Both `update.lock` and `jobs/runner.lock` remain mandatory. The Agent
-must be stopped for publication; on Windows the user must remove its
-Task Scheduler registration and invoke a separate verified updater outside
-`bin`. Installed `manifest.json` stays verbatim, with `archive.sha256`
-beside it. The private state/keys/jobs remain untouched. Upstream can
-roll back ordinary in-process failures, but a kill/power loss between
-renames can leave `bin` missing; there is no durable crash journal.
-See [GitHub Releases](docs/GITHUB_RELEASES.md),
-[Agent installation](docs/AGENT_INSTALLATION.md) and
-[Windows offline update](docs/AGENT_UPDATE_WINDOWS.md). Native Win7/11
-acceptance and first verified publication are still required.
+Install at one stable per-user root: absolute `$XDG_DATA_HOME/hostlink/Agent`
+or `$HOME/.local/share/hostlink/Agent` on Linux, current-user OS-resolved
+`%LOCALAPPDATA%\HostLink\Agent` on Windows. Controller-generated disposable
+PS2/POSIX bootstrap verifies one downloaded binary before consuming the Hub
+invite. Rust Agent install owns enrollment and executable publication; no Git
+or default tools are installed. No ZIP, installed PS1/shell wrappers, release
+manifest, `archive.sha256` or bootstrap receipt. **Keep `state/manifest.json`**:
+it owns private enrollment-key identity, separate from release metadata.
+
+Both `update.lock` and `jobs/runner.lock` remain mandatory. Stop the Agent
+before publication; on Windows remove its current-user Task Scheduler task
+and use a verified separate updater outside installed `bin`. Upstream handles
+ordinary in-process rollback, but sudden kill/power loss may require manual
+recovery; no durable crash journal. See [installation](docs/AGENT_INSTALLATION.md)
+and [Windows offline update](docs/AGENT_UPDATE_WINDOWS.md). Native Win7/11
+acceptance and separately approved publication remain release gates.
 
 The rewrite is being integrated into HostLink `dev` for testing. It is **not
 ready for release, deployment or fleet migration**.
@@ -70,13 +79,10 @@ targets with the separately pinned `nightly-2026-08-22`, `cargo-xwin`, and
 source-exact build and PE evidence workflow is documented in
 [docs/WIN7_REWRITE_ACCEPTANCE.md](docs/WIN7_REWRITE_ACCEPTANCE.md).
 
-For disposable Windows bootstrap checks, `scripts/verify-win7-bootstrap-native.ps1`
-validates the matching x64/x86 build and package receipts, runs the actual
-`bootstrap-verify` binaries, checks their output receipts, and exercises digest,
-target, and overwrite rejection. It requires Windows PowerShell 2, an
-unelevated interactive user, and an explicitly supplied empty private staging
-root. Windows 11 x86 execution is WoW64 evidence only, not native NT6.1
-acceptance. See the acceptance document for package preparation and invocation.
+The old `scripts/verify-win7-bootstrap-native.ps1` ZIP harness is retired
+and fails explicitly without executing candidates. It cannot validate the raw
+installation flow. Native Windows 7 x86/x64, Windows 11 and PowerShell 2
+acceptance must be recorded anew; see the acceptance document.
 
 ## Development commands
 
@@ -111,16 +117,11 @@ private Ed25519 identity. Neither component silently creates or enrolls keys.
 Only use disposable current-user fixtures until the native acceptance matrix
 passes.
 
-Fresh user enrollment is available as `hostlink-agent enroll`; it uses the Hub
-v2 `/v2/enroll` DTO, creates distinct machine and SSH host Ed25519 keys, and
-publishes a private config only after validating the Hub response. The Win7
-PowerShell 2 and Linux bootstrap scripts require independent exact source pins
-for the package ZIP and target-specific verifier sidecar. The sidecar shares the
-updater's bounded required-file/manifest validator, verifies its own bytes match the
-ZIP executable, and writes install integrity metadata plus a source-bound
-bootstrap receipt before the token prompt. See
-[docs/ENROLLMENT.md](docs/ENROLLMENT.md) for the full bootstrap contract and
-native acceptance limits.
+Fresh enrollment uses the Hub v2 `/v2/enroll` DTO, distinct machine and SSH
+host Ed25519 keys, and private config publication after validating the reply.
+Controller-generated bootstrap downloads and SHA-256-checks a single raw
+executable before invoking Rust install and consuming the one-use invite.
+See [enrollment](docs/ENROLLMENT.md) for identity and reconciliation boundaries.
 
 Agent-local commands use **Apalis SQLite 1.0.0** for queue/state/results and
 the official **apalis-board-api 1.0.0** (Axum) for the browser UI and HTTP API.
@@ -189,15 +190,13 @@ Task Scheduler lifecycle and offline update/recovery require fresh native accept
 ## Local Agent artifact packages
 
 Use [the GitHub-only publication contract](docs/ARTIFACTS_AND_INVITES.md):
-`scripts/package-hostlink-agent.py` builds source-bound ZIP/verifier
-artifacts for each target, and
-`scripts/stage-hostlink-github-release.py` verifies their receipts and
-prepares a flat multi-target GitHub Releases upload directory. Both tools
-operate locally and **do not publish or deploy** anything. Publishing an
-immutable GitHub Release requires separate native/source-exact acceptance.
-The obsolete Caddy-hosted manual-URL installer fixture was deleted. Current
-acceptance uses GitHub-only bootstrap tests and a separately approved real
-release/native OS run.
+`scripts/package-hostlink-agent.py` copies one source-bound raw executable
+and writes local provenance; `scripts/stage-hostlink-github-release.py`
+verifies receipts and emits only raw assets plus a hidden local receipt.
+Receipts must not be published. These tools do not upload, tag or deploy.
+Run `python3 -m unittest discover -s scripts/tests -v` for local script checks.
+The old asset-sourced bootstrap credential/download tests were deleted with
+the installers; generated-bootstrap tests belong to the Controller lane.
 
 ## Agent lifecycle
 
@@ -223,3 +222,29 @@ Stale legacy markers do not block service installation, but an existing
 legacy HKCU Run autorun must be safely removed before Task Scheduler startup.
 See [docs/AGENT_LIFECYCLE.md](docs/AGENT_LIFECYCLE.md) for commands, platform
 limits and safety behavior. Windows native acceptance remains unrun.
+
+## Project Structure
+
+```text
+crates/agent/    Agent runtime, enrollment, install/update and local jobs
+crates/client/   Controller CLI and generated bootstrap
+crates/hub/      Fleet management API and state
+scripts/        Local packaging, evidence and disposable pilot tools
+docs/           Source contracts and acceptance history
+Vendor/         Pinned dependencies with local compatibility changes
+```
+
+| Directory | Responsibility |
+| --- | --- |
+| `crates/` | Agent, Controller and Hub implementations |
+| `scripts/` | Local build/package checks; no implicit publication |
+| `docs/` | Architecture, installation and evidence boundaries |
+| `Vendor/` | Pinned dependency sources and provenance |
+
+### Adding New Code
+
+| Concern | Owner |
+| --- | --- |
+| Install/update and enrollment | Agent Rust modules; [source map](docs/SOURCE_LAYOUT.md) |
+| Generated bootstrap and invite | Controller `bootstrap/` and Hub command modules |
+| Artifact packaging and staging | Existing Python scripts and `scripts/tests/` |

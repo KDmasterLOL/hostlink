@@ -34,34 +34,34 @@ does not certify production or registered Windows updater deployment.
 | Agent-local Apalis command queue and Board UI/API | `crates/agent/src/jobs/` (no Client jobs subsystem) |
 | Owner-only private files and Windows ACL | `Vendor/private-fs/` (pinned upstream + Win7 fallback) |
 | Verified-handle → standard `File` conversion for OS locks and Tokio | `crates/agent/src/private_fs.rs` (one extension trait) |
-| Windows 7 LocalAppData lookup for exact updater root | `crates/agent/src/agent_files.rs` |
+| Stable per-user installation root and Windows 7 LocalAppData lookup | `crates/agent/src/agent_files.rs` |
 | Hub v2 endpoints and authoritative registry | `crates/hub/src/server/`; `crates/hub/src/state.rs` |
 | Fresh enrollment and source-pinned installation | `crates/agent/src/enrollment/`; `crates/client/src/bootstrap/` |
 | Linux service lifecycle | `crates/agent/src/service/linux.rs` (`service-manager` + systemd --user) |
 | Windows current-user Task Scheduler | `crates/agent/src/service/windows.rs` (direct COM, owned task action) |
 | Installed Agent update | `crates/agent/src/update.rs`: exact artifact, offline admission and upstream `self_update` |
-| Initial Agent installation and receipt | `crates/agent/src/bootstrap.rs` |
-| Shared package identity and ZIP preflight | `crates/agent/src/package/` |
+| Rust Agent install: enrollment and executable publication | Agent install owner (runtime lane); no installed wrappers |
+| Local raw binary provenance and release staging | `scripts/package-hostlink-agent.py`, `scripts/stage-hostlink-github-release.py` |
 | Shared private root/path and file identities | `crates/agent/src/agent_files.rs` |
 | Windows offline process identity admission | `crates/agent/src/service/offline.rs` |
 
-`update.rs` exposes one GitHub-only `update(root, version)` entrypoint.
-Upstream `self_update::github::Update` handles discovery, private asset
-download and ZIP/manifest-checked bundle publication. The GitHub
-`/releases/latest` selection is pinned to an exact `vX.Y.Z` tag before
-the upstream update; no bespoke `GitHubTransport`, `apply_update`, release
-parser or public arbitrary URL/pin update mode remains. Agent
-credentials are read through the private `agent_files.rs` helpers from the
-target's user-owned `hostlink/credentials/github-token` file. Controller's
-GitHub-only invitation selects and verifies assets in
-`crates/client/src/bootstrap/github.rs` before issuing a Hub invite; the
-target bootstrap securely prompts/creates its own PAT before downloading
-the fixed GitHub asset URLs. `bootstrap.rs` still owns the original
-first-install verifier/finalization, with source `manifest.json` and
-separate installed `archive.sha256`. Both paths preserve locks, the
-stopped-Agent gate and private state. See
-[GitHub Releases](GITHUB_RELEASES.md) and
-[Agent installation](AGENT_INSTALLATION.md).
+Under Huly 1C-1164 the Agent updater uses the upstream `self_update` GitHub
+RAW backend, exact named target asset/version and published SHA-256 in the
+fixed private `KDmasterLOL/hostlink` repository. Controller `bootstrap/` owns
+release selection and disposable Win7 PS2/POSIX bootstrap generation. Agent
+Rust install owns enrollment and executable publication. The obsolete Agent
+installer/run/update assets are deleted; there are no installed wrappers,
+ZIP/package parser, release manifest, archive hash or bootstrap receipt in
+the binary-only contract. **Keep `state/manifest.json`** for private enrollment
+keys. See [installation](AGENT_INSTALLATION.md) for stable per-user roots.
+
+This packaging lane owns scripts/assets/docs only. Baseline Rust still has
+legacy package/bootstrap references; their removal belongs to the Agent and
+Controller lanes. Runtime module names and full build acceptance must be
+verified after coordinator integration. Local raw packaging tests do not
+establish that gate. Credentials stay target-owned and private; offline locks,
+Windows stopped-task checks and private state boundaries remain required.
+See [GitHub Releases](GITHUB_RELEASES.md).
 
 `jobs/mod.rs` exposes only the typed `CommandJob`, local queue and private
 updater contract. `jobs/store.rs` configures the native Apalis SQLite

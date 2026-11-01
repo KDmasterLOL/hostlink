@@ -38,6 +38,18 @@ HostLink Client ── pinned SSH exec/SFTP/forward ──> Agent SSH
 Hub ── inventory/enroll/route/revoke ──> Client + Agent
 ```
 
+## Binary-only installation owner (1C-1164)
+
+Controller resolves the private fixed GitHub release and generates disposable
+PS2/POSIX bootstrap. Download one raw target executable and verify SHA-256
+before consuming a Hub invite. Agent Rust install owns enrollment and
+executable publication at one stable per-user root; no installed wrappers or
+Git/default tools. Agent update uses the `self_update` GitHub RAW backend
+with exact asset/version/digest and offline locks. Preserve private
+`state/manifest.json` for enrollment keys; remove release manifests, archives
+and bootstrap receipts. See [installation](AGENT_INSTALLATION.md).
+This packaging lane does not prove the separate runtime implementation.
+
 ## Job execution contract
 
 The typed payload is `CommandJob { program, args, cwd? }`. There is no

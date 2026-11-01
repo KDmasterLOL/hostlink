@@ -20,6 +20,9 @@ usage() {
 Usage: scripts/build-win7-candidate.sh --source-sha FULL_SHA --output-dir target/PATH
 
 Build and inspect the Agent and Client for both Win7 MSVC target triples.
+This is local PE evidence, not a release bundle or native acceptance.
+Pass each Agent executable and receipt.json to package-hostlink-agent.py
+to stage one raw release asset; Client executables are not Agent assets.
 Use the pre-provisioned xwin SDK 10.0.26100.0 + CRT 14.44.17.14 in XWIN_CACHE_DIR.
 Requires both x86 and x86_64 xwin components; set XWIN_ARCH=x86,x86_64.
 The output directory must be new and inside this checkout's ignored target/.

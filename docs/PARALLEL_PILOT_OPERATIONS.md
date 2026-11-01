@@ -1,5 +1,12 @@
 # HostLink v2 isolated HOME pilot
 
+> 1C-1164: the historical pilot `up/check` path expects archive/installer
+> receipts and is incompatible with the new raw packaging output. It has not
+> been adapted in this packaging lane (pilot implementation is outside scope).
+> Do not use this procedure to claim binary-only bootstrap acceptance. Local
+> pilot lifecycle tests do not exercise that artifact path. See
+> [current installation](AGENT_INSTALLATION.md) and [packaging](ARTIFACTS_AND_INVITES.md).
+
 This Linux-only operator tool runs an isolated v2 Hub, Caddy HTTPS endpoint,
 OpenSSH gateway and freshly enrolled Agent below one private user-owned root.
 It does not change the installed ONEC Agent, port 22, user SSH configuration,

@@ -1,5 +1,10 @@
 # HostLink russh execution rewrite: staged integration and managed-fleet migration
 
+> 1C-1164 supersedes historical ZIP/installer/release-manifest guarantees below.
+> The binary-only contract is [GitHub Releases](GITHUB_RELEASES.md) and
+> [installation](AGENT_INSTALLATION.md). Keep private `state/manifest.json`.
+> Historical test counts do not validate this source or native raw installation.
+
 > 1C-1147 supersedes prior updater staging, CLI and journal guarantees. See
 > [the current updater contract](SELF_UPDATE_REWRITE.md); historical evidence below
 > does not attest this source revision.

@@ -1,6 +1,11 @@
 # History of the Agent self_update integration
 
-**Current implementation (1C-1159):** [GitHub-only release and credential contract](GITHUB_RELEASES.md) and [Agent installation](AGENT_INSTALLATION.md).
+> 1C-1164 supersedes historical ZIP/installer/release-manifest guarantees below.
+> The binary-only contract is [GitHub Releases](GITHUB_RELEASES.md) and
+> [installation](AGENT_INSTALLATION.md). Keep private `state/manifest.json`.
+> Historical test counts do not validate this source or native raw installation.
+
+**Current binary-only contract (1C-1164):** [GitHub-only release and credential contract](GITHUB_RELEASES.md) and [Agent installation](AGENT_INSTALLATION.md).
 All specific versions and manual URL examples below are **historical** and not current CLI instructions.
 The sections below record the **historical** source-exact 1C-1147/1149/1153
 decisions and their own test evidence. Their `install.json` transformation,

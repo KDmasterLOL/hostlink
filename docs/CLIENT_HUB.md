@@ -124,30 +124,26 @@ hostlink invite --name lab-win7 --target x86_64-win7-windows-msvc
 hostlink invite --name lab-win7 --target x86_64-win7-windows-msvc --version 0.1.0
 ```
 
-Without a version, Client chooses GitHub's latest **published stable**
-release; otherwise it selects exact `vX.Y.Z`. Before issuing a
-one-use Hub invite, it verifies the exact target's ZIP and sidecar
-metadata/digests, downloads the selected GitHub installer over authenticated
-HTTPS and verifies its byte digest and target-specific command contract.
+Without a version, Client chooses GitHub's latest published stable release;
+otherwise exact `vX.Y.Z`. Under 1C-1164 it resolves the exact raw target
+executable and GitHub-published SHA-256 before issuing a one-use Hub invite.
+Controller renders disposable Windows 7 PowerShell 2 or POSIX bootstrap;
+there is no released/installed installer asset. Target bootstrap downloads one
+binary and checks its digest before consuming the separate Hub invite, then
+invokes Rust Agent install at the stable per-user root.
 
-The normal target bootstrap contains GitHub asset API URLs and their
-expected SHA-256, without a PAT. With `--embed-github-token`, the
-printed bootstrap includes the Controller PAT so the target can save it
-without a second prompt. Treat this output as sensitive. The target independently
-prompts (without echo) for its own PAT and creates/reads the private
-`hostlink/credentials/github-token` file, then fetches/validates the
-installer, sidecar and ZIP. Only after those validations does the target
-ask for the **different one-use Hub invitation token**. Windows PowerShell 2
-may require saving an explicit target-local helper script (without the PAT)
-and invoking it unelevated; that is printed rather than issuing a command
-that would exceed the Windows command-line limit.
+Default bootstrap prompts for the target's own PAT without echo and creates
+or reads private `hostlink/credentials/github-token`. Explicit
+`--embed-github-token` prints the Controller PAT in the helper instead; protect
+stdout/history/clipboard and delete saved helpers after use. No PAT is embedded
+without opt-in. Unix credentials require `0600`; Windows requires protected
+current-user-only ACL. No Git/default command installation is performed.
+`state/manifest.json` remains private enrollment metadata.
 
-`--token-only` remains a manual-enrollment escape hatch and produces
-no installer command. The old
-`--installer-url`, `--agent-url`, `--archive-url`, and SHA flags have
-been removed: there is **no arbitrary artifact website** fallback.
-A missing private token, inaccessible release, absent GitHub asset digest,
-or changed installer causes an error **before** Hub invitation.
+`--token-only` remains for manual enrollment. No arbitrary-site installer,
+agent or archive URL flags or alternate publisher fallback. Missing private
+credentials, assets or digests fail closed. This packaging lane's tests do not
+validate the separate Controller runtime implementation or native PS2 flow.
 
 See [GitHub Releases](GITHUB_RELEASES.md),
 [Artifact publication](ARTIFACTS_AND_INVITES.md), and

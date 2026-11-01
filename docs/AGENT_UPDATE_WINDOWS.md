@@ -1,64 +1,40 @@
-# Windows Agent: GitHub-only offline update (1C-1159)
+# Windows raw Agent offline update (1C-1164)
 
-The current user must **stop** the installed Agent and remove its
-current-user Task Scheduler task, then run a verified, separate
-`hostlink-agent.exe` updater from beneath the private Agent root but
-**outside** `bin`. Running the updater or replacement of a live Agent
-image is not supported. The updater never kills processes or manipulates
-Task Scheduler registrations by itself.
+The only installation root is the current user's OS-resolved
+`%LOCALAPPDATA%\HostLink\Agent`. Stop the Agent and remove its current-user
+Task Scheduler task before publication. Run a verified separate
+`hostlink-agent.exe` updater outside installed `bin`; never replace a running
+Agent image. The updater does not kill processes or change task registrations.
 
 ```text
-hostlink-agent.exe update                 # GitHub's latest stable release
-hostlink-agent.exe update --version 1.2.3 # exact published GitHub release
+hostlink-agent.exe update
+hostlink-agent.exe update --version 1.2.3
 ```
 
-`--root ROOT` is optional on Windows: the OS resolves the exact
-current-user LocalAppData/HostLink/Agent root. The Agent checks the private
-root and exclusive `update.lock` and `jobs/runner.lock`, requires no
-registered Task Scheduler task or running installed executable, and fails
-before publication when any admission check fails.
+The updater holds exclusive `update.lock` and `jobs/runner.lock`, checks no
+registered task or running installed Agent image, and fails closed when offline
+admission is uncertain. It uses the `self_update` GitHub RAW backend with the
+exact target asset, version and published SHA-256 from private
+`KDmasterLOL/hostlink`. No ZIP extraction or wrapper script is involved.
+The target's `%APPDATA%\HostLink\credentials\github-token` remains a private
+current-user-only protected-DACL file; updates never take a token from argv,
+environment variables or Hub records.
 
-The private GitHub credential is stored in **the target user's**
-`%APPDATA%\HostLink\credentials\github-token`, created by the target-side
-bootstrap prompt with an owner-only protected DACL. Updates read it via
-native Win7-compatible APIs and do **not** accept raw artifact URLs,
-command-line tokens or token environment variables. The credential must
-provide repository-scoped GitHub `Contents:Read`. An inaccessible or
-unpublished GitHub Release is an error, not a reason to retry a different
-publisher.
+Keep `state/manifest.json` for enrollment-key integrity, other private keys,
+config and Apalis jobs. Do not publish or preserve release manifests,
+`archive.sha256`, bootstrap receipts or installed PS1 wrappers. Apalis alone
+owns its SQLite tables. Upstream in-process rollback handles ordinary failed
+publication; there is no durable journal, automatic crash recovery or restart.
+Sudden kill/power loss can require manual executable recovery.
 
-The fixed private `KDmasterLOL/hostlink` GitHub API yields an exact
-version and target asset with a SHA-256 digest. `self_update 1.3.1`
-verifies SHA/ZIP/manifest and extracted file inventory before swapping
-the complete Agent `bin` directory. The publisher preserves the source
-`manifest.json`, writes canonical `archive.sha256`, and rereads the
-installed identity. HTTPS-only CDN redirects do not forward Authorization.
-There is no independent publisher signature, no general release engine,
-no durable crash journal and no automatic task restart. A power loss
-between renames can require manual `bin` recovery.
+Controller-generated PowerShell 2 bootstrap is disposable. By default it prompts
+for the target PAT without echo. Explicit `--embed-github-token` prints a
+secret-bearing helper; protect it and delete after use. Bootstrap downloads one
+raw Agent binary and verifies SHA-256 before consuming the Hub invite, then
+invokes Rust install for enrollment and executable publication. It never
+installs Git or default commands.
 
-The bundle contains the PowerShell 2-compatible
-`Update-HostLink-Agent.ps1` wrapper. Pass
-`-Updater` pointing at the **separate verified executable**; optionally
-pass `-Version 1.2.3`. It determines `ROOT` from the bundle location and
-calls the same GitHub-only Agent updater. No `-Url` or `-Sha256` flags.
-
-For fresh Windows installation, `hostlink invite` supplies an installer
-bootstrap in two steps when the safe PowerShell code exceeds the 8191
-character `cmd.exe` command-line limit. Normally the helper contains
-**no PAT**, but explicit `--embed-github-token` prints a helper containing
-the Controller PAT in cleartext; keep it private and delete after use.
-The target user saves the helper as a local .ps1 and runs it unelevated;
-its hidden prompt securely provisions the GitHub token before fetching
-the release-asset installer, sidecar, and archive. Files are SHA-pinned,
-then `bootstrap-verify` is run **before** asking for the one-use
-HostLink enrollment token.
-
-Native Windows 7 (x86/x64), Windows 11, PowerShell 2, file ACL and
-Task Scheduler concurrency acceptance is still outstanding; Linux
-static/source checks do not establish native correctness. No live
-machines, tasks, registrations or production data were modified.
-
-See [GitHub release lifecycle](GITHUB_RELEASES.md),
-[Agent install/identity](AGENT_INSTALLATION.md) and
-[historical self-update record](SELF_UPDATE_REWRITE.md).
+Native Windows 7 x86/x64, Windows 11, PowerShell 2, ACL and Task Scheduler
+acceptance is **NOT RUN by this packaging lane**. The retired ZIP harness
+cannot supply that evidence. See [Win7 gates](WIN7_REWRITE_ACCEPTANCE.md),
+[release contract](GITHUB_RELEASES.md) and [installation](AGENT_INSTALLATION.md).
