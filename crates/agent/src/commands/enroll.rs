@@ -19,7 +19,7 @@ pub(crate) struct Args {
     user: String,
     #[arg(long)]
     gateway_index: Option<usize>,
-    /// Retain the pending marker until bootstrap-finalize verifies package publication.
+    /// Retain the pending marker for development enrollment reconciliation.
     #[arg(long, hide = true)]
     retain_pending: bool,
 }

@@ -1,0 +1,34 @@
+use clap::Args as ClapArgs;
+use hostlink_agent::installation::{InstallOptions, install};
+use std::{io, path::PathBuf};
+
+#[derive(ClapArgs)]
+pub(crate) struct Args {
+    #[arg(long)]
+    hub_url: String,
+    #[arg(long)]
+    token_file: PathBuf,
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    user: String,
+    /// Additional private Hub CA (PEM); normal certificate verification remains enabled.
+    #[arg(long)]
+    hub_ca_cert: Option<PathBuf>,
+}
+
+pub(crate) async fn execute(args: Args) -> io::Result<()> {
+    let result = install(
+        &InstallOptions {
+            hub_url: args.hub_url,
+            token_file: args.token_file,
+            name: args.name,
+            user: args.user,
+        },
+        args.hub_ca_cert.as_deref(),
+    )
+    .await?;
+    println!("Agent installed: {}", result.machine_id);
+    println!("Configuration: {}", result.config_path.display());
+    Ok(())
+}

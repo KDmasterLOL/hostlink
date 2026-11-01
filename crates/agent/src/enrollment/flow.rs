@@ -8,7 +8,7 @@ pub struct EnrollmentOptions {
     pub install_root: PathBuf,
     pub name: String,
     pub user: String,
-    /// Keep the reconciliation marker until the bootstrap installer validates publication.
+    /// Keep the reconciliation marker until the installer validates binary publication.
     pub retain_pending: bool,
     /// Required when the Hub approves more than one gateway. This is the zero-based
     /// index from the exact v2 response, not a hostname or a TOFU selection.
@@ -126,7 +126,21 @@ where
 
     // The root and pending marker make a second invocation fail closed even if publication or
     // the Hub acknowledgement was interrupted. The invite is never sent a second time.
-    let agent_dir = PrivateDir::ensure(&options.install_root).map_err(io::Error::other)?;
+    let agent_dir = PrivateDir::open(
+        options
+            .install_root
+            .parent()
+            .ok_or_else(|| invalid("Agent root has no parent"))?,
+    )
+    .and_then(|parent| {
+        parent.create_dir(
+            options
+                .install_root
+                .file_name()
+                .ok_or(private_fs::Error::InvalidRelativePath)?,
+        )
+    })
+    .map_err(io::Error::other)?;
     let pending = options.install_root.join("enrollment.pending");
     write_private_new(
         &pending,
@@ -192,9 +206,8 @@ where
         format!("{}\n", response.operator_ssh_public_keys.join("\n")).as_bytes(),
     )?;
 
-    // The durable-job store must be the same install_root/jobs inspected by
-    // update::apply and its active-job interlock. Keeping it below state/
-    // would let a running managed job evade update deferral.
+    // Runtime and updater share install_root/jobs/runner.lock. Apalis alone owns
+    // the database; neither installation nor updates inspect its tables.
     let jobs_root = options.install_root.join("jobs");
     agent_dir.create_dir("jobs").map_err(io::Error::other)?;
     jobs::JobStore::initialize_fresh(&jobs_root)

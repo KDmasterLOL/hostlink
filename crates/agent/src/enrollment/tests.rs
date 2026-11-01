@@ -425,6 +425,17 @@ async fn fresh_enrollment_publishes_private_config_once_against_local_hub_v2() {
             );
         }
     }
+    // Publish the actual running image after a real in-process Hub enrollment. The
+    // enrollment key manifest remains byte-for-byte distinct from release identity.
+    let state_manifest = fs::read(state.join("manifest.json")).unwrap();
+    let mut executable = crate::executable::RunningExecutable::open().unwrap();
+    crate::installation::publish_executable(&install_root, &mut executable).unwrap();
+    assert!(!install_root.join("enrollment.pending").exists());
+    assert_eq!(
+        fs::read(state.join("manifest.json")).unwrap(),
+        state_manifest
+    );
+    assert_eq!(fs::read_dir(install_root.join("bin")).unwrap().count(), 1);
     let replay = replay_request.lock().unwrap().take().unwrap();
     let replay_response = replay_app
         .oneshot(

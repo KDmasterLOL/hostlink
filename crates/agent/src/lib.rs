@@ -2,9 +2,10 @@
 //! The former Agent JSONL listener and external OpenSSH process are absent.
 
 mod agent_files;
-pub mod bootstrap;
 pub mod enrollment;
 pub mod exec;
+mod executable;
+pub mod installation;
 pub mod jobs;
 mod package;
 mod private_fs;

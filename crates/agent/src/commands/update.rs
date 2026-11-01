@@ -1,5 +1,5 @@
 use clap::Args as ClapArgs;
-use hostlink_agent::update::{default_update_root, update};
+use hostlink_agent::{installation::installation_root, update::update};
 use std::{io, path::PathBuf};
 
 #[derive(ClapArgs)]
@@ -15,13 +15,13 @@ pub(crate) struct Args {
 pub(crate) fn execute(args: Args) -> io::Result<()> {
     let root = match args.root {
         Some(root) => root,
-        None => default_update_root()?,
+        None => installation_root()?,
     };
     let updated = update(&root, args.version.as_ref())?;
     if updated {
-        println!("Agent package verified and installed");
+        println!("Agent binary verified and installed");
     } else {
-        println!("Agent package already current");
+        println!("Agent binary already current");
     }
     Ok(())
 }
