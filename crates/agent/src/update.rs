@@ -23,8 +23,8 @@ use std::{
 /// installed executable even when a separate offline Windows updater is running.
 ///
 /// # Errors
-/// Refuses unsafe or alternate roots, active Agents, missing credentials, unpublished installed
-/// bytes, ambiguous/missing raw assets, checksum failures and unsuccessful replacement.
+/// Refuses unsafe or alternate roots, active Agents, missing credentials,
+/// ambiguous/missing raw assets, checksum failures and unsuccessful replacement.
 pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
     validate_installation_root(root)?;
     let _update_lock = lock(root, "update.lock")?;
@@ -62,16 +62,6 @@ pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
                 .new_agent(),
         );
     let discovery = github.build().map_err(io::Error::other)?;
-    let current = discovery
-        .get_release_version(&format!("v{}", installed.version))
-        .map_err(io::Error::other)?;
-    if current.version() != installed.version
-        || selected_asset(current.assets(), &installed.target)?.1 != installed_sha
-    {
-        return Err(invalid(
-            "installed Agent differs from its published GitHub raw asset",
-        ));
-    }
     // Pin /latest explicitly: the backend's unpinned update scans /releases instead.
     let release = if let Some(version) = requested {
         discovery
