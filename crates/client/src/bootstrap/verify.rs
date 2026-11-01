@@ -163,13 +163,17 @@ pub(super) async fn read_bounded(
             "GitHub source used an unexpected content encoding".into(),
         ));
     }
-    if response
-        .content_length()
-        .is_some_and(|size| size > limit as u64)
-    {
-        return Err(BootstrapError::Source(
-            "GitHub source exceeds the byte limit".into(),
-        ));
+    if let Some(length) = response.headers().get(reqwest::header::CONTENT_LENGTH) {
+        let length = length
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| BootstrapError::Source("GitHub source length is invalid".into()))?;
+        if length > limit as u64 {
+            return Err(BootstrapError::Source(
+                "GitHub source exceeds the byte limit".into(),
+            ));
+        }
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response
