@@ -2,10 +2,11 @@ use crate::cli::args::{HubCommand, InviteArgs};
 use hostlink::bootstrap;
 use hostlink::host::Host;
 use hostlink::hub::{HubClient, HubConfig};
+use private_fs::{Durability, PrivateDir, Publication};
 use secrecy::ExposeSecret;
 use std::{
     error::Error,
-    fs::{self, File, OpenOptions},
+    fs,
     io::{self, Write},
     path::PathBuf,
 };
@@ -54,44 +55,27 @@ pub(super) async fn hub_command(command: &HubCommand) -> Result<i32, Box<dyn Err
             };
             HubClient::from_config(&config)?;
             let path = default_hub_config_path()?;
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-                }
+            let parent = path.parent().ok_or("Hub config directory is unavailable")?;
+            let file_name = path
+                .file_name()
+                .ok_or("Hub config filename is unavailable")?;
+            // Public container directories (such as ~/.config) may be shared.
+            // Only the HostLink-owned leaf is private; existing roots are never
+            // chmod'ed or adopted when their permissions do not meet policy.
+            if let Some(container) = parent.parent() {
+                fs::create_dir_all(container)?;
             }
+            let private_dir = PrivateDir::ensure(parent)?;
             let bytes = serde_json::to_vec_pretty(&config)?;
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&path).map_err(|error| {
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    io::Error::new(
-                        error.kind(),
-                        "Hub config already exists; remove it explicitly before reconfiguring",
-                    )
-                } else {
-                    error
-                }
-            })?;
-            let publication = set_private_file_acl(&mut file)
-                .and_then(|()| file.write_all(&bytes))
-                .and_then(|()| file.sync_all());
-            drop(file);
-            if let Err(error) = publication {
-                return match fs::remove_file(&path) {
-                    Ok(()) => Err(error.into()),
-                    Err(cleanup) => Err(io::Error::other(format!(
-                        "Hub config write failed: {error}; owned partial config cleanup failed: {cleanup}"
-                    )).into()),
-                };
-            }
+            let mut writer = private_dir.atomic_with_policy(
+                file_name,
+                Durability::Full,
+                Publication::CreateNew,
+            )?;
+            writer.write_all(&bytes)?;
+            // A failed commit may have published; never remove an ambiguous
+            // destination or overwrite a previously created configuration.
+            writer.commit()?;
             println!("Hub config saved to {}", path.display());
         }
         HubCommand::Show => {
@@ -109,39 +93,6 @@ pub(super) async fn hub_command(command: &HubCommand) -> Result<i32, Box<dyn Err
         }
     }
     Ok(0)
-}
-
-#[cfg(windows)]
-fn set_private_file_acl(file: &mut File) -> io::Result<()> {
-    use windows_permissions::{
-        SecurityDescriptor,
-        constants::{SeObjectType, SecurityInformation},
-        utilities::current_process_sid,
-        wrappers::SetSecurityInfo,
-    };
-
-    let owner = current_process_sid()?;
-    let descriptor: windows_permissions::LocalBox<SecurityDescriptor> =
-        format!("D:P(A;;FA;;;{owner})")
-            .parse()
-            .map_err(|error: io::Error| error)?;
-    let dacl = descriptor
-        .dacl()
-        .ok_or_else(|| io::Error::other("private config ACL could not be constructed"))?;
-    SetSecurityInfo(
-        file,
-        SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl | SecurityInformation::Owner,
-        Some(&owner),
-        None,
-        Some(dacl),
-        None,
-    )
-}
-
-#[cfg(not(windows))]
-fn set_private_file_acl(_file: &mut File) -> io::Result<()> {
-    Ok(())
 }
 
 pub(super) async fn display_name(host: &str, display_name: &str) -> Result<i32, Box<dyn Error>> {

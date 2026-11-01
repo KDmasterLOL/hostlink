@@ -52,6 +52,14 @@ or a protected current-user-only Windows DACL. A PAT never enters Hub records,
 release assets, binaries, download URLs or logs. Tests use synthetic credentials
 and temporary roots; never read or copy the real HOME PAT.
 
+The Controller's fixed `credentials/github-token` is HostLink-managed private
+state: the `hostlink/credentials` directory must be `0700` and its token
+exactly `0600` on Unix, or use the single-current-user protected ACL required
+by `private-fs` on Windows. Existing `0400` Controller PAT files are not
+silently changed; explicitly set `0600` only after reviewing ownership and
+path safety. Credential and directory symlinks, hardlinks and unexpected ACLs
+are rejected. User-supplied Hub/SSH input paths are a separate contract.
+
 The Controller resolves the exact raw asset and digest before creating a
 Hub invite, then generates disposable POSIX or Windows 7 PowerShell 2 bootstrap
 text. Bootstrap downloads **one** executable and verifies SHA-256 before

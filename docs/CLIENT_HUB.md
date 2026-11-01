@@ -20,6 +20,22 @@ hostlink hub check
 
 The configuration is written to `~/.config/hostlink/hub.json` (Windows: `%APPDATA%\HostLink\hub.json`). The Hub URL must be an HTTPS origin. `hub check` checks operator API access and does not probe an Agent. `--hub-ca-cert` is optional and adds one PEM CA to normal TLS trust; certificate and hostname validation remain enabled.
 
+The Hub config is **HostLink-managed private state**: its containing
+`hostlink` directory must be `0700` on Unix and the config file must be
+`0600` (Windows: the current-user-only protected ACL enforced by
+`private-fs`). `hub configure` uses a private create-new atomic publication;
+it will not overwrite an existing config or silently repair unsafe permissions.
+An explicit `HOSTLINK_HUB_CONFIG` path is subject to the same private directory
+and config-file policy. If moving from an older `0400` Hub config, explicitly
+restore its owner write bit to `0600` after verifying ownership and the path;
+the CLI never changes existing permissions on your behalf. `hub show` remains
+offline and does not read the operator token, CA file or SSH keys.
+
+The `--token-file`, `--identity`, `--gateway-identity` and optional CA
+paths identify **user-supplied inputs**, not files installed by HostLink.
+Existing safe read-only `0400` and `0600` credentials remain accepted on
+Unix; those files are not chmod'ed or moved by `hub configure`.
+
 ## Inventory and host operations
 
 ```sh
