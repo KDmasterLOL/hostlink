@@ -65,7 +65,7 @@ pub fn default_update_root() -> io::Result<PathBuf> {
 /// # Errors
 /// Rejects unsafe installed state, inaccessible/unpublished releases, ambiguous
 /// target assets, absent SHA-256, integrity failures and publication errors.
-pub fn update_from_github(root: &Path, version: Option<&Version>) -> io::Result<bool> {
+pub fn update(root: &Path, version: Option<&Version>) -> io::Result<bool> {
     let token = github_token()?;
     let mut updater = Update::configure();
     updater.auth_token(token.expose_secret());

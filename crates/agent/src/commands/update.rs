@@ -1,5 +1,5 @@
 use clap::Args as ClapArgs;
-use hostlink_agent::update::{default_update_root, update_from_github};
+use hostlink_agent::update::{default_update_root, update};
 use std::{io, path::PathBuf};
 
 #[derive(ClapArgs)]
@@ -17,7 +17,7 @@ pub(crate) fn execute(args: Args) -> io::Result<()> {
         Some(root) => root,
         None => default_update_root()?,
     };
-    let updated = update_from_github(&root, args.version.as_ref())?;
+    let updated = update(&root, args.version.as_ref())?;
     if updated {
         println!("Agent package verified and installed");
     } else {

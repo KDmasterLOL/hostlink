@@ -14,7 +14,7 @@ hostlink-agent update --root ROOT         # installed-root override
 ```
 
 The public library interface is
-`update_from_github(root: &Path, version: Option<&semver::Version>) -> io::Result<bool>`.
+`update(root: &Path, version: Option<&semver::Version>) -> io::Result<bool>`.
 The installed Agent reads its own private user credential from
 `~/.config/hostlink/credentials/github-token` on Linux (honouring an absolute
 `XDG_CONFIG_HOME`) or `%APPDATA%\HostLink\credentials\github-token` on
@@ -29,7 +29,7 @@ tags). The selected release must contain exactly one
 fixed authenticated GitHub API origin. The checksum verifies bytes against
 GitHub's metadata; it is **not** an independent publisher signature.
 
-The sole publisher remains upstream `self_update::backends::custom::Update`:
+The sole publisher is upstream `self_update::backends::github::Update`:
 it verifies the complete ZIP SHA-256, archive members, manifest target/version
 and extracted executable and scripts; writes canonical `archive.sha256`;
 publishes the verified bundle under `ROOT/bin`; and reads back the installed

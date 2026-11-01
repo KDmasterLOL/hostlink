@@ -45,7 +45,9 @@ calls the same GitHub-only Agent updater. No `-Url` or `-Sha256` flags.
 
 For fresh Windows installation, `hostlink invite` supplies an installer
 bootstrap in two steps when the safe PowerShell code exceeds the 8191
-character `cmd.exe` command-line limit. The helper contains **no PAT**.
+character `cmd.exe` command-line limit. Normally the helper contains
+**no PAT**, but explicit `--embed-github-token` prints a helper containing
+the Controller PAT in cleartext; keep it private and delete after use.
 The target user saves the helper as a local .ps1 and runs it unelevated;
 its hidden prompt securely provisions the GitHub token before fetching
 the release-asset installer, sidecar, and archive. Files are SHA-pinned,

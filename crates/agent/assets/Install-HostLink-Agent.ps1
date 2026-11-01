@@ -140,7 +140,7 @@ function Get-GitHubCredential([bool]$Provision, [string]$EmbeddedToken) {
         $rules = $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
         if ($rules.Count -ne 1 -or -not $rules[0].IdentityReference.Equals($sid) -or $rules[0].AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or $rules[0].FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or $rules[0].InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or $rules[0].PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) { throw 'GitHub credential must have a protected owner-only DACL.' }
         if ($stream.Length -lt 1 -or $stream.Length -gt 1024) { throw 'Invalid GitHub credential size.' }
-        $reader = New-Object IO.BinaryReader($stream)
+        $reader = New-Object -TypeName System.IO.BinaryReader -ArgumentList $stream
         $bytes = $reader.ReadBytes([int]$stream.Length)
         if ($bytes.Length -ne $stream.Length) { throw 'GitHub credential read failed.' }
         $existing = [Text.Encoding]::ASCII.GetString($bytes)

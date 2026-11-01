@@ -45,10 +45,10 @@ does not certify production or registered Windows updater deployment.
 | Shared private root/path and file identities | `crates/agent/src/agent_files.rs` |
 | Windows offline process identity admission | `crates/agent/src/service/offline.rs` |
 
-`update.rs` exposes the GitHub-only `update_from_github(root, version)`
-entrypoint and uses upstream `self_update::github` for release discovery,
-then the single `self_update::custom::Update` for ZIP/manifest-checked
-publication. No public arbitrary URL/pin update mode remains. Agent
+`update.rs` exposes one GitHub-only `update(root, version)` entrypoint.
+Upstream `self_update::github::Update` handles discovery and the
+ZIP/manifest-checked bundle publication. The release is pinned before
+installing; no public arbitrary URL/pin update mode remains. Agent
 credentials are read through the private `agent_files.rs` helpers from the
 target's user-owned `hostlink/credentials/github-token` file. Controller's
 GitHub-only invitation selects and verifies assets in
