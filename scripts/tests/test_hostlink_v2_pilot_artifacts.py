@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("pilot_artifacts", SCRIPTS / "hostlink-v2-pilot.py")
@@ -17,6 +18,13 @@ spec.loader.exec_module(pilot)
 
 class PilotArtifactTests(unittest.TestCase):
     def setUp(self):
+        # Model the stock CI runner without changing PATH or replacing services.
+        which = shutil.which
+        runtime_tools = {"caddy", "sshd", "openssl", "ssh-keygen", "ssh-keyscan"}
+        lookup = patch.object(pilot.shutil, "which", side_effect=lambda name: (
+            None if name in runtime_tools else which(name)))
+        lookup.start()
+        self.addCleanup(lookup.stop)
         self.temp = tempfile.TemporaryDirectory(prefix="pilot artifacts ")
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
@@ -97,7 +105,9 @@ class PilotArtifactTests(unittest.TestCase):
     def write_receipt(self, value):
         self.receipt_path.write_text(json.dumps(value), encoding="utf-8")
 
-    def test_cold_path_builds_real_source_and_packages_raw_bytes(self):
+    def test_cold_path_builds_real_source_and_packages_raw_bytes_without_runtime_tools(self):
+        for name in ("caddy", "sshd", "openssl", "ssh-keygen", "ssh-keyscan"):
+            self.assertIsNone(pilot.shutil.which(name))
         result = self.configure()
         receipt = result["receipt"]
         self.assertEqual(set(receipt), {"format", "source_sha", "target", "version", "asset",

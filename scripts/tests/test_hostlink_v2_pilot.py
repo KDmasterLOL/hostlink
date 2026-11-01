@@ -115,6 +115,33 @@ class PilotLifecycleTests(unittest.TestCase):
         self.run_cli("up", "--root", str(self.root), expected=2)
         self.run_cli("check", "--root", str(self.root), expected=2)
 
+    def test_cold_up_requires_each_runtime_tool_before_build_or_provisioning(self):
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location("pilot_runtime_preflight", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        self.prepare()
+        marker = helper.marker_read(self.root)
+        before = {path.relative_to(self.root): (path.stat().st_mode,
+                  path.read_bytes() if path.is_file() else None)
+                  for path in self.root.rglob("*")}
+        for missing in ("caddy", "sshd", "openssl", "ssh-keygen", "ssh-keyscan"):
+            with self.subTest(missing=missing):
+                # Only the executable lookup is simulated; no service is run.
+                with patch.object(helper.shutil, "which", side_effect=lambda name: (
+                        None if name == missing else os.sys.executable)), \
+                     patch.object(helper, "run", wraps=helper.run) as run, \
+                     patch.object(helper, "launch", wraps=helper.launch) as launch:
+                    with self.assertRaisesRegex(helper.PilotError,
+                                                f"required local tool is missing: {missing}$"):
+                        helper.up(self.root, self.repo, marker)
+                    run.assert_not_called()
+                    launch.assert_not_called()
+                after = {path.relative_to(self.root): (path.stat().st_mode,
+                         path.read_bytes() if path.is_file() else None)
+                         for path in self.root.rglob("*")}
+                self.assertEqual(after, before)
+
     def test_pid_reuse_fails_closed_without_signalling_current_process(self):
         self.prepare()
         current = os.getpid()

@@ -22,7 +22,6 @@ UID = os.getuid()
 SCHEMA = 2
 VERSION = "0.1.0"
 TARGET = "x86_64-unknown-linux-gnu"
-TOOLS = ("cargo", "sshd", "caddy", "openssl", "ssh-keygen", "ssh-keyscan")
 CHILDREN: dict[int, subprocess.Popen] = {}
 
 
@@ -461,9 +460,6 @@ def configure_artifacts(repo: pathlib.Path, root: pathlib.Path, source_sha: str)
 
     source_identity(repo, source_sha)
     directory(root)
-    for tool in TOOLS:
-        if not shutil.which(tool):
-            fail(f"required local tool is missing: {tool}")
     try:
         version = tomllib.loads((repo / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"]
     except (OSError, UnicodeError, KeyError, TypeError, tomllib.TOMLDecodeError):
@@ -714,19 +710,24 @@ def up(root: pathlib.Path, repo: pathlib.Path, marker: dict) -> None:
     user = pwd.getpwuid(UID).pw_name
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,31}", user):
         fail("current account name is not safe for the isolated sshd configuration")
+    new_pilot = not os.path.lexists(root / "pilot.json")
+    tool_paths = {}
+    if new_pilot:
+        # Preflight before building artifacts or provisioning any runtime state.
+        # Restarts validate their stored service paths and digests separately.
+        for name in ("sshd", "caddy", "openssl", "ssh-keygen", "ssh-keyscan"):
+            path = shutil.which(name)
+            if not path:
+                fail(f"required local tool is missing: {name}")
+            if name in ("caddy", "sshd"):
+                resolved = str(pathlib.Path(path).resolve())
+                tool_paths[name] = {"path": resolved, "sha256": digest(pathlib.Path(path))}
     artifacts = configure_artifacts(repo, root, source_sha)
-    if os.path.lexists(root / "pilot.json"):
+    if not new_pilot:
         restart_existing(root, marker, artifacts)
         return
     for name in ("gateway", "controller", "agent"):
         private_dir(root / name)
-    tool_paths = {}
-    for name in ("caddy", "sshd"):
-        path = shutil.which(name)
-        if not path:
-            fail(f"required local service binary is missing: {name}")
-        resolved = str(pathlib.Path(path).resolve())
-        tool_paths[name] = {"path": resolved, "sha256": digest(pathlib.Path(path))}
     gateway = root / "gateway"
     controller = root / "controller"
     agent_root = root / "agent" / "instance"
