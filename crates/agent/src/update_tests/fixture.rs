@@ -67,7 +67,12 @@ impl Fixture {
         for name in ["jobs", "state", "keys"] {
             private.create_dir(name).unwrap();
         }
-        for name in ["state/agent.json", "state/enrollment.json", "keys/host.key"] {
+        for name in [
+            "state/agent.json",
+            "state/enrollment.json",
+            "keys/host.key",
+            "jobs/jobs.db",
+        ] {
             private
                 .create(name)
                 .unwrap()
@@ -97,14 +102,15 @@ impl Fixture {
         Self { temp, root }
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    pub(super) fn apply(&self, url: &str, bytes: &[u8], version: &str) -> std::io::Result<bool> {
-        update(&self.root, url, &digest(bytes), TARGET, version)
-    }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub(super) fn preserved(&self) -> Vec<Vec<u8>> {
-        ["state/agent.json", "state/enrollment.json", "keys/host.key"]
-            .iter()
-            .map(|name| fs::read(self.root.join(name)).unwrap())
-            .collect()
+        [
+            "state/agent.json",
+            "state/enrollment.json",
+            "keys/host.key",
+            "jobs/jobs.db",
+        ]
+        .iter()
+        .map(|name| fs::read(self.root.join(name)).unwrap())
+        .collect()
     }
 }

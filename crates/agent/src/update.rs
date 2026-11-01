@@ -1,58 +1,30 @@
-//! A single installed-Agent update using the upstream self_update bundle swap.
-//! The source ZIP manifest remains unchanged; only its pinned archive digest is
-//! added alongside it, so the installed bundle retains its exact source identity.
+//! Installed-Agent update through the upstream GitHub bundle publisher.
+//! Keep the source manifest verbatim and store the pinned ZIP digest alongside it.
 
 use crate::{
     agent_files::{github_token, validate_user_owned_root},
     package::{
         ARCHIVE_DIGEST, EXECUTABLE_BASE, MAX_ARCHIVE_BYTES, PACKAGE_MANIFEST, PackageManifest,
-        invalid, read_installed, read_regular, target_matches_runtime, validate_contents,
-        validate_installed,
+        invalid, read_installed, read_regular, validate_contents, validate_installed,
     },
     private_fs::PrivateFileExt,
 };
 use hex::FromHex;
 use private_fs::{FileAccess, FileCreation, OpenOptions, PrivateDir};
-use reqwest::Url;
 use secrecy::ExposeSecret;
 use self_update::{
-    Checksum, Release, ReleaseAsset, ReleaseSource, ReleaseStatus,
-    backends::{custom::Update, custom::UpdateBuilder, github::Update as GitHubUpdate},
-    http_client::{HeaderMap, HttpClient, HttpResponse, UreqClient},
+    Checksum, ReleaseAsset, ReleaseStatus,
+    backends::github::{Update, UpdateBuilder},
+    http_client::{HeaderMap, HttpClient, HttpResponse, UreqClient, header},
 };
 use semver::Version;
 use std::{
     fs::{self, File},
     io::{self, Read},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
-
-// GitHub discovery pins one release before entering the bundle publisher.
-#[derive(Clone)]
-struct SelectedRelease(Release);
-
-impl ReleaseSource for SelectedRelease {
-    fn get_releases(&self) -> self_update::Result<Vec<Release>> {
-        Ok(vec![self.0.clone()])
-    }
-}
-
-// Disposable fixtures exercise the same publisher without a live GitHub release.
-// Arbitrary source selection is absent from the production API and CLI.
-#[cfg(test)]
-fn update(
-    root: &Path,
-    url: &Url,
-    sha256: [u8; 32],
-    target: &str,
-    version: &Version,
-) -> io::Result<bool> {
-    let mut publisher = Update::configure();
-    publisher.ureq_agent(download_transport(url.scheme() == "https", 0));
-    apply_selected(root, url, sha256, target, version, publisher, false)
-}
 
 /// Resolve the installed Agent root without guessing a Linux installer suffix.
 ///
@@ -87,282 +59,29 @@ pub fn default_update_root() -> io::Result<PathBuf> {
     Err(invalid("unsupported Agent platform; specify --root"))
 }
 
-/// Select an exact release, or GitHub's designated latest published release,
-/// from the authenticated GitHub API. A missing/inaccessible release is an
-/// error, never an already-current result. Reads the bootstrap-provisioned private
-/// target-user credentials/github-token file; no token arguments or environment.
-/// GitHub's digest authenticates API-selected bytes; it is not a publisher signature.
+/// Install an exact version (including downgrades), or GitHub's latest stable
+/// published release. Only the private target-user credential file is read.
 ///
 /// # Errors
-/// Returns an error for invalid installed state, unavailable releases, unsafe asset
-/// metadata, failed integrity verification, or publication failure.
+/// Rejects unsafe installed state, inaccessible/unpublished releases, ambiguous
+/// target assets, absent SHA-256, integrity failures and publication errors.
 pub fn update_from_github(root: &Path, version: Option<&Version>) -> io::Result<bool> {
     let token = github_token()?;
-    validate_user_owned_root(root)?;
-    let (installed, _) = read_installed(root)?;
-    let mut discovery = GitHubUpdate::configure();
-    discovery
-        .repo_owner("KDmasterLOL")
-        .repo_name("hostlink")
-        .current_version(&installed.version)
-        .bin_name(EXECUTABLE_BASE)
-        .target(&installed.target)
-        .auth_token(token.expose_secret())
-        .retries(0)
-        .http_client(Arc::new(GitHubTransport::new(true, true)));
-    let discovery = discovery.build().map_err(io::Error::other)?;
-    let releases = discover_github_release(&discovery, version).map_err(|error| {
-        io::Error::other(format!(
-            "no matching published release accessible for KDmasterLOL/hostlink; check target-user GitHub credential and Contents: Read access (repository may have no releases): {error}"
-        ))
-    })?;
-    let mut publisher = Update::configure();
-    publisher
-        .http_client(Arc::new(GitHubTransport::new(false, true)))
-        // self_update gates explicit Authorization headers by allowed host.
-        // The custom backend has no implicit API host, so bind it explicitly.
-        .allow_auth_host("api.github.com")
-        .request_header(
-            self_update::http::header::ACCEPT,
-            "application/octet-stream",
-        )
-        // self_update marks Authorization sensitive. ureq removes it on EVERY
-        // redirect, including same-host redirects. There is no CDN auth request.
-        .request_header(
-            self_update::http::header::AUTHORIZATION,
-            format!("Bearer {}", token.expose_secret()),
-        );
-    let (url, sha256, selected_version) =
-        select_github_asset(&releases, &installed.target, version)?;
-    apply_selected(
-        root,
-        &url,
-        sha256,
-        &installed.target,
-        &selected_version,
-        publisher,
-        version.is_none(),
-    )
+    let mut updater = Update::configure();
+    updater.auth_token(token.expose_secret());
+    apply_update(root, version, updater, Arc::new(GitHubTransport::new(true)))
 }
 
-fn discover_github_release(
-    discovery: &GitHubUpdate,
-    version: Option<&Version>,
-) -> self_update::Result<Vec<Release>> {
-    let Some(version) = version else {
-        return discovery
-            .get_latest_release()
-            .map(|releases| releases.into_vec());
-    };
-    // Only the two authorized tag spellings in the SAME GitHub repository.
-    // Retry the unprefixed spelling only on 404, never on auth/network errors.
-    let release = match discovery.get_release_version(&format!("v{version}")) {
-        Err(self_update::Error::NotFound { .. }) => {
-            discovery.get_release_version(&version.to_string())?
-        }
-        result => result?,
-    };
-    Ok(vec![release])
-}
-
-const MAX_METADATA_BYTES: u64 = 1024 * 1024;
-
-// Upstream owns the release parser and HTTP status handling. This guard supplies
-// the missing published-only policy and bounds metadata before its parser runs.
-// Asset reads are bounded too; archive preflight rejects the cap+1 sentinel.
-struct GitHubTransport {
-    client: UreqClient,
-    metadata: bool,
-}
-
-impl GitHubTransport {
-    fn new(metadata: bool, https_only: bool) -> Self {
-        Self {
-            client: download_transport(https_only, if metadata { 0 } else { 5 }).into(),
-            metadata,
-        }
-    }
-}
-
-struct BoundedResponse {
-    headers: HeaderMap,
-    body: Box<dyn Read>,
-}
-
-impl HttpResponse for BoundedResponse {
-    fn headers(&self) -> &HeaderMap {
-        &self.headers
-    }
-    fn body(self: Box<Self>) -> Box<dyn Read> {
-        self.body
-    }
-}
-
-impl HttpClient for GitHubTransport {
-    fn get(
-        &self,
-        url: &str,
-        headers: &HeaderMap,
-        timeout: Option<Duration>,
-    ) -> self_update::Result<Box<dyn HttpResponse>> {
-        let response = self.client.get(url, headers, timeout)?;
-        let headers = response.headers().clone();
-        let body: Box<dyn Read> = if self.metadata {
-            let mut bytes = Vec::new();
-            response
-                .body()
-                .take(MAX_METADATA_BYTES + 1)
-                .read_to_end(&mut bytes)?;
-            validate_github_metadata(&bytes, url.ends_with("/latest"))?;
-            Box::new(io::Cursor::new(bytes))
-        } else {
-            Box::new(response.body().take(MAX_ARCHIVE_BYTES + 1))
-        };
-        Ok(Box::new(BoundedResponse { headers, body }))
-    }
-}
-
-fn validate_github_metadata(bytes: &[u8], latest: bool) -> io::Result<()> {
-    if bytes.len() as u64 > MAX_METADATA_BYTES {
-        return Err(invalid("GitHub release metadata exceeds size limit"));
-    }
-    #[derive(serde::Deserialize)]
-    struct Publication {
-        draft: bool,
-        prerelease: bool,
-        tag_name: String,
-    }
-    let publication: Publication = serde_json::from_slice(bytes)
-        .map_err(|_| invalid("invalid GitHub release publication metadata"))?;
-    let version = Version::parse(
-        publication
-            .tag_name
-            .strip_prefix('v')
-            .unwrap_or(&publication.tag_name),
-    )
-    .map_err(|_| invalid("GitHub release tag must be X.Y.Z or vX.Y.Z"))?;
-    if publication.draft || (latest && (publication.prerelease || !version.pre.is_empty())) {
-        return Err(invalid(
-            "published GitHub release required (latest must be stable)",
-        ));
-    }
-    Ok(())
-}
-
-fn select_github_asset(
-    releases: &[Release],
-    target: &str,
-    requested: Option<&Version>,
-) -> io::Result<(Url, [u8; 32], Version)> {
-    let name = format!("hostlink-agent-{target}.zip");
-    let mut selected: Option<(&Release, Version)> = None;
-    for release in releases {
-        let version = Version::parse(release.version())
-            .map_err(|_| invalid("GitHub release version is not semantic"))?;
-        if let Some(requested) = requested {
-            if &version != requested {
-                continue;
-            }
-        } else if !version.pre.is_empty()
-            || !release.assets().iter().any(|asset| asset.name() == name)
-        {
-            continue;
-        }
-        if let Some((_, current)) = &selected {
-            match version.cmp_precedence(current) {
-                std::cmp::Ordering::Less => continue,
-                std::cmp::Ordering::Equal => {
-                    return Err(invalid("ambiguous GitHub release version"));
-                }
-                std::cmp::Ordering::Greater => {}
-            }
-        }
-        selected = Some((release, version));
-    }
-    let (release, version) = selected.ok_or_else(|| {
-        invalid("no matching published HostLink Agent release; repository may have no releases")
-    })?;
-    let mut assets = release.assets().iter().filter(|asset| asset.name() == name);
-    let asset = assets
-        .next()
-        .ok_or_else(|| invalid("GitHub release lacks the exact Agent target asset"))?;
-    if assets.next().is_some() {
-        return Err(invalid("ambiguous GitHub Agent target asset"));
-    }
-    let sha256 = asset
-        .digest()
-        .and_then(|digest| digest.strip_prefix("sha256:"))
-        .ok_or_else(|| invalid("GitHub Agent asset requires an API sha256 digest"))?;
-    let sha256 = <[u8; 32]>::from_hex(sha256)
-        .map_err(|_| invalid("GitHub Agent asset SHA-256 must contain 32 hexadecimal bytes"))?;
-    let url =
-        Url::parse(asset.download_url()).map_err(|_| invalid("invalid GitHub API asset URL"))?;
-    let asset_id = url
-        .path()
-        .strip_prefix("/repos/KDmasterLOL/hostlink/releases/assets/");
-    if url.scheme() != "https"
-        || url.host_str() != Some("api.github.com")
-        || url.port_or_known_default() != Some(443)
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-        || url.query().is_some()
-        || !asset_id.is_some_and(|id| {
-            !id.is_empty()
-                && id.bytes().all(|byte| byte.is_ascii_digit())
-                && id.parse::<u64>().is_ok_and(|id| id > 0)
-        })
-    {
-        return Err(invalid(
-            "exact credential-free GitHub API release asset URL required",
-        ));
-    }
-    Ok((url, sha256, version))
-}
-
-fn download_transport(https_only: bool, max_redirects: u32) -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .https_only(https_only)
-        .max_redirects(max_redirects)
-        .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
-        .proxy(None)
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .new_agent()
-}
-
-// Single publication body: selection and transport differ, all install gates do not.
-fn apply_selected(
+// Production and synthetic HTTP fixtures use this same selection/publication path.
+fn apply_update(
     root: &Path,
-    address: &Url,
-    sha256: [u8; 32],
-    target: &str,
-    version: &Version,
-    mut publisher: UpdateBuilder,
-    only_newer: bool,
+    requested: Option<&Version>,
+    mut updater: UpdateBuilder,
+    transport: Arc<GitHubTransport>,
 ) -> io::Result<bool> {
-    if !target_matches_runtime(target) {
-        return Err(invalid("unsupported Agent target for this runtime"));
-    }
-    let test_loopback = cfg!(test)
-        && address.scheme() == "http"
-        && address.host_str() == Some("127.0.0.1")
-        && address.port().is_some_and(|port| port != 0);
-    if (address.scheme() != "https" && !test_loopback)
-        || address.host_str().is_none()
-        || address.port() == Some(0)
-        || !address.username().is_empty()
-        || address.password().is_some()
-        || address.fragment().is_some()
-    {
-        return Err(invalid("credential-free HTTPS artifact URL required"));
-    }
-    if !root.is_absolute() {
-        return Err(invalid("Agent install root must be absolute"));
-    }
     validate_user_owned_root(root)?;
-    // These handles remain alive until publication completes. The runner holds
-    // jobs/runner.lock for its lifetime; this must never query its SQLite state.
+    // Both private locks stay held through discovery, verification and publication.
+    // The runner owns its SQLite state; never inspect it to decide whether to update.
     let lock_file = |parent: &Path, name: &str| -> io::Result<File> {
         PrivateDir::open(parent)
             .and_then(|dir| {
@@ -392,52 +111,86 @@ fn apply_selected(
     crate::service::ensure_agent_offline(root)?;
 
     let (old, old_sha256) = read_installed(root)?;
-    if old.target != target {
-        return Err(invalid(
-            "selected Agent target differs from installed target",
-        ));
+    let target = old.target;
+    updater
+        .repo_owner("KDmasterLOL")
+        .repo_name("hostlink")
+        .current_version(&old.version)
+        .bin_name(EXECUTABLE_BASE)
+        .target(&target)
+        .retries(0)
+        .http_client(transport.clone());
+    let discovery = updater.build().map_err(io::Error::other)?;
+    let release = match requested {
+        None => discovery.get_latest_release().and_then(|releases| {
+            releases
+                .into_vec()
+                .pop()
+                .ok_or_else(self_update::Error::no_release_found)
+        }),
+        Some(version) => match discovery.get_release_version(&format!("v{version}")) {
+            // Retry the other spelling only on 404, never auth/network errors.
+            Err(self_update::Error::NotFound { .. }) => {
+                discovery.get_release_version(&version.to_string())
+            }
+            result => result,
+        },
+    };
+    let release = release.map_err(|error| {
+        io::Error::other(format!(
+            "no matching published release accessible for KDmasterLOL/hostlink; check target-user GitHub credential and Contents: Read access (repository may have no releases): {error}"
+        ))
+    })?;
+    let version = Version::parse(release.version()).map_err(io::Error::other)?;
+    if requested.is_some_and(|requested| *requested != version) {
+        return Err(invalid("GitHub release differs from requested version"));
     }
-    let old_version = Version::parse(&old.version)
-        .map_err(|_| invalid("installed Agent version is not semantic"))?;
+    let (asset, sha256) = select_github_asset(release.assets(), &target)?;
+    let old_version = Version::parse(&old.version).map_err(io::Error::other)?;
     if old_sha256 == sha256 {
-        if old_version != *version {
+        if old_version != version {
             return Err(invalid(
                 "installed version conflicts with selected archive SHA-256",
             ));
         }
         return Ok(false);
     }
-
-    if only_newer && !version.cmp_precedence(&old_version).is_gt() {
+    if requested.is_none() && !version.cmp_precedence(&old_version).is_gt() {
         return Ok(false);
     }
+
     let version = version.to_string();
-    let release = Release::builder()
-        .version(&version)
-        .asset(ReleaseAsset::new(
-            format!("hostlink-agent-{target}.zip"),
-            address.as_str(),
-        ))
-        .build()
-        .map_err(io::Error::other)?;
-    let verified_target = target.to_owned();
-    let verified_version = version.to_owned();
-    let bundle_target = target.to_owned();
-    let bundle_version = version.to_owned();
+    let archive_target = target.clone();
+    let archive_version = version.clone();
+    let bundle_target = target.clone();
+    let bundle_version = version.clone();
     let bundle_sha256 = hex::encode(sha256);
-    let status = publisher
-        .source(SelectedRelease(release))
-        .release_tag(&version)
-        .current_version(&old.version)
-        .target(target)
-        .bin_name(EXECUTABLE_BASE)
+    let asset = asset.clone();
+    let asset_target = target.clone();
+    let status = updater
+        // Upstream's unpinned update walks /releases, losing /latest semantics.
+        // Pin the exact raw tag captured before its parser strips a leading 'v'.
+        .release_tag(
+            transport
+                .publication
+                .get()
+                .ok_or_else(|| invalid("missing GitHub release tag"))?
+                .tag_name
+                .as_str(),
+        )
+        .asset_matcher(move |assets| {
+            let (selected, _) = select_github_asset(assets, &asset_target).ok()?;
+            (selected.download_url() == asset.download_url() && selected.digest() == asset.digest())
+                .then(|| selected.clone())
+        })
         .bundle_path_in_archive(format!("hostlink-agent-{target}"))
         .bundle_install_path(root.join("bin"))
-        .no_confirm(true)
-        .show_output(false)
+        .unattended()
+        // Mandatory even though upstream skips a missing API digest by default.
         .verify_checksum(Checksum::Sha256(hex::encode(sha256)))
+        .verify_release_digest(false) // The same mandatory digest is already pinned above.
         .verify_archive(move |archive| {
-            validate_contents(archive, &verified_target, &verified_version)?;
+            validate_contents(archive, &archive_target, &archive_version)?;
             Ok(())
         })
         .verify_binary(move |bundle| {
@@ -460,7 +213,6 @@ fn apply_selected(
         .map_err(io::Error::other)?
         .update_extended()
         .map_err(io::Error::other)?;
-
     if !matches!(status, ReleaseStatus::Updated(ref release) if release.version() == version) {
         return Err(invalid(
             "self_update did not install the exact pinned release",
@@ -473,6 +225,146 @@ fn apply_selected(
         ));
     }
     Ok(true)
+}
+
+fn select_github_asset<'a>(
+    assets: &'a [ReleaseAsset],
+    target: &str,
+) -> io::Result<(&'a ReleaseAsset, [u8; 32])> {
+    let name = format!("hostlink-agent-{target}.zip");
+    let mut assets = assets.iter().filter(|asset| asset.name() == name);
+    let asset = assets
+        .next()
+        .ok_or_else(|| invalid("GitHub release lacks the exact Agent target asset"))?;
+    if assets.next().is_some() {
+        return Err(invalid("ambiguous GitHub Agent target asset"));
+    }
+    let sha256 = asset
+        .digest()
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .ok_or_else(|| invalid("GitHub Agent asset requires an API sha256 digest"))?;
+    let sha256 = <[u8; 32]>::from_hex(sha256)
+        .map_err(|_| invalid("GitHub Agent asset SHA-256 must contain 32 hexadecimal bytes"))?;
+    // GitHub supplies canonical API URLs. A fixed prefix and numeric suffix
+    // exclude foreign repositories, credentials, alternate schemes and queries.
+    let asset_id = asset
+        .download_url()
+        .strip_prefix("https://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/");
+    if !asset_id.is_some_and(|id| {
+        !id.is_empty()
+            && id.bytes().all(|byte| byte.is_ascii_digit())
+            && id.parse::<u64>().is_ok_and(|id| id > 0)
+    }) {
+        return Err(invalid(
+            "exact credential-free GitHub API release asset URL required",
+        ));
+    }
+    Ok((asset, sha256))
+}
+
+const MAX_METADATA_BYTES: u64 = 1024 * 1024;
+
+// Upstream discards publication flags and raw tags. Keep only the missing policy,
+// body bounds and redirect restrictions; parsing, auth and HTTP errors remain upstream.
+struct GitHubTransport {
+    metadata: Box<dyn HttpClient>,
+    assets: Box<dyn HttpClient>,
+    publication: OnceLock<Publication>,
+}
+
+impl GitHubTransport {
+    fn new(https_only: bool) -> Self {
+        let client = |redirects| {
+            Box::new(UreqClient::from(
+                ureq::Agent::config_builder()
+                    .https_only(https_only)
+                    .max_redirects(redirects)
+                    .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
+                    .proxy(None)
+                    .timeout_global(Some(Duration::from_secs(30)))
+                    .build()
+                    .new_agent(),
+            )) as Box<dyn HttpClient>
+        };
+        Self {
+            metadata: client(0),
+            assets: client(5),
+            publication: OnceLock::new(),
+        }
+    }
+}
+
+struct BoundedResponse {
+    headers: HeaderMap,
+    body: Box<dyn Read>,
+}
+
+impl HttpResponse for BoundedResponse {
+    fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+    fn body(self: Box<Self>) -> Box<dyn Read> {
+        self.body
+    }
+}
+
+impl HttpClient for GitHubTransport {
+    fn get(
+        &self,
+        url: &str,
+        headers: &HeaderMap,
+        timeout: Option<Duration>,
+    ) -> self_update::Result<Box<dyn HttpResponse>> {
+        let asset = headers
+            .get(header::ACCEPT)
+            .is_some_and(|value| value == "application/octet-stream");
+        let client = if asset { &self.assets } else { &self.metadata };
+        let response = client.get(url, headers, timeout)?;
+        let headers = response.headers().clone();
+        let body: Box<dyn Read> = if asset {
+            Box::new(response.body().take(MAX_ARCHIVE_BYTES + 1))
+        } else {
+            let mut bytes = Vec::new();
+            response
+                .body()
+                .take(MAX_METADATA_BYTES + 1)
+                .read_to_end(&mut bytes)?;
+            let publication = validate_github_metadata(&bytes, url.ends_with("/latest"))?;
+            if self.publication.get_or_init(|| publication.clone()) != &publication {
+                return Err(invalid("GitHub release publication changed after selection").into());
+            }
+            Box::new(io::Cursor::new(bytes))
+        };
+        Ok(Box::new(BoundedResponse { headers, body }))
+    }
+}
+
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct Publication {
+    draft: bool,
+    prerelease: bool,
+    tag_name: String,
+}
+
+fn validate_github_metadata(bytes: &[u8], latest: bool) -> io::Result<Publication> {
+    if bytes.len() as u64 > MAX_METADATA_BYTES {
+        return Err(invalid("GitHub release metadata exceeds size limit"));
+    }
+    let publication: Publication = serde_json::from_slice(bytes)
+        .map_err(|_| invalid("invalid GitHub release publication metadata"))?;
+    let version = Version::parse(
+        publication
+            .tag_name
+            .strip_prefix('v')
+            .unwrap_or(&publication.tag_name),
+    )
+    .map_err(|_| invalid("GitHub release tag must be X.Y.Z or vX.Y.Z"))?;
+    if publication.draft || (latest && (publication.prerelease || !version.pre.is_empty())) {
+        return Err(invalid(
+            "published GitHub release required (latest must be stable)",
+        ));
+    }
+    Ok(publication)
 }
 
 #[cfg(test)]
