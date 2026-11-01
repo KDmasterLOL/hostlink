@@ -364,34 +364,70 @@ def stop_items(root: pathlib.Path, items: list[dict]) -> None:
     write_ledger(root, [], False)
 
 
-def jobs_safe(root: pathlib.Path) -> None:
+def jobs_safe(root: pathlib.Path, running: bool) -> None:
     jobs = root / "agent" / "instance" / "jobs"
     for candidate in (root / "agent", root / "agent" / "instance", jobs):
         try:
             info = os.lstat(candidate)
         except FileNotFoundError:
+            if running:
+                fail("running Agent has no verifiable Apalis jobs directory")
             return
         if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != UID or stat.S_IMODE(info.st_mode) != 0o700:
             fail("Agent jobs path contains an unsafe directory")
-    directory(jobs)
-    entries = list(jobs.iterdir())
-    if len(entries) > 4096:
-        fail("durable job state exceeds safe inspection bound")
-    for entry in entries:
+    # Filesystem validation only: Apalis exclusively owns its SQLite schema
+    # and task lifecycle, so do not parse historical jobs-v1 record.json.
+    names = {"jobs.db", "jobs.db-wal", "jobs.db-shm", "runner.lock"}
+    for entry in jobs.iterdir():
         info = os.lstat(entry)
-        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != UID or not re.fullmatch(r"[0-9a-f-]{36}", entry.name):
-            fail("unknown durable job entry blocks shutdown")
-        record_path = entry / "record.json"
-        rec_info = os.lstat(record_path)
-        if not stat.S_ISREG(rec_info.st_mode) or stat.S_ISLNK(rec_info.st_mode) or rec_info.st_uid != UID or stat.S_IMODE(rec_info.st_mode) != 0o600 or rec_info.st_size > 65536:
-            fail("unknown durable job record blocks shutdown")
-        try:
-            record = json.loads(record_path.read_text(encoding="utf-8"))
-            state = record["state"]["state"]
-        except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError):
-            fail("malformed durable job record blocks shutdown")
-        if state in ("prepared", "running", "interrupted") or state not in ("exited", "failed"):
-            fail("active or unknown durable job blocks shutdown")
+        if (entry.name not in names or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != UID or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) not in (0o600, 0o644)):
+            fail("unknown or unsafe Apalis jobs entry blocks shutdown")
+    if not running:
+        return
+    if not (jobs / "jobs.db").is_file():
+        fail("running Agent has no Apalis jobs database")
+    try:
+        config = json.loads(private_text(root / "agent" / "instance" / "state" / "agent.json"))
+    except (OSError, ValueError, UnicodeError) as error:
+        fail(f"Agent Board configuration is malformed ({type(error).__name__})")
+    if not isinstance(config, dict):
+        fail("Agent Board configuration must be an object")
+    address = config.get("board_listen")
+    if (not isinstance(address, str)
+            or re.fullmatch(r"127\.0\.0\.1:([1-9][0-9]{0,4})", address) is None
+            or int(address.rsplit(":", 1)[1]) > 65535):
+        fail("running Agent has no approved loopback Apalis Board address")
+    request = urllib.request.Request(
+        f"http://{address}/api/v1/queues/commands/stats",
+        headers={"Accept": "application/json"},
+    )
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=3) as response:
+            if response.status != 200:
+                fail("Apalis Board did not confirm current job state")
+            body = response.read(65537)
+        if len(body) > 65536:
+            fail("Apalis Board job status response exceeds the safe bound")
+        stats = json.loads(body)
+    except (OSError, ValueError, UnicodeError) as error:
+        fail(f"cannot confirm Apalis Board job quiescence ({type(error).__name__})")
+    if not isinstance(stats, list):
+        fail("Apalis Board job status is malformed")
+    required = {"PENDING_JOBS", "RUNNING_JOBS", "ACTIVE_JOBS", "STALE_RUNNING_JOBS", "QUEUE_BACKLOG"}
+    observed: dict[str, str] = {}
+    for item in stats:
+        if not isinstance(item, dict) or not isinstance(item.get("title"), str):
+            fail("Apalis Board job status is malformed")
+        title = item["title"]
+        if title in required:
+            if title in observed or not isinstance(item.get("value"), str):
+                fail("Apalis Board job status is ambiguous")
+            observed[title] = item["value"]
+    if set(observed) != required or any(value != "0" for value in observed.values()):
+        fail("active, queued or unknown Apalis jobs block shutdown")
 
 
 def clean_tree(root: pathlib.Path) -> None:
@@ -856,18 +892,18 @@ def action(command: str, root: pathlib.Path, repo: pathlib.Path, expected_sha: s
             sys.stdout.write(item.read_text(encoding="utf-8", errors="replace"))
         return
     if command == "down":
-        jobs_safe(root)
         ledger = ledger_read(root)
         if ledger.get("state") == "starting": fail("startup/shutdown state is uncertain; no process was signalled")
+        jobs_safe(root, ledger.get("state") == "running")
         if ledger.get("state") != "running":
             print("STOPPED (already stopped); pilot data preserved."); return
         stop_items(root, ledger["items"])
         print("STOPPED; pilot identity, Hub state, enrollment keys and job history preserved.")
         return
     if command == "purge":
-        jobs_safe(root)
         ledger = ledger_read(root)
         if ledger.get("state") != "stopped" or ledger.get("items"): fail("purge requires a stopped owned pilot")
+        jobs_safe(root, False)
         clean_tree(root)
         shutil.rmtree(root)
         print("PURGED")

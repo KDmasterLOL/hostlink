@@ -70,12 +70,16 @@ reconciliation. The tool never escalates to `SIGKILL`.
   key response against the generated pin, and Controller `verify` over the
   Hub-approved gateway route to the Agent's pinned SSH identity.
 - `logs` reads only bounded regular files from the private pilot log directory.
-- `down` refuses Prepared, Running, Interrupted or malformed durable job
-  records and refuses to stop sshd while an established session remains after
-  the Agent closes its reverse connection. It stops only verified pilot
-  processes and preserves enrollment keys, Hub registry, artifacts and job
-  history for a later `up`.
-- `purge` requires a stopped ledger, safe job state and a tree with no symlinks,
+- `down` verifies the exact running Agent's private Apalis job directory and
+  queries the **loopback-only upstream Board API** for zero pending, running,
+  active, stale-running and queued jobs. A missing, malformed or unavailable
+  Board response blocks shutdown; it does not inspect or modify SQLite tables.
+  It also refuses to stop sshd with an established gateway session after the
+  Agent closes its reverse connection. It signals only source- and PID-pinned
+  pilot processes, retaining Hub/Agent identities, Apalis SQLite history and
+  raw build artifacts for a later `up`.
+- `purge` requires a stopped ledger, known owner-scoped Apalis files and no
+  symlinks,
   foreign ownership, special files or filesystem crossings.
 
 No `.env` file is read or evaluated. Caddy TLS uses normal hostname and

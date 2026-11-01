@@ -180,7 +180,7 @@ class PilotLifecycleTests(unittest.TestCase):
         self.assertTrue(listener.fileno() >= 0)
         listener.close()
 
-    def test_down_refuses_active_or_unknown_job_state_and_preserves_root(self):
+    def test_down_refuses_obsolete_or_unknown_job_files_and_preserves_root(self):
         self.prepare()
         jobs = self.root / "agent" / "instance" / "jobs"
         jobs.mkdir(parents=True, mode=0o700)
@@ -337,34 +337,81 @@ class PilotLifecycleTests(unittest.TestCase):
         first.wait(timeout=5)
         self.assertEqual(helper.ledger_read(self.root)["state"], "stopped")
 
-    def test_down_preserves_terminal_job_history(self):
+    def test_down_preserves_native_apalis_job_database(self):
         self.prepare()
         jobs = self.root / "agent" / "instance" / "jobs"
-        job = jobs / "00000000-0000-0000-0000-000000000000"
-        job.mkdir(parents=True, mode=0o700)
-        os.chmod(self.root / "agent", 0o700)
-        os.chmod(self.root / "agent" / "instance", 0o700)
-        os.chmod(jobs, 0o700)
-        record = job / "record.json"
-        record.write_text(json.dumps({"state": {"state": "exited", "code": 7}}))
-        os.chmod(record, 0o600)
+        jobs.mkdir(parents=True, mode=0o700)
+        for path in (jobs.parent.parent, jobs.parent, jobs):
+            path.chmod(0o700)
+        files = {}
+        for name in ("jobs.db", "jobs.db-wal", "jobs.db-shm", "runner.lock"):
+            file = jobs / name
+            file.write_bytes(("owned " + name).encode())
+            file.chmod(0o600 if name == "runner.lock" else 0o644)
+            files[name] = file.read_bytes()
         self.assertIn("preserved", self.run_cli("down", "--root", str(self.root)).stdout)
-        self.assertTrue(record.exists())
+        self.assertEqual(files, {name: (jobs / name).read_bytes() for name in files})
 
-    def test_down_refuses_prepared_running_and_interrupted_jobs(self):
+    def test_apalis_board_job_gates_are_source_verified_and_fail_closed(self):
+        from unittest.mock import patch
+        import io
+        spec = importlib.util.spec_from_file_location("pilot_apalis_board", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
         self.prepare()
         jobs = self.root / "agent" / "instance" / "jobs"
-        job = jobs / "00000000-0000-0000-0000-000000000000"
-        job.mkdir(parents=True, mode=0o700)
-        os.chmod(self.root / "agent", 0o700)
-        os.chmod(self.root / "agent" / "instance", 0o700)
-        os.chmod(jobs, 0o700)
-        record = job / "record.json"
-        for state in ("prepared", "running", "interrupted"):
-            record.write_text(json.dumps({"state": {"state": state}}))
-            os.chmod(record, 0o600)
-            self.run_cli("down", "--root", str(self.root), expected=2)
-        self.assertTrue(self.root.exists())
+        jobs.mkdir(parents=True, mode=0o700)
+        state = jobs.parent / "state"
+        state.mkdir(mode=0o700)
+        for parent in (jobs.parent.parent, jobs.parent, jobs, state):
+            parent.chmod(0o700)
+        (jobs / "jobs.db").write_bytes(b"opaque Apalis-owned SQLite; never parsed")
+        (jobs / "jobs.db").chmod(0o644)
+        helper.private_write(state / "agent.json", b'{"board_listen":"127.0.0.1:24531"}')
+        names = ("PENDING_JOBS", "RUNNING_JOBS", "ACTIVE_JOBS", "STALE_RUNNING_JOBS", "QUEUE_BACKLOG")
+
+        class Response:
+            status = 200
+            def __init__(self, payload):
+                self.data = io.BytesIO(payload)
+            def read(self, limit):
+                return self.data.read(limit)
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                self.data.close()
+
+        class Opener:
+            def __init__(self, payload):
+                self.payload = payload
+            def open(self, request, timeout):
+                self_outer.assertEqual(request.full_url,
+                                       "http://127.0.0.1:24531/api/v1/queues/commands/stats")
+                self_outer.assertEqual(timeout, 3)
+                return Response(self.payload)
+
+        self_outer = self
+        def check(values, should_pass):
+            payload = json.dumps(values).encode()
+            with patch.object(helper.urllib.request, "build_opener", return_value=Opener(payload)):
+                if should_pass:
+                    helper.jobs_safe(self.root, True)
+                else:
+                    with self.assertRaises(helper.PilotError):
+                        helper.jobs_safe(self.root, True)
+
+        zero = [{"title": title, "stat_type": "Number", "value": "0"} for title in names]
+        check(zero, True)
+        for title in names:
+            with self.subTest(title=title):
+                check([dict(item, value="1") if item["title"] == title else item for item in zero], False)
+        check(zero[:-1], False)
+        check(zero + [zero[0]], False)
+        check([dict(zero[0], value=3)] + zero[1:], False)
+        check({"error": "not a list"}, False)
+        with patch.object(helper.urllib.request, "build_opener", side_effect=OSError("board unavailable")):
+            with self.assertRaises(helper.PilotError):
+                helper.jobs_safe(self.root, True)
 
 
 if __name__ == "__main__":
