@@ -150,3 +150,24 @@ impl RunningExecutable {
         Ok(image)
     }
 }
+
+#[cfg(test)]
+pub(crate) const TEST_IMAGE_BYTES: &[u8] = b"HostLink synthetic unit-test image\n";
+
+#[cfg(test)]
+pub(crate) fn test_image() -> (tempfile::TempDir, RunningExecutable) {
+    use std::io::Write;
+
+    // Publication tests need retained bytes, not the potentially oversized test harness.
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("image");
+    let dir = private_fs::PrivateDir::ensure(&path).unwrap();
+    let mut file = dir.create(EXECUTABLE_NAME).unwrap();
+    file.write_all(TEST_IMAGE_BYTES).unwrap();
+    drop(file);
+    let image = RunningExecutable {
+        file: File::open(path.join(EXECUTABLE_NAME)).unwrap(),
+        sha256: hex::encode(Sha256::digest(TEST_IMAGE_BYTES)),
+    };
+    (temp, image)
+}
