@@ -6,7 +6,7 @@ use crate::{
     agent_files::validate_user_owned_root,
     package::{
         ARCHIVE_DIGEST, EXECUTABLE_BASE, PACKAGE_MANIFEST, PackageManifest, invalid,
-        read_installed, read_regular, supported_targets, target_matches_runtime, validate_contents,
+        read_installed, read_regular, target_matches_runtime, validate_contents,
         validate_installed, validate_sha256,
     },
     private_fs::PrivateFileExt,
@@ -36,6 +36,11 @@ impl ReleaseSource for SelectedRelease {
 /// Update one stopped Agent from an independently pinned release.
 /// Returns true when a bundle was installed, false when already current.
 /// No task registration, Agent restart, or durable crash recovery is performed.
+/// The caller must authorize the archive SHA-256 independently of the URL.
+///
+/// # Errors
+/// Returns an error for invalid selections, unsafe or busy installation roots,
+/// download failures, integrity mismatches, or publication failures.
 pub fn update(
     root: &Path,
     url: &str,
@@ -45,13 +50,8 @@ pub fn update(
 ) -> io::Result<bool> {
     validate_sha256(sha256)?;
     semver::Version::parse(version).map_err(|_| invalid("exact semantic version required"))?;
-    if !supported_targets().contains(&target) || !target_matches_runtime(target) {
+    if !target_matches_runtime(target) {
         return Err(invalid("unsupported Agent target for this runtime"));
-    }
-    if url.contains(['\\', '%', '@']) || url.split('/').any(|part| matches!(part, "." | "..")) {
-        return Err(invalid(
-            "artifact URL requires a literal, credential-free path",
-        ));
     }
     let address = reqwest::Url::parse(url).map_err(|_| invalid("invalid artifact URL"))?;
     let test_loopback = cfg!(test)
@@ -63,13 +63,10 @@ pub fn update(
         || address.port() == Some(0)
         || !address.username().is_empty()
         || address.password().is_some()
+        || address.authority().contains('@')
         || address.fragment().is_some()
-        || address.path_segments().is_none_or(|mut segments| {
-            segments.next_back() != Some(format!("hostlink-agent-{target}.zip").as_str())
-                || !segments.any(|part| part == version || part == format!("v{version}"))
-        })
     {
-        return Err(invalid("exact credential-free HTTPS artifact URL required"));
+        return Err(invalid("credential-free HTTPS artifact URL required"));
     }
     if !root.is_absolute() {
         return Err(invalid("Agent install root must be absolute"));
@@ -96,10 +93,14 @@ pub fn update(
     _update_lock.try_lock()?;
     let _runner_lock = lock_file(&root.join("jobs"), "runner.lock")?;
     _runner_lock.try_lock().map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::WouldBlock,
-            format!("stop the running Agent before updating: {error}"),
-        )
+        if error.kind() == io::ErrorKind::WouldBlock {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("stop the running Agent before updating: {error}"),
+            )
+        } else {
+            error
+        }
     })?;
     #[cfg(windows)]
     crate::service::ensure_agent_offline(root)?;
@@ -123,7 +124,7 @@ pub fn update(
         .version(version)
         .asset(ReleaseAsset::new(
             format!("hostlink-agent-{target}.zip"),
-            url,
+            address.as_str(),
         ))
         .build()
         .map_err(io::Error::other)?;
@@ -150,7 +151,6 @@ pub fn update(
         .bundle_install_path(root.join("bin"))
         .no_confirm(true)
         .show_output(false)
-        .retries(0)
         .ureq_agent(transport)
         .verify_checksum(Checksum::Sha256(sha256.to_owned()))
         .verify_archive(move |archive| {
