@@ -1,6 +1,6 @@
 # History of the Agent self_update integration
 
-**Current implementation (1C-1155):** [Agent installation contract](AGENT_INSTALLATION.md).
+**Current implementation (1C-1155 / 1C-1156):** [Agent installation contract](AGENT_INSTALLATION.md).
 The sections below record the **historical** source-exact 1C-1147/1149/1153
 decisions and their own test evidence. Their `install.json` transformation,
 `Artifact` constructor, `AgentUpdateRequest` and `AgentUpdateOutcome` refer to
@@ -32,6 +32,26 @@ Fresh bootstrap separately verifies the sidecar and ZIP before enrollment,
 retains `manifest.json`, adds `archive.sha256` and checks the source receipt.
 Private root, keys, jobs and state stay outside the published bundle. Windows
 requires an unregistered task and an independent stopped Agent process.
+
+### 1C-1156 — updater URL policy and error semantics
+
+The installed updater accepts a normal parsed credential-free HTTPS URL,
+including percent-encoded paths, optional query strings and arbitrary asset
+basenames. It does **not** infer publisher, target or version identity from
+the textual URL. The caller/operator must independently trust the supplied
+archive SHA-256; `self_update` verifies that digest before ZIP extraction,
+and HostLink checks the manifest and extracted bundle against the selected
+target/version and expected per-file hashes. The parsed canonical URL is used
+for the actual fetch. The existing exact pinned release selection also permits
+an explicit older-version install (no implicit anti-downgrade guarantee).
+
+The upstream `self_update 1.3.1` default is already zero retries. The custom
+`ureq 3.4.2` client **still** disables redirects and environment proxies,
+because its defaults would allow both, and still enforces a 30-second timeout.
+Runner-lock errors now preserve their original I/O kind unless the lock is
+actually contended (`WouldBlock`); unexpected filesystem errors must not
+masquerade as a running Agent. Bootstrap-side source URL/pin validation is a
+different enrollment contract and remains unchanged.
 
 **Acceptance caveat:** this entry is a design/implementation description;
 the historical test matrix later in this document belongs to the older source

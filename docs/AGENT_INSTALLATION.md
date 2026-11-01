@@ -1,4 +1,4 @@
-# Agent update and bootstrap — current contract (1C-1155)
+# Agent update and bootstrap — current contract (1C-1155 / 1C-1156)
 
 HostLink uses upstream `self_update 1.3.1` to download, SHA-verify and swap
 installed Agent bundles. Fresh enrollment is distinct because it must verify
@@ -12,8 +12,11 @@ The Rust interface is one public function:
 `update(root, url, sha256, target, version) -> io::Result<bool>`.
 `true` means installed; `false` means already current.
 
-1. Require an exact credential-free HTTPS URL, target, semantic version
-   and independently supplied lowercase archive SHA-256.
+1. Require a parsed credential-free HTTPS URL (no fragment), a supported
+   runtime target, an exact semantic version and an independently supplied
+   lowercase archive SHA-256. The URL may contain ordinary percent encoding,
+   a query string or an arbitrary CDN asset name; its path is **not** proof
+   of the archive's version, platform or publisher.
 2. Validate the private root and acquire both `update.lock` and
    `jobs/runner.lock`. On Windows the Task Scheduler registration must be
    absent, a verified separate updater must run outside `bin/`, and the
@@ -35,6 +38,17 @@ A tiny private `ReleaseSource` adapter remains because the library's
 custom backend requires this trait even when the caller already selected
 exactly one download URL. Replacing it with the built-in GitHub backend
 would change how exact independently pinned sources are selected.
+
+The updater consumes an artifact selected by the local operator/caller; it
+does not authenticate an otherwise arbitrary URL/hash pair or implement a
+trusted-publisher allowlist. The expected SHA-256 must therefore be obtained
+**independently from an authorized, trusted source**. `ureq` explicitly
+disables redirects and environment proxies and retains a 30-second global
+timeout. These are intentional deviations from `ureq 3.4.2` defaults.
+`self_update 1.3.1` already defaults to zero retries; it is not separately
+configured. An explicitly selected older version remains an allowed
+downgrade under the current exact-artifact contract; there is no implicit
+`latest` selection or anti-rollback policy.
 
 The updater does not read or modify the Apalis database, state, keys,
 registration or service lifetime. The root remains private; the nonsecret
@@ -84,6 +98,11 @@ same-version reissue detection.
 ## Boundaries
 
 - SHA-256 must come from an independently trusted artifact publisher.
+- Installed-Agent updates do not enforce a release filename or version
+  segment in the download URL. The ZIP manifest and extracted file hashes
+  enforce the requested target/version **after** the archive checksum gate.
+  Fresh enrollment/sidecar bootstrap has a separate source-validation
+  contract and is not changed by this updater-only simplification.
 - The ZIP compressed-size bound is checked **after** the upstream download.
   Declared expanded sizes are not a strict streaming quota against
   deliberately false ZIP headers.

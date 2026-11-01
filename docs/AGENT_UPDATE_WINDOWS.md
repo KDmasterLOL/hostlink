@@ -17,10 +17,17 @@ snapshot APIs. `same-file 1.0.6` compares file identities for the separate updat
 and matching running images, avoiding a second hand-written Windows file-ID API.
 
 Only one installed updater exists: high-level self_update custom::Update, pinned to
-1.3.1. Its ReleaseSource contains exactly the supplied URL/version/target. SHA-256,
-bounded ZIP/member/manifest checks and installed inventory are mandatory. Redirects
-and retries are disabled; the download timeout is 30 seconds. There is no remote
-release discovery, local ZIP fallback, provider fallback or "latest" selection.
+1.3.1. Its ReleaseSource contains one parsed caller-selected HTTPS URL and the
+exact version/target; the requested SHA-256 must come independently from a
+trusted operator/publisher. URL path spelling, including the presence of a
+version or target-named filename, is **not** an authenticity check. The archive
+SHA-256, bounded ZIP/member/manifest checks and installed inventory are
+mandatory. Redirects and environment proxies are disabled, so a download
+cannot follow a redirect or inherit an unreviewed system proxy.
+`self_update 1.3.1` defaults to zero retries; the transport retains a
+30-second timeout. An exact explicitly selected downgrade is permitted.
+There is no remote release discovery, local ZIP fallback, provider fallback
+or "latest" selection.
 
 Downloaded archives, temporary bundles and installed bin are **nonsecret**, using
 upstream native temporary filesystem permissions/ACLs. No private-fs ACL hardening
