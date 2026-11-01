@@ -13,12 +13,16 @@ pub(super) struct Route {
 }
 
 pub(super) fn old_hub_gateways(value: &Value, report: &mut HostReadiness) -> Vec<Route> {
+    // An empty Hub list with explicit single-route fields is a supported legacy schema.
     let routes = if let Some(items) = value
         .get("gateways")
-        .and_then(Value::as_array)
-        .filter(|items| !items.is_empty())
+        .filter(|items| !items.as_array().is_some_and(Vec::is_empty))
     {
-        items.iter().filter_map(route_object).collect()
+        route_collection(
+            items,
+            report,
+            "legacy Hub gateway collection is empty or malformed",
+        )
     } else if let Some(host) = string_field(value, "gateway_host") {
         let user = string_field(value, "agent_ssh_user").unwrap_or_default();
         vec![Route {
@@ -38,7 +42,7 @@ pub(super) fn old_hub_gateways(value: &Value, report: &mut HostReadiness) -> Vec
     };
     if routes
         .iter()
-        .any(|route| route.user.is_empty() || route.port == 0)
+        .any(|route| route.user.is_empty() || !(1..=65535).contains(&route.port))
     {
         block(report, "legacy Hub gateway route is incomplete");
     }
@@ -46,11 +50,26 @@ pub(super) fn old_hub_gateways(value: &Value, report: &mut HostReadiness) -> Vec
 }
 
 pub(super) fn inspect_old_hub_pins(value: &Value, report: &mut HostReadiness) {
-    let pins: Vec<Option<String>> = if let Some(gateways) = value
+    let pins: Vec<Option<String>> = if let Some(collection) = value
         .get("gateways")
-        .and_then(Value::as_array)
-        .filter(|gateways| !gateways.is_empty())
+        .filter(|items| !items.as_array().is_some_and(Vec::is_empty))
     {
+        let Some(gateways) = collection.as_array() else {
+            block(
+                report,
+                "legacy Hub gateway collection is empty or malformed",
+            );
+            return;
+        };
+        if gateways
+            .iter()
+            .any(|gateway| route_object(gateway).is_none())
+        {
+            block(
+                report,
+                "legacy Hub gateway collection is empty or malformed",
+            );
+        }
         gateways
             .iter()
             .map(|gateway| string_field(gateway, "host_public_key"))
@@ -71,8 +90,12 @@ pub(super) fn inspect_old_hub_pins(value: &Value, report: &mut HostReadiness) {
 }
 
 pub(super) fn old_controller_gateways(value: &Value, report: &mut HostReadiness) -> Vec<Route> {
-    let routes = if let Some(items) = value.get("gateways").and_then(Value::as_array) {
-        items.iter().filter_map(route_object).collect()
+    let routes = if let Some(items) = value.get("gateways") {
+        route_collection(
+            items,
+            report,
+            "legacy Controller gateway collection is empty or malformed",
+        )
     } else if let Some(host) = string_field(value, "gateway_host") {
         vec![Route {
             host,
@@ -91,7 +114,7 @@ pub(super) fn old_controller_gateways(value: &Value, report: &mut HostReadiness)
     };
     if routes
         .iter()
-        .any(|route| route.user.is_empty() || route.port == 0)
+        .any(|route| route.user.is_empty() || !(1..=65535).contains(&route.port))
     {
         block(report, "legacy Controller gateway route is incomplete");
     }
@@ -109,8 +132,12 @@ pub(super) fn old_agent_gateways(value: &Value, report: &mut HostReadiness) -> V
             "legacy Agent reverse route lacks explicit SSH key or gateway trust",
         );
     }
-    if let Some(items) = ssh.get("gateways").and_then(Value::as_array) {
-        items.iter().filter_map(route_object).collect()
+    let routes = if let Some(items) = ssh.get("gateways") {
+        route_collection(
+            items,
+            report,
+            "legacy Agent gateway collection is empty or malformed",
+        )
     } else if let Some(host) = string_field(ssh, "gateway_host") {
         vec![Route {
             host,
@@ -129,6 +156,28 @@ pub(super) fn old_agent_gateways(value: &Value, report: &mut HostReadiness) -> V
             "legacy Agent route schema is unsupported or ambiguous",
         );
         Vec::new()
+    };
+    if routes
+        .iter()
+        .any(|route| route.user.is_empty() || !(1..=65535).contains(&route.port))
+    {
+        block(report, "legacy Agent gateway route is incomplete");
+    }
+    routes
+}
+
+fn route_collection(value: &Value, report: &mut HostReadiness, reason: &str) -> Vec<Route> {
+    // Collect all records or reject the collection; never drop an invalid member.
+    match value
+        .as_array()
+        .filter(|items| !items.is_empty())
+        .and_then(|items| items.iter().map(route_object).collect::<Option<Vec<_>>>())
+    {
+        Some(routes) => routes,
+        None => {
+            block(report, reason);
+            Vec::new()
+        }
     }
 }
 
@@ -136,7 +185,10 @@ fn route_object(value: &Value) -> Option<Route> {
     Some(Route {
         host: string_field(value, "host")?,
         user: string_field(value, "user")?,
-        port: value.get("port").and_then(Value::as_u64).unwrap_or(0),
+        port: value
+            .get("port")
+            .and_then(Value::as_u64)
+            .filter(|port| (1..=65535).contains(port))?,
     })
 }
 
