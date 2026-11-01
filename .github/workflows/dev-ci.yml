@@ -62,9 +62,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $assets = @(
-            'crates/agent/assets/Install-HostLink-Agent.ps1',
-            'crates/agent/assets/Run-HostLink-Agent.ps1',
-            'crates/agent/assets/Update-HostLink-Agent.ps1',
+            'crates/client/assets/github-windows.ps1',
+            'crates/client/assets/bootstrap-windows.ps1',
             'scripts/verify-win7-bootstrap-native.ps1',
             'scripts/verify-windows-agent-lifecycle.ps1'
           )
