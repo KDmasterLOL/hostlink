@@ -7,13 +7,13 @@ use crate::agent_files::{
 use crate::package::EXECUTABLE_BASE;
 use crate::package::{
     ARCHIVE_DIGEST, BootstrapReceipt, MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, MAX_MANIFEST_BYTES,
-    PACKAGE_MANIFEST, PackageManifest, invalid, invalid_owned, package_files, read_installed,
-    supported_targets, target_matches_runtime, validate_contents,
+    PACKAGE_MANIFEST, PackageManifest, executable_name, invalid, invalid_owned, package_files,
+    read_installed, supported_targets, target_matches_runtime, validate_contents,
+    validate_installed,
 };
 use hex::FromHex;
 use private_fs::PrivateDir;
 use std::{
-    collections::BTreeSet,
     fs::{self, File},
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -30,8 +30,6 @@ pub fn verify_fresh_package(
         .map_err(|_| invalid("Agent archive SHA-256 must contain 32 hexadecimal bytes"))?;
     // The receipt and archive.sha256 persist the canonical lowercase representation.
     let archive_sha256 = hex::encode(archive_sha256);
-    semver::Version::parse(version)
-        .map_err(|_| invalid("Agent package version must be exact semantic version"))?;
     if version != env!("CARGO_PKG_VERSION") {
         return Err(invalid(
             "verifier sidecar version does not match selected package version",
@@ -56,17 +54,13 @@ pub fn verify_fresh_package(
     let (manifest, staged) =
         validate_and_stage_archive(&canonical_archive, &archive_sha256, target, version, parent)?;
     let staged_package = staged
-        .path()
+        .path
         .join("extracted")
         .join(format!("hostlink-agent-{target}"));
-    let executable = package_files(target)
-        .into_iter()
-        .find(|name| name == "hostlink-agent" || name == "hostlink-agent.exe")
-        .ok_or_else(|| invalid("Agent executable is missing from package contract"))?;
     let running = std::env::current_exe()?;
     let expected_executable = manifest
         .files
-        .get(&executable)
+        .get(executable_name(target))
         .ok_or_else(|| invalid("Agent executable identity is missing from manifest"))?;
     if hash_file(&running, MAX_ENTRY_BYTES)? != expected_executable.sha256 {
         return Err(invalid(
@@ -74,32 +68,24 @@ pub fn verify_fresh_package(
         ));
     }
     let package_dir = PrivateDir::open(&staged_package).map_err(io::Error::other)?;
-    let mut digest_file = package_dir
-        .create(ARCHIVE_DIGEST)
-        .map_err(io::Error::other)?;
-    digest_file.write_all(archive_sha256.as_bytes())?;
-    digest_file.sync_all().map_err(io::Error::other)?;
-    let mut receipt_file = package_dir
-        .create("bootstrap-receipt.json")
-        .map_err(io::Error::other)?;
-    receipt_file.write_all(
-        &serde_json::to_vec_pretty(&serde_json::json!({
-            "format": 2,
-            "component": manifest.component,
-            "target": manifest.target,
-            "version": manifest.version,
-            "archive_sha256": archive_sha256,
-            "sidecar_sha256": expected_executable.sha256,
-            "files": manifest.files,
-        }))
-        .map_err(io::Error::other)?,
-    )?;
-    receipt_file.sync_all().map_err(io::Error::other)?;
-    // Windows refuses renaming a directory containing still-open file handles
-    // (ERROR_ACCESS_DENIED), even after each file's sync_all has succeeded.
-    // Publish only after closing both source-digest and receipt files.
-    drop(receipt_file);
-    drop(digest_file);
+    {
+        let mut receipt_file = package_dir
+            .create("bootstrap-receipt.json")
+            .map_err(io::Error::other)?;
+        serde_json::to_writer_pretty(
+            &mut receipt_file,
+            &serde_json::json!({
+                "format": 2,
+                "component": manifest.component,
+                "target": manifest.target,
+                "version": manifest.version,
+                "archive_sha256": archive_sha256,
+                "sidecar_sha256": expected_executable.sha256,
+                "files": manifest.files,
+            }),
+        )?;
+        receipt_file.sync_all().map_err(io::Error::other)?;
+    } // Close file handles before renaming on Windows.
     drop(package_dir);
     // Windows std::fs::File::open cannot open a directory for sync_all.
     // The member files and receipt have already been individually flushed;
@@ -135,37 +121,14 @@ pub fn finalize_fresh_install(root: &Path) -> io::Result<()> {
             .map_err(io::Error::other)?,
     );
 
-    let state = root.join("state");
-    let state_metadata = fs::symlink_metadata(&state)?;
-    if !state_metadata.is_dir()
-        || state_metadata.file_type().is_symlink()
-        || is_reparse_point(&state_metadata)
-    {
-        return Err(invalid("fresh Agent state directory is missing or unsafe"));
-    }
-    let state_dir = PrivateDir::open(&state).map_err(io::Error::other)?;
-    let config = state.join("agent.json");
-    let config_metadata = fs::symlink_metadata(&config)?;
-    if !config_metadata.is_file()
-        || config_metadata.file_type().is_symlink()
-        || is_reparse_point(&config_metadata)
-    {
-        return Err(invalid("fresh Agent configuration is missing or unsafe"));
-    }
-    #[cfg(windows)]
-    state_dir
-        .open_file("agent.json")
+    PrivateDir::open(root.join("state"))
+        .and_then(|dir| dir.open_file("agent.json"))
         .and_then(|file| file.verify())
         .map_err(io::Error::other)?;
-    #[cfg(not(windows))]
-    drop(state_dir);
 
     let (installed, installed_archive_sha256) = read_installed(root)?;
-    if installed.format != 2
-        || !supported_targets().contains(&installed.target.as_str())
-        || !target_matches_runtime(&installed.target)
-        || installed.version != env!("CARGO_PKG_VERSION")
-    {
+    // read_installed already validates format, runtime target, inventory and hashes.
+    if installed.version != env!("CARGO_PKG_VERSION") {
         return Err(invalid(
             "fresh installed package target or version does not match this Agent",
         ));
@@ -182,10 +145,6 @@ pub fn finalize_fresh_install(root: &Path) -> io::Result<()> {
     }
     let receipt: BootstrapReceipt = serde_json::from_slice(&receipt_bytes)
         .map_err(|error| invalid_owned(format!("invalid bootstrap receipt: {error}")))?;
-    let executable = package_files(&installed.target)
-        .into_iter()
-        .find(|name| name == "hostlink-agent" || name == "hostlink-agent.exe")
-        .ok_or_else(|| invalid("Agent executable is missing from package contract"))?;
     if receipt.format != 2
         || receipt.component != "agent"
         || receipt.target != installed.target
@@ -201,7 +160,7 @@ pub fn finalize_fresh_install(root: &Path) -> io::Result<()> {
     }
     let executable_identity = receipt
         .files
-        .get(&executable)
+        .get(executable_name(&installed.target))
         .ok_or_else(|| invalid("bootstrap receipt omits the Agent executable"))?;
     if receipt.sidecar_sha256 != executable_identity.sha256 {
         return Err(invalid(
@@ -235,9 +194,15 @@ fn validate_and_stage_archive(
     version: &str,
     staging_parent: &Path,
 ) -> io::Result<(PackageManifest, PrivateTempDir)> {
-    let stage = PrivateTempDir::new_in(staging_parent, ".agent-package-")?;
-    let stage_dir = PrivateDir::open(stage.path()).map_err(io::Error::other)?;
-    let staged_archive = stage.path().join("package.zip");
+    let name = format!(".agent-package-{}", uuid::Uuid::new_v4());
+    // Private native creation is required even on Windows; tempfile inherits ACLs.
+    let stage_dir = PrivateDir::open(staging_parent)
+        .and_then(|dir| dir.create_dir(&name))
+        .map_err(io::Error::other)?;
+    let stage = PrivateTempDir {
+        path: staging_parent.join(name),
+    };
+    let staged_archive = stage.path.join("package.zip");
     let mut source = File::open(archive_path)?;
     let source_size = source.metadata()?.len();
     if source_size == 0 || source_size > MAX_ARCHIVE_BYTES {
@@ -270,12 +235,11 @@ fn validate_and_stage_archive(
         .into_iter()
         .chain(std::iter::once(PACKAGE_MANIFEST.to_owned()))
         .collect::<Vec<_>>();
-    let expected = expected_order.iter().cloned().collect::<BTreeSet<_>>();
 
     // The ZIP reader validates member names, types and declared sizes before extraction.
     // After extraction, verify actual file hashes against the package manifest
     // before publishing the fresh installation.
-    let extraction_root = stage.path().join("extracted");
+    let extraction_root = stage.path.join("extracted");
     let extraction_dir = stage_dir
         .ensure_dir("extracted")
         .map_err(io::Error::other)?;
@@ -292,71 +256,29 @@ fn validate_and_stage_archive(
         .archive(self_update::ArchiveKind::Zip)
         .extract_into(&extraction_root)
         .map_err(|error| invalid_owned(format!("Agent ZIP extraction failed: {error}")))?;
-    let package_metadata = fs::symlink_metadata(&package_root)?;
-    if !package_metadata.is_dir() || is_reparse_point(&package_metadata) {
-        return Err(invalid(
-            "Agent ZIP extraction produced an unsafe package root",
-        ));
+    for name in &expected_order {
+        set_staged_file_permissions(&package_root.join(name), name)?;
     }
-    PrivateDir::open(&package_root).map_err(io::Error::other)?;
-    let actual_names = fs::read_dir(&package_root)?
-        .map(|entry| {
-            let entry = entry?;
-            let metadata = fs::symlink_metadata(entry.path())?;
-            if !metadata.is_file() || is_reparse_point(&metadata) {
-                return Err(invalid("Agent ZIP extraction produced a non-regular file"));
-            }
-            entry
-                .file_name()
-                .into_string()
-                .map_err(|_| invalid("Agent ZIP extraction produced a non-UTF-8 file name"))
-        })
-        .collect::<io::Result<BTreeSet<_>>>()?;
-    if actual_names != expected {
-        return Err(invalid(
-            "Agent ZIP extraction inventory differs from its validated index",
-        ));
+    {
+        let mut digest_file = package_dir
+            .create(ARCHIVE_DIGEST)
+            .map_err(io::Error::other)?;
+        digest_file.write_all(archive_sha256.as_bytes())?;
+        digest_file.sync_all().map_err(io::Error::other)?;
     }
-    for (name, identity) in &manifest.files {
-        let path = package_root.join(name);
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.len() != identity.size || hash_file(&path, MAX_ENTRY_BYTES)? != identity.sha256
-        {
-            return Err(invalid(
-                "Agent ZIP extracted file differs from its verified digest",
-            ));
-        }
-        set_staged_file_permissions(&path, name)?;
-    }
+    // Use the installed-package owner for the same exact inventory and file identities.
+    validate_installed(&package_root, &manifest, target)?;
     let extracted_manifest = fs::read(package_root.join(PACKAGE_MANIFEST))?;
     if extracted_manifest != bytes {
         return Err(invalid(
             "Agent ZIP extracted manifest differs from its verified bytes",
         ));
     }
-    set_staged_file_permissions(&package_root.join(PACKAGE_MANIFEST), PACKAGE_MANIFEST)?;
     Ok((manifest, stage))
 }
 
 struct PrivateTempDir {
     path: PathBuf,
-}
-
-impl PrivateTempDir {
-    fn new_in(parent: &Path, prefix: &str) -> io::Result<Self> {
-        let name = format!("{prefix}{}", uuid::Uuid::new_v4());
-        // Create with private security at birth; inherited Windows ACLs are insufficient.
-        PrivateDir::open(parent)
-            .and_then(|dir| dir.create_dir(&name))
-            .map_err(io::Error::other)?;
-        Ok(Self {
-            path: parent.join(name),
-        })
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
 }
 
 impl Drop for PrivateTempDir {
@@ -391,8 +313,6 @@ pub(super) fn set_staged_file_permissions(path: &Path, relative: &str) -> io::Re
             // private-fs requires regular files to be exactly 0600. The executable alone
             // needs 0700 and is subsequently verified by the executable-specific contract.
             file.set_permissions(fs::Permissions::from_mode(0o700))?;
-        } else {
-            private_fs::verify(&file).map_err(io::Error::other)?;
         }
     }
     #[cfg(not(unix))]

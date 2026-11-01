@@ -13,6 +13,14 @@ pub(crate) const PACKAGE_MANIFEST: &str = "manifest.json";
 pub(crate) const ARCHIVE_DIGEST: &str = "archive.sha256";
 pub(crate) const EXECUTABLE_BASE: &str = "hostlink-agent";
 
+pub(crate) fn executable_name(target: &str) -> &'static str {
+    if target.contains("windows") {
+        "hostlink-agent.exe"
+    } else {
+        EXECUTABLE_BASE
+    }
+}
+
 pub(crate) fn invalid(message: &'static str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
 }
@@ -128,14 +136,7 @@ where
     deserializer.deserialize_map(UniqueFileMapVisitor)
 }
 pub(crate) fn package_files(target: &str) -> Vec<String> {
-    let mut files = vec![
-        if target.contains("windows") {
-            "hostlink-agent.exe"
-        } else {
-            EXECUTABLE_BASE
-        }
-        .to_owned(),
-    ];
+    let mut files = vec![executable_name(target).to_owned()];
     if target.contains("windows") {
         files.extend(
             [

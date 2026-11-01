@@ -14,9 +14,7 @@ if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) 
 # and owns exact release selection, manifest checks, locks and publication.
 $scriptDirectory = [IO.Path]::GetDirectoryName($MyInvocation.MyCommand.Path)
 $root = [IO.Directory]::GetParent($scriptDirectory).FullName
-if ([string]::IsNullOrEmpty($Version)) {
-    & $Updater update --root $root
-} else {
-    & $Updater update --root $root --version $Version
-}
+$arguments = @('update', '--root', $root)
+if (-not [string]::IsNullOrEmpty($Version)) { $arguments += @('--version', $Version) }
+& $Updater @arguments
 if ($LASTEXITCODE -ne 0) { throw ('Agent update failed with exit code ' + $LASTEXITCODE) }

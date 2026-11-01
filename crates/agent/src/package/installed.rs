@@ -1,7 +1,7 @@
 //! Read one release manifest without reformatting it during installation.
 
 use super::{
-    ARCHIVE_DIGEST, EXECUTABLE_BASE, MAX_MANIFEST_BYTES, PACKAGE_MANIFEST, PackageManifest,
+    ARCHIVE_DIGEST, MAX_MANIFEST_BYTES, PACKAGE_MANIFEST, PackageManifest, executable_name,
     invalid, package_files, supported_targets, target_matches_runtime,
 };
 use crate::agent_files::{file_identities, is_reparse_point};
@@ -77,17 +77,15 @@ pub(crate) fn validate_installed(
                 .map_err(|_| invalid("Agent bin filename is not UTF-8"))
         })
         .collect::<io::Result<BTreeSet<_>>>()?;
-    if actual != expected || file_identities(bin, &expected_files)? != manifest.files {
+    if actual != expected
+        || manifest.files.values().any(|identity| identity.size == 0)
+        || file_identities(bin, &expected_files)? != manifest.files
+    {
         return Err(invalid(
             "installed Agent files differ from the release manifest",
         ));
     }
-    let executable = if target.contains("windows") {
-        "hostlink-agent.exe"
-    } else {
-        EXECUTABLE_BASE
-    };
-    verify_executable(&bin.join(executable))?;
+    verify_executable(&bin.join(executable_name(target)))?;
     Ok(())
 }
 

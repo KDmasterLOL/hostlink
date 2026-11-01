@@ -32,11 +32,7 @@ hl_config_dir() (
     hl_safe_chain "$1"
 )
 hl_private_dir() {
-    if [ ! -e "$1" ] && [ ! -L "$1" ]; then
-        hl_safe_chain "$(dirname "$1")"
-        mkdir -m 700 "$1" || hl_fail 'Cannot create private credential directory.'
-    fi
-    hl_safe_chain "$1"
+    hl_config_dir "$1"
     [ "$(stat -c '%u:%a' "$1")" = "$(id -u):700" ] || hl_fail 'Credential directory must be owned by this user with mode 0700.'
 }
 hl_credential_path() {
@@ -159,53 +155,52 @@ archive_sha256=
 target=
 hub_ca_cert=
 while [ "$#" -gt 0 ]; do
+    [ "$#" -ge 2 ] || usage
     case "$1" in
-        --hub-url) [ "$#" -ge 2 ] || usage; hub_url=$2; shift 2 ;;
-        --name) [ "$#" -ge 2 ] || usage; name=$2; shift 2 ;;
-        --ssh-user) [ "$#" -ge 2 ] || usage; ssh_user=$2; shift 2 ;;
-        --agent-url) [ "$#" -ge 2 ] || usage; agent_url=$2; shift 2 ;;
-        --agent-sha256) [ "$#" -ge 2 ] || usage; agent_sha256=$2; shift 2 ;;
-        --agent-version) [ "$#" -ge 2 ] || usage; agent_version=$2; shift 2 ;;
-        --archive-url) [ "$#" -ge 2 ] || usage; archive_url=$2; shift 2 ;;
-        --archive-sha256) [ "$#" -ge 2 ] || usage; archive_sha256=$2; shift 2 ;;
-        --target) [ "$#" -ge 2 ] || usage; target=$2; shift 2 ;;
-        --hub-ca-cert) [ "$#" -ge 2 ] || usage; hub_ca_cert=$2; shift 2 ;;
+        --hub-url) hub_url=$2 ;;
+        --name) name=$2 ;;
+        --ssh-user) ssh_user=$2 ;;
+        --agent-url) agent_url=$2 ;;
+        --agent-sha256) agent_sha256=$2 ;;
+        --agent-version) agent_version=$2 ;;
+        --archive-url) archive_url=$2 ;;
+        --archive-sha256) archive_sha256=$2 ;;
+        --target) target=$2 ;;
+        --hub-ca-cert) hub_ca_cert=$2 ;;
         *) usage ;;
     esac
+    shift 2
 done
 
-if [ "$(id -u)" -eq 0 ]; then
-    echo 'Enrollment must run as a normal unprivileged user.' >&2
-    exit 1
-fi
-case "$hub_url" in https://*) ;; *) echo 'Hub URL must use HTTPS.' >&2; exit 1 ;; esac
+[ "$(id -u)" -ne 0 ] || hl_fail 'Enrollment must run as a normal unprivileged user.'
+case "$hub_url" in https://*) ;; *) hl_fail 'Hub URL must use HTTPS.' ;; esac
 hub_authority=${hub_url#https://}
-case "$hub_authority" in *@*|*/*|*\?*|*\#*|'') echo 'Hub URL must be an HTTPS origin without credentials, path, query or fragment.' >&2; exit 1 ;; esac
+case "$hub_authority" in *@*|*/*|*\?*|*\#*|'') hl_fail 'Hub URL must be an HTTPS origin without credentials, path, query or fragment.' ;; esac
 hl_asset_url "$agent_url"
 hl_asset_url "$archive_url"
-case "$name" in ''|*[!a-z0-9._-]*|[!a-z0-9]*) echo 'Name must be canonical lowercase ASCII.' >&2; exit 1 ;; esac
-case "$ssh_user" in ''|*[!A-Za-z0-9._-]*) echo 'SSH user is invalid.' >&2; exit 1 ;; esac
-[ "${#name}" -le 128 ] || { echo 'Name is too long.' >&2; exit 1; }
-case "$agent_sha256" in *[!0-9a-f]*|'') echo 'Agent SHA-256 must be lowercase hexadecimal.' >&2; exit 1 ;; esac
-[ "${#agent_sha256}" -eq 64 ] || { echo 'Agent SHA-256 must contain 64 characters.' >&2; exit 1; }
-case "$archive_sha256" in *[!0-9a-f]*|'') echo 'Archive SHA-256 must be lowercase hexadecimal.' >&2; exit 1 ;; esac
-[ "${#archive_sha256}" -eq 64 ] || { echo 'Archive SHA-256 must contain 64 characters.' >&2; exit 1; }
-[ "$target" = 'x86_64-unknown-linux-gnu' ] || { echo 'Unsupported Linux package target.' >&2; exit 1; }
-[ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || { echo 'This bootstrap supports x86_64 Linux only.' >&2; exit 1; }
-printf '%s' "$agent_version" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$' || { echo 'Agent version must be exact semantic version.' >&2; exit 1; }
-command -v curl >/dev/null 2>&1 || { echo 'curl is required.' >&2; exit 1; }
-command -v sha256sum >/dev/null 2>&1 || { echo 'sha256sum is required.' >&2; exit 1; }
+case "$name" in ''|*[!a-z0-9._-]*|[!a-z0-9]*) hl_fail 'Name must be canonical lowercase ASCII.' ;; esac
+case "$ssh_user" in ''|*[!A-Za-z0-9._-]*) hl_fail 'SSH user is invalid.' ;; esac
+[ "${#name}" -le 128 ] || hl_fail 'Name is too long.'
+for digest in "$agent_sha256" "$archive_sha256"; do
+    case "$digest" in *[!0-9a-f]*|'') hl_fail 'SHA-256 must be lowercase hexadecimal.' ;; esac
+    [ "${#digest}" -eq 64 ] || hl_fail 'SHA-256 must contain 64 characters.'
+done
+[ "$target" = 'x86_64-unknown-linux-gnu' ] || hl_fail 'Unsupported Linux package target.'
+[ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || hl_fail 'This bootstrap supports x86_64 Linux only.'
+printf '%s' "$agent_version" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$' || hl_fail 'Agent version must be exact semantic version.'
+command -v curl >/dev/null 2>&1 || hl_fail 'curl is required.'
+command -v sha256sum >/dev/null 2>&1 || hl_fail 'sha256sum is required.'
 if [ -n "$hub_ca_cert" ]; then
-    [ -f "$hub_ca_cert" ] && [ ! -L "$hub_ca_cert" ] && [ -r "$hub_ca_cert" ] || { echo 'Explicit Hub CA must be a readable regular file, not a symlink.' >&2; exit 1; }
+    [ -f "$hub_ca_cert" ] && [ ! -L "$hub_ca_cert" ] && [ -r "$hub_ca_cert" ] || hl_fail 'Explicit Hub CA must be a readable regular file, not a symlink.'
 fi
 
 base=${XDG_DATA_HOME:-"$HOME/.local/share"}
 [ -d "$base" ] || mkdir -p "$base"
-[ ! -L "$base" ] || { echo 'Install parent must not be a symlink.' >&2; exit 1; }
+[ ! -L "$base" ] || hl_fail 'Install parent must not be a symlink.'
 base=$(cd "$base" && pwd -P)
-[ "$(stat -c '%u' "$base")" = "$(id -u)" ] || { echo 'Install parent must be owned by the current user.' >&2; exit 1; }
+[ "$(stat -c '%u' "$base")" = "$(id -u)" ] || hl_fail 'Install parent must be owned by the current user.'
 base_mode=$((0$(stat -c '%a' "$base")))
-[ $((base_mode & 18)) -eq 0 ] || { echo 'Install parent must not be writable by group or other users.' >&2; exit 1; }
+[ $((base_mode & 18)) -eq 0 ] || hl_fail 'Install parent must not be writable by group or other users.'
 stage=$(mktemp -d "${TMPDIR:-/tmp}/hostlink-agent-bootstrap.XXXXXXXX")
 chmod 700 "$stage"
 token_file="$stage/invite-token"
@@ -225,21 +220,18 @@ verified="$stage/verified-package"
 hl_download "$agent_url" "$agent" 268435456 120
 hl_download "$archive_url" "$archive" 536870912 180
 actual_sha=$(sha256sum "$agent" | awk '{print $1}')
-[ "$actual_sha" = "$agent_sha256" ] || { echo 'Agent executable SHA-256 mismatch.' >&2; exit 1; }
+[ "$actual_sha" = "$agent_sha256" ] || hl_fail 'Agent executable SHA-256 mismatch.'
 chmod 700 "$agent"
-version_output=$("$agent" --version)
-case "$version_output" in *"$agent_version"*) ;; *) echo 'Downloaded Agent version does not match the pinned version.' >&2; exit 1 ;; esac
 "$agent" bootstrap-verify --archive "$archive" --sha256 "$archive_sha256" --target "$target" --version "$agent_version" --output "$verified"
-[ -d "$verified" ] || { echo 'Exact Agent ZIP package verification failed; invite token was not requested.' >&2; exit 1; }
-[ "$(sha256sum "$verified/hostlink-agent" | awk '{print $1}')" = "$agent_sha256" ] || { echo 'Verified ZIP executable differs from the independently pinned sidecar.' >&2; exit 1; }
+[ -d "$verified" ] || hl_fail 'Exact Agent ZIP package verification failed; invite token was not requested.'
+[ "$(sha256sum "$verified/hostlink-agent" | awk '{print $1}')" = "$agent_sha256" ] || hl_fail 'Verified ZIP executable differs from the independently pinned sidecar.'
 
 printf 'One-use HostLink invite token: ' >&2
 stty -echo
 IFS= read -r token
 stty echo
 printf '\n' >&2
-trap cleanup EXIT
-printf '%s' "$token" | LC_ALL=C grep -Eq '^[0-9a-f]{64}$' || { unset token; echo 'Invite token format is invalid.' >&2; exit 1; }
+printf '%s' "$token" | LC_ALL=C grep -Eq '^[0-9a-f]{64}$' || { unset token; hl_fail 'Invite token format is invalid.'; }
 umask 077
 printf '%s' "$token" > "$token_file"
 unset token
@@ -247,26 +239,20 @@ unset token
 parent=$(mktemp -d "$base/hostlink-agent.XXXXXXXX")
 chmod 700 "$parent"
 root="$parent/Agent"
-if [ -n "$hub_ca_cert" ]; then
-    "$agent" enroll --hub-url "$hub_url" --hub-ca-cert "$hub_ca_cert" --token-file "$token_file" --root "$root" --name "$name" --user "$ssh_user" --retain-pending
-else
-    "$agent" enroll --hub-url "$hub_url" --token-file "$token_file" --root "$root" --name "$name" --user "$ssh_user" --retain-pending
-fi
+set -- --hub-url "$hub_url" --token-file "$token_file" --root "$root" --name "$name" --user "$ssh_user" --retain-pending
+if [ -n "$hub_ca_cert" ]; then set -- "$@" --hub-ca-cert "$hub_ca_cert"; fi
+"$agent" enroll "$@"
 install -d -m 700 "$root/bin"
-[ ! -e "$root/bin/hostlink-agent" ] || { echo 'Agent executable already exists; refusing overwrite.' >&2; exit 1; }
-cp "$verified/hostlink-agent" "$root/bin/hostlink-agent"
+for member in hostlink-agent manifest.json archive.sha256 bootstrap-receipt.json; do
+    destination="$root/bin/$member"
+    [ "$member" != bootstrap-receipt.json ] || destination="$root/$member"
+    [ ! -e "$destination" ] && [ ! -L "$destination" ] || hl_fail 'Agent package member already exists; refusing overwrite.'
+    # Noclobber refuses existing files; finalize verifies the installed inventory and hashes.
+    (set -C; cat "$verified/$member" > "$destination")
+    chmod 600 "$destination"
+done
 chmod 700 "$root/bin/hostlink-agent"
-[ "$(sha256sum "$root/bin/hostlink-agent" | awk '{print $1}')" = "$(sha256sum "$verified/hostlink-agent" | awk '{print $1}')" ] || { echo 'Published Agent package member digest mismatch.' >&2; exit 1; }
-cp "$verified/manifest.json" "$root/bin/manifest.json"
-chmod 600 "$root/bin/manifest.json"
-cp "$verified/archive.sha256" "$root/bin/archive.sha256"
-chmod 600 "$root/bin/archive.sha256"
-cp "$verified/bootstrap-receipt.json" "$root/bootstrap-receipt.json"
-chmod 600 "$root/bootstrap-receipt.json"
 "$agent" bootstrap-finalize --root "$root"
-rm -f "$token_file"
-rm -f "$agent" "$archive"
-rm -rf "$verified"
-rmdir "$stage"
+cleanup
 printf 'Enrollment complete. Starting the embedded Agent in this user session. Press Ctrl-C to stop it.\n' >&2
 exec "$root/bin/hostlink-agent" run --config "$root/state/agent.json"

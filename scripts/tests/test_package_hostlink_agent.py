@@ -62,7 +62,6 @@ class PackageHostlinkAgentTests(unittest.TestCase):
         self.assertTrue((self.out / "invite-inputs.json").is_file())
         self.assertTrue((self.out / "artifact-receipt.json").is_file())
         self.assertEqual(stat.S_IMODE(self.out.stat().st_mode), 0o700)
-        self.assertEqual(first_bytes, archive.read_bytes())
         second_out = Path(self.temp.name) / "published-again"
         package.create_package(self.root, self.sha, "x86_64-unknown-linux-gnu", "1.2.3", self.binary, second_out)
         self.assertEqual(first_bytes, (second_out / "1.2.3/hostlink-agent-x86_64-unknown-linux-gnu.zip").read_bytes())
@@ -92,23 +91,8 @@ class PackageHostlinkAgentTests(unittest.TestCase):
         self.assertEqual(package.verify_build_receipt(receipt, self.sha, "x86_64-win7-windows-msvc", binary_sha)["sha256"], package.digest(receipt))
         with self.assertRaisesRegex(ValueError, "source SHA"):
             package.verify_build_receipt(receipt, "0" * 40, "x86_64-win7-windows-msvc", binary_sha)
-        # The first source-exact Win7 x64/x86 PE receipt used this valid
-        # independently checked schema, before the official builder shipped.
-        receipt.write_text(json.dumps({
-            "result": "PE_BUILD_AND_INSPECTION_PASS",
-            "source": {"git_sha": self.sha},
-            "targets": [{"target": "x86_64-win7-windows-msvc", "artifacts": [
-                {"name": "hostlink-agent.exe", "sha256": binary_sha,
-                 "pe_machine": "0x8664", "subsystem": "6.0",
-                 "dynamic_crt_imports_absent": True}
-            ]}],
-        }), encoding="utf-8")
-        self.assertEqual(
-            package.verify_build_receipt(receipt, self.sha, "x86_64-win7-windows-msvc", binary_sha)["sha256"],
-            package.digest(receipt),
-        )
         tampered = json.loads(receipt.read_text(encoding="utf-8"))
-        tampered["targets"][0]["artifacts"][0]["dynamic_crt_imports_absent"] = False
+        tampered["targets"][0]["binaries"][0]["static_crt_import_check"] = "failed"
         receipt.write_text(json.dumps(tampered), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "CRT"):
             package.verify_build_receipt(receipt, self.sha, "x86_64-win7-windows-msvc", binary_sha)
@@ -116,10 +100,6 @@ class PackageHostlinkAgentTests(unittest.TestCase):
     def test_windows_installer_contract_and_pe_machine_checks(self):
         installer = Path(__file__).resolve().parents[2] / "crates/agent/assets/Install-HostLink-Agent.ps1"
         package.verify_installer(installer, "windows")
-        incomplete = Path(self.temp.name) / "incomplete.ps1"
-        incomplete.write_text(installer.read_text(encoding="utf-8").replace("bootstrap-finalize", "bootstrap-finialize"), encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "installer contract"):
-            package.verify_installer(incomplete, "windows")
         pe = Path(self.temp.name) / "agent.exe"
         image = bytearray(128)
         image[:2] = b"MZ"

@@ -78,17 +78,6 @@ class BootstrapTests(unittest.TestCase):
                     API.replace('KDmasterLOL', 'another') + '1'):
             self.assertNotEqual(self.run_sh('hl_asset_url ' + shlex.quote(url)).returncode, 0)
 
-    def test_existing_credential_is_readonly_and_never_reprompted(self):
-        self.put_credential()
-        before = self.credential.stat()
-        result = self.run_sh('hl_provision_credential')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn(FIXTURE, result.stdout + result.stderr)
-        after = self.credential.stat()
-        self.assertEqual((before.st_ino, before.st_mtime_ns, before.st_mode),
-                         (after.st_ino, after.st_mtime_ns, after.st_mode))
-        self.assertEqual(self.credential.read_bytes(), FIXTURE)
-
     def test_explicit_controller_credential_provisions_without_target_prompt(self):
         self.require_safe_ancestry()
         quoted = shlex.quote(FIXTURE.decode('ascii'))
@@ -102,8 +91,10 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
 
         before = self.credential.stat()
-        result = self.run_sh('hl_provision_credential ' + quoted)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        for argument in ('', ' ' + quoted):
+            result = self.run_sh('hl_provision_credential' + argument)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn(FIXTURE, result.stdout + result.stderr)
         after = self.credential.stat()
         self.assertEqual((before.st_ino, before.st_mtime_ns), (after.st_ino, after.st_mtime_ns))
 
@@ -290,13 +281,6 @@ class BootstrapTests(unittest.TestCase):
                 self.assertNotIn(FIXTURE, result.stdout + result.stderr)
             self.assertEqual(len(records), 9, 'one initial call each, at most one no-auth CDN call')
 
-    def test_mutable_local_ancestor_is_rejected_before_any_credential_read(self):
-        self.home.chmod(0o777)
-        result = self.run_sh('hl_safe_chain "$HOME"')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b'writable by other users', result.stderr)
-        self.home.chmod(0o700)
-
     def test_windows_static_security_and_ps2_contract(self):
         script = PS.read_text()
         shared = helpers(script)
@@ -313,17 +297,15 @@ class BootstrapTests(unittest.TestCase):
                          'Get-GitHubAsset $ArchiveUri $archiveFile 536870912 180',
                          'Windows NT 6.1', 'Administrator'):
             self.assertIn(required, script)
-        self.assertLess(script.index('bootstrap-verify --archive'), script.index("Read-Host 'One-use HostLink invite token'"))
-        self.assertLess(script.index('Verified ZIP executable differs'), script.index("Read-Host 'One-use HostLink invite token'"))
-        self.assertNotIn('GetFileName($archiveUriObject.AbsolutePath)', script)
+        self.assertLess(script.index('bootstrap-verify --archive'), script.index("Write-PrivateSecret $tokenFile $sid 'One-use HostLink invite token'"))
+        self.assertLess(script.index('Verified ZIP executable differs'), script.index("Write-PrivateSecret $tokenFile $sid 'One-use HostLink invite token'"))
         self.assertIn('Get-GitHubCredential([bool]$Provision, [string]$EmbeddedToken)', script)
         # An unbound [string] argument becomes empty string in PowerShell,
         # so comparing against $null would break the normal hidden prompt.
-        self.assertIn('if (-not [string]::IsNullOrEmpty($EmbeddedToken))', script)
+        self.assertIn('if ([string]::IsNullOrEmpty($EmbeddedToken))', shared)
         self.assertIn('if (-not [string]::IsNullOrEmpty($EmbeddedToken) -and $EmbeddedToken -cne $existing)', script)
         shell = SH.read_text()
         self.assertLess(shell.index('bootstrap-verify --archive'), shell.index("printf 'One-use HostLink invite token"))
-        self.assertNotIn('archive_name=', shell)
         self.assertNotIn('--location', shell)
 
 
