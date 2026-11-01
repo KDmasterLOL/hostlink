@@ -872,7 +872,34 @@ fn private_directories_require_owner_only_child_inheritance() {
         )],
         true,
     );
-    assert!(matches!(file.verify(), Err(Error::InsecureAcl)));
+    // Windows may normalize inheritance flags away when a DACL is applied
+    // to a non-directory. Validate the persisted ACE, not the requested ACE.
+    let mut owner = ptr::null_mut();
+    let mut acl = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    let status = unsafe {
+        GetSecurityInfo(
+            file.file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            (OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION) as u32,
+            &mut owner,
+            ptr::null_mut(),
+            &mut acl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    assert_eq!(status, 0);
+    assert!(!acl.is_null() && !descriptor.is_null());
+    let mut entry = ptr::null_mut();
+    bool_result(unsafe { GetAce(acl, 0, &mut entry) }).unwrap();
+    let flags = unsafe { (*entry.cast::<ACE_HEADER>()).AceFlags };
+    unsafe { LocalFree(descriptor) };
+    if flags == 0 {
+        file.verify().unwrap(); // The stored DACL is canonical owner-only.
+    } else {
+        assert!(matches!(file.verify(), Err(Error::InsecureAcl)));
+    }
 }
 #[test]
 fn unpaired_utf16_names_are_not_lossily_converted() {
