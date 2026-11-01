@@ -12,10 +12,8 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 use super::validate::{
-    ArtifactSelection, BootstrapError, INSTALLER_TIMEOUT, Target, semver, sha256,
-    validate_https_url,
+    ArtifactSelection, BootstrapError, METADATA_TIMEOUT, Target, semver, sha256, validate_https_url,
 };
-use super::verify::read_bounded;
 
 const RELEASES: &str = "https://api.github.com/repos/KDmasterLOL/hostlink/releases";
 const MAX_METADATA_BYTES: usize = 1024 * 1024;
@@ -119,7 +117,7 @@ pub(super) fn github_client() -> Result<Client, BootstrapError> {
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(INSTALLER_TIMEOUT)
+        .timeout(METADATA_TIMEOUT)
         .user_agent("HostLink-release-preflight")
         .build()
         .map_err(|_| source("could not create GitHub HTTPS client"))
@@ -199,10 +197,7 @@ fn release_url(version: Option<&str>) -> Result<Url, BootstrapError> {
     Url::parse(&format!("{RELEASES}/{suffix}")).map_err(|_| source("invalid GitHub release URL"))
 }
 
-fn parse_release(
-    bytes: &[u8],
-    requested: Option<&str>,
-) -> Result<(Release, String), BootstrapError> {
+fn parse_release(bytes: &[u8], requested: Option<&str>) -> Result<Release, BootstrapError> {
     let release: Release =
         serde_json::from_slice(bytes).map_err(|_| source("GitHub release metadata is invalid"))?;
     let version = release
@@ -219,7 +214,7 @@ fn parse_release(
             "GitHub release is unpublished, draft, or does not match the requested exact version",
         ));
     }
-    Ok((release, version))
+    Ok(release)
 }
 
 fn select_asset(release: &Release, name: &str) -> Result<(Url, String), BootstrapError> {
@@ -241,11 +236,12 @@ fn select_asset(release: &Release, name: &str) -> Result<(Url, String), Bootstra
             source("every selected GitHub asset requires a published sha256:<64 hex> digest")
         })?;
     let url = Url::parse(&asset.url).map_err(|_| source("invalid GitHub asset URL"))?;
+    super::validate::validate_github_asset_url(&url)?;
     Ok((url, digest.to_ascii_lowercase()))
 }
 
 /// Resolve only the fixed private repository's latest release or exact `vX.Y.Z` tag.
-/// Credentials stay local; caller must verify the installer before POST /v2/invites.
+/// Credentials stay local; the target must verify the binary before enrollment.
 /// GitHub SHA-256 metadata is authenticated, not an independent publisher signature.
 pub async fn resolve_github_selection(
     version: Option<&str>,
@@ -264,29 +260,11 @@ pub async fn resolve_github_selection(
         .map_err(|_| source("GitHub release request failed or timed out"))?;
     require_ok(response.status())?;
     let bytes = read_bounded(response, MAX_METADATA_BYTES).await?;
-    let (release, version) = parse_release(&bytes, version)?;
-    let installer = if target.windows() {
-        "Install-HostLink-Agent.ps1"
-    } else {
-        "install-hostlink-agent.sh"
-    };
-    let sidecar = format!(
-        "hostlink-agent-{}{}",
-        target.as_str(),
-        if target.windows() { ".exe" } else { "" }
-    );
-    let archive = format!("hostlink-agent-{}.zip", target.as_str());
-    let (installer_url, installer_sha256) = select_asset(&release, installer)?;
-    let (agent_url, agent_sha256) = select_asset(&release, &sidecar)?;
-    let (archive_url, archive_sha256) = select_asset(&release, &archive)?;
+    let release = parse_release(&bytes, version)?;
+    let (agent_url, agent_sha256) = select_asset(&release, &target.asset_name())?;
     let selection = ArtifactSelection {
-        installer_url,
-        installer_sha256,
         agent_url,
         agent_sha256,
-        archive_url,
-        archive_sha256,
-        version,
         target,
         name,
         ssh_user,
@@ -297,123 +275,47 @@ pub async fn resolve_github_selection(
     Ok(selection)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::{Value, json};
-
-    fn metadata() -> Value {
-        json!({"tag_name":"v1.2.3", "draft":false, "published_at":"2026-11-01", "assets":[
-            {"name":"installer", "url":format!("{RELEASES}/assets/1"), "state":"uploaded", "digest":format!("sha256:{}", "a".repeat(64))}
-        ]})
+pub(super) async fn read_bounded(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, BootstrapError> {
+    if response
+        .headers()
+        .get(reqwest::header::CONTENT_ENCODING)
+        .is_some_and(|value| value.as_bytes() != b"identity")
+    {
+        return Err(BootstrapError::Source(
+            "GitHub source used an unexpected content encoding".into(),
+        ));
     }
-
-    #[test]
-    fn release_requires_exact_published_version_unique_asset_and_digest() {
-        assert_eq!(
-            release_url(None).unwrap().as_str(),
-            format!("{RELEASES}/latest")
-        );
-        assert_eq!(
-            release_url(Some("1.2.3")).unwrap().as_str(),
-            format!("{RELEASES}/tags/v1.2.3")
-        );
-        assert!(release_url(Some("latest")).is_err());
-        let parse =
-            |value: &Value| parse_release(&serde_json::to_vec(value).unwrap(), Some("1.2.3"));
-        let (release, _) = parse(&metadata()).unwrap();
-        assert_eq!(
-            select_asset(&release, "installer").unwrap().1,
-            "a".repeat(64)
-        );
-        assert!(select_asset(&release, "nested/installer").is_err());
-        for (key, bad) in [
-            ("draft", json!(true)),
-            ("published_at", Value::Null),
-            ("tag_name", json!("v9.9.9")),
-        ] {
-            let mut value = metadata();
-            value[key] = bad;
-            assert!(parse(&value).is_err());
-        }
-        for (key, bad) in [
-            ("digest", Value::Null),
-            ("digest", json!("sha256:abc")),
-            ("state", json!("new")),
-        ] {
-            let mut value = metadata();
-            value["assets"][0][key] = bad;
-            assert!(select_asset(&parse(&value).unwrap().0, "installer").is_err());
-        }
-        let mut value = metadata();
-        let duplicate = value["assets"][0].clone();
-        value["assets"].as_array_mut().unwrap().push(duplicate);
-        assert!(select_asset(&parse(&value).unwrap().0, "installer").is_err());
-    }
-
-    #[test]
-    fn authenticated_request_is_sensitive_and_fixed_to_repository_api() {
-        let client = github_client().unwrap();
-        let token = SecretString::from("synthetic_fixture");
-        let request = authenticated_get(
-            &client,
-            release_url(None).unwrap(),
-            &token,
-            "application/octet-stream",
-        )
-        .unwrap()
-        .build()
-        .unwrap();
-        assert!(request.headers()[reqwest::header::AUTHORIZATION].is_sensitive());
-        assert!(
-            authenticated_get(
-                &client,
-                Url::parse("https://elsewhere.invalid/").unwrap(),
-                &token,
-                "application/octet-stream"
-            )
-            .is_err()
-        );
-        for status in [
-            StatusCode::UNAUTHORIZED,
-            StatusCode::FORBIDDEN,
-            StatusCode::NOT_FOUND,
-            StatusCode::FOUND,
-        ] {
-            let error = require_ok(status).unwrap_err().to_string();
-            assert!(error.contains(&status.as_u16().to_string()));
-            assert!(!error.contains(token.expose_secret()));
+    if let Some(length) = response.headers().get(reqwest::header::CONTENT_LENGTH) {
+        let length = length
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| BootstrapError::Source("GitHub source length is invalid".into()))?;
+        if length > limit as u64 {
+            return Err(BootstrapError::Source(
+                "GitHub source exceeds the byte limit".into(),
+            ));
         }
     }
-
-    #[cfg(unix)]
-    #[test]
-    fn credential_requires_private_regular_bounded_single_link_file() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("github-token");
-        assert!(read_token_file(&path).is_err());
-        fs::write(&path, b"synthetic_fixture\n").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(read_token_file(&path).is_ok());
-        let link = root.path().join("link");
-        symlink(&path, &link).unwrap();
-        assert!(read_token_file(&link).is_err());
-        fs::hard_link(&path, root.path().join("hardlink")).unwrap();
-        assert!(read_token_file(&path).is_err());
-        fs::remove_file(root.path().join("hardlink")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
-        assert!(read_token_file(&path).is_err());
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        for invalid in [
-            vec![],
-            vec![b'a'; MAX_TOKEN_BYTES + 1],
-            b"bad\nheader".to_vec(),
-            b" space".to_vec(),
-            vec![0xff],
-        ] {
-            fs::write(&path, invalid).unwrap();
-            assert!(read_token_file(&path).is_err());
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| BootstrapError::Source("GitHub source download failed".into()))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(BootstrapError::Source(
+                "GitHub source exceeds the byte limit".into(),
+            ));
         }
+        bytes.extend_from_slice(&chunk);
     }
+    Ok(bytes)
 }
+
+#[cfg(test)]
+#[path = "github_tests.rs"]
+mod tests;

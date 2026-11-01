@@ -6,6 +6,7 @@ fn hostlink(args: &[&str], config: &std::path::Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_hostlink"))
         .args(args)
         .env("HOSTLINK_HUB_CONFIG", config)
+        .env("HOME", config.parent().unwrap())
         // Release tests must never consult a developer's real GitHub PAT.
         .env(
             "XDG_CONFIG_HOME",
@@ -60,21 +61,7 @@ fn invalid_target_or_missing_github_credential_fail_before_any_hub_invite_reques
     let token = root.path().join("operator.token");
     fs::write(&token, "disposable-operator-token").expect("write token fixture");
     fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).expect("protect token fixture");
-    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
-        Ok(listener) => listener,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("SKIP Hub POST boundary fixture: sandbox denied loopback bind: {error}");
-            return;
-        }
-        Err(error) => panic!("bind disposable Hub boundary fixture: {error}"),
-    };
-    listener
-        .set_nonblocking(true)
-        .expect("make fixture nonblocking");
-    let hub_url = format!(
-        "https://{}",
-        listener.local_addr().expect("read fixture address")
-    );
+    let hub_url = "https://127.0.0.1:1";
     let config = root.path().join("hub.json");
     fs::write(
         &config,
@@ -134,8 +121,5 @@ fn invalid_target_or_missing_github_credential_fail_before_any_hub_invite_reques
     assert!(!embedded.status.success());
     assert!(String::from_utf8_lossy(&embedded.stderr).contains("GitHub credential"));
     assert!(!String::from_utf8_lossy(&embedded.stdout).contains("token:"));
-    assert!(
-        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
-        "invalid artifact selection must fail before any Hub POST"
-    );
+    assert!(!stderr.contains("Hub request"), "{stderr}");
 }

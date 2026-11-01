@@ -210,11 +210,6 @@ async fn invite(command: &Command) -> Result<i32, Box<dyn Error>> {
             .clone()
             .ok_or("--name is required for a runnable bootstrap")?;
         let selected_target = Target::parse(&get(target, "--target")?)?;
-        if selected_target.windows() && bootstrap_hub_ca_cert.is_some() {
-            return Err(
-                "--bootstrap-hub-ca-cert is supported only by the POSIX Linux installer".into(),
-            );
-        }
         let selection = bootstrap::resolve_github_selection(
             version.as_deref(),
             selected_target,
@@ -226,21 +221,14 @@ async fn invite(command: &Command) -> Result<i32, Box<dyn Error>> {
         .await?;
         Some(selection)
     };
-    // Download, bound, hash, and inspect the exact installer before consuming an invite.
-    let verified = match &selection {
-        Some(selection) => {
-            Some(bootstrap::verify_installer(selection, config.hub_ca_cert.as_deref()).await?)
+    // Resolve the exact raw asset/digest and render before creating a Hub invite.
+    // Target-side SHA-256 verification precedes the invite token prompt and install.
+    let bootstrap_command = match &selection {
+        Some(selection) if *embed_github_token => {
+            Some(bootstrap::render_command_embedded(selection)?)
         }
+        Some(selection) => Some(bootstrap::render_command(selection)),
         None => None,
-    };
-    // Construct the complete command before consuming the one-use Hub invite.
-    // Any credential/configuration error must not burn an invitation.
-    let bootstrap_command = match (&selection, &verified) {
-        (Some(selection), Some(verified)) if *embed_github_token => {
-            Some(bootstrap::render_command_embedded(selection, verified)?)
-        }
-        (Some(selection), Some(verified)) => Some(bootstrap::render_command(selection, verified)),
-        _ => None,
     };
     if selection.is_some() {
         eprintln!(
@@ -249,7 +237,7 @@ async fn invite(command: &Command) -> Result<i32, Box<dyn Error>> {
     }
     if *embed_github_token {
         eprintln!(
-            "WARNING: bootstrap_command contains your GitHub PAT in plain text. +             Protect stdout, terminal history and clipboard; delete any saved +             Windows bootstrap helper after installation. Every target receiving +             this PAT can read the authorized private GitHub repository."
+            "WARNING: bootstrap_command contains your GitHub PAT in plain text. Protect stdout, terminal history and clipboard; delete any saved Windows bootstrap helper after installation. Every target receiving this PAT can read the authorized private GitHub repository."
         );
     }
     let client = HubClient::from_config(&config)?;
@@ -260,10 +248,10 @@ async fn invite(command: &Command) -> Result<i32, Box<dyn Error>> {
         invite.token.expose_secret(),
         invite.expires_at
     );
-    if let (Some(verified), Some(bootstrap_command)) = (&verified, bootstrap_command) {
+    if let (Some(selection), Some(bootstrap_command)) = (&selection, bootstrap_command) {
         println!(
-            "artifact_binding: verified\ninstaller_sha256: {}\nbootstrap_command:\n{}",
-            verified.sha256, bootstrap_command
+            "artifact_binding: target-verifies-before-enrollment\nagent_sha256: {}\nbootstrap_command:\n{}",
+            selection.agent_sha256, bootstrap_command
         );
     } else {
         println!("artifact_binding: token-only; no bootstrap command");

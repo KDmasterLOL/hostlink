@@ -3,8 +3,7 @@
 use reqwest::Url;
 use thiserror::Error;
 
-pub(super) const MAX_INSTALLER_BYTES: usize = 1024 * 1024;
-pub(super) const INSTALLER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(super) const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -34,6 +33,14 @@ impl Target {
         }
     }
 
+    pub fn asset_name(self) -> String {
+        format!(
+            "hostlink-agent-{}{}",
+            self.as_str(),
+            if self.windows() { ".exe" } else { "" }
+        )
+    }
+
     pub fn windows(self) -> bool {
         !matches!(self, Self::LinuxX64)
     }
@@ -41,13 +48,8 @@ impl Target {
 
 #[derive(Clone, Debug)]
 pub struct ArtifactSelection {
-    pub installer_url: Url,
-    pub installer_sha256: String,
     pub agent_url: Url,
     pub agent_sha256: String,
-    pub archive_url: Url,
-    pub archive_sha256: String,
-    pub version: String,
     pub target: Target,
     pub name: String,
     pub ssh_user: String,
@@ -55,17 +57,11 @@ pub struct ArtifactSelection {
     pub bootstrap_hub_ca_cert: Option<std::path::PathBuf>,
 }
 
-#[derive(Clone, Debug)]
-pub struct VerifiedInstaller {
-    pub url: Url,
-    pub sha256: String,
-}
-
 #[derive(Debug, Error)]
 pub enum BootstrapError {
     #[error("invalid bootstrap selection: {0}")]
     Invalid(&'static str),
-    #[error("installer source preflight failed: {0}")]
+    #[error("GitHub release selection failed: {0}")]
     Source(String),
 }
 
@@ -79,21 +75,10 @@ impl ArtifactSelection {
         if !ssh_user(&self.ssh_user) {
             return Err(BootstrapError::Invalid("SSH user is invalid"));
         }
-        if !semver(&self.version) {
+        if !sha256(&self.agent_sha256) {
             return Err(BootstrapError::Invalid(
-                "exact semantic version is required",
+                "binary SHA-256 pin must be lowercase hexadecimal",
             ));
-        }
-        for digest in [
-            &self.installer_sha256,
-            &self.agent_sha256,
-            &self.archive_sha256,
-        ] {
-            if !sha256(digest) {
-                return Err(BootstrapError::Invalid(
-                    "all artifact SHA-256 pins must be lowercase hexadecimal",
-                ));
-            }
         }
         let hub = https_url(&self.hub_url)?;
         if hub.path() != "/" || hub.query().is_some() {
@@ -101,17 +86,7 @@ impl ArtifactSelection {
         }
         // URL paths carry opaque GitHub asset IDs; release names/version and
         // published digests are checked by the authenticated metadata resolver.
-        for url in [&self.installer_url, &self.agent_url, &self.archive_url] {
-            validate_github_asset_url(url)?;
-        }
-        if self.installer_url == self.agent_url
-            || self.agent_url == self.archive_url
-            || self.installer_url == self.archive_url
-        {
-            return Err(BootstrapError::Invalid(
-                "release asset IDs must be distinct",
-            ));
-        }
+        validate_github_asset_url(&self.agent_url)?;
         Ok(())
     }
 }
@@ -130,48 +105,6 @@ pub(super) fn validate_github_asset_url(url: &Url) -> Result<(), BootstrapError>
     {
         return Err(BootstrapError::Invalid(
             "exact credential-free KDmasterLOL/hostlink GitHub API asset URL required",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn validate_installer_contract(
-    source: &str,
-    target: Target,
-) -> Result<(), BootstrapError> {
-    let required = if target.windows() {
-        [
-            "HubUrl",
-            "Name",
-            "SshUser",
-            "AgentUri",
-            "AgentSha256",
-            "ArchiveUri",
-            "ArchiveSha256",
-            "AgentVersion",
-            "Target",
-            "Read-Host",
-            "-AsSecureString",
-        ]
-        .as_slice()
-    } else {
-        [
-            "--hub-url",
-            "--name",
-            "--ssh-user",
-            "--agent-url",
-            "--agent-sha256",
-            "--archive-url",
-            "--archive-sha256",
-            "--agent-version",
-            "--target",
-            "stty -echo",
-        ]
-        .as_slice()
-    };
-    if required.iter().any(|part| !source.contains(part)) {
-        return Err(BootstrapError::Source(
-            "installer does not implement the source-bound enrollment contract".into(),
         ));
     }
     Ok(())
