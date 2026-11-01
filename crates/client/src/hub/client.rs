@@ -6,14 +6,15 @@ use hostlink_hub::{
     DisplayNameRequest, GatewayEndpoint, HostsResponse, HubInfo, InviteRequest, InviteResponse,
     RegisteredHost, RevokeReceipt,
 };
+use private_fs::PrivateDir;
 use reqwest::{Method, StatusCode, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 use super::{
     config::{
-        HubClientError, HubConfig, MAX_BODY_BYTES, parse_origin, read_private_credential,
-        select_host,
+        HubClientError, HubConfig, MAX_BODY_BYTES, MAX_CONFIG_BYTES, parse_origin,
+        read_private_credential, select_host,
     },
     routes::validate_gateway_list,
 };
@@ -28,11 +29,27 @@ pub struct HubClient {
 }
 
 impl HubClient {
-    /// Reads only the owner-private controller configuration without loading the
+    /// Reads only the HostLink-managed private controller configuration without loading the
     /// operator credential, CA, SSH keys, or constructing a network client.
+    ///
+    /// # Errors
+    /// Returns [`HubClientError::Credential`] if the containing private directory
+    /// or file is unsafe/inaccessible, or the bounded JSON does not match [`HubConfig`].
     pub fn read_config(path: &Path) -> Result<HubConfig, HubClientError> {
-        let value = read_private_credential(path)?;
-        serde_json::from_str(&value).map_err(|_| HubClientError::Credential)
+        let parent = path.parent().ok_or(HubClientError::Credential)?;
+        let name = path.file_name().ok_or(HubClientError::Credential)?;
+        let directory = PrivateDir::open(parent).map_err(|_| HubClientError::Credential)?;
+        let file = directory
+            .open_file(name)
+            .map_err(|_| HubClientError::Credential)?;
+        let mut bytes = Vec::new();
+        file.take(MAX_CONFIG_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| HubClientError::Credential)?;
+        if bytes.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(HubClientError::Credential);
+        }
+        serde_json::from_slice(&bytes).map_err(|_| HubClientError::Credential)
     }
 
     /// Parse a private config and construct its usable HTTP client once.

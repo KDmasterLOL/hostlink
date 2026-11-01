@@ -38,18 +38,17 @@ fn public_key() -> String {
 }
 
 #[cfg(unix)]
-#[test]
-fn offline_hub_config_read_does_not_require_token_ca_or_ssh_identity() {
-    use std::os::unix::fs::{PermissionsExt, symlink};
-
+fn private_config_fixture() -> (tempfile::TempDir, PathBuf, HubConfig) {
+    use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let config_path = root.path().join("hub.json");
     let missing_token = root.path().join("missing-operator-token");
     let missing_ca = root.path().join("missing-private-ca.pem");
     let expected = HubConfig {
         hub_url: "https://hub.example.invalid".into(),
         hub_ca_cert: Some(missing_ca),
-        token_file: missing_token.clone(),
+        token_file: missing_token,
         ssh_user: "operator".into(),
         identity: root.path().join("missing-controller-key"),
         gateway_identity: root.path().join("missing-gateway-key"),
@@ -57,24 +56,144 @@ fn offline_hub_config_read_does_not_require_token_ca_or_ssh_identity() {
     };
     fs::write(&config_path, serde_json::to_vec(&expected).unwrap()).unwrap();
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
+    (root, config_path, expected)
+}
+
+#[cfg(unix)]
+#[test]
+fn offline_hub_config_read_does_not_require_token_ca_or_ssh_identity() {
+    let (_root, config_path, expected) = private_config_fixture();
+    for path in [
+        &expected.token_file,
+        expected.hub_ca_cert.as_ref().unwrap(),
+        &expected.identity,
+        &expected.gateway_identity,
+    ] {
+        assert!(!path.exists());
+    }
 
     let offline = HubClient::read_config(&config_path).expect("show must be offline");
     assert_eq!(offline.hub_url, expected.hub_url);
-    assert_eq!(offline.token_file, missing_token);
+    assert_eq!(offline.token_file, expected.token_file);
     assert_eq!(offline.hub_ca_cert, expected.hub_ca_cert);
-    assert!(
-        HubClient::from_file(&config_path).is_err(),
-        "connection must still require a real private token"
-    );
+    assert_eq!(offline.identity, expected.identity);
+    assert_eq!(offline.gateway_identity, expected.gateway_identity);
+    assert!(matches!(
+        HubClient::from_file(&config_path),
+        Err(HubClientError::Credential)
+    ));
+}
 
-    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(HubClient::read_config(&config_path).is_err());
+#[cfg(unix)]
+#[test]
+fn managed_hub_config_requires_exact_private_modes_without_repair() {
+    use std::os::unix::fs::PermissionsExt;
+    let (root, config_path, _) = private_config_fixture();
+    for mode in [0o400, 0o644] {
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(mode)).unwrap();
+        assert!(HubClient::read_config(&config_path).is_err());
+        assert_eq!(
+            fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+            mode
+        );
+    }
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(HubClient::read_config(&config_path).is_err());
+    assert_eq!(
+        fs::metadata(root.path()).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_hub_config_rejects_file_parent_ancestor_symlinks_and_hardlinks() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let (root, config_path, _) = private_config_fixture();
     let link = root.path().join("config-link.json");
     symlink(&config_path, &link).unwrap();
     assert!(HubClient::read_config(&link).is_err());
-    fs::write(&config_path, b"{not-json").unwrap();
+
+    let alias_root = tempfile::tempdir().unwrap();
+    let parent_link = alias_root.path().join("linked-parent");
+    symlink(root.path(), &parent_link).unwrap();
+    assert!(HubClient::read_config(&parent_link.join("hub.json")).is_err());
+    let child = root.path().join("child");
+    fs::create_dir(&child).unwrap();
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::copy(&config_path, child.join("hub.json")).unwrap();
+    assert!(HubClient::read_config(&child.join("hub.json")).is_ok());
+    assert!(HubClient::read_config(&parent_link.join("child/hub.json")).is_err());
+
+    let hardlink = root.path().join("hardlink.json");
+    fs::hard_link(&config_path, &hardlink).unwrap();
     assert!(HubClient::read_config(&config_path).is_err());
+    assert!(HubClient::read_config(&hardlink).is_err());
+    fs::remove_file(&hardlink).unwrap();
+    assert!(HubClient::read_config(&config_path).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_hub_config_preserves_schema_bounds_and_redacts_errors() {
+    let (_root, config_path, config) = private_config_fixture();
+    let mut bytes = serde_json::to_vec(&config).unwrap();
+    bytes.resize(super::config::MAX_CONFIG_BYTES as usize, b' ');
+    fs::write(&config_path, &bytes).unwrap();
+    assert!(HubClient::read_config(&config_path).is_ok());
+    bytes.push(b' ');
+    let mut unknown = serde_json::to_value(&config).unwrap();
+    unknown["operator_token"] = OPERATOR_TOKEN.into();
+    let mut missing = serde_json::to_value(&config).unwrap();
+    missing.as_object_mut().unwrap().remove("token_file");
+    for invalid in [
+        bytes,
+        Vec::new(),
+        b"{not-json".to_vec(),
+        vec![0xff],
+        serde_json::to_vec(&unknown).unwrap(),
+        serde_json::to_vec(&missing).unwrap(),
+    ] {
+        fs::write(&config_path, invalid).unwrap();
+        let error = HubClient::read_config(&config_path).unwrap_err();
+        assert!(!format!("{error}: {error:?}").contains(OPERATOR_TOKEN));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn external_operator_token_accepts_read_only_files_and_still_requires_presence() {
+    use std::os::unix::fs::PermissionsExt;
+    let (root, config_path, mut config) = private_config_fixture();
+    config.hub_ca_cert = None;
+    fs::write(&config.token_file, OPERATOR_TOKEN).unwrap();
+    // External operator input retains its policy even outside a private app directory.
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    for mode in [0o400, 0o600] {
+        fs::set_permissions(&config.token_file, fs::Permissions::from_mode(mode)).unwrap();
+        assert!(HubClient::from_config(&config).is_ok());
+        assert_eq!(
+            fs::metadata(&config.token_file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            mode
+        );
+    }
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&config.token_file, fs::Permissions::from_mode(0o400)).unwrap();
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    assert!(HubClient::from_file(&config_path).is_ok());
+    fs::remove_file(&config.token_file).unwrap();
+    assert!(HubClient::read_config(&config_path).is_ok());
+    let error = match HubClient::from_config(&config) {
+        Ok(_) => panic!("missing external operator token must fail"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, HubClientError::Credential));
+    assert!(!format!("{error}: {error:?}").contains(OPERATOR_TOKEN));
 }
 
 #[test]

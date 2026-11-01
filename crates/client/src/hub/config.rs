@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub(super) const MAX_BODY_BYTES: usize = 64 * 1024;
+pub(super) const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 pub(super) const MAX_CREDENTIAL_BYTES: u64 = 64 * 1024;
 
 /// Controller-local settings needed to turn authoritative Hub records into pinned SSH targets.
@@ -113,6 +114,7 @@ pub(super) fn select_host(
     }
 }
 
+// Operator tokens are external inputs; retain their legacy permissions policy.
 pub(super) fn read_private_credential(path: &Path) -> Result<String, HubClientError> {
     let before = fs::symlink_metadata(path).map_err(|_| HubClientError::Credential)?;
     if !before.is_file() || before.file_type().is_symlink() || before.len() > MAX_CREDENTIAL_BYTES {
