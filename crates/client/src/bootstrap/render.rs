@@ -1,6 +1,17 @@
-//! Copyable PowerShell 2/Win7 and POSIX bootstrap command rendering.
+//! Target-local credential provisioning and source-pinned bootstrap rendering.
 
 use super::validate::{ArtifactSelection, VerifiedInstaller};
+
+// Reuse the actual installer functions; credential/download policy has one source per OS.
+fn github_helpers(source: &str) -> &str {
+    source
+        .split_once("# BEGIN GITHUB BOOTSTRAP HELPERS\n")
+        .expect("bundled bootstrap helper start")
+        .1
+        .split_once("# END GITHUB BOOTSTRAP HELPERS")
+        .expect("bundled bootstrap helper end")
+        .0
+}
 
 pub fn render_command(selection: &ArtifactSelection, installer: &VerifiedInstaller) -> String {
     if selection.target.windows() {
@@ -27,18 +38,29 @@ fn render_powershell(selection: &ArtifactSelection, installer: &VerifiedInstalle
     .into_iter()
     .map(|(name, value)| format!(" -{name} {}", ps_quote(value)))
     .collect::<String>();
+    let helpers = github_helpers(include_str!(
+        "../../../agent/assets/Install-HostLink-Agent.ps1"
+    ));
     let script = format!(
-        "$ErrorActionPreference='Stop'; $tls=[Enum]::ToObject([Net.SecurityProtocolType],3072); [Net.ServicePointManager]::SecurityProtocol=$tls; $u=New-Object Uri({url}); if($u.Scheme -cne 'https'){{throw 'HTTPS required'}}; $r=[Net.HttpWebRequest]::Create($u); $r.AllowAutoRedirect=$false; $r.Timeout=30000; $r.ReadWriteTimeout=30000; $v=$r.GetResponse(); try{{if([int]$v.StatusCode -ne 200 -or $v.ContentLength -gt 1048576){{throw 'Pinned installer response rejected'}}; $s=$v.GetResponseStream(); $m=New-Object IO.MemoryStream; $b=New-Object byte[] 65536; while(($n=$s.Read($b,0,$b.Length)) -gt 0){{if($m.Length+$n -gt 1048576){{throw 'Installer too large'}}; $m.Write($b,0,$n)}}; $bytes=$m.ToArray()}}finally{{$v.Close()}}; $h=New-Object Security.Cryptography.SHA256Managed; try{{$actual=([BitConverter]::ToString($h.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}}finally{{$h.Clear()}}; if($actual -cne {digest}){{throw 'Installer SHA-256 mismatch'}}; $script=[Text.Encoding]::UTF8.GetString($bytes); & ([scriptblock]::Create($script)){args}\n",
-        args = args
+        "$ErrorActionPreference='Stop'\nSet-PSDebug -Off\n{helpers}\nAssert-GitHubAsset {url}\n[void](Get-GitHubCredential $true)\n$bytes=Get-GitHubAsset {url} '' 1048576 30\n$h=New-Object Security.Cryptography.SHA256Managed\ntry{{$actual=([BitConverter]::ToString($h.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}}finally{{$h.Clear()}}\nif($actual -cne {digest}){{throw 'Installer SHA-256 mismatch'}}\n$script=[Text.Encoding]::UTF8.GetString($bytes)\n& ([scriptblock]::Create($script)){args}\n"
     );
     let utf16le = script
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>();
-    format!(
+    let command = format!(
         "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {}",
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, utf16le)
-    )
+    );
+    if command.len() <= 8191 {
+        command
+    } else {
+        // Windows cmd.exe limits the entire encoded command to 8191 characters.
+        // The security helpers cannot fit; provide an explicit two-step local helper.
+        format!(
+            "1. On the TARGET save the script between the markers as %USERPROFILE%\\hostlink-bootstrap.ps1 (UTF-8 with BOM). No credential is included.\n2. In an unelevated target cmd.exe run:\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%USERPROFILE%\\hostlink-bootstrap.ps1\"\n# BEGIN TARGET HELPER\n{script}# END TARGET HELPER\n"
+        )
+    }
 }
 
 fn render_posix(selection: &ArtifactSelection, installer: &VerifiedInstaller) -> String {
@@ -63,17 +85,13 @@ fn render_posix(selection: &ArtifactSelection, installer: &VerifiedInstaller) ->
             sh_quote(&path.to_string_lossy())
         ));
     }
-    let curl_ca = selection
-        .bootstrap_hub_ca_cert
-        .as_ref()
-        .map(|path| format!("--cacert {} ", sh_quote(&path.to_string_lossy())))
-        .unwrap_or_default();
+    let helpers = github_helpers(include_str!(
+        "../../../agent/assets/install-hostlink-agent.sh"
+    ));
     format!(
-        "set -eu\ninstaller=$(mktemp)\ntrap 'rm -f \"$installer\"' EXIT HUP INT TERM\ncurl {curl_ca}--fail --silent --show-error --proto '=https' --tlsv1.2 --max-filesize 1048576 --connect-timeout 10 --max-time 30 -o \"$installer\" {}\nprintf '%s  %s\\n' {} \"$installer\" | sha256sum -c -\n/bin/sh \"$installer\"{}\n",
-        sh_quote(installer.url.as_str()),
-        sh_quote(&installer.sha256),
-        args,
-        curl_ca = curl_ca
+        "set -eu\n{helpers}\nhl_asset_url {url}\nhl_provision_credential\ninstaller=$(mktemp)\ntrap 'rm -f \"$installer\"' EXIT\ntrap 'exit 130' HUP INT TERM\nhl_download {url} \"$installer\" 1048576 30\nprintf '%s  %s\\n' {digest} \"$installer\" | sha256sum -c -\n/bin/sh \"$installer\"{args}\n",
+        url = sh_quote(installer.url.as_str()),
+        digest = sh_quote(&installer.sha256),
     )
 }
 

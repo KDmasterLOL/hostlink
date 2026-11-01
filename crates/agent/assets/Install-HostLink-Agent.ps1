@@ -12,36 +12,187 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+Set-PSDebug -Off
 
+# BEGIN GITHUB BOOTSTRAP HELPERS
+# Shared verbatim with the Controller renderer; compatible with PowerShell 2/.NET 3.5.
+function Assert-GitHubAsset([string]$Url) {
+    if ($Url -cnotmatch '\Ahttps://api\.github\.com/repos/KDmasterLOL/hostlink/releases/assets/[1-9][0-9]*\z') { throw 'Expected a HostLink GitHub API release asset URL.' }
+}
+function Assert-NoReparse([string]$Path) {
+    $part = New-Object IO.DirectoryInfo($Path)
+    while ($null -ne $part) {
+        if (([IO.File]::GetAttributes($part.FullName) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Credential ancestor must not be a reparse point.' }
+        $part = $part.Parent
+    }
+}
 function Set-PrivateDirectory([string]$Path, [Security.Principal.SecurityIdentifier]$Sid) {
     if ([IO.Directory]::Exists($Path) -or [IO.File]::Exists($Path)) { throw 'Bootstrap staging path already exists.' }
     $security = New-Object Security.AccessControl.DirectorySecurity
+    $security.SetOwner($Sid)
     $security.SetAccessRuleProtection($true, $false)
     # SQLite creates DB/WAL/SHM itself: child files must inherit only this SID.
     $rule = New-Object Security.AccessControl.FileSystemAccessRule($Sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
     [void]$security.AddAccessRule($rule)
     [void][IO.Directory]::CreateDirectory($Path, $security)
-    $directory = New-Object IO.DirectoryInfo($Path)
-    if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Private directory is a reparse point.' }
-    if (-not $directory.GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier]).Equals($Sid)) { throw 'Private directory owner mismatch.' }
+    Assert-PrivateDirectory $Path $Sid
 }
-
 function Assert-PrivateDirectory([string]$Path, [Security.Principal.SecurityIdentifier]$Sid) {
     $directory = New-Object IO.DirectoryInfo($Path)
-    if (-not $directory.Exists -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Install parent is missing or a reparse point.' }
+    if (-not $directory.Exists -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Private directory is missing or a reparse point.' }
     $acl = $directory.GetAccessControl()
-    if (-not $acl.GetOwner([Security.Principal.SecurityIdentifier]).Equals($Sid) -or -not $acl.AreAccessRulesProtected) { throw 'Install parent owner or ACL is unsafe.' }
-    $rules = $acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier])
-    if ($rules.Count -ne 1) { throw 'Install parent must have exactly one current-user ACL entry; migrate the old parent explicitly.' }
+    if (-not $acl.GetOwner([Security.Principal.SecurityIdentifier]).Equals($Sid) -or -not $acl.AreAccessRulesProtected) { throw 'Private directory owner or ACL is unsafe.' }
+    $rules = $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+    if ($rules.Count -ne 1) { throw 'Private directory must have exactly one current-user ACL entry.' }
     $rule = $rules[0]
     if (-not $rule.IdentityReference.Equals($Sid) -or
         $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
         $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
         $rule.InheritanceFlags -ne ([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit) -or
-        $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
-        throw 'Install parent ACL differs from private-fs owner-only policy; migrate the old parent explicitly.'
+        $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) { throw 'Private directory ACL differs from owner-only policy.' }
+}
+function Get-GitHubCredential([bool]$Provision) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($null -eq $identity -or $null -eq $identity.User -or @('S-1-5-18','S-1-5-19','S-1-5-20') -contains $identity.User.Value) { throw 'Bootstrap requires a normal interactive user.' }
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'Bootstrap must run unelevated in the current user session.' }
+    $sid = $identity.User
+    $appData = $env:APPDATA
+    if ([string]::IsNullOrEmpty($appData) -or -not [IO.Path]::IsPathRooted($appData) -or -not [IO.Directory]::Exists($appData)) { throw 'Current-user APPDATA is unavailable.' }
+    Assert-NoReparse $appData
+    $base = New-Object IO.DirectoryInfo($appData)
+    $baseAcl = $base.GetAccessControl()
+    if (-not $baseAcl.GetOwner([Security.Principal.SecurityIdentifier]).Equals($sid)) { throw 'APPDATA must be owned by the current user.' }
+    $writeMask = [Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+    foreach ($rule in $baseAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and ($rule.FileSystemRights -band $writeMask) -ne 0 -and -not $rule.IdentityReference.Equals($sid) -and @('S-1-5-18','S-1-5-32-544') -notcontains $rule.IdentityReference.Value) { throw 'APPDATA is writable by another user.' }
+    }
+    $hostDirectory = Join-Path $appData 'HostLink'
+    $credentialDirectory = Join-Path $hostDirectory 'credentials'
+    foreach ($directory in @($hostDirectory, $credentialDirectory)) {
+        if (-not [IO.Directory]::Exists($directory) -and $Provision) { Set-PrivateDirectory $directory $sid }
+        Assert-NoReparse $directory
+        Assert-PrivateDirectory $directory $sid
+    }
+    $path = Join-Path $credentialDirectory 'github-token'
+    # GetAttributes observes reparse points; only a genuine missing file permits prompting.
+    $missing = $false
+    try { $attributes = [IO.File]::GetAttributes($path) }
+    catch [IO.FileNotFoundException] { $missing = $true }
+    if ($missing) {
+        if (-not $Provision) { throw 'Provision the target GitHub credential through the invite bootstrap first.' }
+        $secure = Read-Host 'GitHub fine-grained PAT (HostLink Contents:Read only)' -AsSecureString
+        $pointer = [IntPtr]::Zero
+        $bytes = $null
+        $stream = $null
+        try {
+            if ($secure.Length -lt 1 -or $secure.Length -gt 1024) { throw 'Invalid GitHub credential size.' }
+            $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+            $bytes = New-Object byte[] $secure.Length
+            for ($i = 0; $i -lt $bytes.Length; $i++) {
+                $low = [Runtime.InteropServices.Marshal]::ReadByte($pointer, 2 * $i)
+                $high = [Runtime.InteropServices.Marshal]::ReadByte($pointer, 2 * $i + 1)
+                if ($high -ne 0 -or -not (($low -ge 48 -and $low -le 57) -or ($low -ge 65 -and $low -le 90) -or ($low -ge 97 -and $low -le 122) -or $low -eq 95)) { throw 'Invalid GitHub credential format.' }
+                $bytes[$i] = $low
+            }
+            $security = New-Object Security.AccessControl.FileSecurity
+            $security.SetOwner($sid)
+            $security.SetAccessRuleProtection($true, $false)
+            $rule = New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'Allow')
+            [void]$security.AddAccessRule($rule)
+            # Atomic CreateNew with a protected DACL; never create a readable secret then fix ACLs.
+            $stream = New-Object IO.FileStream($path, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]::Write, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush()
+        } finally {
+            if ($null -ne $stream) { $stream.Close() }
+            if ($null -ne $bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
+            if ($pointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer) }
+            $secure.Dispose()
+        }
+        $attributes = [IO.File]::GetAttributes($path)
+    }
+    if (($attributes -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Directory)) -ne 0) { throw 'GitHub credential must be a regular file, not a reparse point.' }
+    $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $acl = $stream.GetAccessControl()
+        if (-not $acl.AreAccessRulesProtected -or -not $acl.GetOwner([Security.Principal.SecurityIdentifier]).Equals($sid)) { throw 'Unsafe GitHub credential owner or ACL.' }
+        $rules = $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+        if ($rules.Count -ne 1 -or -not $rules[0].IdentityReference.Equals($sid) -or $rules[0].AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or $rules[0].FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or $rules[0].InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or $rules[0].PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) { throw 'GitHub credential must have a protected owner-only DACL.' }
+        if ($stream.Length -lt 1 -or $stream.Length -gt 1024) { throw 'Invalid GitHub credential size.' }
+        $bytes = New-Object byte[] ([int]$stream.Length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $count = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($count -eq 0) { throw 'GitHub credential read failed.' }
+            $offset += $count
+        }
+        foreach ($b in $bytes) { if (-not (($b -ge 48 -and $b -le 57) -or ($b -ge 65 -and $b -le 90) -or ($b -ge 97 -and $b -le 122) -or $b -eq 95)) { throw 'Invalid GitHub credential format.' } }
+        return [Text.Encoding]::ASCII.GetString($bytes)
+    } finally {
+        if ($null -ne $bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
+        $stream.Close()
     }
 }
+function Get-GitHubAsset([string]$Url, [string]$Destination, [long]$MaximumBytes, [int]$DeadlineSeconds) {
+    Assert-GitHubAsset $Url
+    $credential = Get-GitHubCredential $false
+    $response = $null; $output = $null; $inputStream = $null; $request = $null; $created = $false; $complete = $false
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Enum]::ToObject([Net.SecurityProtocolType], 3072)
+        for ($hop = 0; $hop -le 1; $hop++) {
+            $remaining = [int]($DeadlineSeconds * 1000 - $clock.ElapsedMilliseconds)
+            if ($remaining -le 0) { throw 'Download deadline exceeded.' }
+            $request = [Net.HttpWebRequest]::Create((New-Object Uri($Url)))
+            $request.AllowAutoRedirect = $false
+            $request.UseDefaultCredentials = $false
+            $request.Method = 'GET'
+            $request.UserAgent = 'HostLink-bootstrap'
+            $request.Accept = 'application/octet-stream'
+            $request.Timeout = [Math]::Min(30000, $remaining)
+            $request.ReadWriteTimeout = [Math]::Min(30000, $remaining)
+            if ($hop -eq 0) { $request.Headers['Authorization'] = 'Bearer ' + $credential }
+            $response = $request.GetResponse()
+            $credential = $null
+            if ([int]$response.StatusCode -eq 200) { break }
+            if ([int]$response.StatusCode -ne 302 -or $hop -ne 0) { throw 'Download response rejected.' }
+            $Url = $response.Headers['Location']
+            if ($Url -cnotmatch '\Ahttps://(release-assets|objects)\.githubusercontent\.com/[^\s\\#]+\z') { throw 'Download redirect destination rejected.' }
+            $response.Close(); $response = $null
+        }
+        if ($response.ContentLength -gt $MaximumBytes) { throw 'Download size limit exceeded.' }
+        $inputStream = $response.GetResponseStream()
+        if ([string]::IsNullOrEmpty($Destination)) { $output = New-Object IO.MemoryStream }
+        else { $output = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None); $created = $true }
+        $buffer = New-Object byte[] 65536
+        $total = 0L
+        while ($true) {
+            $remaining = [int]($DeadlineSeconds * 1000 - $clock.ElapsedMilliseconds)
+            if ($remaining -le 0) { throw 'Download deadline exceeded.' }
+            $inputStream.ReadTimeout = [Math]::Min(30000, $remaining)
+            $count = $inputStream.Read($buffer, 0, $buffer.Length)
+            if ($clock.ElapsedMilliseconds -ge $DeadlineSeconds * 1000) { throw 'Download deadline exceeded.' }
+            if ($count -eq 0) { break }
+            $total += $count
+            if ($total -gt $MaximumBytes) { throw 'Download size limit exceeded.' }
+            $output.Write($buffer, 0, $count)
+        }
+        $output.Flush()
+        $complete = $true
+        if ([string]::IsNullOrEmpty($Destination)) { return ,$output.ToArray() }
+    } catch { throw 'GitHub asset download failed (credential, TLS, HTTP, deadline or size); no fallback.' }
+    finally {
+        $credential = $null
+        if ($null -ne $request) { $request.Abort() }
+        if ($null -ne $inputStream) { $inputStream.Close() }
+        if ($null -ne $response) { $response.Close() }
+        if ($null -ne $output) { $output.Close() }
+        if ($created -and -not $complete) { [IO.File]::Delete($Destination) }
+        $clock.Stop()
+    }
+}
+# END GITHUB BOOTSTRAP HELPERS
 
 function Get-Sha256([string]$Path) {
     $algorithm = New-Object Security.Cryptography.SHA256Managed
@@ -89,40 +240,10 @@ $verified = Join-Path $stage 'verified-package'
 $tokenFile = Join-Path $stage 'invite-token'
 
 try {
-    $uri = New-Object Uri($AgentUri)
-    $archiveUriObject = New-Object Uri($ArchiveUri)
-    if ($uri.Scheme -cne 'https' -or $archiveUriObject.Scheme -cne 'https' -or -not $uri.Authority.Equals($archiveUriObject.Authority, [StringComparison]::OrdinalIgnoreCase) -or -not [string]::IsNullOrEmpty($uri.UserInfo) -or -not [string]::IsNullOrEmpty($uri.Fragment) -or -not [string]::IsNullOrEmpty($archiveUriObject.UserInfo) -or -not [string]::IsNullOrEmpty($archiveUriObject.Fragment)) { throw 'Package URLs must use one HTTPS origin without credentials or fragments.' }
-    if ([IO.Path]::GetFileName($archiveUriObject.AbsolutePath) -cne ('hostlink-agent-' + $Target + '.zip')) { throw 'Archive URL must select the exact target-named Agent ZIP.' }
-    try {
-        $tls12 = [Enum]::ToObject([Net.SecurityProtocolType], 3072)
-        [Net.ServicePointManager]::SecurityProtocol = $tls12
-    } catch { throw 'TLS 1.2 is unavailable in this Windows/.NET session; bootstrap will not downgrade TLS.' }
-    function Download-Pinned([Uri]$DownloadUri, [string]$Destination, [long]$MaximumBytes) {
-        $request = [Net.HttpWebRequest]::Create($DownloadUri)
-        $request.AllowAutoRedirect = $false
-        $request.Method = 'GET'
-        $request.Timeout = 30000
-        $request.ReadWriteTimeout = 30000
-        $response = $request.GetResponse()
-        try {
-            if ([int]$response.StatusCode -ne 200) { throw 'Pinned download returned an unexpected status.' }
-            if ($response.ContentLength -gt $MaximumBytes) { throw 'Pinned download exceeds its size limit.' }
-            $input = $response.GetResponseStream()
-            $output = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-            try {
-                $buffer = New-Object byte[] 65536
-                $total = 0L
-                while (($count = $input.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                    $total += $count
-                    if ($total -gt $MaximumBytes) { throw 'Pinned download exceeds its size limit.' }
-                    $output.Write($buffer, 0, $count)
-                }
-                $output.Flush()
-            } finally { $output.Close(); $input.Close() }
-        } finally { $response.Close() }
-    }
-    Download-Pinned $uri $agentFile 268435456
-    Download-Pinned $archiveUriObject $archiveFile 536870912
+    Assert-GitHubAsset $AgentUri
+    Assert-GitHubAsset $ArchiveUri
+    Get-GitHubAsset $AgentUri $agentFile 268435456 120
+    Get-GitHubAsset $ArchiveUri $archiveFile 536870912 180
     if ((Get-Sha256 $agentFile) -cne $AgentSha256) { throw 'Agent executable SHA-256 mismatch.' }
     $versionOutput = & $agentFile --version 2>&1
     if ($LASTEXITCODE -ne 0 -or ($versionOutput -join ' ') -notmatch [regex]::Escape($AgentVersion)) { throw 'Downloaded Agent version does not match the pinned version.' }
