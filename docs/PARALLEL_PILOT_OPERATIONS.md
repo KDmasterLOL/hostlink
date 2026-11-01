@@ -1,12 +1,5 @@
 # HostLink v2 isolated HOME pilot
 
-> 1C-1164: the historical pilot `up/check` path expects archive/installer
-> receipts and is incompatible with the new raw packaging output. It has not
-> been adapted in this packaging lane (pilot implementation is outside scope).
-> Do not use this procedure to claim binary-only bootstrap acceptance. Local
-> pilot lifecycle tests do not exercise that artifact path. See
-> [current installation](AGENT_INSTALLATION.md) and [packaging](ARTIFACTS_AND_INVITES.md).
-
 This Linux-only operator tool runs an isolated v2 Hub, Caddy HTTPS endpoint,
 OpenSSH gateway and freshly enrolled Agent below one private user-owned root.
 It does not change the installed ONEC Agent, port 22, user SSH configuration,
@@ -16,11 +9,23 @@ to `127.0.0.1`; this pilot is not externally reachable and is not a deployment.
 ## Requirements and source pin
 
 Run as the intended non-root user from an exact clean Git commit. Required local
-tools are Rust/Cargo with cached locked dependencies, Python 3, OpenSSH server
+tools are Rust/Cargo with cached locked dependencies, Python 3.11+, OpenSSH server
 and client, Caddy, and OpenSSL. The first `up` builds the Hub,
 Agent and Controller in release mode and creates the immutable Linux Agent
-package using `scripts/package-hostlink-agent.py`. The package receipt and
-binary digests are retained in the private root and tied to its marker SHA.
+package using `scripts/package-hostlink-agent.py`. The package contains exactly
+`hostlink-agent-x86_64-unknown-linux-gnu` and a private
+`artifact-receipt.json` in raw format 2. The receipt binds the source SHA,
+Linux target, Cargo workspace version, exact asset name, byte size and SHA-256;
+its `build_receipt` is `null`. The executable is bounded to 256 MiB and the
+receipt to 64 KiB. Both fresh and retained packages reject unexpected members,
+symlinks, foreign ownership, unsafe permissions, or changed bytes.
+
+Hub, Agent and Controller copies have a separate private `build-receipt.json`
+with source SHA and all three binary digests. Creating copies runs Cargo for
+that source even if release binaries already exist in the target cache; the
+Agent copy must also match the packaged raw executable. Retained copies are
+verified against their receipt before reuse. These local provenance receipts
+stay in the private pilot root and are not production release assets.
 
 The root must be a normalized absolute path, with no symlink in any existing
 component, and the parent must belong to the current user. The root is created
@@ -85,12 +90,22 @@ This local pilot does not prove external DNS/VPS/firewall access, legacy/new
 Agent coexistence on another installed host, Windows 11 or Windows 7 behavior,
 safe Windows update, source release readiness, or production suitability.
 The CLI invitation here is an explicit local token-only invitation followed by
-the real Agent enrollment API; the source-pinned installer/package artifacts
-are built and served, but the installer UX is not exercised by this lifecycle
-command. The full invitation/installer acceptance remains covered separately
-only after an explicitly approved published GitHub Release and a separate
-source-exact native bootstrap acceptance. The retired Caddy/manual-URL
-installer fixture is not valid evidence for current GitHub-only installation.
+the real Agent enrollment API. The pilot builds a source-pinned raw Agent
+package and serves its local artifact directory through loopback Caddy, but
+does not exercise the private GitHub production bootstrap, PAT provisioning,
+release download or installer UX. Production bootstrap acceptance requires an
+explicitly approved GitHub Release and separate source-exact native checks;
+see [Agent installation](AGENT_INSTALLATION.md) and
+[packaging and invites](ARTIFACTS_AND_INVITES.md). Local artifact tests are not
+production bootstrap evidence.
+
+Focused artifact verification uses disposable synthetic fixtures, the real
+packager and a tiny offline Cargo workspace; it does not build HostLink or
+start pilot services:
+
+```sh
+python3 -m unittest discover -s scripts/tests -p 'test_hostlink_v2_pilot_artifacts.py' -v
+```
 
 If loopback sockets are denied by the execution environment, do not report
 `up`/`check` as passed. Keep the private root and process evidence intact for

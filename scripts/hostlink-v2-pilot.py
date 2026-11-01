@@ -421,71 +421,128 @@ def wait_https(url: str, ca: pathlib.Path, process: subprocess.Popen, timeout=25
 
 
 def configure_artifacts(repo: pathlib.Path, root: pathlib.Path, source_sha: str) -> dict:
+    import tomllib
+
     source_identity(repo, source_sha)
+    directory(root)
     for tool in TOOLS:
         if not shutil.which(tool):
             fail(f"required local tool is missing: {tool}")
-    artifacts = root / "artifacts"
-    receipt_path = artifacts / "artifact-receipt.json"
-    if artifacts.exists():
+    try:
+        version = tomllib.loads((repo / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"]
+    except (OSError, UnicodeError, KeyError, TypeError, tomllib.TOMLDecodeError):
+        fail("source workspace package version is unavailable or malformed")
+    if not isinstance(version, str) or not version:
+        fail("source workspace package version is invalid")
+
+    def checked_file(path: pathlib.Path, limit: int, mode: int | None = None) -> os.stat_result:
         try:
-            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            fail("existing source artifact receipt is unavailable or malformed")
-        if receipt.get("source_sha") != source_sha or receipt.get("target") != TARGET or receipt.get("version") != VERSION:
-            fail("existing package receipt does not match this source/target/version")
-        sidecar_rel = pathlib.PurePosixPath(str(receipt.get("sidecar", "")))
-        archive_rel = pathlib.PurePosixPath(str(receipt.get("archive", "")))
-        installer_rel = pathlib.PurePosixPath(str(receipt.get("installer", "")))
-        if any(path.is_absolute() or ".." in path.parts for path in (sidecar_rel, archive_rel, installer_rel)):
-            fail("artifact receipt contains an unsafe path")
-        sidecar = artifacts.joinpath(*sidecar_rel.parts)
-        # The packager publishes ZIP and installer under VERSION/, while the
-        # agent sidecar is nested one level further under VERSION/TARGET/.
-        archive = artifacts.joinpath(VERSION, *archive_rel.parts)
-        installer = artifacts.joinpath(VERSION, *installer_rel.parts)
-        for path, expected in ((sidecar, receipt.get("sidecar_sha256")), (archive, receipt.get("archive_sha256")), (installer, receipt.get("installer_sha256"))):
             info = os.lstat(path)
-            if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != UID or digest(path) != expected:
-                fail("existing source-pinned package member changed")
-    else:
-        run(["cargo", "build", "--offline", "--locked", "--release", "-p", "hostlink-hub", "-p", "hostlink-agent", "-p", "hostlink"], timeout=1800)
-        target_dir = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", str(repo / "target")))
-        binaries = {"hub": target_dir / "release/hostlink-hub", "agent": target_dir / "release/hostlink-agent", "client": target_dir / "release/hostlink"}
-        run([sys.executable, str(repo / "scripts/package-hostlink-agent.py"), "--source-sha", source_sha,
-             "--target", TARGET, "--version", VERSION, "--binary", str(binaries["agent"]), "--output-dir", str(artifacts)])
-        receipt = json.loads((artifacts / "artifact-receipt.json").read_text(encoding="utf-8"))
+        except OSError:
+            fail(f"source-pinned file is unavailable: {path.name}")
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != UID
+                or (mode is not None and (stat.S_IMODE(info.st_mode) != mode or info.st_nlink != 1))
+                or not 0 < info.st_size <= limit):
+            fail(f"source-pinned file type, owner, permissions, links, or size is invalid: {path.name}")
+        return info
+
+    def read_receipt(path: pathlib.Path) -> dict:
+        checked_file(path, 65536, 0o600)
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            fail(f"source receipt is unavailable or malformed: {path.name}")
+        if not isinstance(value, dict):
+            fail(f"source receipt must be an object: {path.name}")
+        return value
+
+    max_binary = 256 * 1024 * 1024  # Same bound as the canonical raw packager.
+    artifacts = root / "artifacts"
+    asset_name = f"hostlink-agent-{TARGET}"
     target_dir = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", str(repo / "target")))
+    if not target_dir.is_absolute():
+        target_dir = repo / target_dir
     binaries = {"hub": target_dir / "release/hostlink-hub", "agent": target_dir / "release/hostlink-agent", "client": target_dir / "release/hostlink"}
     dest = root / "bin"
     build_receipt = root / "build-receipt.json"
-    if dest.exists():
+    if not os.path.lexists(dest) and os.path.lexists(build_receipt):
+        fail("build receipt exists without the owned binary directory")
+    # Cached release files alone do not bind Hub/Agent/Client to source_sha.
+    # Rebuild all three whenever creating either the package or the owned copies.
+    built = False
+    if not os.path.lexists(artifacts):
+        run(["cargo", "build", "--manifest-path", str(repo / "Cargo.toml"),
+             "--target-dir", str(target_dir), "--offline", "--locked", "--release",
+             "-p", "hostlink-hub", "-p", "hostlink-agent", "-p", "hostlink"], timeout=1800)
+        source_identity(repo, source_sha)
+        built = True
+        run([sys.executable, str(repo / "scripts/package-hostlink-agent.py"), "--source-sha", source_sha,
+             "--target", TARGET, "--version", version, "--binary", str(binaries["agent"]), "--output-dir", str(artifacts)])
+    # Both new and retained packages pass the same strict raw-only contract.
+    directory(artifacts)
+    if {path.name for path in artifacts.iterdir()} != {asset_name, "artifact-receipt.json"}:
+        fail("raw artifact directory contains missing or unexpected members")
+    receipt = read_receipt(artifacts / "artifact-receipt.json")
+    fields = {"format", "source_sha", "target", "version", "asset", "asset_sha256", "asset_size", "build_receipt"}
+    if set(receipt) != fields or type(receipt.get("format")) is not int or receipt["format"] != 2:
+        fail("artifact receipt must use the exact raw format 2 schema")
+    if receipt["source_sha"] != source_sha or receipt["target"] != TARGET or receipt["version"] != version:
+        fail("package receipt does not match this source/target/version")
+    if (receipt["asset"] != asset_name or receipt["build_receipt"] is not None
+            or type(receipt["asset_size"]) is not int
+            or not 0 < receipt["asset_size"] <= max_binary
+            or not isinstance(receipt["asset_sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", receipt["asset_sha256"])):
+        fail("raw artifact receipt asset identity, size, or digest is invalid")
+    asset = artifacts / asset_name
+    if (checked_file(asset, max_binary, 0o700).st_size != receipt["asset_size"]
+            or digest(asset) != receipt["asset_sha256"]):
+        fail("source-pinned raw artifact size or SHA-256 changed")
+
+    if os.path.lexists(dest):
         directory(dest)
-        try:
-            saved = json.loads(build_receipt.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            fail("existing build receipt is unavailable or malformed")
-        if saved.get("schema") != 1 or saved.get("source_sha") != source_sha:
-            fail("existing build receipt does not match the pilot source")
-        binary_sha = {}
+        if {path.name for path in dest.iterdir()} != {path.name for path in binaries.values()}:
+            fail("stored source binary directory contains missing or unexpected members")
+        saved = read_receipt(build_receipt)
+        if (set(saved) != {"schema", "source_sha", "binary_sha256"}
+                or type(saved.get("schema")) is not int or saved["schema"] != 1
+                or saved.get("source_sha") != source_sha
+                or not isinstance(saved.get("binary_sha256"), dict)
+                or set(saved["binary_sha256"]) != set(binaries)):
+            fail("existing build receipt does not match the pilot source or binary set")
+        binary_sha = saved["binary_sha256"]
         for key, path in ((key, dest / value.name) for key, value in binaries.items()):
-            info = os.lstat(path)
-            expected = saved.get("binary_sha256", {}).get(key)
-            if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != UID or digest(path) != expected:
+            checked_file(path, max_binary, 0o700)
+            expected = binary_sha[key]
+            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected) or digest(path) != expected:
                 fail(f"stored source-exact {key} binary changed")
-            binary_sha[key] = expected
+        if binary_sha["agent"] != receipt["asset_sha256"]:
+            fail("stored Agent binary does not match the raw artifact")
     else:
-        if not all(path.is_file() and not path.is_symlink() for path in binaries.values()):
-            run(["cargo", "build", "--offline", "--locked", "--release", "-p", "hostlink-hub", "-p", "hostlink-agent", "-p", "hostlink"], timeout=1800)
-        private_dir(dest)
+        if not built:
+            run(["cargo", "build", "--manifest-path", str(repo / "Cargo.toml"),
+                 "--target-dir", str(target_dir), "--offline", "--locked", "--release",
+                 "-p", "hostlink-hub", "-p", "hostlink-agent", "-p", "hostlink"], timeout=1800)
+            source_identity(repo, source_sha)
         binary_sha = {}
         for key, path in binaries.items():
-            if not path.is_file() or path.is_symlink():
-                fail(f"source-exact {key} binary is unavailable")
-            shutil.copyfile(path, dest / path.name)
-            os.chmod(dest / path.name, 0o700)
-            binary_sha[key] = digest(dest / path.name)
+            # Cargo output may be world-readable and hardlinked to deps/;
+            # only the owned copies require private modes and a single link.
+            checked_file(path, max_binary)
+            binary_sha[key] = digest(path)
+        if binary_sha["agent"] != receipt["asset_sha256"]:
+            fail("built Agent binary does not match the raw artifact")
+        private_dir(dest)
+        for key, path in binaries.items():
+            copy = dest / path.name
+            shutil.copyfile(path, copy)
+            os.chmod(copy, 0o700)
+            checked_file(copy, max_binary, 0o700)
+            if digest(copy) != binary_sha[key]:
+                fail(f"source-exact {key} binary changed while copying")
+        source_identity(repo, source_sha)
         private_write(build_receipt, json.dumps({"schema": 1, "source_sha": source_sha, "binary_sha256": binary_sha}, sort_keys=True).encode() + b"\n")
+    source_identity(repo, source_sha)
     return {"receipt": receipt, "binaries": {key: str(dest / path.name) for key, path in binaries.items()},
             "binary_sha256": binary_sha}
 
