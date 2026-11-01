@@ -7,7 +7,7 @@ mod routes;
 pub use client::HubClient;
 pub use config::{HubClientError, HubConfig};
 pub use hostlink_hub::RevokeReceipt;
-pub use routes::{host_spec_from, host_spec_from_approved_routes};
+pub use routes::host_spec_from_approved_routes;
 
 #[cfg(test)]
 use config::{MAX_BODY_BYTES, parse_origin, select_host};

@@ -37,6 +37,46 @@ fn public_key() -> String {
         .expect("encode Ed25519 public key")
 }
 
+#[cfg(unix)]
+#[test]
+fn offline_hub_config_read_does_not_require_token_ca_or_ssh_identity() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let root = tempfile::tempdir().unwrap();
+    let config_path = root.path().join("hub.json");
+    let missing_token = root.path().join("missing-operator-token");
+    let missing_ca = root.path().join("missing-private-ca.pem");
+    let expected = HubConfig {
+        hub_url: "https://hub.example.invalid".into(),
+        hub_ca_cert: Some(missing_ca),
+        token_file: missing_token.clone(),
+        ssh_user: "operator".into(),
+        identity: root.path().join("missing-controller-key"),
+        gateway_identity: root.path().join("missing-gateway-key"),
+        preferred_gateway: None,
+    };
+    fs::write(&config_path, serde_json::to_vec(&expected).unwrap()).unwrap();
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let offline = HubClient::read_config(&config_path).expect("show must be offline");
+    assert_eq!(offline.hub_url, expected.hub_url);
+    assert_eq!(offline.token_file, missing_token);
+    assert_eq!(offline.hub_ca_cert, expected.hub_ca_cert);
+    assert!(
+        HubClient::from_file(&config_path).is_err(),
+        "connection must still require a real private token"
+    );
+
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(HubClient::read_config(&config_path).is_err());
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let link = root.path().join("config-link.json");
+    symlink(&config_path, &link).unwrap();
+    assert!(HubClient::read_config(&link).is_err());
+    fs::write(&config_path, b"{not-json").unwrap();
+    assert!(HubClient::read_config(&config_path).is_err());
+}
+
 #[test]
 fn shared_hub_dtos_enforce_v2_contract_and_preserve_info_forward_compatibility() {
     let info: HubInfo = serde_json::from_value(serde_json::json!({
@@ -378,21 +418,21 @@ async fn manages_hosts_through_the_in_process_hub_v2_router() {
         .resolve_host("fixture-machine")
         .await
         .expect("resolve by canonical name");
-    let spec = client
-        .resolve_host_spec(
-            "machine-001",
-            &HubConfig {
-                hub_url: "https://hub.fixture".into(),
-                hub_ca_cert: None,
-                token_file: PathBuf::from("unused-in-fixture"),
-                ssh_user: "agent-user".into(),
-                identity: PathBuf::from("controller_ed25519"),
-                gateway_identity: PathBuf::from("gateway_ed25519"),
-                preferred_gateway: None,
-            },
-        )
-        .await
-        .expect("resolve pinned HostSpec");
+    let spec = host_spec_from_approved_routes(
+        selected.clone(),
+        &gateways,
+        &HubConfig {
+            hub_url: "https://hub.fixture".into(),
+            hub_ca_cert: None,
+            token_file: PathBuf::from("unused-in-fixture"),
+            ssh_user: "agent-user".into(),
+            identity: PathBuf::from("controller_ed25519"),
+            gateway_identity: PathBuf::from("gateway_ed25519"),
+            preferred_gateway: None,
+        },
+    )
+    .await
+    .expect("resolve pinned HostSpec");
     assert_eq!(spec.user, "agent-user");
     assert_eq!(spec.host_public_key, host_key);
     assert_eq!(

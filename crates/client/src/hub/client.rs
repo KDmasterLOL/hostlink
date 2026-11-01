@@ -10,14 +10,12 @@ use reqwest::{Method, StatusCode, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
-use crate::HostSpec;
-
 use super::{
     config::{
         HubClientError, HubConfig, MAX_BODY_BYTES, parse_origin, read_private_credential,
         select_host,
     },
-    routes::{host_spec_from_approved_routes, validate_gateway_list},
+    routes::validate_gateway_list,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -30,17 +28,16 @@ pub struct HubClient {
 }
 
 impl HubClient {
-    /// Reads a bounded owner-only controller config file and validates its token source.
+    /// Reads only the owner-private controller configuration without loading the
+    /// operator credential, CA, SSH keys, or constructing a network client.
     pub fn read_config(path: &Path) -> Result<HubConfig, HubClientError> {
-        let (_, config) = Self::from_file(path)?;
-        Ok(config)
+        let value = read_private_credential(path)?;
+        serde_json::from_str(&value).map_err(|_| HubClientError::Credential)
     }
 
     /// Parse a private config and construct its usable HTTP client once.
     pub fn from_file(path: &Path) -> Result<(Self, HubConfig), HubClientError> {
-        let value = read_private_credential(path)?;
-        let config: HubConfig =
-            serde_json::from_str(&value).map_err(|_| HubClientError::Credential)?;
+        let config = Self::read_config(path)?;
         let client = Self::from_config(&config)?;
         Ok((client, config))
     }
@@ -158,17 +155,6 @@ impl HubClient {
             return Err(HubClientError::Response);
         }
         Ok(receipt)
-    }
-
-    /// Resolves a fresh authoritative host and its explicitly selected approved routes.
-    pub async fn resolve_host_spec(
-        &self,
-        selector: &str,
-        config: &HubConfig,
-    ) -> Result<HostSpec, HubClientError> {
-        let host = self.resolve_host(selector).await?;
-        let gateways = self.info().await?;
-        host_spec_from_approved_routes(host, &gateways, config).await
     }
 
     async fn get_json<T: for<'de> Deserialize<'de>>(

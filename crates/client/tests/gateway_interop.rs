@@ -5,7 +5,7 @@ use axum::{
 };
 use hostlink::{
     connect::HostConnection,
-    hub::{HubConfig as ControllerHubConfig, host_spec_from},
+    hub::{HubConfig as ControllerHubConfig, host_spec_from_approved_routes},
 };
 use hostlink_agent::{AgentConfig, ReverseGateway, ssh};
 use hostlink_hub::{
@@ -427,9 +427,9 @@ async fn reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins() {
             .expect("approved reverse key projection")
             .contains("hostlink-agent:managed-agent-id")
     );
-    let spec = host_spec_from(
+    let spec = host_spec_from_approved_routes(
         enrolled.host.clone(),
-        &enrolled.gateways[0],
+        &enrolled.gateways,
         &ControllerHubConfig {
             hub_url: "https://hub.fixture.test".into(),
             hub_ca_cert: None,

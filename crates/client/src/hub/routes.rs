@@ -78,38 +78,25 @@ pub async fn host_spec_from_approved_routes(
             routes.push((gateway, address));
         }
     }
-    host_spec_from_routes(host, &routes, 0, config)
-}
-
-/// Resolves one registry record and an already-selected approved route into the existing SSH type.
-pub async fn host_spec_from(
-    host: RegisteredHost,
-    gateway: &GatewayEndpoint,
-    config: &HubConfig,
-) -> Result<HostSpec, HubClientError> {
-    let address = resolve_gateway(gateway).await?;
-    host_spec_from_routes(host, &[(gateway, address)], 0, config)
+    host_spec_from_routes(host, &routes, config)
 }
 
 fn host_spec_from_routes(
     host: RegisteredHost,
     routes: &[(&GatewayEndpoint, SocketAddr)],
-    primary_index: usize,
     config: &HubConfig,
 ) -> Result<HostSpec, HubClientError> {
-    let (gateway, address) = routes.get(primary_index).ok_or(HubClientError::Response)?;
+    let (gateway, address) = routes.first().ok_or(HubClientError::Response)?;
     validate_pin(&host.ssh_host_public_key)?;
     let mut alternates = Vec::with_capacity(routes.len().saturating_sub(1));
-    for (index, (endpoint, address)) in routes.iter().enumerate() {
+    for (endpoint, address) in routes.iter().skip(1) {
         validate_pin(&endpoint.host_public_key)?;
-        if index != primary_index {
-            alternates.push(GatewayRoute {
-                address: *address,
-                user: endpoint.user.clone(),
-                identity: config.gateway_identity.clone(),
-                host_public_key: endpoint.host_public_key.clone(),
-            });
-        }
+        alternates.push(GatewayRoute {
+            address: *address,
+            user: endpoint.user.clone(),
+            identity: config.gateway_identity.clone(),
+            host_public_key: endpoint.host_public_key.clone(),
+        });
     }
     Ok(HostSpec {
         endpoint: SocketAddr::from(([127, 0, 0, 1], host.remote_port)),
