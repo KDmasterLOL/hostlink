@@ -73,7 +73,7 @@ fn host_errors_preserve_the_existing_hub_and_ssh_error_owners() {
 // or a test-only public HTTP constructor to the production Hub client.
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
-#[path = "../../tests/e2e_steps/fixture.rs"]
+#[path = "fixture.rs"]
 mod fixture;
 #[cfg(target_os = "linux")]
 use {

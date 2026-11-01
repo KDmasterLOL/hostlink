@@ -86,11 +86,9 @@ private root. A failed or uncertain enrollment is not retried
 automatically because the Hub may have committed it.
 
 `--token-only` remains for explicit manual enrollment and does not
-create a runnable installer command. The old
-`scripts/hostlink-managed-gateway-fixture.sh` Caddy source origin is
-**historical** for the pre-1C-1159 manual URL interface; it must be
-migrated to GitHub API fixture semantics before it can assert the new
-managed invitation end-to-end.
+create a runnable installer command. The obsolete opt-in Caddy/manual-URL
+bootstrap test was removed; GitHub-only byte/credential tests remain. Full
+private-release/native Windows first-install acceptance is still pending.
 
 ## Security / validation
 

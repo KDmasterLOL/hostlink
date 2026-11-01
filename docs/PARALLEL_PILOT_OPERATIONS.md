@@ -81,7 +81,9 @@ The CLI invitation here is an explicit local token-only invitation followed by
 the real Agent enrollment API; the source-pinned installer/package artifacts
 are built and served, but the installer UX is not exercised by this lifecycle
 command. The full invitation/installer acceptance remains covered separately
-by `scripts/hostlink-managed-gateway-fixture.sh`.
+only after an explicitly approved published GitHub Release and a separate
+source-exact native bootstrap acceptance. The retired Caddy/manual-URL
+installer fixture is not valid evidence for current GitHub-only installation.
 
 If loopback sockets are denied by the execution environment, do not report
 `up`/`check` as passed. Keep the private root and process evidence intact for

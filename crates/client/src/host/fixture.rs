@@ -122,22 +122,6 @@ pub(super) fn public_key(key: &PrivateKey) -> String {
     key.public_key().to_openssh().expect("serialize public key")
 }
 
-pub(super) fn ssh_fingerprint(public_key_file: &Path) -> String {
-    let output = run_ok(
-        Command::new("ssh-keygen")
-            .args(["-lf"])
-            .arg(public_key_file)
-            .args(["-E", "sha256"]),
-        "compute disposable SSH key fingerprint",
-    );
-    String::from_utf8(output.stdout)
-        .expect("ssh-keygen fingerprint is UTF-8")
-        .split_whitespace()
-        .nth(1)
-        .expect("ssh-keygen emitted fingerprint")
-        .to_owned()
-}
-
 pub(super) fn run_ok(command: &mut Command, what: &str) -> std::process::Output {
     let output = command.output().unwrap_or_else(|_| panic!("run {what}"));
     assert!(
@@ -228,12 +212,4 @@ pub(super) fn write_server_certificate(root: &Path) -> (PathBuf, PathBuf, PathBu
         "generate unrelated TLS CA",
     );
     (ca_cert, leaf_cert, leaf_key)
-}
-
-pub(super) fn private_log(path: &Path) -> Stdio {
-    Stdio::from(fs::File::create(path).expect("create private process log"))
-}
-
-pub(super) fn cli_env(command: &mut Command, config: &Path) {
-    command.env("HOSTLINK_HUB_CONFIG", config);
 }

@@ -168,13 +168,9 @@ mapping and target-side TCP probes through `russh` direct-tcpip. See
 [docs/TCP_FORWARDING.md](docs/TCP_FORWARDING.md) for commands, deadlines,
 concurrency limits and security behavior.
 
-The opt-in process-level managed gateway fixture runs a real child Hub over
-trusted local HTTPS, enrolls an Agent, and uses a temporary OpenSSH gateway
-whose `AuthorizedKeysFile` includes the Hub-owned v2 projection. It exercises
-managed exec, SFTP, forwarding and revocation without touching
-user SSH configuration or system services. See
-[docs/ISOLATED_GATEWAY.md](docs/ISOLATED_GATEWAY.md) for prerequisites and
-limits.
+The isolated Hub/OpenSSH gateway pilot uses only disposable user-owned
+processes. Its procedures and limitations are in
+[docs/PARALLEL_PILOT_OPERATIONS.md](docs/PARALLEL_PILOT_OPERATIONS.md).
 
 Fresh Agent enrollment can retain an explicitly selected Hub-approved primary
 gateway and ordered, independently pinned alternates. Transient transport
@@ -199,9 +195,9 @@ artifacts for each target, and
 prepares a flat multi-target GitHub Releases upload directory. Both tools
 operate locally and **do not publish or deploy** anything. Publishing an
 immutable GitHub Release requires separate native/source-exact acceptance.
-The former `hostlink-managed-gateway-fixture.sh` exercised the historical
-Caddy-hosted manual URL CLI; it has not been migrated to the new GitHub-only
-invite path and is **not** current acceptance evidence.
+The obsolete Caddy-hosted manual-URL installer fixture was deleted. Current
+acceptance uses GitHub-only bootstrap tests and a separately approved real
+release/native OS run.
 
 ## Agent lifecycle
 
