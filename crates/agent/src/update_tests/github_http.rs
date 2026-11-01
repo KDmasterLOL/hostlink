@@ -234,6 +234,7 @@ fn api_asset_200_and_302_install_with_auth_only_on_initial_request() {
         let mut publisher = Update::configure();
         publisher
             .http_client(Arc::new(GitHubTransport::new(false, false)))
+            .allow_auth_host("127.0.0.1")
             .request_header(
                 self_update::http::header::AUTHORIZATION,
                 format!("Bearer {FIXTURE_CREDENTIAL}"),
@@ -255,7 +256,14 @@ fn api_asset_200_and_302_install_with_auth_only_on_initial_request() {
             .unwrap()
         );
         let requests = api.requests.lock().unwrap();
-        assert!(requests[0].1 && requests[0].2);
+        assert!(
+            requests[0].1 && requests[0].2,
+            "initial API request must have auth and octet-stream accept: {:?}",
+            requests
+                .iter()
+                .map(|(_, auth, octet)| (*auth, *octet))
+                .collect::<Vec<_>>()
+        );
         assert!(requests.iter().skip(1).all(|request| !request.1));
         assert_eq!(read_installed(&fixture.root).unwrap().0.version, "2.0.0");
     }

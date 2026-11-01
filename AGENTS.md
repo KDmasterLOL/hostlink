@@ -31,6 +31,15 @@ installed-file integrity, upstream in-process rollback on failed publication,
 and offline stopped-only Windows update after removal of the current-user
 Task Scheduler task. Apalis alone owns its SQLite job state; service and
 updater must not inspect its tables.
+Under user authorization for 1C-1159, GitHub Releases in the fixed private
+`KDmasterLOL/hostlink` repository are the SOLE production artifact source for
+fresh invites and installed updates. Both Controller and target use separate
+current-user, private `hostlink/credentials/github-token` files; on first
+target bootstrap the credential is securely prompted, never embedded in source,
+binary, invitation output, CLI argv, download URLs or release bundles. No
+arbitrary-site `invite` or `update` flags and no alternate publisher fallback.
+GitHub-digest checks do not replace HostLink ZIP, manifest, filesystem, locks
+or stopped-Agent checks; native Windows 7/11 acceptance remains a release gate.
 Under the explicit 2026-10-31 user trade-off for 1C-1147, no bespoke Windows
 staging ACL hardening or durable update journal is required. Sudden kill/power loss
 may leave bin missing; there is no automatic crash recovery. Persistent

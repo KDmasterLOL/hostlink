@@ -16,22 +16,30 @@ Target packages:
   enrollment, SSH authorization and revocation; **no execution RPC**. See
   [crates/hub/README.md](crates/hub/README.md) for server configuration/API.
 
-Updates use high-level `self_update 1.3.1` with one exact HTTPS artifact URL,
-independent SHA-256, version and runtime target. The Agent must be fully stopped;
-Windows additionally requires removing its Task Scheduler registration and running
-a separate updater beneath the private root, outside `bin`. The CLI uses
-`update --root ROOT --url URL --sha256 SHA --target TARGET --version VERSION`.
-Archive/bundle staging and nonsecret `bin` use upstream native permissions/ACLs.
-Private root/state/jobs/keys and process locks retain `private-fs` protection.
-Fresh installs and updates both retain the exact source `bin/manifest.json`
-(format 2) and store the independently pinned ZIP digest in
-`bin/archive.sha256`. There is no duplicated install metadata or legacy migration.
-Ordinary publication errors use upstream best-effort in-process rollback.
-**A kill/power loss between renames can leave bin missing; there is no
-automatic crash recovery or restart.**
-See [Agent update and bootstrap](docs/AGENT_INSTALLATION.md),
-[updater contract](docs/SELF_UPDATE_REWRITE.md) and
-[Windows operation](docs/AGENT_UPDATE_WINDOWS.md). Native acceptance remains open.
+Fresh installation and updates use **only the private**
+`KDmasterLOL/hostlink` **GitHub Releases** repository. The target's GitHub
+read-only credential is entered during bootstrap and stored in a private
+current-user file (`~/.config/hostlink/credentials/github-token` on Linux,
+`%APPDATA%\HostLink\credentials\github-token` on Windows), not embedded
+in the binary, Hub invite, CLI arguments or URLs. Controller uses its own
+corresponding user-local credential to resolve and preflight the release
+**before issuing an invitation**. The updater supports
+`hostlink-agent update [--version X.Y.Z] [--root ROOT]` and no arbitrary
+`--url`, `--sha256` or `--target` flags. ZIPs require GitHub-published
+SHA-256 and exact target/version/manifest identity, and one upstream
+`self_update` publisher installs a verified bundle.
+
+Both `update.lock` and `jobs/runner.lock` remain mandatory. The Agent
+must be stopped for publication; on Windows the user must remove its
+Task Scheduler registration and invoke a separate verified updater outside
+`bin`. Installed `manifest.json` stays verbatim, with `archive.sha256`
+beside it. The private state/keys/jobs remain untouched. Upstream can
+roll back ordinary in-process failures, but a kill/power loss between
+renames can leave `bin` missing; there is no durable crash journal.
+See [GitHub Releases](docs/GITHUB_RELEASES.md),
+[Agent installation](docs/AGENT_INSTALLATION.md) and
+[Windows offline update](docs/AGENT_UPDATE_WINDOWS.md). Native Win7/11
+acceptance and first verified publication are still required.
 
 The rewrite is being integrated into HostLink `dev` for testing. It is **not
 ready for release, deployment or fleet migration**.
@@ -180,14 +188,16 @@ Task Scheduler lifecycle and offline update/recovery require fresh native accept
 
 ## Local Agent artifact packages
 
-Use [docs/ARTIFACTS_AND_INVITES.md](docs/ARTIFACTS_AND_INVITES.md) and
-`scripts/package-hostlink-agent.py` to create a deterministic, source-SHA-bound
-Agent ZIP, sidecar, installer pin, and invite-input hashes. Packaging is local
-only; operators select and verify their own immutable HTTPS artifact origin.
-The `hostlink-managed-gateway-fixture.sh` opt-in HOME fixture also packages from
-its clean committed SHA and exercises the real CLI invite, HTTPS installer,
-one-use prompt, and managed Agent lifecycle against temporary Caddy/sshd
-instances. Native Windows 11 and Win7 PowerShell 2 acceptance remain separate.
+Use [the GitHub-only publication contract](docs/ARTIFACTS_AND_INVITES.md):
+`scripts/package-hostlink-agent.py` builds source-bound ZIP/verifier
+artifacts for each target, and
+`scripts/stage-hostlink-github-release.py` verifies their receipts and
+prepares a flat multi-target GitHub Releases upload directory. Both tools
+operate locally and **do not publish or deploy** anything. Publishing an
+immutable GitHub Release requires separate native/source-exact acceptance.
+The former `hostlink-managed-gateway-fixture.sh` exercised the historical
+Caddy-hosted manual URL CLI; it has not been migrated to the new GitHub-only
+invite path and is **not** current acceptance evidence.
 
 ## Agent lifecycle
 

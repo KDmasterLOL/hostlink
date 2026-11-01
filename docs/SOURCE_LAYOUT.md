@@ -45,16 +45,21 @@ does not certify production or registered Windows updater deployment.
 | Shared private root/path and file identities | `crates/agent/src/agent_files.rs` |
 | Windows offline process identity admission | `crates/agent/src/service/offline.rs` |
 
-`update.rs` exposes typed pinned `update(root,url,sha256,target,version)`
-and a latest/exact GitHub Release selector. Both reuse one upstream
-`self_update::backends::custom::Update` publisher for already installed
-Agents. `bootstrap.rs` owns first-install verification/finalization, sharing
-the verbatim package `manifest.json`, separate `archive.sha256` and safe ZIP
-preflight from `package/`. There is no installed-format migration, old-journal guard, second
-publisher or custom ZIP parser. Private root/state/jobs/keys retain `private-fs`
-protection, while installed `bin/` is nonsecret.
-See [Agent installation ownership](AGENT_INSTALLATION.md) and
-[historical updater integration evidence](SELF_UPDATE_REWRITE.md).
+`update.rs` exposes the GitHub-only `update_from_github(root, version)`
+entrypoint and uses upstream `self_update::github` for release discovery,
+then the single `self_update::custom::Update` for ZIP/manifest-checked
+publication. No public arbitrary URL/pin update mode remains. Agent
+credentials are read through the private `agent_files.rs` helpers from the
+target's user-owned `hostlink/credentials/github-token` file. Controller's
+GitHub-only invitation selects and verifies assets in
+`crates/client/src/bootstrap/github.rs` before issuing a Hub invite; the
+target bootstrap securely prompts/creates its own PAT before downloading
+the fixed GitHub asset URLs. `bootstrap.rs` still owns the original
+first-install verifier/finalization, with source `manifest.json` and
+separate installed `archive.sha256`. Both paths preserve locks, the
+stopped-Agent gate and private state. See
+[GitHub Releases](GITHUB_RELEASES.md) and
+[Agent installation](AGENT_INSTALLATION.md).
 
 `jobs/mod.rs` exposes only the typed `CommandJob`, local queue and private
 updater contract. `jobs/store.rs` configures the native Apalis SQLite

@@ -1,6 +1,7 @@
 # History of the Agent self_update integration
 
-**Current implementation (1C-1157):** [Agent installation contract](AGENT_INSTALLATION.md).
+**Current implementation (1C-1159):** [GitHub-only release and credential contract](GITHUB_RELEASES.md) and [Agent installation](AGENT_INSTALLATION.md).
+All specific versions and manual URL examples below are **historical** and not current CLI instructions.
 The sections below record the **historical** source-exact 1C-1147/1149/1153
 decisions and their own test evidence. Their `install.json` transformation,
 `Artifact` constructor, `AgentUpdateRequest` and `AgentUpdateOutcome` refer to

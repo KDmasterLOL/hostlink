@@ -1,72 +1,62 @@
-# Windows Agent offline update (1C-1157)
+# Windows Agent: GitHub-only offline update (1C-1159)
 
-Use a fully stopped, unregistered Agent. Stop/remove its current-user Task Scheduler
-task with the existing service commands, then invoke a verified separate copy of
-hostlink-agent.exe beneath the private root, **outside bin**, with:
+The current user must **stop** the installed Agent and remove its
+current-user Task Scheduler task, then run a verified, separate
+`hostlink-agent.exe` updater from beneath the private Agent root but
+**outside** `bin`. Running the updater or replacement of a live Agent
+image is not supported. The updater never kills processes or manipulates
+Task Scheduler registrations by itself.
 
 ```text
-hostlink-agent.exe update
-hostlink-agent.exe update --version X.Y.Z
+hostlink-agent.exe update                 # GitHub's latest stable release
+hostlink-agent.exe update --version 1.2.3 # exact published GitHub release
 ```
 
-Run the separate verified updater executable from **outside** installed
-`bin`, after stopping/removing the Agent's current-user Task Scheduler task.
-Without `--root`, the command uses the exact OS-resolved per-user
-LocalAppData/HostLink/Agent root; it does not install or start services.
-The fixed GitHub repository is private, requiring `GH_TOKEN` or
-`GITHUB_TOKEN` in the process environment for read-only release access.
-The exact `--root --url --sha256 --target --version` options and PowerShell2
-wrapper remain supported for independently pinned artifacts.
+`--root ROOT` is optional on Windows: the OS resolves the exact
+current-user LocalAppData/HostLink/Agent root. The Agent checks the private
+root and exclusive `update.lock` and `jobs/runner.lock`, requires no
+registered Task Scheduler task or running installed executable, and fails
+before publication when any admission check fails.
 
-The updater does not stop/remove/register/start a task or change HKCU. An installed
-task (even stopped), held runner/update lock or active
-installed Agent image is an error. It never kills a PID. The root remains the exact
-OS-resolved LocalAppData/HostLink/Agent, with private-fs protected root and parent,
-without symlink/reparse aliases. Win7 uses SHGetFolderPathW and existing process
-snapshot APIs. `same-file 1.0.6` compares file identities for the separate updater
-and matching running images, avoiding a second hand-written Windows file-ID API.
+The private GitHub credential is stored in **the target user's**
+`%APPDATA%\HostLink\credentials\github-token`, created by the target-side
+bootstrap prompt with an owner-only protected DACL. Updates read it via
+native Win7-compatible APIs and do **not** accept raw artifact URLs,
+command-line tokens or token environment variables. The credential must
+provide repository-scoped GitHub `Contents:Read`. An inaccessible or
+unpublished GitHub Release is an error, not a reason to retry a different
+publisher.
 
-Only one installed updater exists: high-level self_update custom::Update,
-pinned to 1.3.1. Independently pinned manual mode forbids redirects.
-Automatic mode selects a specific release from the fixed GitHub repository
-and requires its API-published SHA-256 (not an independent publisher signature).
-Its asset may require bounded HTTPS-only CDN redirects, while credentials
-remain limited to the GitHub API origin. Both paths disable environment proxies.
-The archive SHA-256, bounded ZIP/member/manifest checks and installed inventory
-remain mandatory.
-`self_update 1.3.1` defaults to zero retries; the transport retains a
-30-second timeout. An exact explicitly selected downgrade is permitted.
-There is no unrelated-provider fallback, unsigned release fallback or remote
-service lifecycle manipulation.
+The fixed private `KDmasterLOL/hostlink` GitHub API yields an exact
+version and target asset with a SHA-256 digest. `self_update 1.3.1`
+verifies SHA/ZIP/manifest and extracted file inventory before swapping
+the complete Agent `bin` directory. The publisher preserves the source
+`manifest.json`, writes canonical `archive.sha256`, and rereads the
+installed identity. HTTPS-only CDN redirects do not forward Authorization.
+There is no independent publisher signature, no general release engine,
+no durable crash journal and no automatic task restart. A power loss
+between renames can require manual `bin` recovery.
 
-Downloaded archives, temporary bundles and installed bin are **nonsecret**, using
-upstream native temporary filesystem permissions/ACLs. No private-fs ACL hardening
-is applied to those updater files. Persistent root, state, jobs, keys, configuration
-and OS lock files retain their existing private-fs protection. The updater does not
-open SQLite or interpret job state; pending tasks survive for the next Agent start.
+The bundle contains the PowerShell 2-compatible
+`Update-HostLink-Agent.ps1` wrapper. Pass
+`-Updater` pointing at the **separate verified executable**; optionally
+pass `-Version 1.2.3`. It determines `ROOT` from the bundle location and
+calls the same GitHub-only Agent updater. No `-Url` or `-Sha256` flags.
 
-The verify_binary hook verifies extracted source manifest/file identities
-and writes a 64-character independently pinned `archive.sha256` beside the
-**unchanged** `manifest.json` in the staged bundle. It then validates
-the entire inventory before the library swaps `bin/`. On startup/update the
-installed source manifest and digest are both read back and verified;
-no obsolete install.json compatibility reader exists.
+For fresh Windows installation, `hostlink invite` supplies an installer
+bootstrap in two steps when the safe PowerShell code exceeds the 8191
+character `cmd.exe` command-line limit. The helper contains **no PAT**.
+The target user saves the helper as a local .ps1 and runs it unelevated;
+its hidden prompt securely provisions the GitHub token before fetching
+the release-asset installer, sidecar, and archive. Files are SHA-pinned,
+then `bootstrap-verify` is run **before** asking for the one-use
+HostLink enrollment token.
 
-On an ordinary publication error self_update attempts to restore the old bundle.
-Rollback is best-effort; a failed restoration is logged upstream and the original
-error is returned. **There is no durable journal or automatic recovery after kill
-or power loss. A kill between renames can leave bin absent and an unnamed stash.**
-Stop and reconcile the installation manually in that case; do not claim the
-Agent was updated. There is no legacy journal compatibility engine or
-automatic restart.
-After success explicitly reinstall/start the owned task. Service status is OS
-registration/running state, not binary SHA or SSH health attestation.
+Native Windows 7 (x86/x64), Windows 11, PowerShell 2, file ACL and
+Task Scheduler concurrency acceptance is still outstanding; Linux
+static/source checks do not establish native correctness. No live
+machines, tasks, registrations or production data were modified.
 
-The PowerShell 2-compatible Update-HostLink-Agent.ps1 wrapper forwards the URL pins
-to the supplied separate updater and propagates failure. Run-HostLink-Agent.ps1
-accepts a native-ACL bundle while retaining private root/config checks. The
-first-install scripts and bootstrap-verify/bootstrap-finalize commands are retained.
-
-Native Windows11/Win7 x64/x86, PowerShell 2, Scheduler concurrency and actual process
-checks remain separate acceptance gates. Cross checks are compile/static evidence.
-See [implementation and verification](SELF_UPDATE_REWRITE.md).
+See [GitHub release lifecycle](GITHUB_RELEASES.md),
+[Agent install/identity](AGENT_INSTALLATION.md) and
+[historical self-update record](SELF_UPDATE_REWRITE.md).

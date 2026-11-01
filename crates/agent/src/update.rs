@@ -119,6 +119,9 @@ pub fn update_from_github(root: &Path, version: Option<&Version>) -> io::Result<
     let mut publisher = Update::configure();
     publisher
         .http_client(Arc::new(GitHubTransport::new(false, true)))
+        // self_update gates explicit Authorization headers by allowed host.
+        // The custom backend has no implicit API host, so bind it explicitly.
+        .allow_auth_host("api.github.com")
         .request_header(
             self_update::http::header::ACCEPT,
             "application/octet-stream",

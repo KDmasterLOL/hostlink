@@ -110,25 +110,46 @@ Apalis can retry a previously started command after a worker crash, so
 side effects may repeat. The old `hostlink jobs` CLI and SSH jobs
 subsystem were intentionally removed.
 
-## Invitations
+## Invitations (private GitHub Releases only)
+
+The Controller must first have a private read-only GitHub token stored in
+its own `~/.config/hostlink/credentials/github-token`
+(`%APPDATA%\HostLink\credentials\github-token` on Windows). It must
+grant `Contents: Read` to the fixed private `KDmasterLOL/hostlink`
+repository. This does not grant access to a private release unless the
+token is valid, and also grants read access to repository source.
 
 ```sh
-hostlink invite --name lab-win7 --ssh-user hostlink --ttl-seconds 900 \
-  --target x86_64-win7-windows-msvc \
-  --version 0.2.0 \
-  --installer-url https://artifacts.example/Install-HostLink-Agent.ps1 \
-  --installer-sha256 <independently-verified-script-sha256> \
-  --agent-url https://artifacts.example/v0.2.0/x86_64-win7-windows-msvc/hostlink-agent.exe \
-  --agent-sha256 <independently-verified-agent-sha256> \
-  --archive-url https://artifacts.example/v0.2.0/hostlink-agent-x86_64-win7-windows-msvc.zip \
-  --archive-sha256 <independently-verified-zip-sha256>
+hostlink invite --name lab-win7 --target x86_64-win7-windows-msvc
+hostlink invite --name lab-win7 --target x86_64-win7-windows-msvc --version 0.1.0
 ```
 
-The default invite flow requires an exact target (`i686-win7-windows-msvc`, `x86_64-win7-windows-msvc`, `x86_64-pc-windows-msvc`, or `x86_64-unknown-linux-gnu`), semantic version, canonical name, SSH user (`--ssh-user`, or the configured Hub default), the installer URL and SHA-256, Agent sidecar URL and SHA-256, and exact target-named ZIP URL and SHA-256. Installer, sidecar, and ZIP URLs must be credential-free HTTPS links on one origin. The sidecar and ZIP paths must bind the selected version (`VERSION` or `vVERSION` segment); the sidecar must also contain the exact target as a path segment and end in `hostlink-agent.exe` on Windows or `hostlink-agent` on Linux. The ZIP URL must end in `hostlink-agent-TARGET.zip`.
+Without a version, Client chooses GitHub's latest **published stable**
+release; otherwise it selects exact `vX.Y.Z`. Before issuing a
+one-use Hub invite, it verifies the exact target's ZIP and sidecar
+metadata/digests, downloads the selected GitHub installer over authenticated
+HTTPS and verifies its byte digest and target-specific command contract.
 
-Before `POST /v2/invites`, the client fetches the installer with redirects disabled, TLS certificate verification enabled, a 1 MiB bound and a 30 second deadline. It checks the independently supplied script digest and the expected platform installer interface. Any missing pin, malformed or swapped source, redirect, download error, digest mismatch, invalid UTF-8 or installer contract mismatch fails before an invitation is issued. The generated Windows PowerShell 2 or POSIX command repeats the bounded HTTPS download and exact installer SHA-256 verification on the target before executing the verified bytes. Installer arguments are shell-quoted, and the installer itself checks the sidecar and ZIP pins, target and version before prompting for the invitation token.
+The generated target bootstrap contains GitHub asset API URLs and their
+expected SHA-256, **never the GitHub token**. The target independently
+prompts (without echo) for its own PAT and creates/reads the private
+`hostlink/credentials/github-token` file, then fetches/validates the
+installer, sidecar and ZIP. Only after those validations does the target
+ask for the **different one-use Hub invitation token**. Windows PowerShell 2
+may require saving an explicit target-local helper script (without the PAT)
+and invoking it unelevated; that is printed rather than issuing a command
+that would exceed the Windows command-line limit.
 
-The one-use token is displayed separately from the copyable command. It is never embedded in the command, script, URL or environment; the installed bootstrap securely prompts for it. Manual enrollment is available only through explicit `hostlink invite --token-only` and does not print a runnable command.
+`--token-only` remains a manual-enrollment escape hatch and produces
+no installer command. The old
+`--installer-url`, `--agent-url`, `--archive-url`, and SHA flags have
+been removed: there is **no arbitrary artifact website** fallback.
+A missing private token, inaccessible release, absent GitHub asset digest,
+or changed installer causes an error **before** Hub invitation.
+
+See [GitHub Releases](GITHUB_RELEASES.md),
+[Artifact publication](ARTIFACTS_AND_INVITES.md), and
+[Fresh enrollment](ENROLLMENT.md).
 
 ## Multi-gateway Client routing
 

@@ -1,151 +1,105 @@
-# Agent update and bootstrap — current contract (1C-1157)
+# Installed Agent and first-install verification — current 1C-1159 contract
 
-HostLink uses upstream `self_update 1.3.1` to download, SHA-verify and swap
-installed Agent bundles. Fresh enrollment is distinct because it must verify
-an independently pinned executable sidecar and ZIP before using an invitation.
+**Only** GitHub Releases in the private `KDmasterLOL/hostlink` repository
+are supported as production artifact sources. No external artifact site,
+operator-selected URL, mirror, or env token override remains. For the release
+and target-side bootstrap contracts see [GitHub Releases](GITHUB_RELEASES.md).
 
-## Installed Agent: `crates/agent/src/update.rs`
-
-```sh
-hostlink-agent update                         # GitHub's latest published stable Release
-hostlink-agent update --version 1.2.3         # exact release (explicit downgrade allowed)
-hostlink-agent update --root ROOT             # explicit installed root
-```
-
-The manually pinned Rust API accepts typed `&Url`, `[u8; 32]` and
-`&semver::Version` in `update(root,url,sha256,target,version)`. Automatic
-`update_from_github(root,version,token)` discovers the release from the
-fixed **KDmasterLOL/hostlink** GitHub repository.
-`true` means installed; `false` means already current.
-
-Automatic mode uses GitHub's designated latest published release
-(`/releases/latest`, excluding drafts and prereleases), and requires the exact
-`hostlink-agent-TARGET.zip` asset and its
-`sha256:<hex>` digest from GitHub Release metadata, then verifies the
-downloaded bytes and HostLink package manifest before publication. It trusts
-the authenticated GitHub repository **as the publisher**, not an independent
-cryptographic signature. The repository is currently private: supply
-`GH_TOKEN` or `GITHUB_TOKEN` in the updater's environment for read access.
-On 2026-11-01 there were no published HostLink Releases, so no real latest
-artifact exists yet; the command must report absence, not pretend success.
-
-The Linux install path uses `$XDG_DATA_HOME/hostlink-agent.RANDOM/Agent`;
-without `--root`, the updater infers it only from an installed executable
-at `ROOT/bin/hostlink-agent`. A development binary needs explicit
-`--root`. Windows uses OS-resolved LocalAppData/HostLink/Agent, but the
-verified offline updater must still be launched **outside bin**, after the
-Task Scheduler task is removed and Agent processes stop.
-
-The old independently pinned artifact mode remains available:
+## Installed Agent
 
 ```sh
-hostlink-agent update --root ROOT --url HTTPS_URL --sha256 SHA256 \
-  --version X.Y.Z --target TARGET
+hostlink-agent update                     # latest published stable release
+hostlink-agent update --version 1.2.3     # explicitly selected release, downgrade permitted
+hostlink-agent update --root ROOT         # installed-root override
 ```
 
-Clap parses URLs, SemVer and a 32-byte hex-decoded SHA. Direct pinned mode
-forbids redirects; GitHub API asset downloads may require bounded HTTPS-only
-CDN redirects, without forwarding the private API token to a new origin.
+The public library interface is
+`update_from_github(root: &Path, version: Option<&semver::Version>) -> io::Result<bool>`.
+The installed Agent reads its own private user credential from
+`~/.config/hostlink/credentials/github-token` on Linux (honouring an absolute
+`XDG_CONFIG_HOME`) or `%APPDATA%\HostLink\credentials\github-token` on
+Windows. It never obtains a PAT from CLI arguments, `GH_TOKEN`, `GITHUB_TOKEN`,
+the Hub, or the release package. Absent or unsafe credentials fail closed.
 
-1. Require a parsed credential-free HTTPS URL (no fragment), a supported
-   runtime target, an exact semantic version and an independently supplied
-   lowercase archive SHA-256. The URL may contain ordinary percent encoding,
-   a query string or an arbitrary CDN asset name; its path is **not** proof
-   of the archive's version, platform or publisher.
-2. Validate the private root and acquire both `update.lock` and
-   `jobs/runner.lock`. On Windows the Task Scheduler registration must be
-   absent, a verified separate updater must run outside `bin/`, and the
-   installed Agent executable must not be running.
-3. Read the existing `bin/manifest.json` and `bin/archive.sha256`, validate
-   exact file identities, and skip the download only if **both** version and
-   archive digest already match. Different content at the same version
-   remains an explicit reinstallation; a matching SHA with conflicting
-   version is an error.
-4. Configure one `self_update::backends::custom::Update` with the selected
-   version/URL, expected archive checksum, ZIP preflight and extracted
-   bundle verification. The upstream library downloads/extracts/swaps the
-   bundle, with only best-effort in-process rollback.
-5. Retain the **verbatim** source `manifest.json` in the new `bin/`, append
-   `archive.sha256` containing the verified ZIP digest, and verify the
-   installed manifest and files after publication.
+GitHub's pinned upstream `self_update::github` backend discovers latest
+published stable release or exact `vX.Y.Z` (also accepts unprefixed exact
+tags). The selected release must contain exactly one
+`hostlink-agent-TARGET.zip` with a valid GitHub API-published
+`sha256:<hex>` digest. Release metadata and asset URLs must come from the
+fixed authenticated GitHub API origin. The checksum verifies bytes against
+GitHub's metadata; it is **not** an independent publisher signature.
 
-A tiny private `ReleaseSource` adapter remains because the library's
-custom backend requires this trait even when the caller already selected
-exactly one download URL. Replacing it with the built-in GitHub backend
-would change how exact independently pinned sources are selected.
+The sole publisher remains upstream `self_update::backends::custom::Update`:
+it verifies the complete ZIP SHA-256, archive members, manifest target/version
+and extracted executable and scripts; writes canonical `archive.sha256`;
+publishes the verified bundle under `ROOT/bin`; and reads back the installed
+identity. Both `ROOT/update.lock` and `ROOT/jobs/runner.lock` remain held
+throughout. Apalis SQLite state and keys are never modified by the updater.
+GitHub asset downloads support bounded HTTPS-only CDN redirects, with
+authentication sent only to the initial `api.github.com` request.
 
-The updater consumes an artifact selected by the local operator/caller; it
-does not authenticate an otherwise arbitrary URL/hash pair or implement a
-trusted-publisher allowlist. The expected SHA-256 must therefore be obtained
-**independently from an authorized, trusted source**. `ureq` explicitly
-disables redirects and environment proxies and retains a 30-second global
-timeout. These are intentional deviations from `ureq 3.4.2` defaults.
-`self_update 1.3.1` already defaults to zero retries; it is not separately
-configured. An explicitly selected older version remains an allowed
-downgrade under the current exact-artifact contract; there is no implicit
-anti-rollback policy.
+`true` means installed, `false` means already current. Without
+`--version` the updater cannot downgrade or silently reinstall the same
+version. A supplied older version is allowed. If there is no published
+release, missing target asset, missing digest, token or network access, the
+command errors without claiming an update.
 
-The updater does not read or modify the Apalis database, state, keys,
-registration or service lifetime. The root remains private; the nonsecret
-`bin/` may use upstream native file permissions.
+On Linux the default `ROOT` is derived from the actual installed executable
+at `ROOT/bin/hostlink-agent` (the installer uses randomized private parents).
+A development binary must pass `--root`. On Windows the install root is the
+current user's OS-resolved LocalAppData/HostLink/Agent, but update must still be
+performed by a **verified separate executable outside the installed bin**.
+Windows requires the Agent stopped, current-user Task Scheduler registration
+removed, and no running installed Agent image. No part of `update`
+automatically stops/restarts/registers a service.
 
-## Package format
+## ZIP package identity
 
-The release ZIP is produced by `scripts/package-hostlink-agent.py` and
-contains a `hostlink-agent-TARGET/` directory with the executable,
-Windows helper scripts (for Windows targets) and **one** `manifest.json`.
-The manifest contains `format` (2), `component` (`agent`), `target`,
-`version` and the exact file size/SHA-256 map (`files`).
+`scripts/package-hostlink-agent.py` creates target-specific packages with
+the exact interior path `hostlink-agent-TARGET/`, `manifest.json`, executable
+and helper scripts. The source manifest is retained byte-for-byte in
+`ROOT/bin` and records `format=2`, `component=agent`, target, version and
+per-file SHA-256. `archive.sha256` is added **after** ZIP verification (an
+archive cannot self-hash). There is no `install.json` compatibility layer.
 
-This **same manifest** is retained verbatim after extraction; no
-`install.json` or duplicated installed-metadata schema is created.
-The ZIP's SHA-256 cannot appear inside itself without a self-reference,
-so the updater or fresh bootstrap adds `archive.sha256` alongside the
-manifest **after verification**. Both files travel together in the
-published `bin/` bundle, preserving source digest/version identity and
-same-version reissue detection.
+`scripts/stage-hostlink-github-release.py` verifies package source/version
+receipts and creates one flat uniquely-named multi-target GitHub upload
+directory without publishing a tag or release. See
+[artifact build and staging](ARTIFACTS_AND_INVITES.md).
 
-## Fresh installation: `crates/agent/src/bootstrap.rs`
+## Fresh bootstrap
 
-1. Linux shell/PowerShell 2 scripts independently pin the ZIP and verifier
-   sidecar, invoking `bootstrap-verify` before asking for the invite token.
-2. The verifier checks source SHA, complete safe ZIP member inventory,
-   extracted file digests, target/version, and its own executable against
-   the package member. A newly created private staging folder contains
-   the actual verified member files, **verbatim `manifest.json`**,
-   `archive.sha256` and a separate `bootstrap-receipt.json`.
-3. After enrollment, the installer copies member files, `manifest.json`
-   and `archive.sha256` to `ROOT/bin/` and the bootstrap receipt to the
-   private root. No archive-pinned secret is placed in the bundle.
-4. `bootstrap-finalize --root ROOT` rechecks installed source and file
-   digests, receipt, private state and pending marker. It clears the marker
-   only on success. Unknown legacy formats are not adopted.
+`hostlink invite` resolves GitHub Release metadata, validates all required
+assets and downloads/checks the selected installer **before** requesting a
+one-use Hub invitation. The copyable target bootstrap does NOT contain the PAT:
+it prompts locally without echoing (or verifies an existing private credential)
+and stores it in the target user's private credential file. The signed-by-hash
+installer, target-specific sidecar executable, and ZIP are then fetched via
+GitHub release-asset API with target-side credential and bounded manual HTTPS
+redirects; their SHA-256 hashes are checked before `bootstrap-verify`.
 
-| Ownership | Location |
-| --- | --- |
-| Single installed-update API and upstream call | `crates/agent/src/update.rs` |
-| Source-pinned fresh enrollment | `crates/agent/src/bootstrap.rs` |
-| Shared ZIP preflight and manifest/installed identity | `crates/agent/src/package/` |
-| Private path/file helpers | `crates/agent/src/agent_files.rs` |
-| Windows stopped-image check | `crates/agent/src/service/offline.rs` |
-| Disposable update and bootstrap regressions | `crates/agent/src/update_tests/`, `crates/agent/tests/bootstrap_lifecycle.rs` |
+The verifier checks ZIP inventory, file digests, target and source-sidecar
+identity, stages a fresh private bundle, and writes a separate
+`bootstrap-receipt.json`. Only after source verification does bootstrap
+prompt for the **different, one-use Hub invitation token** and enroll. The
+one-use token is never reused automatically after an uncertain outcome.
+`bootstrap-finalize` checks installed files, receipt, private state and
+pending marker before completing.
 
-## Boundaries
+The target's GitHub token remains outside the Agent install root/ZIP. It is
+not an enrollment or Hub registration secret.
 
-- SHA-256 must come from an independently trusted artifact publisher.
-- Installed-Agent updates do not enforce a release filename or version
-  segment in the download URL. The ZIP manifest and extracted file hashes
-  enforce the requested target/version **after** the archive checksum gate.
-  Fresh enrollment/sidecar bootstrap has a separate source-validation
-  contract and is not changed by this updater-only simplification.
-- The ZIP compressed-size bound is checked **after** the upstream download.
-  Declared expanded sizes are not a strict streaming quota against
-  deliberately false ZIP headers.
-- Power loss between upstream directory renames can leave `bin/` absent;
-  there is no durable crash recovery or automatic service restart.
-- Windows 7/11, PowerShell 2, Task Scheduler and actual running-process
-  behavior require native acceptance, not just cross-compilation.
+## Known acceptance gates
 
-See [source layout](SOURCE_LAYOUT.md), [Windows offline update](AGENT_UPDATE_WINDOWS.md),
-[artifact packaging](ARTIFACTS_AND_INVITES.md), and
-[historical integration evidence](SELF_UPDATE_REWRITE.md).
+- No verified live private GitHub Release existed as of 2026-11-01. Do not
+  confuse synthetic API/HTTPS fixtures with a published-release download.
+- Windows 7 x86/x64 and Windows 11 PowerShell 2/ACL/Task Scheduler native
+  acceptance has **not** run for this revision.
+- Power-loss during the upstream directory renames can leave `bin` missing;
+  upstream rollback handles ordinary in-process publication errors only.
+- ZIP network download is bounded by a read cap; ZIP declared expansion sizes
+  are not an independent streaming quota against malicious false size headers.
+
+[Windows offline updater](AGENT_UPDATE_WINDOWS.md) ·
+[Source layout](SOURCE_LAYOUT.md) ·
+[Historical self-update decisions](SELF_UPDATE_REWRITE.md)

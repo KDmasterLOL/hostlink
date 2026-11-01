@@ -1,3 +1,5 @@
+**Historical pre-1C-1159 rollout plan:** its manual artifact URL, Caddy publication and legacy jobs commands have been superseded. Do **not** run those historical commands against current `dev`. See [GitHub Releases](GITHUB_RELEASES.md) for the current installation/update contract and its native acceptance gates.
+
 # HostLink — complete parallel operation and release plan
 
 Status: 2026-10-26. Parent Huly 1C-987, parallel rollout 1C-1037.

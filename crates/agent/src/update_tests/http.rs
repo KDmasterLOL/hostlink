@@ -333,14 +333,12 @@ async fn pending_native_apalis_task_and_private_state_survive_update() {
 #[test]
 fn already_current_manifest_does_not_download_again() {
     let fixture = Fixture::new();
-    let current = package("1.0.0", b"old executable", false);
-    assert_eq!(
-        hex::encode(read_installed(&fixture.root).unwrap().1),
-        digest(&current)
-    );
-    let server = Server::start(current.clone(), None);
+    // The ZIP source digest is the identity, not a fresh re-packaging of the
+    // same member bytes (archive metadata is not required to be reproducible).
+    let pin = hex::encode(read_installed(&fixture.root).unwrap().1);
+    let server = Server::start(package("1.0.0", b"old executable", false), None);
     let url = server.url();
-    assert!(!fixture.apply(&url, &current, "1.0.0").unwrap());
+    assert!(!update(&fixture.root, &url, &pin, TARGET, "1.0.0").unwrap());
     assert_eq!(server.request_count(), 0);
 }
 
