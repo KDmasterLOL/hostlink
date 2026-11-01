@@ -46,7 +46,7 @@ Hub owns **fleet identity/topology/lifecycle** only. It does not run shell comma
 | Agent | `crates/agent/src/{lib,main,ssh,tunnel,jobs,sftp,update}/` | Fresh enrollment and source-pinned installer; independent Apalis Board listener on loopback only, no legacy Agent JSONL or SSH jobs RPC |
 | Prior implementation (READ-ONLY) | `dev:crates/onec-hub/src/{state,server,allocation,authorized_keys,enrollment/*}.rs`, `dev:crates/onec-access/src/hub/*`, `dev:crates/onec-agent/src/{bootstrap_enrollment,enrollment_http}.rs` and `dev:crates/onec-agent/assets/Install-HostLink-Agent.ps1` | Reuse validated semantics and mature primitives selectively. Do **not** clone the old control-secret/JSONL execution stack or depend on old Toolkit |
 
-Hub's stable value types may be consumed by Client with the Hub **server feature disabled**; the Win7 Client must not link Axum/HTTP server runtime. No catch-all `core` or duplicate identity/protocol parsers merely to break a dependency cycle.
+Hub's stable value types may be consumed by Client with the Hub **server feature disabled**; Controller installations on HOME and WORK must not link the Hub HTTP server runtime. The Win7 Client is not a required installed target, although Win7 private-fs regressions still cover Agent storage. No catch-all `core` or duplicate identity/protocol parsers merely to break a dependency cycle.
 
 ### Proposed versioned management contract
 

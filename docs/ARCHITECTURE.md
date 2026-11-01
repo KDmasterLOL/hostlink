@@ -27,6 +27,31 @@ description of current `dev`.
   tiny `/new` form submits JSON directly to the upstream Board task API;
   `/` serves the upstream board for listing tasks/workers.
 
+## Deployment topology
+
+| Installation | Binary | Responsibility |
+| --- | --- | --- |
+| HOME PC (Linux) | `hostlink` (Client/Controller) | Managed Hub inventory, invitations, pinned SSH, transfers and forwarding |
+| WORK PC (Windows 11) | `hostlink.exe` (Client/Controller) | The same Controller operations under its own user credentials and SSH key identity |
+| Managed Windows/Linux servers, including supported Win7 targets | `hostlink-agent[.exe]` | User-scoped enrollment, embedded SSH/SFTP, reverse tunnel, Apalis worker and updates |
+| Independent management infrastructure | `hostlink-hub` and SSH gateway | Authoritative fleet identity/invites/revocation and approved SSH routing |
+
+Client installation does not install or register an Agent on HOME or WORK.
+Controller credentials and host keys must remain private to each Controller
+user; do not share a target's Agent private keys with either Controller.
+Server Agents are admitted through an explicit one-use Hub invite and run
+side-by-side with existing OneC Agent installations until separately approved
+replacement. The Hub is not a second execution/data transport.
+
+The four raw GitHub Release assets are **Agent binaries for server targets**,
+not installers for the HOME/WORK Controller. Build and verify the `hostlink`
+Client independently on HOME (Linux) and WORK (Windows 11). Windows 7
+Controller installation is not a release requirement; Win7 shared private-fs
+tests may use the Client as a diagnostic reproducer, but server Agent
+enrollment, protected storage and publication still require native NT6.1
+acceptance. See [release assets](GITHUB_RELEASES.md) and
+[cross-platform acceptance](WIN7_REWRITE_ACCEPTANCE.md).
+
 ```text
 Browser ── loopback HTTP/SSH TCP forward ──> Agent Apalis Board
                                                │ native TaskSink

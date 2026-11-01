@@ -14,6 +14,12 @@ Exactly four raw executables are eligible for publication:
 - `hostlink-agent-x86_64-win7-windows-msvc.exe`
 - `hostlink-agent-i686-win7-windows-msvc.exe`
 
+These assets install **Agent on managed servers**. They do not install the
+`hostlink` Client on HOME Linux or WORK Windows 11, and cannot silently
+enroll either Controller as a server Agent. Controller installation and
+native Client checks are a separate deployment step; the Hub and gateway
+are independently hosted infrastructure.
+
 Each asset needs a GitHub API-published `sha256:<hex>` digest. The updater
 uses the upstream `self_update` GitHub backend in RAW mode with the exact
 named target asset, version and published digest. A digest authenticates

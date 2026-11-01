@@ -4,6 +4,10 @@ Managed HostLink rewrite for development integration testing under Huly 1C-987.
 The workspace contains three crates: Agent, Client and the required Hub. This
 integration is not a release, deployment or installed fleet cutover.
 See the [documentation index](docs/index.md) for maintained contracts.
+The intended Controller installations are HOME PC (Linux) and WORK PC
+(Windows 11). The Agent is installed on managed servers, not automatically
+on either Controller computer. Hub and SSH gateway are independent
+management/routing infrastructure; see [deployment topology](docs/ARCHITECTURE.md#deployment-topology).
 Huly 1C-1164 defines binary-only distribution. Agent, Controller and
 packaging changes are integrated and pass the Linux workspace tests; native
 Windows and real private-release acceptance remain separate release gates.
