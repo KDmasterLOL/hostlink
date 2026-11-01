@@ -71,11 +71,11 @@ fn host_errors_preserve_the_existing_hub_and_ssh_error_owners() {
 
 // Reuse the existing process/certificate helpers rather than adding a TLS stack
 // or a test-only public HTTP constructor to the production Hub client.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[allow(dead_code)]
 #[path = "../../tests/e2e_steps/fixture.rs"]
 mod fixture;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use {
     fixture::{Children, key, private_dir, private_key_file, private_write, public_key},
     russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding},
@@ -89,7 +89,7 @@ use {
     },
 };
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod managed {
     use super::*;
     use axum::{Router, body::Body, http::Request};
@@ -135,8 +135,8 @@ mod managed {
             let service = HubService::new(ServerConfig {
                 listen: "127.0.0.1:1".parse().unwrap(),
                 public_url: "https://hub.fixture".into(),
-                state_root: root.path().join("hub-state"),
-                authorized_keys: root.path().join("gateway/authorized_keys"),
+                state_root: root.path().join("hostlink-hub-v2"),
+                authorized_keys: root.path().join("gateway/hostlink-v2-authorized_keys"),
                 gateways: vec![gateway],
                 operator_ssh_public_keys: vec![public_key(controller)],
                 operator_token: OPERATOR.into(),
@@ -297,9 +297,11 @@ mod managed {
             reply: server::ChannelOpenHandle,
             _: &mut server::Session,
         ) -> Result<(), Self::Error> {
+            // The Hub derives a distinct reverse port from each machine ID.
+            // Accept its configured disposable range, not one hardcoded ID's port.
             if let Some(target) = self.target
                 && host == "127.0.0.1"
-                && port == 41000
+                && (41000..=41010).contains(&port)
             {
                 let mut stream = tokio::net::TcpStream::connect(target).await?;
                 reply.accept().await;
@@ -341,6 +343,7 @@ mod managed {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires disposable Linux Caddy/OpenSSL and loopback network acceptance"]
     async fn create_only_invites_and_hub_errors_keep_secrets_private() {
         let controller = key();
         let (gateway, _ssh) = ssh(&controller, None).await;
@@ -373,6 +376,7 @@ mod managed {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires disposable Linux Caddy/OpenSSL and loopback network acceptance"]
     async fn connect_returns_canonical_identity_and_always_resolves_fresh() {
         let controller = key();
         let (target, _target) = ssh(&controller, None).await;
@@ -423,6 +427,7 @@ mod managed {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires disposable Linux Caddy/OpenSSL and loopback network acceptance"]
     async fn connect_rejects_unknown_ambiguous_routes_and_target_pin_mismatch() {
         let controller = key();
         let (target, _target) = ssh(&controller, None).await;
@@ -468,7 +473,13 @@ mod managed {
             .await
             .err()
             .unwrap();
-        assert!(matches!(error, HostError::Ssh(_)));
+        assert!(
+            matches!(
+                error,
+                HostError::Ssh(SshClientError::Russh(russh::Error::UnknownKey))
+            ),
+            "mismatched target pin must fail during SSH host-key validation: {error:?}"
+        );
         let rendered = format!("{error} {error:?}");
         assert!(!rendered.contains(OPERATOR));
         assert!(!rendered.contains("BEGIN OPENSSH PRIVATE KEY"));

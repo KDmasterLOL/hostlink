@@ -75,6 +75,18 @@ ssh.close().await?;
 
 `Host::create` does **not** upload artifacts, install an Agent, wait for enrollment or imply that a host is online. The high-level CLI validates its source-pinned installer *before* requesting the invitation; library callers must establish equivalent artifact trust themselves. The `PendingHost` holds the invitation, not an SSH identity. `Host::connect` resolves a current Hub record and approved gateway list for every call, returns the registered `Host` identity with the existing authenticated `HostConnection`, and never falls back to a cached or unmanaged route when Hub is unavailable. Neither operation creates another SSH engine.
 
+The Linux process-level domain regressions require Caddy, OpenSSL and available
+disposable loopback ports, so they are intentionally opt-in rather than a
+dependency of ordinary CI unit tests:
+
+```sh
+cargo test --offline --locked -p hostlink --lib -- --ignored --test-threads=1
+```
+
+These cases exercise the actual HTTPS Hub and pinned nested `russh` flow,
+including fresh name/ID resolution, revoked hosts, ambiguous selectors and
+key mismatches. They do not replace Windows 7/11 native acceptance.
+
 ## Agent-local jobs through Apalis Board
 
 Freshly enrolled Agents have a private `board_listen` such as
