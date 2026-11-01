@@ -6,12 +6,17 @@ fn hostlink(args: &[&str], config: &std::path::Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_hostlink"))
         .args(args)
         .env("HOSTLINK_HUB_CONFIG", config)
+        // Release tests must never consult a developer's real GitHub PAT.
+        .env(
+            "XDG_CONFIG_HOME",
+            config.parent().unwrap().join("missing-test-config"),
+        )
         .output()
         .expect("start hostlink CLI")
 }
 
 #[test]
-fn invite_requires_source_pins_by_default_and_exposes_explicit_manual_mode() {
+fn invite_selects_only_github_release_and_keeps_token_only_mode() {
     let help = Command::new(env!("CARGO_BIN_EXE_hostlink"))
         .args(["invite", "--help"])
         .output()
@@ -24,12 +29,6 @@ fn invite_requires_source_pins_by_default_and_exposes_explicit_manual_mode() {
     for option in [
         "--token-only",
         "--ssh-user",
-        "--installer-url",
-        "--installer-sha256",
-        "--agent-url",
-        "--agent-sha256",
-        "--archive-url",
-        "--archive-sha256",
         "--version",
         "--target",
         "--bootstrap-hub-ca-cert",
@@ -39,10 +38,23 @@ fn invite_requires_source_pins_by_default_and_exposes_explicit_manual_mode() {
             "missing {option} from invite interface: {help}"
         );
     }
+    for removed in [
+        "--installer-url",
+        "--installer-sha256",
+        "--agent-url",
+        "--agent-sha256",
+        "--archive-url",
+        "--archive-sha256",
+    ] {
+        assert!(
+            !help.contains(removed),
+            "obsolete arbitrary-site flag survived: {removed}"
+        );
+    }
 }
 
 #[test]
-fn invalid_source_target_is_rejected_before_any_hub_invite_request() {
+fn invalid_target_or_missing_github_credential_fail_before_any_hub_invite_request() {
     let root = tempfile::tempdir().expect("temporary config directory");
     let token = root.path().join("operator.token");
     fs::write(&token, "disposable-operator-token").expect("write token fixture");
@@ -78,18 +90,20 @@ fn invalid_source_target_is_rejected_before_any_hub_invite_request() {
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600))
         .expect("protect config fixture");
 
-    let missing = hostlink(
+    let invalid_target = hostlink(
         &[
             "invite",
             "--name",
             "lab-win7",
             "--target",
-            "x86_64-win7-windows-msvc",
+            "unsupported-target",
         ],
         &config,
     );
-    assert!(!missing.status.success());
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("--installer-url is required"));
+    assert!(!invalid_target.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid_target.stderr).contains("unsupported bootstrap target")
+    );
 
     let output = hostlink(
         &[
@@ -98,29 +112,12 @@ fn invalid_source_target_is_rejected_before_any_hub_invite_request() {
             "lab-win7",
             "--target",
             "x86_64-win7-windows-msvc",
-            "--version",
-            "1.2.3",
-            "--installer-url",
-            "https://artifacts.example/install.ps1",
-            "--installer-sha256",
-            &"a".repeat(64),
-            "--agent-url",
-            "https://artifacts.example/x86_64-win7-windows-msvc/hostlink-agent.exe",
-            "--agent-sha256",
-            &"b".repeat(64),
-            "--archive-url",
-            "https://artifacts.example/hostlink-agent-x86_64-pc-windows-msvc.zip",
-            "--archive-sha256",
-            &"c".repeat(64),
         ],
         &config,
     );
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("ZIP URL must name the exact selected target"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("GitHub credential"), "{stderr}");
     assert!(!stderr.contains("disposable-operator-token"));
     assert!(
         matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
