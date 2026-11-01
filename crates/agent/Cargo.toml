@@ -16,6 +16,7 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+hex.workspace = true
 base64.workspace = true
 semver.workspace = true
 zip.workspace = true
@@ -26,7 +27,7 @@ ulid.workspace = true
 secrecy.workspace = true
 processkit.workspace = true
 rand.workspace = true
-self_update = { version = "=1.3.1", default-features = false, features = ["archive-zip", "compression-zip-deflate", "rustls", "ureq", "checksums"] }
+self_update = { version = "=1.3.1", default-features = false, features = ["archive-zip", "compression-zip-deflate", "rustls", "ureq", "checksums", "github"] }
 hostlink-hub = { path = "../hub", default-features = false }
 reqwest.workspace = true
 ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }

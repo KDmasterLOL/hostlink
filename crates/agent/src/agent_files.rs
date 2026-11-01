@@ -45,7 +45,7 @@ fn validate_windows_update_root(root: &Path) -> io::Result<()> {
 // independent of caller-provided environment variables. SHGetFolderPathW
 // avoids importing newer Known Folder functions on the Win7 build.
 #[cfg(windows)]
-fn local_app_data_path() -> io::Result<PathBuf> {
+pub(super) fn local_app_data_path() -> io::Result<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::UI::Shell::{CSIDL_LOCAL_APPDATA, SHGetFolderPathW};
 

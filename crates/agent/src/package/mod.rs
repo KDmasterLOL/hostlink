@@ -13,18 +13,6 @@ pub(crate) const PACKAGE_MANIFEST: &str = "manifest.json";
 pub(crate) const ARCHIVE_DIGEST: &str = "archive.sha256";
 pub(crate) const EXECUTABLE_BASE: &str = "hostlink-agent";
 
-pub(crate) fn validate_sha256(digest: &str) -> std::io::Result<()> {
-    if digest.len() != 64
-        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || digest.bytes().any(|byte| byte.is_ascii_uppercase())
-    {
-        return Err(invalid(
-            "SHA-256 must contain 64 lowercase hexadecimal characters",
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) fn invalid(message: &'static str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
 }

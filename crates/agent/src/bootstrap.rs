@@ -8,8 +8,9 @@ use crate::package::EXECUTABLE_BASE;
 use crate::package::{
     ARCHIVE_DIGEST, BootstrapReceipt, MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, MAX_MANIFEST_BYTES,
     PACKAGE_MANIFEST, PackageManifest, invalid, invalid_owned, package_files, read_installed,
-    supported_targets, target_matches_runtime, validate_contents, validate_sha256,
+    supported_targets, target_matches_runtime, validate_contents,
 };
+use hex::FromHex;
 use private_fs::PrivateDir;
 use std::{
     collections::BTreeSet,
@@ -25,7 +26,10 @@ pub fn verify_fresh_package(
     version: &str,
     output: &Path,
 ) -> io::Result<()> {
-    validate_sha256(archive_sha256)?;
+    let archive_sha256 = <[u8; 32]>::from_hex(archive_sha256)
+        .map_err(|_| invalid("Agent archive SHA-256 must contain 32 hexadecimal bytes"))?;
+    // The receipt and archive.sha256 persist the canonical lowercase representation.
+    let archive_sha256 = hex::encode(archive_sha256);
     semver::Version::parse(version)
         .map_err(|_| invalid("Agent package version must be exact semantic version"))?;
     if version != env!("CARGO_PKG_VERSION") {
@@ -50,7 +54,7 @@ pub fn verify_fresh_package(
     }
     let canonical_archive = fs::canonicalize(archive_path)?;
     let (manifest, staged) =
-        validate_and_stage_archive(&canonical_archive, archive_sha256, target, version, parent)?;
+        validate_and_stage_archive(&canonical_archive, &archive_sha256, target, version, parent)?;
     let staged_package = staged
         .path()
         .join("extracted")
@@ -186,7 +190,9 @@ pub fn finalize_fresh_install(root: &Path) -> io::Result<()> {
         || receipt.component != "agent"
         || receipt.target != installed.target
         || receipt.version != installed.version
-        || receipt.archive_sha256 != installed_archive_sha256
+        || <[u8; 32]>::from_hex(&receipt.archive_sha256)
+            .map_err(|_| invalid("bootstrap receipt archive SHA-256 is invalid"))?
+            != installed_archive_sha256
         || receipt.files != installed.files
     {
         return Err(invalid(

@@ -2,9 +2,10 @@
 
 use super::{
     ARCHIVE_DIGEST, EXECUTABLE_BASE, MAX_MANIFEST_BYTES, PACKAGE_MANIFEST, PackageManifest,
-    invalid, package_files, supported_targets, target_matches_runtime, validate_sha256,
+    invalid, package_files, supported_targets, target_matches_runtime,
 };
 use crate::agent_files::{file_identities, is_reparse_point};
+use hex::FromHex;
 use std::{
     collections::BTreeSet,
     fs,
@@ -14,7 +15,7 @@ use std::{
 
 /// The source manifest remains verbatim in bin; the independently pinned archive
 /// checksum is stored alongside it after extraction (it cannot hash itself in ZIP).
-pub(crate) fn read_installed(root: &Path) -> io::Result<(PackageManifest, String)> {
+pub(crate) fn read_installed(root: &Path) -> io::Result<(PackageManifest, [u8; 32])> {
     let bin = root.join("bin");
     let manifest: PackageManifest =
         serde_json::from_slice(&read_regular(&bin.join(PACKAGE_MANIFEST))?)?;
@@ -25,10 +26,8 @@ pub(crate) fn read_installed(root: &Path) -> io::Result<(PackageManifest, String
             "installed Agent target does not match this runtime",
         ));
     }
-    let archive_sha256 = std::str::from_utf8(&read_regular(&bin.join(ARCHIVE_DIGEST))?)
-        .map_err(|_| invalid("installed archive SHA-256 must be ASCII"))?
-        .to_owned();
-    validate_sha256(&archive_sha256)?;
+    let archive_sha256 = <[u8; 32]>::from_hex(read_regular(&bin.join(ARCHIVE_DIGEST))?)
+        .map_err(|_| invalid("installed archive SHA-256 must contain 32 hexadecimal bytes"))?;
     validate_installed(&bin, &manifest, &manifest.target)?;
     Ok((manifest, archive_sha256))
 }
