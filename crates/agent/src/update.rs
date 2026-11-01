@@ -63,7 +63,6 @@ pub fn update(
         || address.port() == Some(0)
         || !address.username().is_empty()
         || address.password().is_some()
-        || address.authority().contains('@')
         || address.fragment().is_some()
     {
         return Err(invalid("credential-free HTTPS artifact URL required"));

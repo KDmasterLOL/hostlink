@@ -82,11 +82,12 @@ fn wrong_target_package(body: &[u8]) -> Vec<u8> {
     let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for index in 0..source.len() {
         let mut entry = source.by_index(index).unwrap();
-        if entry.name().ends_with("/manifest.json") {
+        let name = entry.name().unwrap().into_owned();
+        if name.ends_with("/manifest.json") {
             let mut manifest: serde_json::Value = serde_json::from_reader(&mut entry).unwrap();
             manifest["target"] = serde_json::json!("i686-win7-windows-msvc");
             archive
-                .start_file(entry.name(), zip::write::SimpleFileOptions::default())
+                .start_file(name, zip::write::SimpleFileOptions::default())
                 .unwrap();
             archive
                 .write_all(&serde_json::to_vec(&manifest).unwrap())
@@ -338,4 +339,17 @@ fn already_current_manifest_does_not_download_again() {
     let url = server.url();
     assert!(!fixture.apply(&url, &current, "1.0.0").unwrap());
     assert_eq!(server.request_count(), 0);
+}
+
+#[test]
+fn explicitly_pinned_older_release_is_installed_without_latest_discovery() {
+    let fixture = Fixture::new();
+    let older = package("0.9.0", b"operator-selected older Agent", false);
+    let server = Server::start(older.clone(), None);
+    assert!(fixture.apply(&server.url(), &older, "0.9.0").unwrap());
+    let (manifest, pinned_sha) = read_installed(&fixture.root).unwrap();
+    assert_eq!(manifest.version, "0.9.0");
+    assert_eq!(manifest.target, TARGET);
+    assert_eq!(pinned_sha, digest(&older));
+    assert_eq!(server.request_count(), 1);
 }
