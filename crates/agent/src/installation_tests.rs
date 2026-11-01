@@ -1,4 +1,5 @@
 use super::*;
+use crate::executable::{TEST_IMAGE_BYTES, test_image};
 use std::io::Write;
 
 #[cfg(target_os = "linux")]
@@ -40,10 +41,14 @@ fn pending_fixture() -> (tempfile::TempDir, PathBuf) {
 #[test]
 fn publication_copies_running_image_and_keeps_only_binary_plus_enrollment_state() {
     let (_temp, root) = pending_fixture();
-    let mut image = RunningExecutable::open().unwrap();
+    let (_image_temp, mut image) = test_image();
     let expected = image.sha256.clone();
     publish_executable(&root, &mut image).unwrap();
     assert!(!root.join("enrollment.pending").exists());
+    assert_eq!(
+        fs::read(root.join("bin").join(EXECUTABLE_NAME)).unwrap(),
+        TEST_IMAGE_BYTES
+    );
     assert_eq!(
         hash_file(
             &root.join("bin").join(EXECUTABLE_NAME),
@@ -60,24 +65,62 @@ fn publication_copies_running_image_and_keeps_only_binary_plus_enrollment_state(
     assert!(!root.join("bootstrap-receipt.json").exists());
     assert!(!root.join("bin/manifest.json").exists());
     assert!(!root.join("bin/archive.sha256").exists());
-    assert!(publish_executable(&root, &mut RunningExecutable::open().unwrap()).is_err());
+    let (_retry_temp, mut retry_image) = test_image();
+    assert!(publish_executable(&root, &mut retry_image).is_err());
 }
 
 #[test]
 fn publication_failure_preserves_pending_and_enrollment_state_without_adoption() {
     let (_temp, root) = pending_fixture();
-    let mut image = RunningExecutable::open().unwrap();
+    let (_image_temp, mut image) = test_image();
     image.sha256 = "00".repeat(32);
-    assert!(publish_executable(&root, &mut image).is_err());
-    assert!(root.join("enrollment.pending").is_file());
+    let error = publish_executable(&root, &mut image).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "published executable differs from the verified running image"
+    );
+    assert_eq!(
+        fs::read(root.join("enrollment.pending")).unwrap(),
+        b"keep on failure"
+    );
     assert_eq!(
         fs::read(root.join("state/manifest.json")).unwrap(),
         b"private enrollment manifest"
     );
+    let (_retry_temp, mut retry_image) = test_image();
     assert!(
-        publish_executable(&root, &mut RunningExecutable::open().unwrap()).is_err(),
+        publish_executable(&root, &mut retry_image).is_err(),
         "a failed publication never adopts an existing bin"
     );
+    assert_eq!(
+        fs::read(root.join("bin").join(EXECUTABLE_NAME)).unwrap(),
+        TEST_IMAGE_BYTES
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn executable_validation_rejects_images_larger_than_256_mib() {
+    let (_temp, root) = pending_fixture();
+    let (_image_temp, mut image) = test_image();
+    publish_executable(&root, &mut image).unwrap();
+    let path = root.join("bin").join(EXECUTABLE_NAME);
+    verify_executable(&path).unwrap();
+    assert_eq!(MAX_EXECUTABLE_BYTES, 256 * 1024 * 1024);
+    // Linux extends this disposable file with a sparse hole; no large image is written/read.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(MAX_EXECUTABLE_BYTES + 1)
+        .unwrap();
+    let error = verify_executable(&path).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(
+        error.to_string(),
+        "Agent executable is not a bounded regular file"
+    );
+    assert!(hash_file(&path, MAX_EXECUTABLE_BYTES).is_err());
 }
 
 #[cfg(unix)]
