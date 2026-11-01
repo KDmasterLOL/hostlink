@@ -4,7 +4,8 @@ For `hostlink-agent update` without arguments to discover a real latest
 version, an independently approved release process must upload the
 `hostlink-agent-TARGET.zip` assets to a GitHub Release in the fixed
 `KDmasterLOL/hostlink` repository, with an exact SemVer tag and a valid
-GitHub API `sha256:<hex>` digest for each asset. The ZIP's
+GitHub API `sha256:<hex>` digest for each asset. The release must be published
+as the latest eligible stable release for the no-argument updater. The ZIP's
 `manifest.json` must match the release target and version. The updater
 rejects missing or invalid release digests; it does not synthesize a SHA
 or create releases/tags. The repository is private and access requires

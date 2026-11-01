@@ -1544,6 +1544,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "futures",
+ "hex",
  "hostlink-hub",
  "libc",
  "private-fs",

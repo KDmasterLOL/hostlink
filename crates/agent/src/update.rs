@@ -16,7 +16,9 @@ use private_fs::{FileAccess, FileCreation, OpenOptions, PrivateDir};
 use reqwest::Url;
 use self_update::{
     Checksum, Release, ReleaseAsset, ReleaseSource, ReleaseStatus,
-    backends::{custom::Update, custom::UpdateBuilder, github::ReleaseList},
+    backends::{
+        custom::Update, custom::UpdateBuilder, github::ReleaseList, github::Update as GitHubUpdate,
+    },
 };
 use semver::Version;
 use std::{
@@ -89,8 +91,8 @@ pub fn default_update_root() -> io::Result<PathBuf> {
     Err(invalid("unsupported Agent platform; specify --root"))
 }
 
-/// Select an exact release, or the greatest stable release carrying this installed
-/// target, from the authenticated GitHub API. A missing/inaccessible release is an
+/// Select an exact release, or GitHub's designated latest published release,
+/// from the authenticated GitHub API. A missing/inaccessible release is an
 /// error, never an already-current result. The token is used only in memory.
 /// GitHub's digest authenticates API-selected bytes; it is not a publisher signature.
 ///
@@ -131,16 +133,43 @@ pub fn update_from_github(
             format!("Bearer {token}"),
         );
     }
-    let releases = listing
-        .build()
-        .map_err(io::Error::other)?
-        .fetch()
-        .map_err(|error| {
-            io::Error::other(format!(
-                "cannot list private KDmasterLOL/hostlink releases; check GitHub API access: {error}"
-            ))
-        })?
-        .into_vec();
+    // A private repository's authenticated /releases list may expose DRAFTS
+    // to users with write access. The official /releases/latest endpoint
+    // excludes unpublished drafts and pre-releases. Use it for the default.
+    let releases = if version.is_none() {
+        let mut latest = GitHubUpdate::configure();
+        latest
+            .repo_owner("KDmasterLOL")
+            .repo_name("hostlink")
+            .current_version(&installed.version)
+            .bin_name(EXECUTABLE_BASE)
+            .target(&installed.target)
+            .ureq_agent(download_transport(true, 0));
+        if let Some(token) = token {
+            latest.auth_token(token);
+        }
+        latest
+            .build()
+            .map_err(io::Error::other)?
+            .get_latest_release()
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "no published latest release accessible for KDmasterLOL/hostlink: {error}"
+                ))
+            })?
+            .into_vec()
+    } else {
+        listing
+            .build()
+            .map_err(io::Error::other)?
+            .fetch()
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "cannot list private KDmasterLOL/hostlink releases; check GitHub API access: {error}"
+                ))
+            })?
+            .into_vec()
+    };
     let (url, sha256, selected_version) =
         select_github_asset(&releases, &installed.target, version)?;
     apply_selected(

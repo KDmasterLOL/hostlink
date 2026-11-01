@@ -7,7 +7,7 @@ an independently pinned executable sidecar and ZIP before using an invitation.
 ## Installed Agent: `crates/agent/src/update.rs`
 
 ```sh
-hostlink-agent update                         # highest compatible stable GitHub Release
+hostlink-agent update                         # GitHub's latest published stable Release
 hostlink-agent update --version 1.2.3         # exact release (explicit downgrade allowed)
 hostlink-agent update --root ROOT             # explicit installed root
 ```
@@ -18,7 +18,9 @@ The manually pinned Rust API accepts typed `&Url`, `[u8; 32]` and
 fixed **KDmasterLOL/hostlink** GitHub repository.
 `true` means installed; `false` means already current.
 
-Automatic mode requires the exact `hostlink-agent-TARGET.zip` asset and its
+Automatic mode uses GitHub's designated latest published release
+(`/releases/latest`, excluding drafts and prereleases), and requires the exact
+`hostlink-agent-TARGET.zip` asset and its
 `sha256:<hex>` digest from GitHub Release metadata, then verifies the
 downloaded bytes and HostLink package manifest before publication. It trusts
 the authenticated GitHub repository **as the publisher**, not an independent
