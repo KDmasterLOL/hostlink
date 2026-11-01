@@ -28,12 +28,12 @@ is applied to those updater files. Persistent root, state, jobs, keys, configura
 and OS lock files retain their existing private-fs protection. The updater does not
 open SQLite or interpret job state; pending tasks survive for the next Agent start.
 
-The verify_binary hook checks the extracted files, replaces manifest.json with
-format-2 install.json and validates the exact bin inventory before the library
-publishes the entire bundle. This updates the executable, all support scripts and
-metadata together. Both fresh installation and update use only
-`bin/install.json` format 2; an old `root/install.json` is not read or migrated.
-Missing, symlinked or invalid metadata is an error.
+The verify_binary hook verifies extracted source manifest/file identities
+and writes a 64-character independently pinned `archive.sha256` beside the
+**unchanged** `manifest.json` in the staged bundle. It then validates
+the entire inventory before the library swaps `bin/`. On startup/update the
+installed source manifest and digest are both read back and verified;
+no obsolete install.json compatibility reader exists.
 
 On an ordinary publication error self_update attempts to restore the old bundle.
 Rollback is best-effort; a failed restoration is logged upstream and the original

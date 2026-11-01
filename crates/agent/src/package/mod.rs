@@ -10,7 +10,7 @@ pub(crate) const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 pub(crate) const PACKAGE_MANIFEST: &str = "manifest.json";
-pub(crate) const INSTALL_METADATA: &str = "install.json";
+pub(crate) const ARCHIVE_DIGEST: &str = "archive.sha256";
 pub(crate) const EXECUTABLE_BASE: &str = "hostlink-agent";
 
 pub(crate) fn validate_sha256(digest: &str) -> std::io::Result<()> {
@@ -88,17 +88,6 @@ pub(crate) struct PackageManifest {
 pub(crate) struct FileIdentity {
     pub(super) size: u64,
     pub(super) sha256: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct InstallMetadata {
-    pub(super) format: u32,
-    pub(super) target: String,
-    pub(super) installed_version: String,
-    pub(super) installed_package_sha256: String,
-    #[serde(deserialize_with = "deserialize_unique_file_map")]
-    pub(super) installed_files: BTreeMap<String, FileIdentity>,
 }
 
 #[derive(Debug, Deserialize)]

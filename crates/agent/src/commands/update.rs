@@ -1,5 +1,5 @@
 use clap::Args as ClapArgs;
-use hostlink_agent::update::{AgentUpdateOutcome, AgentUpdateRequest, Artifact};
+use hostlink_agent::update::update;
 use std::{io, path::PathBuf};
 
 #[derive(ClapArgs)]
@@ -17,18 +17,16 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn execute(args: Args) -> io::Result<()> {
-    let update = AgentUpdateRequest {
-        install_root: args.root,
-        artifact: Artifact::new(&args.url, args.sha256, args.target, args.version)?,
-    };
-    match hostlink_agent::update::apply(&update)? {
-        AgentUpdateOutcome::AlreadyCurrent { .. } => {
-            println!("Agent package already current");
-            Ok(())
-        }
-        AgentUpdateOutcome::Installed { .. } => {
-            println!("Agent package verified and installed");
-            Ok(())
-        }
+    if update(
+        &args.root,
+        &args.url,
+        &args.sha256,
+        &args.target,
+        &args.version,
+    )? {
+        println!("Agent package verified and installed");
+    } else {
+        println!("Agent package already current");
     }
+    Ok(())
 }

@@ -50,6 +50,9 @@ class PackageHostlinkAgentTests(unittest.TestCase):
                 "hostlink-agent-x86_64-unknown-linux-gnu/hostlink-agent",
                 "hostlink-agent-x86_64-unknown-linux-gnu/manifest.json",
             ])
+            # The archive's SHA cannot appear within itself. The verifier
+            # adds archive.sha256 beside this exact manifest during install.
+            self.assertNotIn("archive.sha256", " ".join(zf.namelist()))
             manifest = json.loads(zf.read(zf.namelist()[-1]))
             self.assertEqual(manifest["format"], 2)
             self.assertEqual(manifest["target"], "x86_64-unknown-linux-gnu")

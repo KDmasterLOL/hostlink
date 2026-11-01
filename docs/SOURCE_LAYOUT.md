@@ -44,10 +44,11 @@ does not certify production or registered Windows updater deployment.
 | Shared private root/path and file identities | `crates/agent/src/agent_files.rs` |
 | Windows offline process identity admission | `crates/agent/src/service/offline.rs` |
 
-`update.rs` invokes a single `self_update::backends::custom::Update` for already
-installed Agents. `bootstrap.rs` owns first-install verification/finalization,
-sharing only current format-2 package metadata and safe ZIP preflight in
-`package/`. There is no installed-format migration, old-journal guard, second
+`update.rs` exposes one `update(root,url,sha256,target,version)` function and
+invokes upstream `self_update::backends::custom::Update` for already installed
+Agents. `bootstrap.rs` owns first-install verification/finalization, sharing
+the verbatim package `manifest.json`, separate `archive.sha256` and safe ZIP
+preflight from `package/`. There is no installed-format migration, old-journal guard, second
 publisher or custom ZIP parser. Private root/state/jobs/keys retain `private-fs`
 protection, while installed `bin/` is nonsecret.
 See [Agent installation ownership](AGENT_INSTALLATION.md) and

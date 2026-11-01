@@ -1,180 +1,83 @@
-//! Update an already installed Agent through upstream self_update.
-//! Fresh installation, archive policy and installed-file models live outside
-//! this module; there is no second updater or compatibility migration.
+//! A single installed-Agent update using the upstream self_update bundle swap.
+//! The source ZIP manifest remains unchanged; only its pinned archive digest is
+//! added alongside it, so the installed bundle retains its exact source identity.
 
-use crate::agent_files::validate_user_owned_root;
-#[cfg(unix)]
-use crate::package::EXECUTABLE_BASE;
-#[cfg(test)]
-use crate::package::MAX_ARCHIVE_BYTES;
-use crate::package::{
-    INSTALL_METADATA, InstallMetadata, MAX_MANIFEST_BYTES, PACKAGE_MANIFEST, PackageManifest,
-    invalid, read_installed, read_regular, supported_targets, target_matches_runtime,
-    validate_contents, validate_installed, validate_sha256,
+use crate::{
+    agent_files::validate_user_owned_root,
+    package::{
+        ARCHIVE_DIGEST, EXECUTABLE_BASE, PACKAGE_MANIFEST, PackageManifest, invalid,
+        read_installed, read_regular, supported_targets, target_matches_runtime, validate_contents,
+        validate_installed, validate_sha256,
+    },
+    private_fs::PrivateFileExt,
 };
-use crate::private_fs::PrivateFileExt;
 use private_fs::{FileAccess, FileCreation, OpenOptions, PrivateDir};
-use reqwest::Url;
 use self_update::{
     Checksum, Release, ReleaseAsset, ReleaseSource, ReleaseStatus, backends::custom::Update,
 };
 use std::{
     fs::{self, File},
     io,
-    path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    path::Path,
     time::Duration,
 };
 
-#[derive(Clone, Debug)]
-pub struct Artifact {
-    pub(super) url: Url,
-    pub(super) sha256: String,
-    pub(super) target: String,
-    pub(super) version: String,
-}
+// self_update requires a ReleaseSource even for a caller-pinned single URL.
+// Its GitHub backend would change both the source-selection and trust contract.
+#[derive(Clone)]
+struct SelectedRelease(Release);
 
-impl Artifact {
-    pub fn new(url: &str, sha256: String, target: String, version: String) -> io::Result<Self> {
-        Self::parse(url, sha256, target, version, false)
-    }
-
-    #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
-    pub(super) fn loopback(
-        url: &str,
-        sha256: String,
-        target: String,
-        version: String,
-    ) -> io::Result<Self> {
-        Self::parse(url, sha256, target, version, true)
-    }
-
-    fn parse(
-        value: &str,
-        sha256: String,
-        target: String,
-        version: String,
-        fixture_http: bool,
-    ) -> io::Result<Self> {
-        validate_sha256(&sha256)?;
-        semver::Version::parse(&version).map_err(|_| invalid("exact semantic version required"))?;
-        if !supported_targets().contains(&target.as_str()) || !target_matches_runtime(&target) {
-            return Err(invalid("unsupported Agent target for this runtime"));
-        }
-        if value.contains(['\\', '%', '@'])
-            || value.split('/').any(|part| matches!(part, "." | ".."))
-        {
-            return Err(invalid(
-                "artifact URL requires a literal path without traversal or credentials",
-            ));
-        }
-        let url = Url::parse(value).map_err(|_| invalid("invalid artifact URL"))?;
-        let loopback = fixture_http
-            && url.scheme() == "http"
-            && url.host_str() == Some("127.0.0.1")
-            && url.port().is_some_and(|port| port != 0);
-        if (!loopback && url.scheme() != "https")
-            || url.host_str().is_none()
-            || url.port() == Some(0)
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.fragment().is_some()
-        {
-            return Err(invalid(
-                "credential-free HTTPS artifact URL without a fragment required",
-            ));
-        }
-        let name = format!("hostlink-agent-{target}.zip");
-        let tagged = format!("v{version}");
-        let segments = url
-            .path_segments()
-            .ok_or_else(|| invalid("invalid artifact URL path"))?
-            .collect::<Vec<_>>();
-        if segments.last().copied() != Some(name.as_str())
-            || !segments
-                .iter()
-                .any(|part| *part == version || *part == tagged)
-        {
-            return Err(invalid(
-                "artifact URL must name the exact version and target",
-            ));
-        }
-        Ok(Self {
-            url,
-            sha256,
-            target,
-            version,
-        })
-    }
-}
-
-impl ReleaseSource for Artifact {
+impl ReleaseSource for SelectedRelease {
     fn get_releases(&self) -> self_update::Result<Vec<Release>> {
-        Ok(vec![
-            Release::builder()
-                .version(&self.version)
-                .asset(ReleaseAsset::new(
-                    format!("hostlink-agent-{}.zip", self.target),
-                    self.url.as_str(),
-                ))
-                .build()?,
-        ])
+        Ok(vec![self.0.clone()])
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct AgentUpdateRequest {
-    pub install_root: PathBuf,
-    pub artifact: Artifact,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AgentUpdateOutcome {
-    AlreadyCurrent {
-        version: String,
-        archive_sha256: String,
-    },
-    Installed {
-        version: String,
-        archive_sha256: String,
-    },
-}
-
-/// Apply one independently pinned URL to a fully stopped Agent.
-/// No Agent/service restart is performed. A kill between upstream renames may leave bin absent.
-pub fn apply(request: &AgentUpdateRequest) -> io::Result<AgentUpdateOutcome> {
-    let _locks = acquire(&request.install_root)?;
-    let old = read_installed(&request.install_root)?;
-    let selected = &request.artifact;
-    if old.target != selected.target {
+/// Update one stopped Agent from an independently pinned release.
+/// Returns true when a bundle was installed, false when already current.
+/// No task registration, Agent restart, or durable crash recovery is performed.
+pub fn update(
+    root: &Path,
+    url: &str,
+    sha256: &str,
+    target: &str,
+    version: &str,
+) -> io::Result<bool> {
+    validate_sha256(sha256)?;
+    semver::Version::parse(version).map_err(|_| invalid("exact semantic version required"))?;
+    if !supported_targets().contains(&target) || !target_matches_runtime(target) {
+        return Err(invalid("unsupported Agent target for this runtime"));
+    }
+    if url.contains(['\\', '%', '@']) || url.split('/').any(|part| matches!(part, "." | "..")) {
         return Err(invalid(
-            "selected Agent target differs from installed target",
+            "artifact URL requires a literal, credential-free path",
         ));
     }
-    if old.installed_package_sha256 == selected.sha256 {
-        if old.installed_version != selected.version {
-            return Err(invalid(
-                "installed version conflicts with the selected archive SHA-256",
-            ));
-        }
-        return Ok(AgentUpdateOutcome::AlreadyCurrent {
-            version: selected.version.clone(),
-            archive_sha256: selected.sha256.clone(),
-        });
+    let address = reqwest::Url::parse(url).map_err(|_| invalid("invalid artifact URL"))?;
+    let test_loopback = cfg!(test)
+        && address.scheme() == "http"
+        && address.host_str() == Some("127.0.0.1")
+        && address.port().is_some_and(|port| port != 0);
+    if (address.scheme() != "https" && !test_loopback)
+        || address.host_str().is_none()
+        || address.port() == Some(0)
+        || !address.username().is_empty()
+        || address.password().is_some()
+        || address.fragment().is_some()
+        || address.path_segments().is_none_or(|mut segments| {
+            segments.next_back() != Some(format!("hostlink-agent-{target}.zip").as_str())
+                || !segments.any(|part| part == version || part == format!("v{version}"))
+        })
+    {
+        return Err(invalid("exact credential-free HTTPS artifact URL required"));
     }
-    publish(request, &old)?;
-    Ok(AgentUpdateOutcome::Installed {
-        version: selected.version.clone(),
-        archive_sha256: selected.sha256.clone(),
-    })
-}
-
-fn acquire(root: &Path) -> io::Result<(File, File)> {
     if !root.is_absolute() {
         return Err(invalid("Agent install root must be absolute"));
     }
     validate_user_owned_root(root)?;
-    let open = |parent: &Path, name: &str| -> io::Result<File> {
+    // These handles remain alive until publication completes. The runner holds
+    // jobs/runner.lock for its lifetime; this must never query its SQLite state.
+    let lock_file = |parent: &Path, name: &str| -> io::Result<File> {
         PrivateDir::open(parent)
             .and_then(|dir| {
                 dir.open_file_with(
@@ -189,12 +92,10 @@ fn acquire(root: &Path) -> io::Result<(File, File)> {
             .map_err(io::Error::other)?
             .try_clone_std()
     };
-    let update = open(root, "update.lock")?;
-    update
-        .try_lock()
-        .map_err(|error| io::Error::new(io::ErrorKind::WouldBlock, error))?;
-    let runner = open(&root.join("jobs"), "runner.lock")?;
-    runner.try_lock().map_err(|error| {
+    let _update_lock = lock_file(root, "update.lock")?;
+    _update_lock.try_lock()?;
+    let _runner_lock = lock_file(&root.join("jobs"), "runner.lock")?;
+    _runner_lock.try_lock().map_err(|error| {
         io::Error::new(
             io::ErrorKind::WouldBlock,
             format!("stop the running Agent before updating: {error}"),
@@ -202,103 +103,93 @@ fn acquire(root: &Path) -> io::Result<(File, File)> {
     })?;
     #[cfg(windows)]
     crate::service::ensure_agent_offline(root)?;
-    Ok((update, runner))
-}
 
-fn publish(request: &AgentUpdateRequest, old: &InstallMetadata) -> io::Result<()> {
-    let artifact = &request.artifact;
-    let verified = Arc::new(OnceLock::new());
-    let archive_verified = Arc::clone(&verified);
-    let selected = artifact.clone();
-    let bundle_verified = Arc::clone(&verified);
-    let bundle_artifact = artifact.clone();
-    let agent = ureq::Agent::config_builder()
-        .https_only(artifact.url.scheme() == "https") // HTTP artifacts exist only in unit fixtures.
+    let (old, old_sha256) = read_installed(root)?;
+    if old.target != target {
+        return Err(invalid(
+            "selected Agent target differs from installed target",
+        ));
+    }
+    if old_sha256 == sha256 {
+        if old.version != version {
+            return Err(invalid(
+                "installed version conflicts with selected archive SHA-256",
+            ));
+        }
+        return Ok(false);
+    }
+
+    let release = Release::builder()
+        .version(version)
+        .asset(ReleaseAsset::new(
+            format!("hostlink-agent-{target}.zip"),
+            url,
+        ))
+        .build()
+        .map_err(io::Error::other)?;
+    let verified_target = target.to_owned();
+    let verified_version = version.to_owned();
+    let bundle_target = target.to_owned();
+    let bundle_version = version.to_owned();
+    let bundle_sha256 = sha256.to_owned();
+    let transport = ureq::Agent::config_builder()
+        .https_only(address.scheme() == "https")
         .max_redirects(0)
         .proxy(None)
         .timeout_global(Some(Duration::from_secs(30)))
         .build()
         .new_agent();
+
     let status = Update::configure()
-        .source(artifact.clone())
-        .release_tag(&artifact.version)
-        .current_version(&old.installed_version)
-        .target(&artifact.target)
-        .bin_name("hostlink-agent")
-        .bundle_path_in_archive(format!("hostlink-agent-{}", artifact.target))
-        .bundle_install_path(request.install_root.join("bin"))
+        .source(SelectedRelease(release))
+        .release_tag(version)
+        .current_version(&old.version)
+        .target(target)
+        .bin_name(EXECUTABLE_BASE)
+        .bundle_path_in_archive(format!("hostlink-agent-{target}"))
+        .bundle_install_path(root.join("bin"))
         .no_confirm(true)
         .show_output(false)
         .retries(0)
-        .ureq_agent(agent)
-        .verify_checksum(Checksum::Sha256(artifact.sha256.clone()))
-        .verify_archive(move |path| {
-            let validated = validate_contents(path, &selected.target, &selected.version)?;
-            archive_verified
-                .set(validated)
-                .map_err(|_| invalid("archive hook ran twice"))?;
+        .ureq_agent(transport)
+        .verify_checksum(Checksum::Sha256(sha256.to_owned()))
+        .verify_archive(move |archive| {
+            validate_contents(archive, &verified_target, &verified_version)?;
             Ok(())
         })
-        .verify_binary(move |path| {
-            let (manifest, bytes) = bundle_verified
-                .get()
-                .ok_or_else(|| invalid("archive hook did not run"))?;
-            prepare_bundle(path, &bundle_artifact, manifest, bytes)?;
-            Ok(())
+        .verify_binary(move |bundle| {
+            let manifest: PackageManifest =
+                serde_json::from_slice(&read_regular(&bundle.join(PACKAGE_MANIFEST))?)?;
+            if manifest.version != bundle_version || manifest.target != bundle_target {
+                return Err(invalid("extracted manifest differs from selected release").into());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let executable = bundle.join(EXECUTABLE_BASE);
+                let mode = fs::metadata(&executable)?.permissions().mode();
+                fs::set_permissions(executable, fs::Permissions::from_mode(mode | 0o100))?;
+            }
+            fs::write(bundle.join(ARCHIVE_DIGEST), &bundle_sha256)?;
+            Ok(validate_installed(bundle, &manifest, &bundle_target)?)
         })
         .build()
         .map_err(io::Error::other)?
         .update_extended()
         .map_err(io::Error::other)?;
-    if !matches!(status, ReleaseStatus::Updated(ref release) if release.version() == artifact.version)
-    {
+
+    if !matches!(status, ReleaseStatus::Updated(ref release) if release.version() == version) {
         return Err(invalid(
             "self_update did not install the exact pinned release",
         ));
     }
-    let installed = read_installed(&request.install_root)?;
-    if installed.installed_package_sha256 != artifact.sha256
-        || installed.installed_version != artifact.version
-    {
+    let (installed, installed_sha256) = read_installed(root)?;
+    if installed.version != version || installed_sha256 != sha256 {
         return Err(invalid(
-            "published Agent identity differs from the selected artifact",
+            "published Agent identity differs from selected release",
         ));
     }
-    Ok(())
-}
-
-fn prepare_bundle(
-    path: &Path,
-    artifact: &Artifact,
-    manifest: &PackageManifest,
-    bytes: &[u8],
-) -> io::Result<()> {
-    if read_regular(&path.join(PACKAGE_MANIFEST))? != bytes {
-        return Err(invalid("extracted manifest differs from verified archive"));
-    }
-    // The published format contains metadata beside the executable, never state/jobs/keys.
-    fs::remove_file(path.join(PACKAGE_MANIFEST))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let executable = path.join(EXECUTABLE_BASE);
-        let mode = fs::metadata(&executable)?.permissions().mode();
-        fs::set_permissions(executable, fs::Permissions::from_mode(mode | 0o100))?;
-    }
-    let metadata = InstallMetadata {
-        format: 2,
-        target: artifact.target.clone(),
-        installed_version: artifact.version.clone(),
-        installed_package_sha256: artifact.sha256.clone(),
-        installed_files: manifest.files.clone(),
-    };
-    let bytes = serde_json::to_vec_pretty(&metadata)?;
-    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
-        return Err(invalid("generated install metadata exceeds its size limit"));
-    }
-    fs::write(path.join(INSTALL_METADATA), bytes)?;
-    validate_installed(path, &metadata, &artifact.target)?;
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]

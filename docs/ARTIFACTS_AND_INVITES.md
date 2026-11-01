@@ -30,7 +30,7 @@ OUTPUT/
       hostlink-agent.exe.sha256      # Linux name omits .exe
 ```
 
-The ZIP contains only the required `hostlink-agent-TARGET/<contract files>` set. The packager emits a deterministic order, but the Agent verifier does not depend on that order. Its manifest is stable JSON with current `format: 2`, component, target, version, and sorted file identities. ZIP timestamps are fixed, files are regular entries with executable mode only on the binary, and compression is DEFLATE. Archive and sidecar SHA-256 pins are recorded separately. Outputs are created under a private directory; an existing output is never replaced.
+The ZIP contains only the required `hostlink-agent-TARGET/<contract files>` set. The packager emits a deterministic order, but the Agent verifier does not depend on that order. Its manifest is stable JSON with current `format: 2`, component, target, version, and sorted file identities. The verifier and updater retain the exact source `manifest.json` in `bin/`; the independent archive SHA is stored as `archive.sha256` only after validation to avoid a self-referential ZIP digest. ZIP timestamps are fixed, files are regular entries with executable mode only on the binary, and compression is DEFLATE. Archive and sidecar SHA-256 pins are recorded separately. Outputs are created under a private directory; an existing output is never replaced.
 
 Before using the values in `invite-inputs.json`, copy the candidate into an immutable HTTPS artifact directory under a URL you control. Preserve the exact bytes and pins. The expected URL paths are:
 

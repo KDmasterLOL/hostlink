@@ -1,11 +1,10 @@
-//! Exact installed identity; format 2 metadata travels atomically inside nonsecret bin.
+//! Read one release manifest without reformatting it during installation.
 
 use super::{
-    EXECUTABLE_BASE, INSTALL_METADATA, InstallMetadata, MAX_MANIFEST_BYTES, invalid, package_files,
-    validate_sha256,
+    ARCHIVE_DIGEST, EXECUTABLE_BASE, MAX_MANIFEST_BYTES, PACKAGE_MANIFEST, PackageManifest,
+    invalid, package_files, supported_targets, target_matches_runtime, validate_sha256,
 };
 use crate::agent_files::{file_identities, is_reparse_point};
-use crate::package::{supported_targets, target_matches_runtime};
 use std::{
     collections::BTreeSet,
     fs,
@@ -13,21 +12,25 @@ use std::{
     path::Path,
 };
 
-pub(crate) fn read_installed(root: &Path) -> io::Result<InstallMetadata> {
-    let path = root.join("bin").join(INSTALL_METADATA);
-    let metadata: InstallMetadata = serde_json::from_slice(&read_regular(&path)?)?;
-    if metadata.format != 2 {
-        return Err(invalid("installed Agent metadata must have format 2"));
-    }
-    if !supported_targets().contains(&metadata.target.as_str())
-        || !target_matches_runtime(&metadata.target)
+/// The source manifest remains verbatim in bin; the independently pinned archive
+/// checksum is stored alongside it after extraction (it cannot hash itself in ZIP).
+pub(crate) fn read_installed(root: &Path) -> io::Result<(PackageManifest, String)> {
+    let bin = root.join("bin");
+    let manifest: PackageManifest =
+        serde_json::from_slice(&read_regular(&bin.join(PACKAGE_MANIFEST))?)?;
+    if !supported_targets().contains(&manifest.target.as_str())
+        || !target_matches_runtime(&manifest.target)
     {
         return Err(invalid(
             "installed Agent target does not match this runtime",
         ));
     }
-    validate_installed(&root.join("bin"), &metadata, &metadata.target)?;
-    Ok(metadata)
+    let archive_sha256 = std::str::from_utf8(&read_regular(&bin.join(ARCHIVE_DIGEST))?)
+        .map_err(|_| invalid("installed archive SHA-256 must be ASCII"))?
+        .to_owned();
+    validate_sha256(&archive_sha256)?;
+    validate_installed(&bin, &manifest, &manifest.target)?;
+    Ok((manifest, archive_sha256))
 }
 
 pub(crate) fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
@@ -47,19 +50,21 @@ pub(crate) fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
 
 pub(crate) fn validate_installed(
     bin: &Path,
-    metadata: &InstallMetadata,
+    manifest: &PackageManifest,
     target: &str,
 ) -> io::Result<()> {
-    if metadata.format != 2 || metadata.target != target {
+    if manifest.format != 2 || manifest.component != "agent" || manifest.target != target {
         return Err(invalid(
-            "installed Agent metadata has a different format or target",
+            "installed Agent manifest has an unexpected identity",
         ));
     }
-    semver::Version::parse(&metadata.installed_version).map_err(io::Error::other)?;
-    validate_sha256(&metadata.installed_package_sha256)?;
+    semver::Version::parse(&manifest.version)
+        .map_err(|_| invalid("installed Agent version is not semantic"))?;
     validate_directory(bin)?;
-    let mut expected = package_files(target).into_iter().collect::<BTreeSet<_>>();
-    expected.insert(INSTALL_METADATA.into());
+    let expected_files = package_files(target);
+    let mut expected = expected_files.iter().cloned().collect::<BTreeSet<_>>();
+    expected.insert(PACKAGE_MANIFEST.into());
+    expected.insert(ARCHIVE_DIGEST.into());
     let actual = fs::read_dir(bin)?
         .map(|entry| {
             let entry = entry?;
@@ -73,11 +78,9 @@ pub(crate) fn validate_installed(
                 .map_err(|_| invalid("Agent bin filename is not UTF-8"))
         })
         .collect::<io::Result<BTreeSet<_>>>()?;
-    if actual != expected
-        || file_identities(bin, &package_files(target))? != metadata.installed_files
-    {
+    if actual != expected || file_identities(bin, &expected_files)? != manifest.files {
         return Err(invalid(
-            "installed Agent files differ from their exact identity metadata",
+            "installed Agent files differ from the release manifest",
         ));
     }
     let executable = if target.contains("windows") {

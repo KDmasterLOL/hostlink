@@ -174,8 +174,12 @@ try {
         [IO.File]::SetAccessControl($destinationMember, $tokenSecurity)
         if ((Get-Sha256 $destinationMember) -cne (Get-Sha256 $sourceMember)) { throw 'Published Agent package member digest mismatch.' }
     }
-    [IO.File]::Copy((Join-Path $verified 'install.json'), (Join-Path $bin 'install.json'))
-    [IO.File]::SetAccessControl((Join-Path $bin 'install.json'), $tokenSecurity)
+    foreach ($metadata in @('manifest.json','archive.sha256')) {
+        $sourceMetadata = Join-Path $verified $metadata
+        $installedMetadata = Join-Path $bin $metadata
+        [IO.File]::Copy($sourceMetadata, $installedMetadata)
+        [IO.File]::SetAccessControl($installedMetadata, $tokenSecurity)
+    }
     [IO.File]::Copy((Join-Path $verified 'bootstrap-receipt.json'), (Join-Path $root 'bootstrap-receipt.json'))
     [IO.File]::SetAccessControl((Join-Path $root 'bootstrap-receipt.json'), $tokenSecurity)
     & $agentFile bootstrap-finalize --root $root

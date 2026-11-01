@@ -82,8 +82,8 @@ impl Fixture {
             .extract_into(&extracted)
             .unwrap();
         let bundle = extracted.join(format!("hostlink-agent-{TARGET}"));
-        let (manifest, _) = crate::package::validate_contents(&archive, TARGET, "1.0.0").unwrap();
-        fs::remove_file(bundle.join(PACKAGE_MANIFEST)).unwrap();
+        crate::package::validate_contents(&archive, TARGET, "1.0.0").unwrap();
+        fs::write(bundle.join(ARCHIVE_DIGEST), digest(&old)).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -94,27 +94,11 @@ impl Fixture {
             .unwrap();
         }
         fs::rename(bundle, root.join("bin")).unwrap();
-        let metadata = crate::package::InstallMetadata {
-            format: 2,
-            target: TARGET.into(),
-            installed_version: "1.0.0".into(),
-            installed_package_sha256: digest(&old),
-            installed_files: manifest.files,
-        };
-        fs::write(
-            root.join("bin").join(INSTALL_METADATA),
-            serde_json::to_vec(&metadata).unwrap(),
-        )
-        .unwrap();
         Self { temp, root }
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    pub(super) fn request(&self, url: &str, bytes: &[u8], version: &str) -> AgentUpdateRequest {
-        AgentUpdateRequest {
-            install_root: self.root.clone(),
-            artifact: Artifact::loopback(url, digest(bytes), TARGET.into(), version.into())
-                .unwrap(),
-        }
+    pub(super) fn apply(&self, url: &str, bytes: &[u8], version: &str) -> std::io::Result<bool> {
+        update(&self.root, url, &digest(bytes), TARGET, version)
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub(super) fn preserved(&self) -> Vec<Vec<u8>> {

@@ -1,4 +1,46 @@
-# 1C-1147: production self_update-first cutover
+# History of the Agent self_update integration
+
+**Current implementation (1C-1155):** [Agent installation contract](AGENT_INSTALLATION.md).
+The sections below record the **historical** source-exact 1C-1147/1149/1153
+decisions and their own test evidence. Their `install.json` transformation,
+`Artifact` constructor, `AgentUpdateRequest` and `AgentUpdateOutcome` refer to
+superseded code and are **not** requirements of current `dev`.
+
+## 1C-1155 — direct source manifest / minimal update interface
+
+The current Agent has one public
+`update(root, url, sha256, target, version) -> io::Result<bool>`.
+The high-level upstream `self_update::backends::custom::Update` remains the
+only downloader, ZIP extractor and bundle publisher. The exact caller-selected
+HTTPS URL, version, target and independently supplied full ZIP SHA-256 stay
+pinned. A minimal one-`Release` adapter is required by upstream
+`custom::Update::source`; GitHub auto-discovery would change that contract.
+
+The source release `manifest.json`, containing file SHA-256 identities, is
+copied **unchanged** into `bin/`. After the upstream checksum check the
+staged bundle receives a 64-byte `bin/archive.sha256` file. This digest
+cannot be embedded in its own archive without a cryptographic self-reference.
+The two metadata files swap atomically with the executable and scripts.
+The archive hook still checks ZIP safety/required member inventory; the
+binary hook verifies the extracted files before publication. There is no
+manifest-to-install conversion, duplicated installed metadata struct,
+`OnceLock` sharing, bespoke rollback or installed-format migration.
+The same-version/different-digest case still installs the selected exact
+source; equal-version/equal-digest requests are idempotent.
+
+Fresh bootstrap separately verifies the sidecar and ZIP before enrollment,
+retains `manifest.json`, adds `archive.sha256` and checks the source receipt.
+Private root, keys, jobs and state stay outside the published bundle. Windows
+requires an unregistered task and an independent stopped Agent process.
+
+**Acceptance caveat:** this entry is a design/implementation description;
+the historical test matrix later in this document belongs to the older source
+commit. New source-exact test results must be recorded separately.
+
+---
+
+## Historical 1C-1147 contract
+
 
 Base: dev@b7f93f46150ab86780eec5bad643ee325462b483. Author worktree/branch:
 `task/1c-1145-self-update-rewrite-20261031`. No dev/main/tag/release, installed

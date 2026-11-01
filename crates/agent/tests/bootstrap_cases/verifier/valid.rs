@@ -77,16 +77,20 @@ fn fresh_package_verifier_extracts_exact_manifest_and_installed_metadata() {
         fs::read(output.join("hostlink-agent")).expect("extracted sidecar"),
         sidecar
     );
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&fs::read(output.join("install.json")).expect("metadata"))
-            .expect("metadata JSON");
-    assert_eq!(metadata["format"], 2);
-    assert_eq!(metadata["target"], TARGET);
-    assert_eq!(metadata["installed_version"], version);
-    assert_eq!(metadata["installed_package_sha256"], archive_sha256);
+    let manifest_in_output: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("manifest.json")).expect("manifest"))
+            .expect("manifest JSON");
+    assert_eq!(manifest_in_output, manifest);
+    assert_eq!(manifest_in_output["format"], 2);
+    assert_eq!(manifest_in_output["target"], TARGET);
+    assert_eq!(manifest_in_output["version"], version);
     assert_eq!(
-        metadata["installed_files"]["hostlink-agent"]["sha256"],
+        manifest_in_output["files"]["hostlink-agent"]["sha256"],
         format!("{:x}", Sha256::digest(&sidecar))
+    );
+    assert_eq!(
+        fs::read(output.join("archive.sha256")).expect("archive pin"),
+        archive_sha256.as_bytes()
     );
 
     let root = temp.path().join("installed-agent");
@@ -103,8 +107,10 @@ fn fresh_package_verifier_extracts_exact_manifest_and_installed_metadata() {
     .expect("pending marker");
     fs::copy(output.join("hostlink-agent"), bin.join("hostlink-agent"))
         .expect("publish verified executable");
-    fs::copy(output.join("install.json"), root.join("bin/install.json"))
-        .expect("publish install metadata");
+    fs::copy(output.join("manifest.json"), bin.join("manifest.json"))
+        .expect("publish source manifest");
+    fs::copy(output.join("archive.sha256"), bin.join("archive.sha256"))
+        .expect("publish independent archive digest");
     assert!(!root.join("install.json").exists());
     fs::copy(
         output.join("bootstrap-receipt.json"),
@@ -124,11 +130,13 @@ fn fresh_package_verifier_extracts_exact_manifest_and_installed_metadata() {
         .expect("private executable");
         fs::set_permissions(state.join("agent.json"), fs::Permissions::from_mode(0o600))
             .expect("private config");
+        fs::set_permissions(bin.join("manifest.json"), fs::Permissions::from_mode(0o600))
+            .expect("private manifest");
         fs::set_permissions(
-            root.join("bin/install.json"),
+            bin.join("archive.sha256"),
             fs::Permissions::from_mode(0o600),
         )
-        .expect("private metadata");
+        .expect("private source digest");
         fs::set_permissions(
             root.join("bootstrap-receipt.json"),
             fs::Permissions::from_mode(0o600),

@@ -23,8 +23,9 @@ a separate updater beneath the private root, outside `bin`. The CLI uses
 `update --root ROOT --url URL --sha256 SHA --target TARGET --version VERSION`.
 Archive/bundle staging and nonsecret `bin` use upstream native permissions/ACLs.
 Private root/state/jobs/keys and process locks retain `private-fs` protection.
-Fresh installs and updates both publish only the current format-2
-`bin/install.json`. There is no legacy root-metadata fallback or migration.
+Fresh installs and updates both retain the exact source `bin/manifest.json`
+(format 2) and store the independently pinned ZIP digest in
+`bin/archive.sha256`. There is no duplicated install metadata or legacy migration.
 Ordinary publication errors use upstream best-effort in-process rollback.
 **A kill/power loss between renames can leave bin missing; there is no
 automatic crash recovery or restart.**

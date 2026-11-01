@@ -6,9 +6,9 @@ use crate::agent_files::{
 #[cfg(unix)]
 use crate::package::EXECUTABLE_BASE;
 use crate::package::{
-    BootstrapReceipt, INSTALL_METADATA, InstallMetadata, MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES,
-    MAX_MANIFEST_BYTES, PACKAGE_MANIFEST, PackageManifest, invalid, invalid_owned, package_files,
-    read_installed, supported_targets, target_matches_runtime, validate_contents, validate_sha256,
+    ARCHIVE_DIGEST, BootstrapReceipt, MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, MAX_MANIFEST_BYTES,
+    PACKAGE_MANIFEST, PackageManifest, invalid, invalid_owned, package_files, read_installed,
+    supported_targets, target_matches_runtime, validate_contents, validate_sha256,
 };
 use private_fs::PrivateDir;
 use std::{
@@ -69,20 +69,12 @@ pub fn verify_fresh_package(
             "verifier sidecar does not match the package Agent executable",
         ));
     }
-    let install_metadata = InstallMetadata {
-        format: 2,
-        target: target.to_owned(),
-        installed_version: version.to_owned(),
-        installed_package_sha256: archive_sha256.to_owned(),
-        installed_files: manifest.files.clone(),
-    };
     let package_dir = PrivateDir::open(&staged_package).map_err(io::Error::other)?;
-    let mut metadata_file = package_dir
-        .create(INSTALL_METADATA)
+    let mut digest_file = package_dir
+        .create(ARCHIVE_DIGEST)
         .map_err(io::Error::other)?;
-    metadata_file
-        .write_all(&serde_json::to_vec_pretty(&install_metadata).map_err(io::Error::other)?)?;
-    metadata_file.sync_all().map_err(io::Error::other)?;
+    digest_file.write_all(archive_sha256.as_bytes())?;
+    digest_file.sync_all().map_err(io::Error::other)?;
     let mut receipt_file = package_dir
         .create("bootstrap-receipt.json")
         .map_err(io::Error::other)?;
@@ -99,12 +91,11 @@ pub fn verify_fresh_package(
         .map_err(io::Error::other)?,
     )?;
     receipt_file.sync_all().map_err(io::Error::other)?;
-    fs::remove_file(staged_package.join(PACKAGE_MANIFEST))?;
     // Windows refuses renaming a directory containing still-open file handles
     // (ERROR_ACCESS_DENIED), even after each file's sync_all has succeeded.
-    // Publish only after closing both verified metadata and receipt files.
+    // Publish only after closing both source-digest and receipt files.
     drop(receipt_file);
-    drop(metadata_file);
+    drop(digest_file);
     drop(package_dir);
     // Windows std::fs::File::open cannot open a directory for sync_all.
     // The member files and receipt have already been individually flushed;
@@ -165,11 +156,11 @@ pub fn finalize_fresh_install(root: &Path) -> io::Result<()> {
     #[cfg(not(windows))]
     drop(state_dir);
 
-    let installed = read_installed(root)?;
+    let (installed, installed_archive_sha256) = read_installed(root)?;
     if installed.format != 2
         || !supported_targets().contains(&installed.target.as_str())
         || !target_matches_runtime(&installed.target)
-        || installed.installed_version != env!("CARGO_PKG_VERSION")
+        || installed.version != env!("CARGO_PKG_VERSION")
     {
         return Err(invalid(
             "fresh installed package target or version does not match this Agent",
@@ -194,9 +185,9 @@ pub fn finalize_fresh_install(root: &Path) -> io::Result<()> {
     if receipt.format != 2
         || receipt.component != "agent"
         || receipt.target != installed.target
-        || receipt.version != installed.installed_version
-        || receipt.archive_sha256 != installed.installed_package_sha256
-        || receipt.files != installed.installed_files
+        || receipt.version != installed.version
+        || receipt.archive_sha256 != installed_archive_sha256
+        || receipt.files != installed.files
     {
         return Err(invalid(
             "bootstrap receipt does not match installed package metadata",

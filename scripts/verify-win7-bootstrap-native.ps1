@@ -286,31 +286,21 @@ function Assert-OutputReceipt([string]$Output, $Artifact, [Security.Principal.Se
             Stop-Harness 'extracted package member does not match the verified receipt'
         }
     }
-    $metadataPath = Assert-RegularOwnedFile ([IO.Path]::Combine($Output, 'install.json')) $Sid
-    $metadata = Read-JsonFile $metadataPath
-    Assert-ReceiptKeys $metadata @('format','target','installed_version','installed_package_sha256','installed_files')
-    if ([int](Get-JsonValue $metadata 'format') -ne 2 -or (Get-JsonValue $metadata 'target') -cne $Artifact.Target -or (Get-JsonValue $metadata 'installed_version') -cne $Version -or (Get-JsonValue $metadata 'installed_package_sha256') -cne $Artifact.ArchiveSha256) { Stop-Harness 'installed metadata does not bind exact package version and digest' }
-    $installed = Get-JsonValue $metadata 'installed_files'
-    if ($installed.Count -ne $Artifact.Files.Count) { Stop-Harness 'installed metadata inventory count mismatch' }
-    foreach ($name in $Artifact.Files.Keys) {
-        if (-not $installed.ContainsKey($name) -or $installed[$name].sha256 -cne $Artifact.Files[$name].sha256 -or [long]$installed[$name].size -ne [long]$Artifact.Files[$name].size) { Stop-Harness 'installed metadata member inventory mismatch' }
+    $archivePin = Assert-RegularOwnedFile ([IO.Path]::Combine($Output, 'archive.sha256')) $Sid
+    if ([IO.File]::ReadAllText($archivePin, [Text.Encoding]::ASCII) -cne $Artifact.ArchiveSha256) {
+        Stop-Harness 'installed archive digest does not match independently selected source'
     }
-    # validate_and_stage_archive intentionally preserves the exact package.zip
-    # and manifest.json alongside extracted files and the two receipts. Both
-    # must be verified; simply increasing the allowed file count would hide
-    # an unauthorized or modified output member.
-    $archivePath = Assert-RegularOwnedFile ([IO.Path]::Combine($Output, 'package.zip')) $Sid
-    if ((Get-Sha256 $archivePath) -cne $Artifact.ArchiveSha256) { Stop-Harness 'preserved package ZIP digest mismatch' }
+    # The original ZIP manifest remains verbatim; no install.json transformation.
     $manifestPath = Assert-RegularOwnedFile ([IO.Path]::Combine($Output, 'manifest.json')) $Sid
     $manifest = Read-JsonFile $manifestPath
     Assert-ReceiptKeys $manifest @('format','component','target','version','files')
-    if ([int](Get-JsonValue $manifest 'format') -ne 1 -or (Get-JsonValue $manifest 'component') -cne 'agent' -or (Get-JsonValue $manifest 'target') -cne $Artifact.Target -or (Get-JsonValue $manifest 'version') -cne $Version) { Stop-Harness 'preserved manifest identity mismatch' }
+    if ([int](Get-JsonValue $manifest 'format') -ne 2 -or (Get-JsonValue $manifest 'component') -cne 'agent' -or (Get-JsonValue $manifest 'target') -cne $Artifact.Target -or (Get-JsonValue $manifest 'version') -cne $Version) { Stop-Harness 'preserved manifest identity mismatch' }
     $manifestFiles = Get-JsonValue $manifest 'files'
     if ($manifestFiles.Count -ne $Artifact.Files.Count) { Stop-Harness 'preserved manifest member count mismatch' }
     foreach ($name in $Artifact.Files.Keys) {
         if (-not $manifestFiles.ContainsKey($name) -or $manifestFiles[$name].sha256 -cne $Artifact.Files[$name].sha256 -or [long]$manifestFiles[$name].size -ne [long]$Artifact.Files[$name].size) { Stop-Harness 'preserved manifest member digest or size mismatch' }
     }
-    $expectedCount = $Artifact.Files.Count + 4
+    $expectedCount = $Artifact.Files.Count + 3
     $actualFiles = @(Get-ChildItem -LiteralPath $Output -Force | Where-Object { -not $_.PSIsContainer })
     if ($actualFiles.Count -ne $expectedCount) { Stop-Harness 'native output contains unexpected files' }
     # Windows PowerShell 2 does not provide modern scalar/null .Count semantics.

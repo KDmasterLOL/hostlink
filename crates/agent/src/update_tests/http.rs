@@ -68,48 +68,50 @@ impl Drop for Server {
 }
 
 #[test]
-fn idempotency_and_same_version_new_digest_use_real_high_level_update() {
+fn idempotency_and_same_version_changed_digest_use_real_upstream_update() {
     let fixture = Fixture::new();
     let before = fixture.preserved();
     let body = package("2.0.0", b"new executable", false);
     let server = Server::start(body.clone(), None);
-    let request = fixture.request(&server.url(), &body, "2.0.0");
-    assert!(matches!(
-        apply(&request).unwrap(),
-        AgentUpdateOutcome::Installed { .. }
-    ));
-    assert_eq!(
-        crate::package::read_installed(&fixture.root)
-            .unwrap()
-            .format,
-        2
-    );
+    assert!(fixture.apply(&server.url(), &body, "2.0.0").unwrap());
+    let (manifest, source_sha) = read_installed(&fixture.root).unwrap();
+    assert_eq!(manifest.version, "2.0.0");
+    assert_eq!(source_sha, digest(&body));
     assert_eq!(fixture.preserved(), before);
     assert!(!fixture.root.join("jobs/jobs.db").exists());
-    assert!(matches!(
-        apply(&request).unwrap(),
-        AgentUpdateOutcome::AlreadyCurrent { .. }
-    ));
+
+    assert!(!fixture.apply(&server.url(), &body, "2.0.0").unwrap());
     assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+
     let replacement = package("2.0.0", b"different exact executable", false);
     let other = Server::start(replacement.clone(), None);
-    assert!(matches!(
-        apply(&fixture.request(&other.url(), &replacement, "2.0.0")).unwrap(),
-        AgentUpdateOutcome::Installed { .. }
-    ));
+    assert!(fixture.apply(&other.url(), &replacement, "2.0.0").unwrap());
     assert_eq!(
         fs::read(fixture.root.join("bin/hostlink-agent")).unwrap(),
         b"different exact executable"
     );
+    assert_eq!(
+        read_installed(&fixture.root).unwrap().1,
+        digest(&replacement)
+    );
     assert_eq!(fixture.preserved(), before);
-    let mut conflict = request.clone();
-    conflict.artifact.sha256 = digest(&replacement);
-    conflict.artifact.version = "2.0.1".into();
-    assert!(apply(&conflict).is_err());
+
+    let same_sha_different_version = format!("{}/v2.0.1/hostlink-agent-{TARGET}.zip", other.origin);
+    assert!(
+        update(
+            &fixture.root,
+            &same_sha_different_version,
+            &digest(&replacement),
+            TARGET,
+            "2.0.1"
+        )
+        .is_err()
+    );
+    assert_eq!(other.requests.load(Ordering::SeqCst), 1);
 }
 
 #[test]
-fn changed_download_wrong_manifest_symlink_and_redirect_preserve_install() {
+fn bad_checksum_manifest_symlink_and_redirect_preserve_old_bundle() {
     let good = package("2.0.0", b"new executable", false);
     for body in [
         package("2.0.0", b"changed executable", false),
@@ -119,29 +121,24 @@ fn changed_download_wrong_manifest_symlink_and_redirect_preserve_install() {
         let fixture = Fixture::new();
         let before = fixture.preserved();
         let server = Server::start(body.clone(), None);
-        let mut request = fixture.request(&server.url(), &body, "2.0.0");
-        if body == package("2.0.0", b"changed executable", false) {
-            request.artifact.sha256 = digest(&good);
-        }
-        assert!(apply(&request).is_err());
-        assert_eq!(
-            crate::package::read_installed(&fixture.root)
-                .unwrap()
-                .installed_version,
-            "1.0.0"
-        );
+        let pin = if body == package("2.0.0", b"changed executable", false) {
+            digest(&good)
+        } else {
+            digest(&body)
+        };
+        assert!(update(&fixture.root, &server.url(), &pin, TARGET, "2.0.0").is_err());
+        assert_eq!(read_installed(&fixture.root).unwrap().0.version, "1.0.0");
         assert_eq!(fixture.preserved(), before);
     }
     let destination = Server::start(good.clone(), None);
     let redirect = Server::start(Vec::new(), Some(&destination.url()));
     let fixture = Fixture::new();
-    assert!(apply(&fixture.request(&redirect.url(), &good, "2.0.0")).is_err());
+    assert!(fixture.apply(&redirect.url(), &good, "2.0.0").is_err());
     assert_eq!(destination.requests.load(Ordering::SeqCst), 0);
-    // The library normally resolves symlink bundle destinations; HostLink rejects them first.
     fs::rename(fixture.root.join("bin"), fixture.root.join("alias-target")).unwrap();
     std::os::unix::fs::symlink(fixture.root.join("alias-target"), fixture.root.join("bin"))
         .unwrap();
-    assert!(apply(&fixture.request(&destination.url(), &good, "2.0.0")).is_err());
+    assert!(fixture.apply(&destination.url(), &good, "2.0.0").is_err());
     assert_eq!(destination.requests.load(Ordering::SeqCst), 0);
 }
 
@@ -150,9 +147,14 @@ fn upstream_bundle_ordinary_publication_error_restores_old_tree() {
     let fixture = Fixture::new();
     let body = package("2.0.0", b"new executable", false);
     let server = Server::start(body.clone(), None);
-    let request = fixture.request(&server.url(), &body, "2.0.0");
-    // Fault through the public upstream hook: after staging, remove the source name.
-    // swap_bundle then stashes old bin, fails to rename this source and restores old bin.
+    let release = Release::builder()
+        .version("2.0.0")
+        .asset(ReleaseAsset::new(
+            format!("hostlink-agent-{TARGET}.zip"),
+            server.url(),
+        ))
+        .build()
+        .unwrap();
     let reached = Arc::new(AtomicBool::new(false));
     let hook_reached = Arc::clone(&reached);
     let transport = ureq::Agent::config_builder()
@@ -162,7 +164,7 @@ fn upstream_bundle_ordinary_publication_error_restores_old_tree() {
         .build()
         .new_agent();
     let result = self_update::backends::custom::Update::configure()
-        .source(request.artifact.clone())
+        .source(SelectedRelease(release))
         .release_tag("2.0.0")
         .current_version("1.0.0")
         .target(TARGET)
@@ -183,16 +185,8 @@ fn upstream_bundle_ordinary_publication_error_restores_old_tree() {
         .unwrap()
         .update();
     assert!(result.is_err());
-    assert!(
-        reached.load(Ordering::SeqCst),
-        "rollback fault hook must actually execute"
-    );
-    assert_eq!(
-        crate::package::read_installed(&fixture.root)
-            .unwrap()
-            .installed_version,
-        "1.0.0"
-    );
+    assert!(reached.load(Ordering::SeqCst));
+    assert_eq!(read_installed(&fixture.root).unwrap().0.version, "1.0.0");
     assert_eq!(
         fs::read(fixture.root.join("bin/hostlink-agent")).unwrap(),
         b"old executable"
@@ -232,7 +226,7 @@ async fn pending_native_apalis_task_and_private_state_survive_update() {
     let state = fixture.preserved();
     let body = package("2.0.0", b"new executable", false);
     let server = Server::start(body.clone(), None);
-    apply(&fixture.request(&server.url(), &body, "2.0.0")).unwrap();
+    fixture.apply(&server.url(), &body, "2.0.0").unwrap();
     assert_eq!(fs::read(jobs.join("jobs.db")).unwrap(), db);
     assert_eq!(fixture.preserved(), state);
     let pool = sqlx::SqlitePool::connect_with(
@@ -252,21 +246,12 @@ async fn pending_native_apalis_task_and_private_state_survive_update() {
 }
 
 #[test]
-fn already_current_format2_does_not_download_again() {
+fn already_current_manifest_does_not_download_again() {
     let fixture = Fixture::new();
     let current = package("1.0.0", b"old executable", false);
-    assert_eq!(
-        crate::package::read_installed(&fixture.root)
-            .unwrap()
-            .installed_package_sha256,
-        digest(&current)
-    );
+    assert_eq!(read_installed(&fixture.root).unwrap().1, digest(&current));
     let server = Server::start(current.clone(), None);
     let url = format!("{}/v1.0.0/hostlink-agent-{TARGET}.zip", server.origin);
-    let request = fixture.request(&url, &current, "1.0.0");
-    assert!(matches!(
-        apply(&request).unwrap(),
-        AgentUpdateOutcome::AlreadyCurrent { .. }
-    ));
+    assert!(!fixture.apply(&url, &current, "1.0.0").unwrap());
     assert_eq!(server.requests.load(Ordering::SeqCst), 0);
 }
