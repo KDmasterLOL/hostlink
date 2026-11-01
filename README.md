@@ -87,6 +87,16 @@ acceptance must be recorded anew; see the acceptance document.
 
 ## Development commands
 
+The `dev-ci.yml` Windows job compiles all targets, runs strict Clippy and
+classifies the current token with Windows built-in administrator membership.
+It first runs a real `serve_on` token regression; an unknown identity or a
+classification inconsistent with the production guard fails CI. Elevated
+hosted runners run portable Windows tests with eight exact Agent runtime E2E
+exclusions listed in the workflow and CI logs. Non-elevated Windows runs the
+full suite without exclusions. Excluded E2E cases are not passes: full native
+non-elevated WORK Windows acceptance remains required separately. The
+production elevated-Agent refusal remains enforced.
+
 ```sh
 cargo test --offline --locked --workspace
 cargo clippy --offline --locked --workspace --all-targets -- -D warnings
