@@ -240,6 +240,61 @@ class PilotLifecycleTests(unittest.TestCase):
         first.wait(timeout=3)
         self.assertNotEqual(first.returncode, 0)
 
+    def test_launch_waits_for_verified_exec_identity_not_transient_proc_snapshot(self):
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location("pilot_startup_identity", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        self.prepare()
+        original = helper.proc_identity
+        calls = [0]
+
+        def during_exec(pid):
+            identity = original(pid)
+            calls[0] += 1
+            if identity and calls[0] == 1:
+                return {**identity, "dev": -1, "cmd": ["wrong image"]}
+            return identity
+
+        with patch.object(helper, "proc_identity", side_effect=during_exec):
+            child, record = helper.launch(
+                [os.sys.executable, "-c", "import time;time.sleep(60)"],
+                self.root / "logs" / "verified-start.log",
+            )
+        try:
+            self.assertGreater(calls[0], 1)
+            self.assertEqual(record["cmd"][0], os.sys.executable)
+            self.assertTrue(helper.owned_process(record))
+            helper.write_ledger(self.root, [record], True)
+            helper.stop_items(self.root, [record])
+            child.wait(timeout=5)
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
+
+    def test_stop_refuses_changed_executable_digest_without_signalling(self):
+        spec = importlib.util.spec_from_file_location("pilot_digest_guard", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        self.prepare()
+        child, record = helper.launch(
+            [os.sys.executable, "-c", "import time;time.sleep(60)"],
+            self.root / "logs" / "digest-guard.log",
+        )
+        try:
+            replaced = {**record, "exe_sha256": "0" * 64}
+            with self.assertRaisesRegex(helper.PilotError, "ownership changed"):
+                helper.stop_items(self.root, [replaced])
+            self.assertIsNone(child.poll())
+            helper.write_ledger(self.root, [record], True)
+            helper.stop_items(self.root, [record])
+            child.wait(timeout=5)
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
+
     def test_owned_process_log_reopens_for_append_without_following_symlinks(self):
         spec = importlib.util.spec_from_file_location("pilot_log_restart", HELPER)
         helper = importlib.util.module_from_spec(spec)

@@ -250,12 +250,35 @@ def wait_port(port: int, process: subprocess.Popen, deadline=20) -> None:
     fail("owned loopback service did not become ready")
 
 
-def snapshot_process(process: subprocess.Popen) -> dict:
-    identity = proc_identity(process.pid)
-    if not identity:
-        fail("cannot read newly launched process identity")
-    identity["exe_sha256"] = digest(pathlib.Path("/proc") / str(process.pid) / "exe")
-    return identity
+def snapshot_process(process: subprocess.Popen, args: list[str]) -> dict:
+    # The child can still be transitioning through exec while /proc/stat,
+    # cmdline and environ are read separately. Admit only a stable snapshot of
+    # the requested executable, never a transient parent or unrelated PID.
+    expected = os.stat(args[0])
+    role = pathlib.Path(args[0]).name
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        before = proc_identity(process.pid)
+        if (before is not None and before["dev"] == expected.st_dev
+                and before["ino"] == expected.st_ino
+                and (role == "sshd" or before["cmd"] == args)):
+            after = proc_identity(process.pid)
+            if (after is not None and
+                    all(before[key] == after[key]
+                        for key in ("start", "exe", "dev", "ino", "cmd", "hub_config"))):
+                # sshd may retitle its argv on startup; its verified binary and
+                # PID birth are authoritative, whereas the recorded invocation
+                # is retained only to describe the owned service.
+                if role == "sshd":
+                    after["cmd"] = args
+                after["role"] = role
+                after["exe_sha256"] = digest(pathlib.Path("/proc") / str(process.pid) / "exe")
+                if process.poll() is None:
+                    return after
+        if process.poll() is not None:
+            break
+        time.sleep(.01)
+    fail("new child did not reach a stable, expected executable identity")
 
 
 def launch(args: list[str], log: pathlib.Path, *, env=None) -> tuple[subprocess.Popen, dict]:
@@ -275,7 +298,7 @@ def launch(args: list[str], log: pathlib.Path, *, env=None) -> tuple[subprocess.
     finally:
         stream.close()
     try:
-        identity = snapshot_process(child)
+        identity = snapshot_process(child, args)
     except BaseException:
         # We still own the newly returned child handle, even if its /proc
         # identity became unreadable before we could write the durable ledger.
@@ -288,13 +311,24 @@ def launch(args: list[str], log: pathlib.Path, *, env=None) -> tuple[subprocess.
                 fail("untracked newly spawned service did not stop; manual reconciliation required")
         raise
     CHILDREN[child.pid] = child
-    identity["role"] = pathlib.Path(args[0]).name
     return child, identity
+
+
+def owned_process(record: dict) -> bool:
+    if not identity_matches(record):
+        return False
+    expected = record.get("exe_sha256")
+    if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+        return False
+    try:
+        return digest(pathlib.Path("/proc") / str(record["pid"]) / "exe") == expected
+    except OSError:
+        return False
 
 
 def stop_items(root: pathlib.Path, items: list[dict]) -> None:
     # Validate the complete set before sending any signal, then checkpoint each stopped PID.
-    if any(not identity_matches(item) and not process_stopped(item) for item in items):
+    if any(not owned_process(item) and not process_stopped(item) for item in items):
         fail("process ownership changed before stop; remaining state preserved")
     remaining = items[:]
     for item in reversed(items):
@@ -302,7 +336,7 @@ def stop_items(root: pathlib.Path, items: list[dict]) -> None:
             remaining = [candidate for candidate in remaining if candidate["pid"] != item["pid"]]
             write_ledger(root, remaining, True)
             continue
-        if not identity_matches(item):
+        if not owned_process(item):
             fail("process ownership changed during stop; remaining state preserved")
         if item.get("role") == "sshd":
             port = item.get("listen_port")
