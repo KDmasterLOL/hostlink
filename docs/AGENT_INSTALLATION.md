@@ -22,20 +22,23 @@ Windows. It never obtains a PAT from CLI arguments, `GH_TOKEN`, `GITHUB_TOKEN`,
 the Hub, or the release package. Absent or unsafe credentials fail closed.
 
 GitHub's pinned upstream `self_update::github` backend discovers latest
-published stable release or exact `vX.Y.Z` (also accepts unprefixed exact
-tags). The selected release must contain exactly one
+published stable release or exact `vX.Y.Z`. HostLink packages use v-prefixed
+GitHub Release tags. The selected release must contain exactly one
 `hostlink-agent-TARGET.zip` with a valid GitHub API-published
 `sha256:<hex>` digest. Release metadata and asset URLs must come from the
 fixed authenticated GitHub API origin. The checksum verifies bytes against
 GitHub's metadata; it is **not** an independent publisher signature.
 
-The sole publisher is upstream `self_update::backends::github::Update`:
-it verifies the complete ZIP SHA-256, archive members, manifest target/version
+The sole publisher is upstream `self_update::backends::github::Update`.
+No custom HTTP transport, release metadata parser or secondary publisher
+remains. The selected release is pinned to its v-prefixed tag before the
+library downloads it, avoiding the library's different unpinned release-list
+selection semantics. It verifies the ZIP SHA-256, archive members, manifest target/version
 and extracted executable and scripts; writes canonical `archive.sha256`;
 publishes the verified bundle under `ROOT/bin`; and reads back the installed
 identity. Both `ROOT/update.lock` and `ROOT/jobs/runner.lock` remain held
 throughout. Apalis SQLite state and keys are never modified by the updater.
-GitHub asset downloads support bounded HTTPS-only CDN redirects, with
+GitHub asset downloads support HTTPS-only CDN redirects, with
 authentication sent only to the initial `api.github.com` request.
 
 `true` means installed, `false` means already current. Without
@@ -97,8 +100,9 @@ not an enrollment or Hub registration secret.
   acceptance has **not** run for this revision.
 - Power-loss during the upstream directory renames can leave `bin` missing;
   upstream rollback handles ordinary in-process publication errors only.
-- ZIP network download is bounded by a read cap; ZIP declared expansion sizes
-  are not an independent streaming quota against malicious false size headers.
+- ZIP compressed and member sizes are bounded during package preflight,
+  after the upstream download completes. The transport itself does not
+  impose a streaming byte cap.
 
 [Windows offline updater](AGENT_UPDATE_WINDOWS.md) ·
 [Source layout](SOURCE_LAYOUT.md) ·

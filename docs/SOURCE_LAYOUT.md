@@ -46,9 +46,11 @@ does not certify production or registered Windows updater deployment.
 | Windows offline process identity admission | `crates/agent/src/service/offline.rs` |
 
 `update.rs` exposes one GitHub-only `update(root, version)` entrypoint.
-Upstream `self_update::github::Update` handles discovery and the
-ZIP/manifest-checked bundle publication. The release is pinned before
-installing; no public arbitrary URL/pin update mode remains. Agent
+Upstream `self_update::github::Update` handles discovery, private asset
+download and ZIP/manifest-checked bundle publication. The GitHub
+`/releases/latest` selection is pinned to an exact `vX.Y.Z` tag before
+the upstream update; no bespoke `GitHubTransport`, `apply_update`, release
+parser or public arbitrary URL/pin update mode remains. Agent
 credentials are read through the private `agent_files.rs` helpers from the
 target's user-owned `hostlink/credentials/github-token` file. Controller's
 GitHub-only invitation selects and verifies assets in
