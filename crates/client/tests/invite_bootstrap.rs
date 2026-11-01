@@ -58,6 +58,9 @@ fn invite_selects_only_github_release_and_keeps_token_only_mode() {
 #[test]
 fn invalid_target_or_missing_github_credential_fail_before_any_hub_invite_request() {
     let root = tempfile::tempdir().expect("temporary config directory");
+    // The config is HostLink-managed state, not an arbitrary public fixture.
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
+        .expect("protect managed config directory");
     let token = root.path().join("operator.token");
     fs::write(&token, "disposable-operator-token").expect("write token fixture");
     fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).expect("protect token fixture");
