@@ -92,15 +92,12 @@ pub fn update(
     let _update_lock = lock_file(root, "update.lock")?;
     _update_lock.try_lock()?;
     let _runner_lock = lock_file(&root.join("jobs"), "runner.lock")?;
-    _runner_lock.try_lock().map_err(|error| {
-        if error.kind() == io::ErrorKind::WouldBlock {
-            io::Error::new(
-                io::ErrorKind::WouldBlock,
-                format!("stop the running Agent before updating: {error}"),
-            )
-        } else {
-            error
-        }
+    _runner_lock.try_lock().map_err(|error| match error {
+        fs::TryLockError::WouldBlock => io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "stop the running Agent before updating",
+        ),
+        fs::TryLockError::Error(error) => error,
     })?;
     #[cfg(windows)]
     crate::service::ensure_agent_offline(root)?;
