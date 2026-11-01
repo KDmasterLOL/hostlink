@@ -1,6 +1,6 @@
 # History of the Agent self_update integration
 
-**Current implementation (1C-1155 / 1C-1156):** [Agent installation contract](AGENT_INSTALLATION.md).
+**Current implementation (1C-1157):** [Agent installation contract](AGENT_INSTALLATION.md).
 The sections below record the **historical** source-exact 1C-1147/1149/1153
 decisions and their own test evidence. Their `install.json` transformation,
 `Artifact` constructor, `AgentUpdateRequest` and `AgentUpdateOutcome` refer to
@@ -8,7 +8,7 @@ superseded code and are **not** requirements of current `dev`.
 
 ## 1C-1155 — direct source manifest / minimal update interface
 
-The current Agent has one public
+The 1C-1155 version of the Agent had one public
 `update(root, url, sha256, target, version) -> io::Result<bool>`.
 The high-level upstream `self_update::backends::custom::Update` remains the
 only downloader, ZIP extractor and bundle publisher. The exact caller-selected
@@ -32,6 +32,19 @@ Fresh bootstrap separately verifies the sidecar and ZIP before enrollment,
 retains `manifest.json`, adds `archive.sha256` and checks the source receipt.
 Private root, keys, jobs and state stay outside the published bundle. Windows
 requires an unregistered task and an independent stopped Agent process.
+
+### 1C-1157 — typed inputs and GitHub Release selection
+
+The pinned Rust update API accepts parsed `Url`, exact `Version`, and a
+32-byte SHA-256 decoded from CLI input by `hex`. The no-argument Agent
+`update` selects the newest compatible stable release from the fixed
+private GitHub repository; `--version X.Y.Z` selects that version explicitly.
+Both use the existing `self_update` package and stopped-Agent checks.
+GitHub's API-published SHA-256 is verified but is not an independent
+publisher signature. Exact operator-pinned URL/SHA mode remains available.
+Private repository access requires suitable GitHub credentials. No published
+HostLink Releases existed at the 2026-11-01 baseline, so live latest
+installation cannot be claimed until an approved release is published.
 
 ### 1C-1156 — updater URL policy and error semantics
 

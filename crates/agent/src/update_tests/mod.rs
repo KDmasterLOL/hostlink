@@ -13,11 +13,60 @@ const TARGET: &str = "x86_64-win7-windows-msvc";
 #[cfg(all(windows, target_arch = "x86"))]
 const TARGET: &str = "i686-win7-windows-msvc";
 
+// The CLI owns decoding of text input. Preserve the previous invalid-input
+// coverage while exercising the public updater with actual parsed types.
+fn update(
+    root: &std::path::Path,
+    url: &str,
+    sha256: &str,
+    target: &str,
+    version: &str,
+) -> io::Result<bool> {
+    let url = reqwest::Url::parse(url).map_err(|_| invalid("invalid artifact URL"))?;
+    let sha256 = hex::decode(sha256).map_err(|_| invalid("invalid SHA-256"))?;
+    let sha256: [u8; 32] = sha256
+        .try_into()
+        .map_err(|_| invalid("SHA-256 must be exactly 32 bytes"))?;
+    let version =
+        semver::Version::parse(version).map_err(|_| invalid("exact semantic version required"))?;
+    super::update(root, &url, sha256, target, &version)
+}
+
+#[test]
+fn parsed_updater_contract_reaches_the_lock_without_revalidating_text() {
+    let fixture = Fixture::new();
+    let _lock = held_lock(&fixture, "update.lock");
+    let url =
+        reqwest::Url::parse("https://artifacts.example/pinned-package?token=not-a-secret").unwrap();
+    let version = semver::Version::parse("2.0.0").unwrap();
+    let sha256 = [0xa5_u8; 32];
+    assert_eq!(
+        super::update(&fixture.root, &url, sha256, TARGET, &version)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::WouldBlock
+    );
+}
+
 #[test]
 fn https_artifact_paths_and_queries_reach_the_lock_gate() {
     let fixture = Fixture::new();
     let _lock = held_lock(&fixture, "update.lock");
     let pin = digest(b"independent artifact");
+    // Hex parsing accepts either case; the canonical persisted archive SHA is
+    // encoded in lowercase by the actual updater.
+    assert_eq!(
+        update(
+            &fixture.root,
+            "https://artifacts.example/bytes",
+            &pin.to_uppercase(),
+            TARGET,
+            "2.0.0"
+        )
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::WouldBlock
+    );
     for url in [
         format!("https://artifacts.example/v2.0.0/hostlink-agent-{TARGET}.zip"),
         "https://artifacts.example/objects/download".to_owned(),
@@ -77,7 +126,6 @@ fn artifact_trust_boundary_rejects_invalid_inputs_before_the_lock_gate() {
         "".to_owned(),
         "a".repeat(63),
         "a".repeat(65),
-        "A".repeat(64),
         "g".repeat(64),
     ] {
         assert_eq!(

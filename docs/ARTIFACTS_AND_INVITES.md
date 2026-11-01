@@ -1,5 +1,17 @@
 # HostLink Agent artifact packaging and invites
 
+For `hostlink-agent update` without arguments to discover a real latest
+version, an independently approved release process must upload the
+`hostlink-agent-TARGET.zip` assets to a GitHub Release in the fixed
+`KDmasterLOL/hostlink` repository, with an exact SemVer tag and a valid
+GitHub API `sha256:<hex>` digest for each asset. The ZIP's
+`manifest.json` must match the release target and version. The updater
+rejects missing or invalid release digests; it does not synthesize a SHA
+or create releases/tags. The repository is private and access requires
+authorized GitHub credentials; distributing broad-scope tokens to Agents
+is not part of this change. Native Windows/source-exact release gates
+still apply before publication.
+
 `scripts/package-hostlink-agent.py` builds a local immutable candidate layout for one exact source SHA, target, and semantic version. It does not publish files, select an HTTPS host, or contact the Hub. Choose an output path that does not exist under a current-user-owned directory.
 
 ```sh

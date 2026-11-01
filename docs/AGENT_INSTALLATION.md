@@ -1,4 +1,4 @@
-# Agent update and bootstrap — current contract (1C-1155 / 1C-1156)
+# Agent update and bootstrap — current contract (1C-1157)
 
 HostLink uses upstream `self_update 1.3.1` to download, SHA-verify and swap
 installed Agent bundles. Fresh enrollment is distinct because it must verify
@@ -6,11 +6,44 @@ an independently pinned executable sidecar and ZIP before using an invitation.
 
 ## Installed Agent: `crates/agent/src/update.rs`
 
-`hostlink-agent update --root ROOT --url URL --sha256 SHA --target TARGET --version VERSION`
+```sh
+hostlink-agent update                         # highest compatible stable GitHub Release
+hostlink-agent update --version 1.2.3         # exact release (explicit downgrade allowed)
+hostlink-agent update --root ROOT             # explicit installed root
+```
 
-The Rust interface is one public function:
-`update(root, url, sha256, target, version) -> io::Result<bool>`.
+The manually pinned Rust API accepts typed `&Url`, `[u8; 32]` and
+`&semver::Version` in `update(root,url,sha256,target,version)`. Automatic
+`update_from_github(root,version,token)` discovers the release from the
+fixed **KDmasterLOL/hostlink** GitHub repository.
 `true` means installed; `false` means already current.
+
+Automatic mode requires the exact `hostlink-agent-TARGET.zip` asset and its
+`sha256:<hex>` digest from GitHub Release metadata, then verifies the
+downloaded bytes and HostLink package manifest before publication. It trusts
+the authenticated GitHub repository **as the publisher**, not an independent
+cryptographic signature. The repository is currently private: supply
+`GH_TOKEN` or `GITHUB_TOKEN` in the updater's environment for read access.
+On 2026-11-01 there were no published HostLink Releases, so no real latest
+artifact exists yet; the command must report absence, not pretend success.
+
+The Linux install path uses `$XDG_DATA_HOME/hostlink-agent.RANDOM/Agent`;
+without `--root`, the updater infers it only from an installed executable
+at `ROOT/bin/hostlink-agent`. A development binary needs explicit
+`--root`. Windows uses OS-resolved LocalAppData/HostLink/Agent, but the
+verified offline updater must still be launched **outside bin**, after the
+Task Scheduler task is removed and Agent processes stop.
+
+The old independently pinned artifact mode remains available:
+
+```sh
+hostlink-agent update --root ROOT --url HTTPS_URL --sha256 SHA256 \
+  --version X.Y.Z --target TARGET
+```
+
+Clap parses URLs, SemVer and a 32-byte hex-decoded SHA. Direct pinned mode
+forbids redirects; GitHub API asset downloads may require bounded HTTPS-only
+CDN redirects, without forwarding the private API token to a new origin.
 
 1. Require a parsed credential-free HTTPS URL (no fragment), a supported
    runtime target, an exact semantic version and an independently supplied
@@ -48,7 +81,7 @@ timeout. These are intentional deviations from `ureq 3.4.2` defaults.
 `self_update 1.3.1` already defaults to zero retries; it is not separately
 configured. An explicitly selected older version remains an allowed
 downgrade under the current exact-artifact contract; there is no implicit
-`latest` selection or anti-rollback policy.
+anti-rollback policy.
 
 The updater does not read or modify the Apalis database, state, keys,
 registration or service lifetime. The root remains private; the nonsecret

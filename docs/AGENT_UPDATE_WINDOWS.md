@@ -1,12 +1,22 @@
-# Windows Agent offline URL update (1C-1147)
+# Windows Agent offline update (1C-1157)
 
 Use a fully stopped, unregistered Agent. Stop/remove its current-user Task Scheduler
 task with the existing service commands, then invoke a verified separate copy of
 hostlink-agent.exe beneath the private root, **outside bin**, with:
 
 ```text
-hostlink-agent.exe update --root ROOT --url EXACT_HTTPS_URL --sha256 INDEPENDENT_SHA256 --target EXACT_TARGET --version EXACT_VERSION
+hostlink-agent.exe update
+hostlink-agent.exe update --version X.Y.Z
 ```
+
+Run the separate verified updater executable from **outside** installed
+`bin`, after stopping/removing the Agent's current-user Task Scheduler task.
+Without `--root`, the command uses the exact OS-resolved per-user
+LocalAppData/HostLink/Agent root; it does not install or start services.
+The fixed GitHub repository is private, requiring `GH_TOKEN` or
+`GITHUB_TOKEN` in the process environment for read-only release access.
+The exact `--root --url --sha256 --target --version` options and PowerShell2
+wrapper remain supported for independently pinned artifacts.
 
 The updater does not stop/remove/register/start a task or change HKCU. An installed
 task (even stopped), held runner/update lock or active
@@ -16,18 +26,18 @@ without symlink/reparse aliases. Win7 uses SHGetFolderPathW and existing process
 snapshot APIs. `same-file 1.0.6` compares file identities for the separate updater
 and matching running images, avoiding a second hand-written Windows file-ID API.
 
-Only one installed updater exists: high-level self_update custom::Update, pinned to
-1.3.1. Its ReleaseSource contains one parsed caller-selected HTTPS URL and the
-exact version/target; the requested SHA-256 must come independently from a
-trusted operator/publisher. URL path spelling, including the presence of a
-version or target-named filename, is **not** an authenticity check. The archive
-SHA-256, bounded ZIP/member/manifest checks and installed inventory are
-mandatory. Redirects and environment proxies are disabled, so a download
-cannot follow a redirect or inherit an unreviewed system proxy.
+Only one installed updater exists: high-level self_update custom::Update,
+pinned to 1.3.1. Independently pinned manual mode forbids redirects.
+Automatic mode selects a specific release from the fixed GitHub repository
+and requires its API-published SHA-256 (not an independent publisher signature).
+Its asset may require bounded HTTPS-only CDN redirects, while credentials
+remain limited to the GitHub API origin. Both paths disable environment proxies.
+The archive SHA-256, bounded ZIP/member/manifest checks and installed inventory
+remain mandatory.
 `self_update 1.3.1` defaults to zero retries; the transport retains a
 30-second timeout. An exact explicitly selected downgrade is permitted.
-There is no remote release discovery, local ZIP fallback, provider fallback
-or "latest" selection.
+There is no unrelated-provider fallback, unsigned release fallback or remote
+service lifecycle manipulation.
 
 Downloaded archives, temporary bundles and installed bin are **nonsecret**, using
 upstream native temporary filesystem permissions/ACLs. No private-fs ACL hardening

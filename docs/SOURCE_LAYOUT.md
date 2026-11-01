@@ -45,8 +45,9 @@ does not certify production or registered Windows updater deployment.
 | Shared private root/path and file identities | `crates/agent/src/agent_files.rs` |
 | Windows offline process identity admission | `crates/agent/src/service/offline.rs` |
 
-`update.rs` exposes one `update(root,url,sha256,target,version)` function and
-invokes upstream `self_update::backends::custom::Update` for already installed
+`update.rs` exposes typed pinned `update(root,url,sha256,target,version)`
+and a latest/exact GitHub Release selector. Both reuse one upstream
+`self_update::backends::custom::Update` publisher for already installed
 Agents. `bootstrap.rs` owns first-install verification/finalization, sharing
 the verbatim package `manifest.json`, separate `archive.sha256` and safe ZIP
 preflight from `package/`. There is no installed-format migration, old-journal guard, second
