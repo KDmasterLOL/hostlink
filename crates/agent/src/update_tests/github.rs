@@ -118,3 +118,60 @@ fn rejects_duplicate_version_and_target_assets() {
         .unwrap();
     assert!(select_github_asset(&[ambiguous], TARGET, None).is_err());
 }
+
+#[test]
+fn publication_guard_rejects_drafts_unstable_latest_invalid_tags_and_large_bodies() {
+    let metadata = |tag: &str, draft: bool, prerelease: bool| {
+        serde_json::to_vec(&serde_json::json!({
+            "tag_name": tag, "draft": draft, "prerelease": prerelease
+        }))
+        .unwrap()
+    };
+    for tag in ["1.2.3", "v1.2.3"] {
+        assert!(validate_github_metadata(&metadata(tag, false, false), true).is_ok());
+        assert!(validate_github_metadata(&metadata(tag, true, false), false).is_err());
+        assert!(validate_github_metadata(&metadata(tag, false, true), true).is_err());
+    }
+    for tag in ["vv1.2.3", "release-1.2.3", "1.2", "", "1.2.3\n"] {
+        assert!(validate_github_metadata(&metadata(tag, false, false), false).is_err());
+    }
+    for prerelease in [false, true] {
+        let body = metadata("v2.0.0-beta.1", false, prerelease);
+        assert!(validate_github_metadata(&body, true).is_err());
+        assert!(validate_github_metadata(&body, false).is_ok());
+    }
+    for body in [
+        b"{}".as_slice(),
+        b"[]",
+        b"null",
+        b"not JSON",
+        br#"{"draft":false,"prerelease":false}"#,
+    ] {
+        assert!(validate_github_metadata(body, true).is_err());
+    }
+    let mut oversized = metadata("v1.2.3", false, false);
+    oversized.resize(MAX_METADATA_BYTES as usize + 1, b' ');
+    assert!(validate_github_metadata(&oversized, false).is_err());
+}
+
+#[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn latest_selection_cannot_downgrade_or_republish_same_version() {
+    let fixture = Fixture::new();
+    let old = read_installed(&fixture.root).unwrap().1;
+    for version in ["0.9.0", "1.0.0", "1.0.0-beta.1"] {
+        assert!(
+            !apply_selected(
+                &fixture.root,
+                &Url::parse("https://127.0.0.1:1/not-requested.zip").unwrap(),
+                [0xa5; 32],
+                TARGET,
+                &Version::parse(version).unwrap(),
+                Update::configure(),
+                true
+            )
+            .unwrap()
+        );
+        assert_eq!(read_installed(&fixture.root).unwrap().1, old);
+    }
+}

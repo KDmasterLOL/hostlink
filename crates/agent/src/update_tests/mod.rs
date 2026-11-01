@@ -1,8 +1,11 @@
 use super::*;
 use std::{fs, io};
 
+mod credentials;
 mod fixture;
 mod github;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod github_http;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod http;
 use fixture::{Fixture, digest, package};

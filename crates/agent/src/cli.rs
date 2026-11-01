@@ -21,7 +21,7 @@ enum Command {
     Check(commands::check::Args),
     /// Serve SSH/SFTP and optional outbound reverse SSH until terminated.
     Run(commands::run::Args),
-    /// Update a stopped Agent from GitHub (latest stable by default) or a pinned URL.
+    /// Update a stopped Agent from GitHub Releases using its private credential file.
     Update(commands::update::Args),
     /// Enroll a fresh user-owned Agent root with a one-use Hub invitation.
     Enroll(commands::enroll::Args),
@@ -49,26 +49,12 @@ pub(crate) async fn run() -> io::Result<()> {
 mod tests {
     use super::*;
 
-    const SHA256: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
     #[test]
     fn all_cli_commands_retain_their_arguments() {
         let valid = [
             vec!["check", "--config", "agent.json"],
             vec!["run", "--config", "agent.json"],
-            vec![
-                "update",
-                "--root",
-                "agent",
-                "--url",
-                "https://artifacts.example/v1.0.0/hostlink-agent-x86_64-unknown-linux-gnu.zip",
-                "--sha256",
-                SHA256,
-                "--target",
-                "target",
-                "--version",
-                "1.0.0",
-            ],
+            vec!["update", "--root", "agent", "--version", "1.0.0"],
             vec![
                 "enroll",
                 "--hub-url",
@@ -132,58 +118,40 @@ mod tests {
     }
 
     #[test]
-    fn manual_update_requires_a_complete_pin_but_root_is_optional() {
-        let pin = [
+    fn update_rejects_manual_source_and_token_arguments() {
+        for (flag, value) in [
             ("--url", "https://artifacts.example/agent.zip"),
-            ("--sha256", SHA256),
-            ("--version", "1.2.3"),
+            ("--sha256", "a5"),
             ("--target", "x86_64-unknown-linux-gnu"),
-        ];
-        for mask in 0..16 {
-            let mut args = vec!["hostlink-agent", "update"];
-            for (bit, (flag, value)) in pin.iter().enumerate() {
-                if mask & (1 << bit) != 0 {
-                    args.extend([*flag, *value]);
-                }
-            }
-            let expected = matches!(mask, 0 | 4 | 15);
-            assert_eq!(Cli::try_parse_from(&args).is_ok(), expected, "{args:?}");
+            ("--token", "fixture-only"),
+            ("--token-file", "fixture-only"),
+        ] {
+            assert!(Cli::try_parse_from(["hostlink-agent", "update", flag, value]).is_err());
         }
+        assert!(
+            Cli::try_parse_from([
+                "hostlink-agent",
+                "update",
+                "--url",
+                "https://artifacts.example/agent.zip",
+                "--sha256",
+                "a5",
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--version",
+                "1.2.3",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
     fn update_rejects_malformed_typed_values() {
-        let pin = [
-            "hostlink-agent",
-            "update",
-            "--url",
-            "https://artifacts.example/agent.zip",
-            "--sha256",
-            SHA256,
-            "--version",
-            "1.2.3",
-            "--target",
-            "x86_64-unknown-linux-gnu",
-        ];
-        for (index, invalid) in [
-            (3, "not-a-url"),
-            (5, "abc"),
-            (
-                5,
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg",
-            ),
-            (
-                5,
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef00",
-            ),
-            (7, "v1.2.3"),
-            (7, "1.2"),
-        ] {
-            let mut args = pin;
-            args[index] = invalid;
-            assert!(Cli::try_parse_from(args).is_err(), "CLI accepted {args:?}");
+        for invalid in ["v1.2.3", "1.2", "latest", ""] {
+            assert!(
+                Cli::try_parse_from(["hostlink-agent", "update", "--version", invalid]).is_err()
+            );
         }
-        assert!(Cli::try_parse_from(["hostlink-agent", "update", "--version", "latest"]).is_err());
     }
 
     #[test]

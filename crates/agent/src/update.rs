@@ -3,10 +3,10 @@
 //! added alongside it, so the installed bundle retains its exact source identity.
 
 use crate::{
-    agent_files::validate_user_owned_root,
+    agent_files::{github_token, validate_user_owned_root},
     package::{
-        ARCHIVE_DIGEST, EXECUTABLE_BASE, PACKAGE_MANIFEST, PackageManifest, invalid,
-        read_installed, read_regular, target_matches_runtime, validate_contents,
+        ARCHIVE_DIGEST, EXECUTABLE_BASE, MAX_ARCHIVE_BYTES, PACKAGE_MANIFEST, PackageManifest,
+        invalid, read_installed, read_regular, target_matches_runtime, validate_contents,
         validate_installed,
     },
     private_fs::PrivateFileExt,
@@ -14,21 +14,22 @@ use crate::{
 use hex::FromHex;
 use private_fs::{FileAccess, FileCreation, OpenOptions, PrivateDir};
 use reqwest::Url;
+use secrecy::ExposeSecret;
 use self_update::{
     Checksum, Release, ReleaseAsset, ReleaseSource, ReleaseStatus,
-    backends::{
-        custom::Update, custom::UpdateBuilder, github::ReleaseList, github::Update as GitHubUpdate,
-    },
+    backends::{custom::Update, custom::UpdateBuilder, github::Update as GitHubUpdate},
+    http_client::{HeaderMap, HttpClient, HttpResponse, UreqClient},
 };
 use semver::Version;
 use std::{
     fs::{self, File},
-    io,
+    io::{self, Read},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
-// Both discovery paths pin one release before entering the same bundle publisher.
+// GitHub discovery pins one release before entering the bundle publisher.
 #[derive(Clone)]
 struct SelectedRelease(Release);
 
@@ -38,15 +39,10 @@ impl ReleaseSource for SelectedRelease {
     }
 }
 
-/// Update one stopped Agent from an independently pinned release.
-/// Returns true when a bundle was installed, false when already current.
-/// No task registration, Agent restart, or durable crash recovery is performed.
-/// The caller must authorize the archive SHA-256 independently of the URL.
-///
-/// # Errors
-/// Returns an error for invalid selections, unsafe or busy installation roots,
-/// download failures, integrity mismatches, or publication failures.
-pub fn update(
+// Disposable fixtures exercise the same publisher without a live GitHub release.
+// Arbitrary source selection is absent from the production API and CLI.
+#[cfg(test)]
+fn update(
     root: &Path,
     url: &Url,
     sha256: [u8; 32],
@@ -93,83 +89,46 @@ pub fn default_update_root() -> io::Result<PathBuf> {
 
 /// Select an exact release, or GitHub's designated latest published release,
 /// from the authenticated GitHub API. A missing/inaccessible release is an
-/// error, never an already-current result. The token is used only in memory.
+/// error, never an already-current result. Reads the bootstrap-provisioned private
+/// target-user credentials/github-token file; no token arguments or environment.
 /// GitHub's digest authenticates API-selected bytes; it is not a publisher signature.
 ///
 /// # Errors
 /// Returns an error for invalid installed state, unavailable releases, unsafe asset
 /// metadata, failed integrity verification, or publication failure.
-pub fn update_from_github(
-    root: &Path,
-    version: Option<&Version>,
-    token: Option<&str>,
-) -> io::Result<bool> {
+pub fn update_from_github(root: &Path, version: Option<&Version>) -> io::Result<bool> {
+    let token = github_token()?;
     validate_user_owned_root(root)?;
     let (installed, _) = read_installed(root)?;
-    let mut listing = ReleaseList::configure();
-    listing
+    let mut discovery = GitHubUpdate::configure();
+    discovery
         .repo_owner("KDmasterLOL")
         .repo_name("hostlink")
-        .ureq_agent(download_transport(true, 0));
+        .current_version(&installed.version)
+        .bin_name(EXECUTABLE_BASE)
+        .target(&installed.target)
+        .auth_token(token.expose_secret())
+        .retries(0)
+        .http_client(Arc::new(GitHubTransport::new(true, true)));
+    let discovery = discovery.build().map_err(io::Error::other)?;
+    let releases = discover_github_release(&discovery, version).map_err(|error| {
+        io::Error::other(format!(
+            "no matching published release accessible for KDmasterLOL/hostlink; check target-user GitHub credential and Contents: Read access (repository may have no releases): {error}"
+        ))
+    })?;
     let mut publisher = Update::configure();
     publisher
-        .ureq_agent(download_transport(true, 5))
+        .http_client(Arc::new(GitHubTransport::new(false, true)))
         .request_header(
             self_update::http::header::ACCEPT,
             "application/octet-stream",
-        );
-    if let Some(token) = token {
-        if token.is_empty()
-            || token.len() > 8192
-            || !token.bytes().all(|byte| byte.is_ascii_graphic())
-        {
-            return Err(invalid("invalid GitHub API token"));
-        }
-        listing.auth_token(token);
+        )
         // self_update marks Authorization sensitive. ureq removes it on EVERY
-        // redirect (even same-host), so a different origin/port never gets it.
-        publisher.request_header(
+        // redirect, including same-host redirects. There is no CDN auth request.
+        .request_header(
             self_update::http::header::AUTHORIZATION,
-            format!("Bearer {token}"),
+            format!("Bearer {}", token.expose_secret()),
         );
-    }
-    // A private repository's authenticated /releases list may expose DRAFTS
-    // to users with write access. The official /releases/latest endpoint
-    // excludes unpublished drafts and pre-releases. Use it for the default.
-    let releases = if version.is_none() {
-        let mut latest = GitHubUpdate::configure();
-        latest
-            .repo_owner("KDmasterLOL")
-            .repo_name("hostlink")
-            .current_version(&installed.version)
-            .bin_name(EXECUTABLE_BASE)
-            .target(&installed.target)
-            .ureq_agent(download_transport(true, 0));
-        if let Some(token) = token {
-            latest.auth_token(token);
-        }
-        latest
-            .build()
-            .map_err(io::Error::other)?
-            .get_latest_release()
-            .map_err(|error| {
-                io::Error::other(format!(
-                    "no published latest release accessible for KDmasterLOL/hostlink: {error}"
-                ))
-            })?
-            .into_vec()
-    } else {
-        listing
-            .build()
-            .map_err(io::Error::other)?
-            .fetch()
-            .map_err(|error| {
-                io::Error::other(format!(
-                    "cannot list private KDmasterLOL/hostlink releases; check GitHub API access: {error}"
-                ))
-            })?
-            .into_vec()
-    };
     let (url, sha256, selected_version) =
         select_github_asset(&releases, &installed.target, version)?;
     apply_selected(
@@ -181,6 +140,110 @@ pub fn update_from_github(
         publisher,
         version.is_none(),
     )
+}
+
+fn discover_github_release(
+    discovery: &GitHubUpdate,
+    version: Option<&Version>,
+) -> self_update::Result<Vec<Release>> {
+    let Some(version) = version else {
+        return discovery
+            .get_latest_release()
+            .map(|releases| releases.into_vec());
+    };
+    // Only the two authorized tag spellings in the SAME GitHub repository.
+    // Retry the unprefixed spelling only on 404, never on auth/network errors.
+    let release = match discovery.get_release_version(&format!("v{version}")) {
+        Err(self_update::Error::NotFound { .. }) => {
+            discovery.get_release_version(&version.to_string())?
+        }
+        result => result?,
+    };
+    Ok(vec![release])
+}
+
+const MAX_METADATA_BYTES: u64 = 1024 * 1024;
+
+// Upstream owns the release parser and HTTP status handling. This guard supplies
+// the missing published-only policy and bounds metadata before its parser runs.
+// Asset reads are bounded too; archive preflight rejects the cap+1 sentinel.
+struct GitHubTransport {
+    client: UreqClient,
+    metadata: bool,
+}
+
+impl GitHubTransport {
+    fn new(metadata: bool, https_only: bool) -> Self {
+        Self {
+            client: download_transport(https_only, if metadata { 0 } else { 5 }).into(),
+            metadata,
+        }
+    }
+}
+
+struct BoundedResponse {
+    headers: HeaderMap,
+    body: Box<dyn Read>,
+}
+
+impl HttpResponse for BoundedResponse {
+    fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+    fn body(self: Box<Self>) -> Box<dyn Read> {
+        self.body
+    }
+}
+
+impl HttpClient for GitHubTransport {
+    fn get(
+        &self,
+        url: &str,
+        headers: &HeaderMap,
+        timeout: Option<Duration>,
+    ) -> self_update::Result<Box<dyn HttpResponse>> {
+        let response = self.client.get(url, headers, timeout)?;
+        let headers = response.headers().clone();
+        let body: Box<dyn Read> = if self.metadata {
+            let mut bytes = Vec::new();
+            response
+                .body()
+                .take(MAX_METADATA_BYTES + 1)
+                .read_to_end(&mut bytes)?;
+            validate_github_metadata(&bytes, url.ends_with("/latest"))?;
+            Box::new(io::Cursor::new(bytes))
+        } else {
+            Box::new(response.body().take(MAX_ARCHIVE_BYTES + 1))
+        };
+        Ok(Box::new(BoundedResponse { headers, body }))
+    }
+}
+
+fn validate_github_metadata(bytes: &[u8], latest: bool) -> io::Result<()> {
+    if bytes.len() as u64 > MAX_METADATA_BYTES {
+        return Err(invalid("GitHub release metadata exceeds size limit"));
+    }
+    #[derive(serde::Deserialize)]
+    struct Publication {
+        draft: bool,
+        prerelease: bool,
+        tag_name: String,
+    }
+    let publication: Publication = serde_json::from_slice(bytes)
+        .map_err(|_| invalid("invalid GitHub release publication metadata"))?;
+    let version = Version::parse(
+        publication
+            .tag_name
+            .strip_prefix('v')
+            .unwrap_or(&publication.tag_name),
+    )
+    .map_err(|_| invalid("GitHub release tag must be X.Y.Z or vX.Y.Z"))?;
+    if publication.draft || (latest && (publication.prerelease || !version.pre.is_empty())) {
+        return Err(invalid(
+            "published GitHub release required (latest must be stable)",
+        ));
+    }
+    Ok(())
 }
 
 fn select_github_asset(

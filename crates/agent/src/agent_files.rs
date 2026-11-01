@@ -46,15 +46,21 @@ fn validate_windows_update_root(root: &Path) -> io::Result<()> {
 // avoids importing newer Known Folder functions on the Win7 build.
 #[cfg(windows)]
 pub(super) fn local_app_data_path() -> io::Result<PathBuf> {
+    use windows_sys::Win32::UI::Shell::CSIDL_LOCAL_APPDATA;
+    app_data_path(CSIDL_LOCAL_APPDATA as i32)
+}
+
+#[cfg(windows)]
+fn app_data_path(folder: i32) -> io::Result<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::UI::Shell::{CSIDL_LOCAL_APPDATA, SHGetFolderPathW};
+    use windows_sys::Win32::UI::Shell::SHGetFolderPathW;
 
     let mut buffer = [0u16; 260];
     // SAFETY: SHGetFolderPathW writes at most MAX_PATH UTF-16 units.
     let result = unsafe {
         SHGetFolderPathW(
             std::ptr::null_mut(),
-            CSIDL_LOCAL_APPDATA as i32,
+            folder,
             std::ptr::null_mut(),
             0,
             buffer.as_mut_ptr(),
@@ -64,9 +70,85 @@ pub(super) fn local_app_data_path() -> io::Result<PathBuf> {
         .ok()
         .map_err(io::Error::other)?;
     let end = buffer.iter().position(|&unit| unit == 0).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "unterminated LocalAppData path")
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unterminated application data path",
+        )
     })?;
     PathBuf::from(std::ffi::OsString::from_wide(&buffer[..end])).canonicalize()
+}
+
+/// Read only the target user's bootstrap-provisioned credential; never create,
+/// repair permissions, or fall back to a token supplied through the environment.
+pub(super) fn github_token() -> io::Result<secrecy::SecretString> {
+    read_github_token(&github_credential_path()?)
+}
+
+pub(super) fn github_credential_path() -> io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Shell::CSIDL_APPDATA;
+        Ok(app_data_path(CSIDL_APPDATA as i32)?.join("HostLink/credentials/github-token"))
+    }
+    #[cfg(not(windows))]
+    github_credential_path_from_config(
+        std::env::var_os("XDG_CONFIG_HOME")
+            .as_deref()
+            .map(Path::new),
+        std::env::var_os("HOME").as_deref().map(Path::new),
+    )
+}
+
+#[cfg(not(windows))]
+pub(super) fn github_credential_path_from_config(
+    xdg: Option<&Path>,
+    home: Option<&Path>,
+) -> io::Result<PathBuf> {
+    let base = match xdg.filter(|path| path.is_absolute()) {
+        Some(path) => path.to_owned(),
+        None => home
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| {
+                invalid("absolute HOME or XDG_CONFIG_HOME required for GitHub credential")
+            })?
+            .join(".config"),
+    };
+    Ok(base.join("hostlink/credentials/github-token"))
+}
+
+pub(super) fn read_github_token(path: &Path) -> io::Result<secrecy::SecretString> {
+    // private-fs acquires a regular, single-link, current-user-owned file without
+    // following links and verifies exact 0600 / protected owner-only Windows DACL.
+    // Validate ancestors too; do not accept an aliased credential directory.
+    let read = || -> io::Result<secrecy::SecretString> {
+        validate_path_has_no_reparse_components(path)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| invalid("invalid credential path"))?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| invalid("invalid credential path"))?;
+        let dir = PrivateDir::open(parent).map_err(io::Error::other)?;
+        let mut file = dir.open_file(name).map_err(io::Error::other)?;
+        let mut token = secrecy::zeroize::Zeroizing::new(String::new());
+        (&mut file).take(8193).read_to_string(&mut token)?;
+        if token.len() > 8192 {
+            return Err(invalid("GitHub credential exceeds 8 KiB"));
+        }
+        if token.ends_with('\n') {
+            token.pop();
+            if token.ends_with('\r') {
+                token.pop();
+            }
+        }
+        if token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return Err(invalid("invalid GitHub credential contents"));
+        }
+        Ok(std::mem::take(&mut *token).into())
+    };
+    // No file contents or upstream error text can enter diagnostics.
+    read().map_err(|error| io::Error::new(error.kind(),
+        "GitHub credential missing or unsafe; provision the target-user credentials/github-token file during bootstrap with a fine-grained PAT (Contents: Read), Unix mode 0600 or protected current-user-only Windows DACL"))
 }
 
 pub(super) fn file_identities(
