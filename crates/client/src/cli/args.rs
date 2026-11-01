@@ -36,32 +36,21 @@ pub(super) enum Command {
     Info { host: String },
     /// Verify a registered host using its current Hub pins and SSH identity.
     Verify { host: String },
-    /// Create an invitation and a source-pinned bootstrap command.
+    /// Create an invitation using authenticated KDmasterLOL/hostlink GitHub Releases.
     Invite {
-        #[arg(long)]
+        #[arg(long, required_unless_present = "token_only")]
         name: Option<String>,
         #[arg(long)]
         ssh_user: Option<String>,
         #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(60..=86400))]
         ttl_seconds: u64,
         /// Create a manual invitation without selecting verified installer artifacts.
-        #[arg(long, conflicts_with_all = ["ssh_user", "installer_url", "installer_sha256", "agent_url", "agent_sha256", "archive_url", "archive_sha256", "version", "target", "bootstrap_hub_ca_cert"])]
+        #[arg(long, conflicts_with_all = ["ssh_user", "version", "target", "bootstrap_hub_ca_cert"])]
         token_only: bool,
-        #[arg(long)]
-        installer_url: Option<String>,
-        #[arg(long)]
-        installer_sha256: Option<String>,
-        #[arg(long)]
-        agent_url: Option<String>,
-        #[arg(long)]
-        agent_sha256: Option<String>,
-        #[arg(long)]
-        archive_url: Option<String>,
-        #[arg(long)]
-        archive_sha256: Option<String>,
+        /// Exact semantic version (v-prefixed GitHub tag); omit for latest published release.
         #[arg(long)]
         version: Option<String>,
-        #[arg(long)]
+        #[arg(long, required_unless_present = "token_only")]
         target: Option<String>,
         /// PEM CA path available on the target, passed only to the Linux bootstrap and enrollment.
         #[arg(long)]
@@ -197,4 +186,37 @@ pub(super) fn parse_socket_addr(value: &str) -> Result<SocketAddr, String> {
     value
         .parse()
         .map_err(|_| "expected an IP:PORT socket address".into())
+}
+
+#[cfg(test)]
+mod github_invite_tests {
+    use super::*;
+
+    #[test]
+    fn release_invite_requires_name_target_and_preserves_token_only() {
+        let base = [
+            "hostlink",
+            "invite",
+            "--name",
+            "fixture",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+        ];
+        assert!(Cli::try_parse_from(base).is_ok());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--version", "1.2.3"])).is_ok());
+        assert!(Cli::try_parse_from(["hostlink", "invite", "--token-only"]).is_ok());
+        assert!(Cli::try_parse_from(["hostlink", "invite"]).is_err());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--token-only"])).is_err());
+        for flag in [
+            "--installer-url",
+            "--installer-sha256",
+            "--agent-url",
+            "--agent-sha256",
+            "--archive-url",
+            "--archive-sha256",
+            "--github-token",
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain([flag, "fixture"])).is_err());
+        }
+    }
 }

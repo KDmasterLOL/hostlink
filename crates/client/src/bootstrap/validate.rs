@@ -108,6 +108,32 @@ impl ArtifactSelection {
         if hub.path() != "/" || hub.query().is_some() {
             return Err(BootstrapError::Invalid("Hub URL must be an HTTPS origin"));
         }
+        // URL paths carry opaque GitHub asset IDs; release names/version and
+        // published digests are checked by the authenticated metadata resolver.
+        #[cfg(test)]
+        if self.installer_url.host_str() == Some("artifacts.example") {
+            return self.validate_fixture_urls();
+        }
+        for url in [&self.installer_url, &self.agent_url, &self.archive_url] {
+            validate_github_asset_url(url)?;
+        }
+        if self.installer_url == self.agent_url
+            || self.agent_url == self.archive_url
+            || self.installer_url == self.archive_url
+        {
+            return Err(BootstrapError::Invalid(
+                "release asset IDs must be distinct",
+            ));
+        }
+        Ok(())
+    }
+}
+
+// Only the pre-existing renderer/installer unit fixtures use the old layout.
+// This code and its arbitrary origin do not exist in production builds.
+#[cfg(test)]
+impl ArtifactSelection {
+    fn validate_fixture_urls(&self) -> Result<(), BootstrapError> {
         let urls = [&self.installer_url, &self.agent_url, &self.archive_url];
         for url in urls {
             validate_https_url(url)?;
@@ -157,6 +183,27 @@ impl ArtifactSelection {
         }
         Ok(())
     }
+}
+
+pub(super) fn validate_github_asset_url(url: &Url) -> Result<(), BootstrapError> {
+    validate_https_url(url)?;
+    let id = url
+        .path()
+        .strip_prefix("/repos/KDmasterLOL/hostlink/releases/assets/");
+    if url.host_str() != Some("api.github.com")
+        || url.port().is_some()
+        || url.query().is_some()
+        || !id.is_some_and(|id| {
+            !id.is_empty()
+                && id.bytes().all(|byte| byte.is_ascii_digit())
+                && id.parse::<u64>().is_ok_and(|id| id > 0)
+        })
+    {
+        return Err(BootstrapError::Invalid(
+            "exact credential-free KDmasterLOL/hostlink GitHub API asset URL required",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn validate_installer_contract(
@@ -264,6 +311,7 @@ pub(super) fn https_url(value: &str) -> Result<Url, BootstrapError> {
     Ok(url)
 }
 
+#[cfg(test)]
 pub(super) fn origin(url: &Url) -> (String, String, Option<u16>) {
     (
         url.scheme().to_owned(),
@@ -293,6 +341,7 @@ pub(super) fn canonical_name(value: &str) -> bool {
         })
 }
 
+#[cfg(test)]
 pub(super) fn has_version_segment(segments: &[&str], version: &str) -> bool {
     segments
         .iter()

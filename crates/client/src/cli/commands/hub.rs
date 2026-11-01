@@ -1,5 +1,5 @@
 use crate::cli::args::{Command, HubCommand};
-use hostlink::bootstrap::{self, ArtifactSelection, Target};
+use hostlink::bootstrap::{self, Target};
 use hostlink::host::Host;
 use hostlink::hub::{HubClient, HubConfig};
 use secrecy::ExposeSecret;
@@ -185,12 +185,6 @@ async fn invite(command: &Command) -> Result<i32, Box<dyn Error>> {
         ssh_user,
         ttl_seconds,
         token_only,
-        installer_url,
-        installer_sha256,
-        agent_url,
-        agent_sha256,
-        archive_url,
-        archive_sha256,
         version,
         target,
         bootstrap_hub_ca_cert,
@@ -220,21 +214,15 @@ async fn invite(command: &Command) -> Result<i32, Box<dyn Error>> {
                 "--bootstrap-hub-ca-cert is supported only by the POSIX Linux installer".into(),
             );
         }
-        let selection = ArtifactSelection {
-            installer_url: bootstrap::parse_artifact_url(&get(installer_url, "--installer-url")?)?,
-            installer_sha256: get(installer_sha256, "--installer-sha256")?,
-            agent_url: bootstrap::parse_artifact_url(&get(agent_url, "--agent-url")?)?,
-            agent_sha256: get(agent_sha256, "--agent-sha256")?,
-            archive_url: bootstrap::parse_artifact_url(&get(archive_url, "--archive-url")?)?,
-            archive_sha256: get(archive_sha256, "--archive-sha256")?,
-            version: get(version, "--version")?,
-            target: selected_target,
-            name: selected_name,
-            ssh_user: ssh_user.clone().unwrap_or_else(|| config.ssh_user.clone()),
-            hub_url: config.hub_url.clone(),
-            bootstrap_hub_ca_cert: bootstrap_hub_ca_cert.clone(),
-        };
-        selection.validate()?;
+        let selection = bootstrap::resolve_github_selection(
+            version.as_deref(),
+            selected_target,
+            selected_name,
+            ssh_user.clone().unwrap_or_else(|| config.ssh_user.clone()),
+            config.hub_url.clone(),
+            bootstrap_hub_ca_cert.clone(),
+        )
+        .await?;
         Some(selection)
     };
     // Download, bound, hash, and inspect the exact installer before consuming an invite.
@@ -244,6 +232,11 @@ async fn invite(command: &Command) -> Result<i32, Box<dyn Error>> {
         }
         None => None,
     };
+    if selection.is_some() {
+        eprintln!(
+            "GitHub SHA-256 authenticates API-selected bytes; it is not an independent publisher signature. Target bootstrap requires its own fine-grained GitHub PAT (Contents:Read), entered privately on the target."
+        );
+    }
     let client = HubClient::from_config(&config)?;
     let pending = Host::create(&client, name.clone(), *ttl_seconds).await?;
     let invite = pending.into_invitation();

@@ -1,9 +1,11 @@
 //! Source-pinned invitation installer selection and copyable bootstrap rendering.
 
+mod github;
 mod render;
 mod validate;
 mod verify;
 
+pub use github::resolve_github_selection;
 pub use render::render_command;
 pub use validate::{ArtifactSelection, BootstrapError, Target, VerifiedInstaller};
 pub use verify::{parse_artifact_url, verify_installer};
