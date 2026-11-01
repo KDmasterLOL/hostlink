@@ -21,6 +21,7 @@ secrecy.workspace = true
 reqwest.workspace = true
 futures.workspace = true
 hostlink-hub = { path = "../hub", default-features = false }
+private-fs = { path = "../../Vendor/private-fs" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.191"

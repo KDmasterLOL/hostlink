@@ -1452,6 +1452,7 @@ dependencies = [
  "hostlink-agent",
  "hostlink-hub",
  "libc",
+ "private-fs",
  "processkit",
  "rand",
  "reqwest 0.12.28",
