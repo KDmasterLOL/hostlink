@@ -585,13 +585,15 @@ pub(super) fn identity_matches(handle: impl AsHandle, expected: Identity) -> Res
 }
 pub(super) fn security_handle(handle: impl AsHandle) -> Result<OwnedHandle> {
     let owned = handle.as_handle().try_clone_to_owned()?;
+    let standard: FILE_STANDARD_INFO = info(&owned, FileStandardInfo)?;
     open_access(
         Some(&owned),
         OsStr::new(""),
-        false,
+        standard.Directory,
         FILE_OPEN as u32,
         None,
-        Some((READ_CONTROL | WRITE_DAC) as u32),
+        // Attribute access supports legacy identity and reopened-handle kind checks.
+        Some((FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC) as u32),
     )
 }
 
