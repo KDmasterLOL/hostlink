@@ -51,7 +51,7 @@ function Assert-PrivateDirectory([string]$Path, [Security.Principal.SecurityIden
         $rule.InheritanceFlags -ne ([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit) -or
         $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) { throw 'Private directory ACL differs from owner-only policy.' }
 }
-function Get-GitHubCredential([bool]$Provision) {
+function Get-GitHubCredential([bool]$Provision, [string]$EmbeddedToken) {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     if ($null -eq $identity -or $null -eq $identity.User -or @('S-1-5-18','S-1-5-19','S-1-5-20') -contains $identity.User.Value) { throw 'Bootstrap requires a normal interactive user.' }
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -91,19 +91,27 @@ function Get-GitHubCredential([bool]$Provision) {
     catch [IO.FileNotFoundException] { $missing = $true }
     if ($missing) {
         if (-not $Provision) { throw 'Provision the target GitHub credential through the invite bootstrap first.' }
-        $secure = Read-Host 'GitHub fine-grained PAT (HostLink Contents:Read only)' -AsSecureString
+        $secure = $null
         $pointer = [IntPtr]::Zero
         $bytes = $null
         $stream = $null
         try {
-            if ($secure.Length -lt 1 -or $secure.Length -gt 1024) { throw 'Invalid GitHub credential size.' }
-            $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-            $bytes = New-Object byte[] $secure.Length
-            for ($i = 0; $i -lt $bytes.Length; $i++) {
-                $low = [Runtime.InteropServices.Marshal]::ReadByte($pointer, 2 * $i)
-                $high = [Runtime.InteropServices.Marshal]::ReadByte($pointer, 2 * $i + 1)
-                if ($high -ne 0 -or -not (($low -ge 48 -and $low -le 57) -or ($low -ge 65 -and $low -le 90) -or ($low -ge 97 -and $low -le 122) -or $low -eq 95)) { throw 'Invalid GitHub credential format.' }
-                $bytes[$i] = $low
+            if (-not [string]::IsNullOrEmpty($EmbeddedToken)) {
+                # This string is deliberately embedded only by the Controller's
+                # explicit --embed-github-token opt-in. Never print or log it.
+                if ($EmbeddedToken -cnotmatch '\A[A-Za-z0-9_]{1,1024}\z') { throw 'Invalid embedded GitHub credential format.' }
+                $bytes = [Text.Encoding]::ASCII.GetBytes($EmbeddedToken)
+            } else {
+                $secure = Read-Host 'GitHub fine-grained PAT (HostLink Contents:Read only)' -AsSecureString
+                if ($secure.Length -lt 1 -or $secure.Length -gt 1024) { throw 'Invalid GitHub credential size.' }
+                $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+                $bytes = New-Object byte[] $secure.Length
+                for ($i = 0; $i -lt $bytes.Length; $i++) {
+                    $low = [Runtime.InteropServices.Marshal]::ReadByte($pointer, 2 * $i)
+                    $high = [Runtime.InteropServices.Marshal]::ReadByte($pointer, 2 * $i + 1)
+                    if ($high -ne 0 -or -not (($low -ge 48 -and $low -le 57) -or ($low -ge 65 -and $low -le 90) -or ($low -ge 97 -and $low -le 122) -or $low -eq 95)) { throw 'Invalid GitHub credential format.' }
+                    $bytes[$i] = $low
+                }
             }
             $security = New-Object Security.AccessControl.FileSecurity
             $security.SetOwner($sid)
@@ -118,7 +126,7 @@ function Get-GitHubCredential([bool]$Provision) {
             if ($null -ne $stream) { $stream.Close() }
             if ($null -ne $bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
             if ($pointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer) }
-            $secure.Dispose()
+            if ($null -ne $secure) { $secure.Dispose() }
         }
         $attributes = [IO.File]::GetAttributes($path)
     }
@@ -138,7 +146,11 @@ function Get-GitHubCredential([bool]$Provision) {
             $offset += $count
         }
         foreach ($b in $bytes) { if (-not (($b -ge 48 -and $b -le 57) -or ($b -ge 65 -and $b -le 90) -or ($b -ge 97 -and $b -le 122) -or $b -eq 95)) { throw 'Invalid GitHub credential format.' } }
-        return [Text.Encoding]::ASCII.GetString($bytes)
+        $existing = [Text.Encoding]::ASCII.GetString($bytes)
+        if (-not [string]::IsNullOrEmpty($EmbeddedToken) -and $EmbeddedToken -cne $existing) {
+            throw 'Existing GitHub credential differs; rotate it explicitly instead of overwriting.'
+        }
+        return $existing
     } finally {
         if ($null -ne $bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
         $stream.Close()

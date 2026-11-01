@@ -89,6 +89,43 @@ class BootstrapTests(unittest.TestCase):
                          (after.st_ino, after.st_mtime_ns, after.st_mode))
         self.assertEqual(self.credential.read_bytes(), FIXTURE)
 
+    def test_explicit_controller_credential_provisions_without_target_prompt(self):
+        self.require_safe_ancestry()
+        quoted = shlex.quote(FIXTURE.decode('ascii'))
+        # No PTY attached: the controller-supplied string must avoid Read-Host.
+        result = self.run_sh('hl_provision_credential ' + quoted)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(FIXTURE, result.stdout + result.stderr)
+        self.assertEqual(self.credential.read_bytes(), FIXTURE)
+        self.assertEqual(self.credential.stat().st_mode & 0o777, 0o600)
+        for directory in (self.credential.parent, self.credential.parent.parent):
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+
+        before = self.credential.stat()
+        result = self.run_sh('hl_provision_credential ' + quoted)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = self.credential.stat()
+        self.assertEqual((before.st_ino, before.st_mtime_ns), (after.st_ino, after.st_mtime_ns))
+
+        # A different shared PAT must never silently replace an existing one.
+        wrong = b'synthetic_other_fixture'
+        result = self.run_sh('hl_provision_credential ' + shlex.quote(wrong.decode()))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'rotate it explicitly', result.stderr)
+        self.assertNotIn(FIXTURE, result.stdout + result.stderr)
+        self.assertNotIn(wrong, result.stdout + result.stderr)
+        self.assertEqual(self.credential.read_bytes(), FIXTURE)
+
+    def test_invalid_embedded_credential_fails_without_interactive_fallback(self):
+        self.require_safe_ancestry()
+        for value in ('', 'bad\nheader', 'bad token', 'bad"quote', 'a' * 1025):
+            result = self.run_sh('hl_provision_credential ' + shlex.quote(value))
+            self.assertNotEqual(result.returncode, 0)
+            if value:
+                self.assertNotIn(value.encode(), result.stderr)
+            self.assertFalse(self.credential.exists())
+        self.assertNotEqual(self.run_sh('hl_provision_credential a b').returncode, 0)
+
     def test_weak_symlink_hardlink_and_mutable_parent_are_refused(self):
         self.put_credential()
         for mode in (0o644, 0o660, 0o666):
@@ -279,6 +316,11 @@ class BootstrapTests(unittest.TestCase):
         self.assertLess(script.index('bootstrap-verify --archive'), script.index("Read-Host 'One-use HostLink invite token'"))
         self.assertLess(script.index('Verified ZIP executable differs'), script.index("Read-Host 'One-use HostLink invite token'"))
         self.assertNotIn('GetFileName($archiveUriObject.AbsolutePath)', script)
+        self.assertIn('Get-GitHubCredential([bool]$Provision, [string]$EmbeddedToken)', script)
+        # An unbound [string] argument becomes empty string in PowerShell,
+        # so comparing against $null would break the normal hidden prompt.
+        self.assertIn('if (-not [string]::IsNullOrEmpty($EmbeddedToken))', script)
+        self.assertIn('if (-not [string]::IsNullOrEmpty($EmbeddedToken) -and $EmbeddedToken -cne $existing)', script)
         shell = SH.read_text()
         self.assertLess(shell.index('bootstrap-verify --archive'), shell.index("printf 'One-use HostLink invite token"))
         self.assertNotIn('archive_name=', shell)

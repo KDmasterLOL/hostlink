@@ -60,26 +60,37 @@ hl_load_credential() {
 }
 hl_provision_credential() {
     [ "$(id -u)" -ne 0 ] || hl_fail 'Bootstrap must run as a normal unprivileged user.'
+    [ "$#" -le 1 ] || hl_fail 'Unexpected credential provision arguments.'
     hl_credential_path
     hl_config_dir "$hl_config"
     hl_private_dir "$hl_config/hostlink"
     hl_private_dir "$hl_config/hostlink/credentials"
     if [ -e "$hl_credential" ] || [ -L "$hl_credential" ]; then
         hl_load_credential
+        if [ "$#" -eq 1 ] && [ "$1" != "$hl_github_token" ]; then
+            unset hl_github_token
+            hl_fail 'Existing GitHub credential differs; rotate it explicitly instead of overwriting.'
+        fi
         unset hl_github_token
         return
     fi
-    hl_tty_state=$(stty -g </dev/tty) || hl_fail 'An interactive target terminal is required.'
-    trap 'stty "$hl_tty_state" </dev/tty' EXIT
-    trap 'exit 130' HUP INT TERM
-    stty -echo </dev/tty
-    printf 'GitHub fine-grained PAT (HostLink Contents:Read only): ' >/dev/tty
-    hl_read_ok=0
-    IFS= read -r hl_github_token </dev/tty || hl_read_ok=$?
-    stty "$hl_tty_state" </dev/tty
-    trap - EXIT HUP INT TERM
-    printf '\n' >/dev/tty
-    [ "$hl_read_ok" -eq 0 ] || hl_fail 'GitHub credential prompt failed.'
+    if [ "$#" -eq 1 ]; then
+        # Explicit Controller opt-in: the generated bootstrap is itself a
+        # secret. Never print this value or pass it to a child process as argv.
+        hl_github_token=$1
+    else
+        hl_tty_state=$(stty -g </dev/tty) || hl_fail 'An interactive target terminal is required.'
+        trap 'stty "$hl_tty_state" </dev/tty' EXIT
+        trap 'exit 130' HUP INT TERM
+        stty -echo </dev/tty
+        printf 'GitHub fine-grained PAT (HostLink Contents:Read only): ' >/dev/tty
+        hl_read_ok=0
+        IFS= read -r hl_github_token </dev/tty || hl_read_ok=$?
+        stty "$hl_tty_state" </dev/tty
+        trap - EXIT HUP INT TERM
+        printf '\n' >/dev/tty
+        [ "$hl_read_ok" -eq 0 ] || hl_fail 'GitHub credential prompt failed.'
+    fi
     case "$hl_github_token" in ''|*[!A-Za-z0-9_]*) unset hl_github_token; hl_fail 'Invalid GitHub credential format.' ;; esac
     [ "${#hl_github_token}" -le 1024 ] || hl_fail 'Invalid GitHub credential size.'
     (set -C; printf '%s' "$hl_github_token" > "$hl_credential") || hl_fail 'Credential creation failed; existing files are never overwritten.'

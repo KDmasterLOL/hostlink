@@ -35,8 +35,13 @@ Under user authorization for 1C-1159, GitHub Releases in the fixed private
 `KDmasterLOL/hostlink` repository are the SOLE production artifact source for
 fresh invites and installed updates. Both Controller and target use separate
 current-user, private `hostlink/credentials/github-token` files; on first
-target bootstrap the credential is securely prompted, never embedded in source,
-binary, invitation output, CLI argv, download URLs or release bundles. No
+target bootstrap the credential is securely prompted by default. Under
+explicit 1C-1160 user authorization, `hostlink invite --embed-github-token`
+may instead print the Controller's PAT in the bootstrap command and provision
+the target credential without prompting. Treat printed commands and any
+saved PowerShell helper as secret material and dispose of them after use.
+Without this explicit opt-in no PAT is included. PATs are never committed
+in source, binaries, Hub records, download URLs or release bundles. No
 arbitrary-site `invite` or `update` flags and no alternate publisher fallback.
 GitHub-digest checks do not replace HostLink ZIP, manifest, filesystem, locks
 or stopped-Agent checks; native Windows 7/11 acceptance remains a release gate.

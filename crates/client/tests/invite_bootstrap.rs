@@ -28,6 +28,7 @@ fn invite_selects_only_github_release_and_keeps_token_only_mode() {
     );
     for option in [
         "--token-only",
+        "--embed-github-token",
         "--ssh-user",
         "--version",
         "--target",
@@ -119,6 +120,20 @@ fn invalid_target_or_missing_github_credential_fail_before_any_hub_invite_reques
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("GitHub credential"), "{stderr}");
     assert!(!stderr.contains("disposable-operator-token"));
+    let embedded = hostlink(
+        &[
+            "invite",
+            "--name",
+            "lab-win7",
+            "--target",
+            "x86_64-win7-windows-msvc",
+            "--embed-github-token",
+        ],
+        &config,
+    );
+    assert!(!embedded.status.success());
+    assert!(String::from_utf8_lossy(&embedded.stderr).contains("GitHub credential"));
+    assert!(!String::from_utf8_lossy(&embedded.stdout).contains("token:"));
     assert!(
         matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
         "invalid artifact selection must fail before any Hub POST"

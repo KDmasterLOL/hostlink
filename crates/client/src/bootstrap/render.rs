@@ -14,14 +14,28 @@ fn github_helpers(source: &str) -> &str {
 }
 
 pub fn render_command(selection: &ArtifactSelection, installer: &VerifiedInstaller) -> String {
+    render_command_with_token(selection, installer, None)
+}
+
+/// Embed a Controller PAT only after an explicit user opt-in at the CLI
+/// boundary. The returned text is a credential and must not be logged.
+pub(super) fn render_command_with_token(
+    selection: &ArtifactSelection,
+    installer: &VerifiedInstaller,
+    token: Option<&str>,
+) -> String {
     if selection.target.windows() {
-        render_powershell(selection, installer)
+        render_powershell(selection, installer, token)
     } else {
-        render_posix(selection, installer)
+        render_posix(selection, installer, token)
     }
 }
 
-fn render_powershell(selection: &ArtifactSelection, installer: &VerifiedInstaller) -> String {
+fn render_powershell(
+    selection: &ArtifactSelection,
+    installer: &VerifiedInstaller,
+    token: Option<&str>,
+) -> String {
     let digest = ps_quote(&installer.sha256);
     let url = ps_quote(installer.url.as_str());
     let args = [
@@ -41,8 +55,12 @@ fn render_powershell(selection: &ArtifactSelection, installer: &VerifiedInstalle
     let helpers = github_helpers(include_str!(
         "../../../agent/assets/Install-HostLink-Agent.ps1"
     ));
+    let provision = token.map_or_else(
+        || "[void](Get-GitHubCredential $true)".to_owned(),
+        |token| format!("[void](Get-GitHubCredential $true {})", ps_quote(token)),
+    );
     let script = format!(
-        "$ErrorActionPreference='Stop'\nSet-PSDebug -Off\n{helpers}\nAssert-GitHubAsset {url}\n[void](Get-GitHubCredential $true)\n$bytes=Get-GitHubAsset {url} '' 1048576 30\n$h=New-Object Security.Cryptography.SHA256Managed\ntry{{$actual=([BitConverter]::ToString($h.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}}finally{{$h.Clear()}}\nif($actual -cne {digest}){{throw 'Installer SHA-256 mismatch'}}\n$script=[Text.Encoding]::UTF8.GetString($bytes)\n& ([scriptblock]::Create($script)){args}\n"
+        "$ErrorActionPreference='Stop'\nSet-PSDebug -Off\n{helpers}\nAssert-GitHubAsset {url}\n{provision}\n$bytes=Get-GitHubAsset {url} '' 1048576 30\n$h=New-Object Security.Cryptography.SHA256Managed\ntry{{$actual=([BitConverter]::ToString($h.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}}finally{{$h.Clear()}}\nif($actual -cne {digest}){{throw 'Installer SHA-256 mismatch'}}\n$script=[Text.Encoding]::UTF8.GetString($bytes)\n& ([scriptblock]::Create($script)){args}\n"
     );
     let utf16le = script
         .encode_utf16()
@@ -57,13 +75,22 @@ fn render_powershell(selection: &ArtifactSelection, installer: &VerifiedInstalle
     } else {
         // Windows cmd.exe limits the entire encoded command to 8191 characters.
         // The security helpers cannot fit; provide an explicit two-step local helper.
+        let note = if token.is_some() {
+            "WARNING: This helper contains your GitHub PAT in plain text. Save it privately, never share it, and delete it after installation."
+        } else {
+            "No GitHub credential is included."
+        };
         format!(
-            "1. On the TARGET save the script between the markers as %USERPROFILE%\\hostlink-bootstrap.ps1 (UTF-8 with BOM). No credential is included.\n2. In an unelevated target cmd.exe run:\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%USERPROFILE%\\hostlink-bootstrap.ps1\"\n# BEGIN TARGET HELPER\n{script}# END TARGET HELPER\n"
+            "1. On the TARGET save the script between the markers as %USERPROFILE%\\hostlink-bootstrap.ps1 (UTF-8 with BOM). {note}\n2. In an unelevated target cmd.exe run:\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%USERPROFILE%\\hostlink-bootstrap.ps1\"\n# BEGIN TARGET HELPER\n{script}# END TARGET HELPER\n"
         )
     }
 }
 
-fn render_posix(selection: &ArtifactSelection, installer: &VerifiedInstaller) -> String {
+fn render_posix(
+    selection: &ArtifactSelection,
+    installer: &VerifiedInstaller,
+    token: Option<&str>,
+) -> String {
     let mut args = [
         ("--hub-url", selection.hub_url.as_str()),
         ("--name", selection.name.as_str()),
@@ -88,8 +115,12 @@ fn render_posix(selection: &ArtifactSelection, installer: &VerifiedInstaller) ->
     let helpers = github_helpers(include_str!(
         "../../../agent/assets/install-hostlink-agent.sh"
     ));
+    let provision = token.map_or_else(
+        || "hl_provision_credential".to_owned(),
+        |token| format!("hl_provision_credential {}", sh_quote(token)),
+    );
     format!(
-        "set -eu\n{helpers}\nhl_asset_url {url}\nhl_provision_credential\ninstaller=$(mktemp)\ntrap 'rm -f \"$installer\"' EXIT\ntrap 'exit 130' HUP INT TERM\nhl_download {url} \"$installer\" 1048576 30\nprintf '%s  %s\\n' {digest} \"$installer\" | sha256sum -c -\n/bin/sh \"$installer\"{args}\n",
+        "set -eu\n{helpers}\nhl_asset_url {url}\n{provision}\ninstaller=$(mktemp)\ntrap 'rm -f \"$installer\"' EXIT\ntrap 'exit 130' HUP INT TERM\nhl_download {url} \"$installer\" 1048576 30\nprintf '%s  %s\\n' {digest} \"$installer\" | sha256sum -c -\n/bin/sh \"$installer\"{args}\n",
         url = sh_quote(installer.url.as_str()),
         digest = sh_quote(&installer.sha256),
     )

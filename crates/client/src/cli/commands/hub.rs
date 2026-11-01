@@ -185,6 +185,7 @@ async fn invite(command: &Command) -> Result<i32, Box<dyn Error>> {
         ssh_user,
         ttl_seconds,
         token_only,
+        embed_github_token,
         version,
         target,
         bootstrap_hub_ca_cert,
@@ -232,9 +233,23 @@ async fn invite(command: &Command) -> Result<i32, Box<dyn Error>> {
         }
         None => None,
     };
+    // Construct the complete command before consuming the one-use Hub invite.
+    // Any credential/configuration error must not burn an invitation.
+    let bootstrap_command = match (&selection, &verified) {
+        (Some(selection), Some(verified)) if *embed_github_token => {
+            Some(bootstrap::render_command_embedded(selection, verified)?)
+        }
+        (Some(selection), Some(verified)) => Some(bootstrap::render_command(selection, verified)),
+        _ => None,
+    };
     if selection.is_some() {
         eprintln!(
-            "GitHub SHA-256 authenticates API-selected bytes; it is not an independent publisher signature. Target bootstrap requires its own fine-grained GitHub PAT (Contents:Read), entered privately on the target."
+            "GitHub SHA-256 authenticates API-selected bytes; it is not an independent publisher signature."
+        );
+    }
+    if *embed_github_token {
+        eprintln!(
+            "WARNING: bootstrap_command contains your GitHub PAT in plain text. +             Protect stdout, terminal history and clipboard; delete any saved +             Windows bootstrap helper after installation. Every target receiving +             this PAT can read the authorized private GitHub repository."
         );
     }
     let client = HubClient::from_config(&config)?;
@@ -245,11 +260,10 @@ async fn invite(command: &Command) -> Result<i32, Box<dyn Error>> {
         invite.token.expose_secret(),
         invite.expires_at
     );
-    if let (Some(selection), Some(verified)) = (&selection, &verified) {
+    if let (Some(verified), Some(bootstrap_command)) = (&verified, bootstrap_command) {
         println!(
             "artifact_binding: verified\ninstaller_sha256: {}\nbootstrap_command:\n{}",
-            verified.sha256,
-            bootstrap::render_command(selection, verified)
+            verified.sha256, bootstrap_command
         );
     } else {
         println!("artifact_binding: token-only; no bootstrap command");

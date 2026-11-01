@@ -130,8 +130,10 @@ one-use Hub invite, it verifies the exact target's ZIP and sidecar
 metadata/digests, downloads the selected GitHub installer over authenticated
 HTTPS and verifies its byte digest and target-specific command contract.
 
-The generated target bootstrap contains GitHub asset API URLs and their
-expected SHA-256, **never the GitHub token**. The target independently
+The normal target bootstrap contains GitHub asset API URLs and their
+expected SHA-256, without a PAT. With `--embed-github-token`, the
+printed bootstrap includes the Controller PAT so the target can save it
+without a second prompt. Treat this output as sensitive. The target independently
 prompts (without echo) for its own PAT and creates/reads the private
 `hostlink/credentials/github-token` file, then fetches/validates the
 installer, sidecar and ZIP. Only after those validations does the target

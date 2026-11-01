@@ -56,10 +56,11 @@ A repository-scoped, **read-only** GitHub credential is read from:
 - Windows: `%APPDATA%\HostLink\credentials\github-token` in the
   **current user's** profile, not the system/service profile.
 
-The installation bootstrap command prompts locally for this credential
-**without echoing**, creates owner-only directories and credential files,
-or verifies and reuses an existing private file. A missing/unsafe credential
-must fail rather than silently attempting an unauthenticated download.
+By default bootstrap prompts locally without echoing and creates the
+user-owned credential file (or reuses a validated existing one).
+With explicit `hostlink invite --embed-github-token`, the bootstrap instead
+provisions the Controller credential automatically. Different existing
+credentials are not overwritten. Invalid files fail closed.
 The Agent subsequently reads the same file for update. The Controller also
 needs its own credential file under its own user profile to resolve Releases
 and verify the installer **before issuing a one-use invitation**.
@@ -70,8 +71,11 @@ repository**, not solely release binaries. On untrusted/customer machines
 consider an independently owned private repository containing only binary
 Releases, or separate credentials per machine to reduce blast radius. Shared
 permanent PATs are simpler but are revocable at the cost of coordinated
-rotation of every machine. Never embed PAT bytes in programs, scripts, Git,
-Hub registry, invitation output, URL/query, process arguments or logs.
+rotation of every machine. The explicit opt-in prints a PAT-bearing
+bootstrap command. Treat that output, copied shell commands and saved
+Windows helper files as sensitive; delete temporary helpers after use.
+Without this opt-in the generated invitation contains no GitHub PAT.
+Never embed PAT bytes in committed programs, releases or Hub records.
 A file with restrictive permissions protects against **other local users**,
 not against compromise of the Agent's own user account.
 
@@ -81,10 +85,10 @@ not against compromise of the Agent's own user account.
    Release, checks target-specific ZIP, sidecar, installer names and full
    GitHub-provided SHA-256 digests, downloads and preflights the installer
    **before** creating the one-use Hub invitation.
-2. The copyable bootstrap command runs on the **target**. It provisions the
-   private credential file by a hidden local prompt (or reads an existing
-   private one), then downloads the chosen installer from the GitHub Release
-   API. The command checks installer SHA-256 before executing it.
+2. The copyable bootstrap command runs on the **target**. By default it
+   provisions the credential through a hidden local prompt; with explicit
+   `--embed-github-token`, it uses the Controller-supplied value instead.
+   It downloads the chosen installer and checks SHA-256 before executing it.
 3. The installer downloads the exact target-specific executable verifier and
    ZIP using the same credential, checks their independently selected hashes,
    runs `bootstrap-verify`, and only then prompts for the one-use Hub invite

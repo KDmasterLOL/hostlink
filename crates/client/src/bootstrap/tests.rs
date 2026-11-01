@@ -215,6 +215,60 @@ fn windows_render_uses_explicit_two_step_helper_when_encoding_exceeds_cmd_limit(
 }
 
 #[test]
+fn github_credential_is_embedded_only_by_explicit_render_opt_in() {
+    // Synthetic fixture only: never use a real Controller credential in tests.
+    let token = "github_pat_synthetic_fixture_123";
+    for target in [
+        Target::LinuxX64,
+        Target::Win7X86,
+        Target::Win7X64,
+        Target::Win11X64,
+    ] {
+        let selected = github_selection(target);
+        let installer = VerifiedInstaller {
+            url: selected.installer_url.clone(),
+            sha256: selected.installer_sha256.clone(),
+        };
+        let normal = render_command(&selected, &installer);
+        assert!(!normal.contains(token));
+        let embedded = super::render::render_command_with_token(&selected, &installer, Some(token));
+        if target.windows() {
+            let script = embedded
+                .split_once("# BEGIN TARGET HELPER\n")
+                .expect("PowerShell 2 bootstrap must provide a local helper")
+                .1
+                .split_once("# END TARGET HELPER")
+                .unwrap()
+                .0;
+            assert!(script.contains(&format!("[void](Get-GitHubCredential $true '{token}')")));
+            assert!(embedded.contains("WARNING: This helper contains your GitHub PAT"));
+            assert!(!normal.contains("WARNING: This helper contains your GitHub PAT"));
+            assert!(script.contains("SetAccessRuleProtection($true, $false)"));
+        } else {
+            assert!(normal.contains("\nhl_provision_credential\n"));
+            assert!(embedded.contains(&format!("\nhl_provision_credential '{token}'\n")));
+            assert!(embedded.contains("sha256sum -c -"));
+            #[cfg(unix)]
+            {
+                use std::io::Write;
+                let mut shell = std::process::Command::new("/bin/sh")
+                    .arg("-n")
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                shell
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(embedded.as_bytes())
+                    .unwrap();
+                assert!(shell.wait().unwrap().success());
+            }
+        }
+    }
+}
+
+#[test]
 fn installer_contract_is_platform_specific_and_version_is_exact_semver() {
     assert!(semver("1.2.3-rc.1+build.4"));
     assert!(!semver("1.2.3-"));

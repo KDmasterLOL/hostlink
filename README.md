@@ -18,10 +18,14 @@ Target packages:
 
 Fresh installation and updates use **only the private**
 `KDmasterLOL/hostlink` **GitHub Releases** repository. The target's GitHub
-read-only credential is entered during bootstrap and stored in a private
-current-user file (`~/.config/hostlink/credentials/github-token` on Linux,
-`%APPDATA%\HostLink\credentials\github-token` on Windows), not embedded
-in the binary, Hub invite, CLI arguments or URLs. Controller uses its own
+read-only credential is entered during bootstrap by default and stored in a
+private current-user file (`~/.config/hostlink/credentials/github-token`
+on Linux, `%APPDATA%\HostLink\credentials\github-token` on Windows).
+`hostlink invite --embed-github-token` explicitly embeds the Controller's
+existing PAT in the printed bootstrap command, so the target provisions it
+without another prompt. This opt-in **exposes the PAT in stdout, copied
+commands and potentially shell history or saved PowerShell scripts**;
+otherwise the token never appears in the generated invitation. Controller uses its own
 corresponding user-local credential to resolve and preflight the release
 **before issuing an invitation**. The updater supports
 `hostlink-agent update [--version X.Y.Z] [--root ROOT]` and no arbitrary

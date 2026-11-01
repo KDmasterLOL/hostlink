@@ -45,8 +45,12 @@ pub(super) enum Command {
         #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(60..=86400))]
         ttl_seconds: u64,
         /// Create a manual invitation without selecting verified installer artifacts.
-        #[arg(long, conflicts_with_all = ["ssh_user", "version", "target", "bootstrap_hub_ca_cert"])]
+        #[arg(long, conflicts_with_all = ["ssh_user", "version", "target", "bootstrap_hub_ca_cert", "embed_github_token"])]
         token_only: bool,
+        /// Include the Controller's private GitHub PAT in the printed target bootstrap.
+        /// The resulting output is a SECRET (shell history, clipboard and saved script).
+        #[arg(long, conflicts_with = "token_only")]
+        embed_github_token: bool,
         /// Exact semantic version (v-prefixed GitHub tag); omit for latest published release.
         #[arg(long)]
         version: Option<String>,
@@ -204,7 +208,12 @@ mod github_invite_tests {
         ];
         assert!(Cli::try_parse_from(base).is_ok());
         assert!(Cli::try_parse_from(base.into_iter().chain(["--version", "1.2.3"])).is_ok());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--embed-github-token"])).is_ok());
         assert!(Cli::try_parse_from(["hostlink", "invite", "--token-only"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["hostlink", "invite", "--token-only", "--embed-github-token"])
+                .is_err()
+        );
         assert!(Cli::try_parse_from(["hostlink", "invite"]).is_err());
         assert!(Cli::try_parse_from(base.into_iter().chain(["--token-only"])).is_err());
         for flag in [
