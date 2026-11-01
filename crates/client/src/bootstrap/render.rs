@@ -10,10 +10,6 @@ pub fn render_command(selection: &ArtifactSelection, installer: &VerifiedInstall
     }
 }
 
-pub fn invitation_is_unexpired(expires_at: i64, now_unix: i64) -> bool {
-    expires_at > now_unix
-}
-
 fn render_powershell(selection: &ArtifactSelection, installer: &VerifiedInstaller) -> String {
     let digest = ps_quote(&installer.sha256);
     let url = ps_quote(installer.url.as_str());

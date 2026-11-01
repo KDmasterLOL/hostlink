@@ -174,9 +174,6 @@ fn installer_contract_is_platform_specific_and_version_is_exact_semver() {
     assert!(
         validate_installer_bytes(source.as_bytes(), &"0".repeat(64), Target::LinuxX64).is_err()
     );
-    assert!(invitation_is_unexpired(101, 100));
-    assert!(!invitation_is_unexpired(100, 100));
-    assert!(!invitation_is_unexpired(99, 100));
 }
 
 #[tokio::test]
