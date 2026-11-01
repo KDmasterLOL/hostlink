@@ -45,26 +45,14 @@ fn render_powershell(selection: &ArtifactSelection, token: Option<&str>) -> Stri
     let script = format!(
         "param([switch]$NoRun)\n$ErrorActionPreference='Stop'\nSet-PSDebug -Off\n{helpers}\n{vars}\n{provision}\n{body}"
     );
-    let utf16le = script
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    let command = format!(
-        "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {}",
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, utf16le)
-    );
-    if command.len() <= 8191 {
-        command
+    let note = if token.is_some() {
+        "WARNING: This helper contains your GitHub PAT in plain text. Never share it."
     } else {
-        let note = if token.is_some() {
-            "WARNING: This helper contains your GitHub PAT in plain text. Save it privately, never share it, and delete it after installation."
-        } else {
-            "No GitHub credential is included. Delete the helper after installation."
-        };
-        format!(
-            "1. On the TARGET save the script between the markers privately as %TEMP%\\hostlink-bootstrap.ps1 (UTF-8 with BOM). {note}\n2. In an unelevated target cmd.exe run (optionally append -NoRun):\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%TEMP%\\hostlink-bootstrap.ps1\"\n# BEGIN TARGET HELPER\n{script}# END TARGET HELPER\n"
-        )
-    }
+        "No GitHub credential is included."
+    };
+    format!(
+        "1. On the TARGET protect the temporary file so only the current user can read or modify it. Save ONLY the script between the markers as %TEMP%\\hostlink-bootstrap.ps1 (UTF-8 with BOM). {note}\n2. Review the saved helper, then explicitly run in an unelevated target cmd.exe (optionally append -NoRun):\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%TEMP%\\hostlink-bootstrap.ps1\"\n3. Delete the helper after installation, including if installation fails.\n# BEGIN TARGET HELPER\n{script}# END TARGET HELPER\n"
+    )
 }
 
 fn render_posix(selection: &ArtifactSelection, token: Option<&str>) -> String {

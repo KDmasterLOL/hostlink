@@ -54,6 +54,20 @@ consuming the separate one-use Hub invitation. It invokes Rust Agent install
 for enrollment and executable publication at the stable per-user root.
 No Git or other default command installation is part of this flow.
 
+Windows output always contains a disposable PowerShell 2 helper between
+`# BEGIN TARGET HELPER` and `# END TARGET HELPER` markers. On the target,
+protect the temporary file so only the current user can read or modify it,
+then save only the text between the markers as
+`%TEMP%\hostlink-bootstrap.ps1`, encoded as UTF-8 with BOM. Review it and
+explicitly execute the printed `powershell -NoProfile -ExecutionPolicy Bypass
+-File "%TEMP%\hostlink-bootstrap.ps1"` command in an unelevated `cmd.exe`;
+optionally append `-NoRun` to install without starting the Agent. Delete the
+helper after installation, including on failure. The helper is never installed.
+With `--embed-github-token`, its PAT is cleartext and the output warns about it;
+without that opt-in it contains no GitHub credential. The helper is not encoded
+in a command line: the full script exceeds the `cmd.exe` limit of 8191 characters.
+Linux keeps the disposable POSIX bootstrap flow.
+
 Authenticated requests go only to the fixed GitHub API origin. A bounded
 HTTPS CDN redirect must not receive Authorization. Missing assets, digests,
 private credentials or inaccessible releases fail closed.

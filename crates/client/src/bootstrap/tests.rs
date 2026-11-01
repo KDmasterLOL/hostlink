@@ -27,6 +27,45 @@ fn windows_script(output: &str) -> &str {
 }
 
 #[test]
+fn windows_output_requires_explicit_private_temporary_helper_execution() {
+    for target in [Target::Win7X86, Target::Win7X64, Target::Win11X64] {
+        for token in [None, Some("github_pat_synthetic_fixture_123")] {
+            let output = super::render::render_command_with_token(&selection(target), token);
+            assert_eq!(output.matches("# BEGIN TARGET HELPER\n").count(), 1);
+            assert_eq!(output.matches("# END TARGET HELPER\n").count(), 1);
+            assert!(output.ends_with("# END TARGET HELPER\n"));
+            let instructions = output.split_once("# BEGIN TARGET HELPER\n").unwrap().0;
+            assert!(instructions.contains("only the current user can read or modify it"));
+            assert!(instructions.contains("Save ONLY the script between the markers"));
+            assert!(instructions.contains("(UTF-8 with BOM)"));
+            assert!(instructions.contains("Review the saved helper, then explicitly run"));
+            assert!(instructions.contains("unelevated target cmd.exe"));
+            assert!(instructions.contains("optionally append -NoRun"));
+            assert!(
+                instructions.contains(
+                    "Delete the helper after installation, including if installation fails"
+                )
+            );
+            assert_eq!(
+                instructions
+                    .lines()
+                    .filter(|line| line.starts_with("powershell "))
+                    .collect::<Vec<_>>(),
+                [
+                    "powershell -NoProfile -ExecutionPolicy Bypass -File \"%TEMP%\\hostlink-bootstrap.ps1\""
+                ]
+            );
+            assert!(windows_script(&output).starts_with("param([switch]$NoRun)\n"));
+            if token.is_some() {
+                assert!(instructions.contains("GitHub PAT in plain text. Never share it."));
+            } else {
+                assert!(instructions.contains("No GitHub credential is included."));
+            }
+        }
+    }
+}
+
+#[test]
 fn four_exact_raw_asset_names_and_fixed_api_digest_pins() {
     for (target, asset) in [
         (Target::LinuxX64, "hostlink-agent-x86_64-unknown-linux-gnu"),
@@ -127,19 +166,30 @@ fn bootstraps_verify_one_binary_before_invite_prompt_and_rust_install() {
 #[test]
 fn render_quotes_values_and_embeds_only_explicit_synthetic_credential() {
     let token = "github_pat_synthetic_fixture_123";
-    for target in [Target::LinuxX64, Target::Win7X64] {
+    for target in [
+        Target::LinuxX64,
+        Target::Win7X86,
+        Target::Win7X64,
+        Target::Win11X64,
+    ] {
         let mut selected = selection(target);
         selected.name = "lab'$(whoami)".into();
-        selected.bootstrap_hub_ca_cert = Some("/private/fixture ca.pem".into());
+        selected.bootstrap_hub_ca_cert = Some(if target.windows() {
+            r"C:\Users\Fixture User\сертификат's root.pem".into()
+        } else {
+            "/private/fixture ca.pem".into()
+        });
         let normal = render_command(&selected);
         assert!(!normal.contains(token));
         let embedded = super::render::render_command_with_token(&selected, Some(token));
         if target.windows() {
             let script = windows_script(&embedded);
+            assert!(windows_script(&normal).contains("\n[void](Get-GitHubCredential $true)\n"));
             assert!(script.contains("$Name='lab''$(whoami)'"));
-            assert!(script.contains("$HubCaCert='/private/fixture ca.pem'"));
+            assert!(script.contains(r"$HubCaCert='C:\Users\Fixture User\сертификат''s root.pem'"));
             assert!(script.contains("--hub-ca-cert $HubCaCert"));
             assert!(script.contains(&format!("[void](Get-GitHubCredential $true '{token}')")));
+            assert_eq!(embedded.matches(token).count(), 1);
             assert!(embedded.contains("WARNING: This helper contains your GitHub PAT"));
             assert!(!normal.contains("WARNING: This helper contains your GitHub PAT"));
             assert!(script.contains("SetAccessRuleProtection($true, $false)"));
