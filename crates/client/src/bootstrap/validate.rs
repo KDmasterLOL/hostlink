@@ -48,13 +48,16 @@ impl Target {
 
 #[derive(Clone, Debug)]
 pub struct ArtifactSelection {
-    pub agent_url: Url,
-    pub agent_sha256: String,
-    pub target: Target,
-    pub name: String,
-    pub ssh_user: String,
-    pub hub_url: String,
-    pub bootstrap_hub_ca_cert: Option<std::path::PathBuf>,
+    // Only the authenticated GitHub resolver may issue a selection to callers.
+    // Rendering a caller-built set of untrusted URL/digest fields bypasses that
+    // ownership boundary even if the target-side downloader fails closed.
+    pub(super) agent_url: Url,
+    pub(super) agent_sha256: String,
+    pub(super) target: Target,
+    pub(super) name: String,
+    pub(super) ssh_user: String,
+    pub(super) hub_url: String,
+    pub(super) bootstrap_hub_ca_cert: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -66,7 +69,12 @@ pub enum BootstrapError {
 }
 
 impl ArtifactSelection {
-    pub fn validate(&self) -> Result<(), BootstrapError> {
+    /// Verified GitHub-published digest associated with the selected executable.
+    pub fn agent_sha256(&self) -> &str {
+        &self.agent_sha256
+    }
+
+    pub(super) fn validate(&self) -> Result<(), BootstrapError> {
         if !canonical_name(&self.name) {
             return Err(BootstrapError::Invalid(
                 "name must be canonical lowercase ASCII",

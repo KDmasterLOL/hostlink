@@ -235,7 +235,8 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
     if let (Some(selection), Some(bootstrap_command)) = (&selection, bootstrap_command) {
         println!(
             "artifact_binding: target-verifies-before-enrollment\nagent_sha256: {}\nbootstrap_command:\n{}",
-            selection.agent_sha256, bootstrap_command
+            selection.agent_sha256(),
+            bootstrap_command
         );
     } else {
         println!("artifact_binding: token-only; no bootstrap command");

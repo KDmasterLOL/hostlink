@@ -19,6 +19,11 @@ uses the upstream `self_update` GitHub backend in RAW mode with the exact
 named target asset, version and published digest. A digest authenticates
 bytes relative to GitHub metadata; it is not an independent publisher signature.
 
+The Client library's `ArtifactSelection` is issued by the authenticated
+GitHub release resolver, not constructed or mutated by library callers;
+the rendered bootstrap consumes that validated selection and exposes only
+the read-only selected SHA-256 to the CLI.
+
 No ZIP, release manifest, checksum sidecar, installer PS1 or shell asset is
 published. Packaging produces one raw executable and a **local**
 `artifact-receipt.json`; staging emits only the selected raw assets and a
