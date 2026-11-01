@@ -212,6 +212,101 @@ fn legacy_hub_single_gateway_fields_are_read_without_defaults() {
 }
 
 #[test]
+fn separate_reverse_and_controller_gateway_credentials_remain_reviewable() {
+    let input = Inputs::new();
+    let agent_key = input.root.path().join("agent-reverse-identity");
+    let controller_key = input.root.path().join("controller-gateway-identity");
+    for path in [&agent_key, &controller_key] {
+        fs::write(path, b"private fixture key").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+    let mut agent: Value = serde_json::from_slice(&fs::read(&input.new_agent).unwrap()).unwrap();
+    agent["gateway"]["identity"] = json!(agent_key);
+    write(&input.new_agent, agent);
+    let mut host: Value = serde_json::from_slice(&fs::read(&input.new_host).unwrap()).unwrap();
+    host["gateway"]["identity"] = json!(controller_key);
+    host["gateway"]["user"] = json!("gateway-operator");
+    write(&input.new_host, host);
+
+    let report = input.report();
+    assert_eq!(report.hosts[0].readiness, Readiness::Review, "{report:?}");
+    assert!(report.hosts[0].blockers.is_empty());
+    assert!(
+        report.hosts[0]
+            .review
+            .iter()
+            .any(|note| note.contains("separately authorized"))
+    );
+    let output = serde_json::to_string(&report).unwrap();
+    assert!(!output.contains("agent-reverse-identity"));
+    assert!(!output.contains("controller-gateway-identity"));
+}
+
+#[test]
+fn gateway_endpoint_cannot_contradict_reverse_port_or_loopback_identity() {
+    for address in ["127.0.0.1:41001", "198.51.100.42:41000", "[::1]:41000"] {
+        let input = Inputs::new();
+        let mut host: Value = serde_json::from_slice(&fs::read(&input.new_host).unwrap()).unwrap();
+        host["endpoint"] = json!(address);
+        write(&input.new_host, host);
+        let report = input.report();
+        assert_eq!(report.hosts[0].readiness, Readiness::Blocked, "{address}");
+        assert!(report.hosts[0].blockers.iter().any(|reason| {
+            reason.contains("endpoint must describe the loopback reverse gateway port")
+        }));
+    }
+}
+
+#[test]
+fn unsupported_desired_alternates_and_missing_gateway_users_block() {
+    for kind in [
+        "agent-alternates",
+        "host-alternates",
+        "agent-user",
+        "host-user",
+    ] {
+        let input = Inputs::new();
+        let agent_path = &input.new_agent;
+        let host_path = &input.new_host;
+        let mut agent: Value = serde_json::from_slice(&fs::read(agent_path).unwrap()).unwrap();
+        let mut host: Value = serde_json::from_slice(&fs::read(host_path).unwrap()).unwrap();
+        let expected = match kind {
+            "agent-alternates" => {
+                agent["gateway_alternates"] = json!([{"host": "uninspected.example"}]);
+                "desired Agent multiple or malformed gateway alternates"
+            }
+            "host-alternates" => {
+                host["gateway"]["alternates"] = json!([{"address": "127.0.0.1:2223"}]);
+                "desired HostSpec multiple or malformed gateway alternates"
+            }
+            "agent-user" => {
+                agent["gateway"].as_object_mut().unwrap().remove("user");
+                "desired Agent gateway SSH user is missing"
+            }
+            "host-user" => {
+                host["gateway"].as_object_mut().unwrap().remove("user");
+                "desired HostSpec gateway SSH user is missing"
+            }
+            _ => unreachable!(),
+        };
+        write(agent_path, agent);
+        write(host_path, host);
+        let report = input.report();
+        assert_eq!(report.hosts[0].readiness, Readiness::Blocked, "{kind}");
+        assert!(
+            report.hosts[0]
+                .blockers
+                .iter()
+                .any(|reason| reason.contains(expected))
+        );
+    }
+}
+
+#[test]
 fn malformed_legacy_gateway_collections_block_without_leaking_or_writing() {
     let valid = json!({
         "host":"gateway.example.test", "user":"agent", "port":22, "host_public_key":pin()
