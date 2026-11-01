@@ -46,7 +46,34 @@ hostlink upload --host lab-win7 --local ./input.bin --remote input.bin
 hostlink download --host lab-win7 --remote output.bin --local ./output.bin
 ```
 
-The existing `--config PATH` form remains available and cannot be combined with `--host`. Managed selection fetches fresh Hub records and builds the existing `HostSpec`; short execution remains on `HostConnection::connect`.
+The existing `--config PATH` form remains available and cannot be combined with `--host`. Managed selection uses `Host::connect` to resolve a fresh Hub identity and independently pinned gateway/Agent keys before establishing `russh`. Explicit unmanaged configuration continues to use `HostSpec` and `HostConnection::connect` directly.
+
+## Rust managed Host API
+
+`Host` represents the stable machine identity of an **already enrolled** host. Its asynchronous operations make the network boundary explicit:
+
+```rust
+use hostlink::{
+    host::Host,
+    hub::HubClient,
+};
+
+// Loading owner-only configuration does not contact Hub.
+let (hub, config) = HubClient::from_file(config_path)?;
+
+// Only after validating the exact source pins and verifying the installer:
+let pending = Host::create(&hub, Some("lab-win7".into()), 900).await?;
+let invitation = pending.into_invitation();
+// Deliver the one-use invitation at an explicitly controlled secret boundary.
+// No Host identity or SSH session exists yet: the target must enroll first.
+
+// After enrollment, resolve a fresh authoritative identity and connect to it.
+let (host, mut ssh) = Host::connect(&hub, &config, "lab-win7").await?;
+let response = ssh.exec("hostname", &[]).await?;
+ssh.close().await?;
+```
+
+`Host::create` does **not** upload artifacts, install an Agent, wait for enrollment or imply that a host is online. The high-level CLI validates its source-pinned installer *before* requesting the invitation; library callers must establish equivalent artifact trust themselves. The `PendingHost` holds the invitation, not an SSH identity. `Host::connect` resolves a current Hub record and approved gateway list for every call, returns the registered `Host` identity with the existing authenticated `HostConnection`, and never falls back to a cached or unmanaged route when Hub is unavailable. Neither operation creates another SSH engine.
 
 ## Agent-local jobs through Apalis Board
 

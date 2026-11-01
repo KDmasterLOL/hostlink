@@ -28,6 +28,7 @@ does not certify production or registered Windows updater deployment.
 | Controller CLI and operator command dispatch | `crates/client/src/cli/{mod.rs,args.rs,commands/}`; `main.rs` is the binary entrypoint |
 | Agent CLI, commands and shared configuration loading | `crates/agent/src/cli.rs`, `crates/agent/src/commands/`, `crates/agent/src/shared.rs`; `main.rs` only initializes the CLI and reports errors |
 | Managed Hub HTTP client, routes and trusted SSH pins | `crates/client/src/hub/{mod.rs,client.rs,config.rs,routes.rs}` |
+| Managed registered Host identity, explicit pending invitation and fresh pinned connect | `crates/client/src/host/` (public `Host::create/connect`) |
 | Direct and gateway SSH | `crates/client/src/connect/`; `crates/agent/src/ssh/`; `crates/agent/src/tunnel/` |
 | Agent process supervision (SSH, Apalis, tunnel, updater lifetime lock) | `crates/agent/src/runtime.rs` |
 | Agent-local Apalis command queue and Board UI/API | `crates/agent/src/jobs/` (no Client jobs subsystem) |
