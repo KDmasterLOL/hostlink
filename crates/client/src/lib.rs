@@ -4,6 +4,7 @@ pub mod bootstrap;
 pub mod connect;
 pub mod exec;
 pub mod forward;
+pub mod host;
 pub mod hub;
 pub mod migration;
 pub mod sftp;
