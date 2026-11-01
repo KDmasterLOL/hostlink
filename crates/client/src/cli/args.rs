@@ -44,7 +44,7 @@ pub(super) enum Command {
         ssh_user: Option<String>,
         #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(60..=86400))]
         ttl_seconds: u64,
-        /// Create a manual invitation without selecting verified installer artifacts.
+        /// Create a manual Hub invitation without selecting a GitHub binary.
         #[arg(long, conflicts_with_all = ["ssh_user", "version", "target", "bootstrap_hub_ca_cert", "embed_github_token"])]
         token_only: bool,
         /// Include the Controller's private GitHub PAT in the printed target bootstrap.
