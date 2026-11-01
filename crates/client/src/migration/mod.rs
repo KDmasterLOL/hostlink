@@ -168,10 +168,31 @@ pub fn preflight(
                 desired_host.get("gateway").expect("matched gateway object"),
                 &mut host,
             );
+            // Gateway mode opens 127.0.0.1:reverse_port via the authenticated
+            // gateway channel, regardless of HostSpec.endpoint. Reject a
+            // contradictory explicit endpoint rather than report it ready.
+            if let (Some(port), Some(endpoint)) = (
+                desired_host
+                    .get("gateway")
+                    .and_then(|value| value.get("reverse_port"))
+                    .and_then(Value::as_u64),
+                string_field(&desired_host, "endpoint")
+                    .and_then(|text| text.parse::<SocketAddr>().ok()),
+            ) && (endpoint.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+                || u64::from(endpoint.port()) != port)
+            {
+                block(
+                    &mut host,
+                    "desired HostSpec endpoint must describe the loopback reverse gateway port",
+                );
+            }
             host.review.push(
                 "verify desired Agent gateway pin file matches the HostSpec gateway pin".into(),
             );
             host.review.push("verify target Agent public pin against the installed host key on the disposable target".into());
+            host.review.push(
+                "verify distinct Agent and Controller gateway SSH identities are independently authorized".into(),
+            );
         }
         (None | Some(Value::Null), None | Some(Value::Null)) => {}
         _ => block(
