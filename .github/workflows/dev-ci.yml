@@ -55,8 +55,65 @@ jobs:
         run: cargo check --locked --workspace --all-targets
       - name: Strict Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - name: Native Windows non-ignored tests
-        run: cargo test --locked --workspace
+      - name: Native Windows token contract and applicable workspace tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+          if ($null -eq $identity.User -or @('S-1-5-18','S-1-5-19','S-1-5-20') -contains $identity.User.Value) {
+            throw 'Cannot classify runner: an interactive Windows user token is required'
+          }
+          $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+          $elevated = $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+          if ($elevated -isnot [bool]) {
+            throw 'Cannot classify Windows runner token elevation'
+          }
+          Write-Output "Windows runner SID=$($identity.User.Value); administrator token=$elevated"
+
+          # The real serve_on regression cross-checks this classification against
+          # the production guard before CI is allowed to exclude any Agent E2E.
+          $regression = 'windows_startup_enforces_token_before_listener_or_key_access'
+          $tests = @(cargo test --locked -p hostlink-agent --test ssh_loopback -- --list)
+          if ($LASTEXITCODE -ne 0 -or $tests -notcontains "${regression}: test") {
+            throw 'Required native Windows token regression is unavailable'
+          }
+          cargo test --locked -p hostlink-agent --test ssh_loopback $regression -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows token contract failed' }
+
+          if ($elevated) {
+            # Audited serve_on callers only; --exact also makes --skip exact.
+            # host_cli's Agent case is Unix-only and already explicitly ignored.
+            # Keep gateway pin denials, CLI validation and all other SSH tests.
+            $excluded = @(
+              # crates/client/tests/agent_interop.rs
+              'agent_and_controller_authenticate_stream_execute_and_transfer',
+              # crates/client/tests/gateway_interop.rs
+              'reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins',
+              # crates/client/tests/tcp_forward_interop.rs
+              'local_forward_roundtrips_binary_data_for_multiple_clients_and_joins',
+              'probe_cli_succeeds_and_reports_refused_target_and_wrong_pin',
+              'forward_requires_loopback_and_active_agent_shutdown_closes_proxy',
+              # crates/client/tests/multi_gateway_client.rs
+              'unavailable_primary_fails_over_and_pinned_nested_agent_execs_and_sftp',
+              # crates/agent/tests/ssh_loopback.rs
+              'loopback_auth_and_exec_keep_binary_streams_and_exit_status',
+              # crates/agent/tests/multi_gateway.rs
+              'unavailable_primary_fails_over_to_pinned_route_and_controller_reaches_agent'
+            )
+            Write-Output 'Elevated runner: running portable Windows tests and elevated-startup refusal, excluding these non-elevated Agent E2E cases:'
+            $testArguments = @('test', '--locked', '--workspace', '--', '--exact')
+            foreach ($test in $excluded) {
+              Write-Output "EXCLUDED (requires non-elevated Agent): $test"
+              $testArguments += @('--skip', $test)
+            }
+            Write-Output 'These exclusions are NOT native E2E passes. Full non-elevated WORK Windows acceptance remains required.'
+            & cargo @testArguments
+          } else {
+            Write-Output 'Non-elevated runner: running the full workspace suite without exclusions.'
+            cargo test --locked --workspace
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows workspace tests failed' }
       - name: Parse PowerShell scripts
         shell: powershell
         run: |

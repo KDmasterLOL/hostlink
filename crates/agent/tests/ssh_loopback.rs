@@ -52,6 +52,92 @@ async fn connect(addr: SocketAddr, host_key: &russh::keys::PublicKey) -> client:
     .expect("connect to embedded SSH server")
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_startup_enforces_token_before_listener_or_key_access() {
+    // Use the same built-in membership check as CI, then independently observe the
+    // production token guard. Unknown identities/classification must fail this test.
+    let identity = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                r"$ErrorActionPreference = 'Stop'
+                $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+                if ($null -eq $identity.User -or @('S-1-5-18','S-1-5-19','S-1-5-20') -contains $identity.User.Value) {
+                    throw 'An interactive Windows user token is required'
+                }
+                $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+                $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)",
+            ])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("Windows token classification deadline")
+    .expect("run built-in Windows token membership check");
+    assert!(
+        identity.status.success(),
+        "Windows token classification failed: {}",
+        String::from_utf8_lossy(&identity.stderr)
+    );
+    let elevated = match String::from_utf8(identity.stdout)
+        .expect("Windows token classification output")
+        .trim()
+    {
+        "True" => true,
+        "False" => false,
+        other => panic!("unsupported Windows token classification: {other:?}"),
+    };
+    let temp = tempfile::tempdir().expect("empty fixture root");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("prebind loopback listener");
+    let mut config = AgentConfig {
+        listen: listener.local_addr().expect("bound address"),
+        user: "agent".into(),
+        host_key: temp.path().join("absent-host-key"),
+        authorized_keys: temp.path().join("absent-authorized-keys"),
+        jobs_root: temp.path().join("absent-jobs"),
+        board_listen: None,
+        gateway: None,
+        gateway_alternates: Vec::new(),
+    };
+    if !elevated {
+        // A valid but mismatched address is a no-effects sentinel immediately
+        // after the guard. Limited users must reach it, rather than skip the test.
+        config
+            .listen
+            .set_port(if config.listen.port() == 1 { 2 } else { 1 });
+    }
+    config.validate().expect("syntactically valid Agent config");
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        ssh::serve_on(listener, &config, std::future::pending::<()>()),
+    )
+    .await
+    .expect("startup refusal deadline")
+    .expect_err("startup must stop before accessing missing fixture paths");
+    if elevated {
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            error.to_string(),
+            "remote Agent execution requires a non-elevated Windows token"
+        );
+        println!("Elevated Windows token: real Agent startup refused before key access");
+    } else {
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.to_string(),
+            "prebound SSH listener must match configured loopback address"
+        );
+        println!("Non-elevated Windows token: Agent token guard allowed listener validation");
+    }
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
 #[tokio::test]
 async fn loopback_auth_and_exec_keep_binary_streams_and_exit_status() {
     let temp = tempfile::tempdir().expect("temporary directory");
