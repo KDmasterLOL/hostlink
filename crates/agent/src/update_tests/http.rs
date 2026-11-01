@@ -119,7 +119,7 @@ fn idempotency_and_same_version_changed_digest_use_real_upstream_update() {
     let (manifest, source_sha) = read_installed(&fixture.root).unwrap();
     assert_eq!(manifest.version, "2.0.0");
     assert_eq!(manifest.target, TARGET);
-    assert_eq!(source_sha, digest(&body));
+    assert_eq!(hex::encode(source_sha), digest(&body));
     let archive = fixture.temp.path().join("source.zip");
     fs::write(&archive, &body).unwrap();
     let (_, source_manifest) =
@@ -142,7 +142,7 @@ fn idempotency_and_same_version_changed_digest_use_real_upstream_update() {
         b"different exact executable"
     );
     assert_eq!(
-        read_installed(&fixture.root).unwrap().1,
+        hex::encode(read_installed(&fixture.root).unwrap().1),
         digest(&replacement)
     );
     assert_eq!(fixture.preserved(), before);
@@ -334,7 +334,10 @@ async fn pending_native_apalis_task_and_private_state_survive_update() {
 fn already_current_manifest_does_not_download_again() {
     let fixture = Fixture::new();
     let current = package("1.0.0", b"old executable", false);
-    assert_eq!(read_installed(&fixture.root).unwrap().1, digest(&current));
+    assert_eq!(
+        hex::encode(read_installed(&fixture.root).unwrap().1),
+        digest(&current)
+    );
     let server = Server::start(current.clone(), None);
     let url = server.url();
     assert!(!fixture.apply(&url, &current, "1.0.0").unwrap());
@@ -350,6 +353,32 @@ fn explicitly_pinned_older_release_is_installed_without_latest_discovery() {
     let (manifest, pinned_sha) = read_installed(&fixture.root).unwrap();
     assert_eq!(manifest.version, "0.9.0");
     assert_eq!(manifest.target, TARGET);
-    assert_eq!(pinned_sha, digest(&older));
+    assert_eq!(hex::encode(pinned_sha), digest(&older));
     assert_eq!(server.request_count(), 1);
+}
+
+#[test]
+fn uppercase_cli_digest_is_stored_in_canonical_lowercase() {
+    let fixture = Fixture::new();
+    let body = package("2.0.0", b"typed hex digest", false);
+    let server = Server::start(body.clone(), None);
+    let expected = digest(&body);
+    assert!(
+        update(
+            &fixture.root,
+            &server.url(),
+            &expected.to_uppercase(),
+            TARGET,
+            "2.0.0"
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("bin/archive.sha256")).unwrap(),
+        expected
+    );
+    assert_eq!(
+        hex::encode(read_installed(&fixture.root).unwrap().1),
+        expected
+    );
 }

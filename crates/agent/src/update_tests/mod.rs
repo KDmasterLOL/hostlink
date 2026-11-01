@@ -2,6 +2,7 @@ use super::*;
 use std::{fs, io};
 
 mod fixture;
+mod github;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod http;
 use fixture::{Fixture, digest, package};
@@ -46,6 +47,12 @@ fn parsed_updater_contract_reaches_the_lock_without_revalidating_text() {
             .kind(),
         io::ErrorKind::WouldBlock
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unknown_development_binary_does_not_guess_an_installed_root() {
+    assert!(default_update_root().is_err());
 }
 
 #[test]
@@ -230,7 +237,7 @@ fn installed_bundle_retains_verbatim_manifest_and_pinned_archive_digest() {
     fs::rename(bundle, fixture.root.join("bin")).unwrap();
     let (installed, archive_digest) = read_installed(&fixture.root).unwrap();
     assert_eq!(installed.version, "2.0.0");
-    assert_eq!(archive_digest, digest(&body));
+    assert_eq!(hex::encode(archive_digest), digest(&body));
 
     fs::write(fixture.root.join("bin/archive.sha256"), b"invalid").unwrap();
     assert!(read_installed(&fixture.root).is_err());
