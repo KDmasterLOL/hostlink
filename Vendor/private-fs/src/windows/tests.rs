@@ -16,6 +16,18 @@ fn fixture() -> (tempfile::TempDir, PrivateDir) {
     (temp, dir)
 }
 
+std::thread_local! {
+    static DIRECTORY_REOPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn before_directory_reopen() {
+    let hook = DIRECTORY_REOPEN_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 fn with_legacy_identity<T>(run: impl FnOnce() -> T) -> T {
     struct Restore(bool);
     impl Drop for Restore {
@@ -239,6 +251,215 @@ fn forced_legacy_identity_checks_object_and_classic_publication() {
             Err(Error::WrongObjectKind)
         ));
     });
+}
+
+#[test]
+fn directory_creation_reopen_rejects_replaced_identity() {
+    with_open_status(STATUS_INVALID_PARAMETER, || {
+        let run = || {
+            for (existing, ensure) in [(false, false), (false, true), (true, true)] {
+                let (temp, dir) = fixture();
+                let root = temp.path().join("private");
+                if existing {
+                    drop(dir.create_dir("slot").unwrap());
+                }
+                let replacement = dir.create_dir("replacement").unwrap();
+                let replacement_id = replacement.id;
+                drop(replacement);
+                let changed_root = root.clone();
+                DIRECTORY_REOPEN_HOOK.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move || {
+                        // The broad handle must already be closed. Both directories
+                        // have valid private ACLs, so rejection must be by identity.
+                        std::fs::rename(changed_root.join("slot"), changed_root.join("detached"))
+                            .unwrap();
+                        std::fs::rename(
+                            changed_root.join("replacement"),
+                            changed_root.join("slot"),
+                        )
+                        .unwrap();
+                    }));
+                });
+                let result = if ensure {
+                    dir.ensure_dir("slot")
+                } else {
+                    dir.create_dir("slot")
+                };
+                let unused = DIRECTORY_REOPEN_HOOK.with(|slot| slot.borrow_mut().take());
+                assert!(unused.is_none(), "directory reopen checkpoint must execute");
+                assert!(matches!(result, Err(Error::IdentityChanged)));
+                assert_eq!(dir.open_dir("slot").unwrap().id, replacement_id);
+                assert_ne!(dir.open_dir("detached").unwrap().id, replacement_id);
+                assert_eq!(dir.entries().unwrap().len(), 2);
+            }
+        };
+        // Exercise native identity (128-bit on modern Windows) as well as
+        // the forced local-NTFS legacy identity used on Windows 7.
+        run();
+        with_legacy_identity(run);
+    });
+}
+
+#[test]
+fn directory_creation_reopen_rechecks_acl_and_reparse() {
+    with_open_status(STATUS_INVALID_PARAMETER, || {
+        with_legacy_identity(|| {
+            for reparse in [false, true] {
+                let (temp, dir) = fixture();
+                let root = temp.path().join("private");
+                let outside = tempfile::tempdir().unwrap();
+                let slot_path = root.join("slot");
+                let outside_path = outside.path().to_path_buf();
+                DIRECTORY_REOPEN_HOOK.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move || {
+                        let opened = PrivateDir::open(slot_path).unwrap();
+                        if reparse {
+                            junction(&opened, &outside_path);
+                        } else {
+                            set_acl(&opened, &[(&world(), FILE_ALL_ACCESS as u32, 0)], true);
+                        }
+                    }));
+                });
+                let result = dir.create_dir("slot");
+                let unused = DIRECTORY_REOPEN_HOOK.with(|slot| slot.borrow_mut().take());
+                assert!(unused.is_none(), "directory reopen checkpoint must execute");
+                if reparse {
+                    assert!(matches!(result, Err(Error::PathRedirect)));
+                } else {
+                    assert!(matches!(result, Err(Error::InsecureAcl)));
+                }
+                assert_eq!(dir.entries().unwrap(), [std::ffi::OsString::from("slot")]);
+                assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+            }
+        });
+    });
+}
+
+#[test]
+fn legacy_create_new_full_commit_after_directory_creation_or_ensure() {
+    for (existing, keep_reader) in [(false, false), (false, true), (true, false), (true, true)] {
+        with_open_status(STATUS_INVALID_PARAMETER, || {
+            with_legacy_identity(|| {
+                let (temp, original) = fixture();
+                let root = temp.path().join("private");
+                // Keep the newly created capability alive for the original Win7
+                // failure; also exercise ensure on an already existing directory.
+                let dir = if existing {
+                    drop(original);
+                    PrivateDir::ensure(&root).unwrap()
+                } else {
+                    original
+                };
+                let bytes = br#"{
+  "hub_url": "https://hub.example.invalid",
+  "hub_ca_cert": null,
+  "token_file": "C:\\Users\\test-user\\AppData\\Local\\HostLink-NativeAcceptance\\synthetic-operator.token",
+  "ssh_user": "hostlink",
+  "identity": "C:\\test\\controller.key",
+  "gateway_identity": "C:\\test\\gateway.key",
+  "preferred_gateway": null
+}"#;
+                assert!((300..=500).contains(&bytes.len()));
+                let mut writer = dir
+                    .atomic_with_policy("hub.json", Durability::Full, crate::Publication::CreateNew)
+                    .unwrap();
+                writer.write_all(bytes).unwrap();
+                assert!(!root.join("hub.json").exists());
+                // A real additional reader shares deletion through private-fs. Keep it
+                // live across rename to distinguish reader lifetime from payload size.
+                let staging_name = dir.entries().unwrap().pop().unwrap();
+                let staging_reader = keep_reader.then(|| dir.open_file(&staging_name).unwrap());
+                writer.commit().unwrap_or_else(|error| {
+                    panic!(
+                        "full create-new commit with existing={existing}, staging reader={keep_reader}: {error:?}"
+                    )
+                });
+
+                let mut published = dir.open_file("hub.json").unwrap();
+                if let Some(reader) = &staging_reader {
+                    assert!(published.same_object(reader));
+                }
+                assert!(matches!(published.id, nt::Identity::Legacy { .. }));
+                published.verify().unwrap();
+                let mut contents = Vec::new();
+                published.read_to_end(&mut contents).unwrap();
+                assert_eq!(contents, bytes);
+
+                let mut duplicate = dir
+                    .atomic_with_policy("hub.json", Durability::Full, crate::Publication::CreateNew)
+                    .unwrap();
+                duplicate.write_all(b"must not overwrite").unwrap();
+                assert!(matches!(
+                    duplicate.commit(),
+                    Err(Error::AtomicCommit { may_have_published: false, source })
+                        if matches!(*source, Error::Io(ref error)
+                            if error.kind() == io::ErrorKind::AlreadyExists)
+                ));
+                assert!(published.same_object(&dir.open_file("hub.json").unwrap()));
+                assert_eq!(std::fs::read(root.join("hub.json")).unwrap(), bytes);
+                assert_eq!(
+                    dir.entries().unwrap(),
+                    [std::ffi::OsString::from("hub.json")]
+                );
+
+                std::fs::hard_link(root.join("hub.json"), root.join("alias")).unwrap();
+                let mut linked = dir
+                    .atomic_with_policy("hub.json", Durability::Full, crate::Publication::CreateNew)
+                    .unwrap();
+                linked.write_all(b"must not replace a linked file").unwrap();
+                assert!(matches!(
+                    linked.commit(),
+                    Err(Error::AtomicCommit { may_have_published: false, source })
+                        if matches!(*source, Error::MultipleHardLinks { links: 2 })
+                ));
+                assert_eq!(std::fs::read(root.join("alias")).unwrap(), bytes);
+                assert_eq!(dir.entries().unwrap().len(), 2);
+                std::fs::remove_file(root.join("alias")).unwrap();
+
+                set_acl(&published, &[(&world(), FILE_ALL_ACCESS as u32, 0)], true);
+                let mut insecure = dir
+                    .atomic_with_policy("hub.json", Durability::Full, crate::Publication::CreateNew)
+                    .unwrap();
+                insecure
+                    .write_all(b"must not repair an insecure file")
+                    .unwrap();
+                assert!(matches!(
+                    insecure.commit(),
+                    Err(Error::AtomicCommit { may_have_published: false, source })
+                        if matches!(*source, Error::InsecureAcl)
+                ));
+                assert!(matches!(published.verify(), Err(Error::InsecureAcl)));
+                assert_eq!(std::fs::read(root.join("hub.json")).unwrap(), bytes);
+                assert_eq!(dir.entries().unwrap().len(), 1);
+
+                let outside = tempfile::tempdir().unwrap();
+                let redirect = dir.create_dir("redirect").unwrap();
+                junction(&redirect, outside.path());
+                assert!(matches!(
+                    dir.atomic_with_policy(
+                        "redirect/hub.json",
+                        Durability::Full,
+                        crate::Publication::CreateNew
+                    ),
+                    Err(Error::PathRedirect)
+                ));
+                assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+                assert_eq!(dir.entries().unwrap().len(), 2);
+
+                set_acl(&dir, &[(&dir.user, FILE_ALL_ACCESS as u32, 0)], true);
+                assert!(matches!(
+                    dir.atomic_with_policy(
+                        "new.json",
+                        Durability::Full,
+                        crate::Publication::CreateNew
+                    ),
+                    Err(Error::InsecureAcl)
+                ));
+                assert!(matches!(dir.check_private(), Err(Error::InsecureAcl)));
+                assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+            });
+        });
+    }
 }
 
 #[test]
@@ -467,6 +688,12 @@ fn set_acl(handle: impl AsHandle, entries: &[(&Sid, u32, u32)], protected: bool)
     }
 }
 fn junction(handle: impl AsHandle, target: &Path) {
+    // Directory capabilities retain minimal access. Acquire a writable handle
+    // for this deliberate test mutation without reopening a mutable pathname.
+    let retained = handle.as_handle().try_clone_to_owned().unwrap();
+    let id = nt::metadata(&retained, true, None).unwrap();
+    let writable = nt::directory_for_sync(&retained).unwrap();
+    nt::metadata(&writable, true, Some(id)).unwrap();
     let substitute: Vec<u16> = OsStr::new(r"\??\")
         .encode_wide()
         .chain(target.as_os_str().encode_wide())
@@ -488,7 +715,7 @@ fn junction(handle: impl AsHandle, target: &Path) {
     // and synchronous call with no output payload or OVERLAPPED structure.
     bool_result(unsafe {
         DeviceIoControl(
-            handle.as_handle().as_raw_handle(),
+            writable.as_raw_handle(),
             FSCTL_SET_REPARSE_POINT as u32,
             buffer.as_ptr().cast(),
             buffer.len() as u32,
@@ -991,7 +1218,7 @@ fn verification_policy_has_explicit_streaming_boundaries(
 #[test]
 fn parent_directory_flush_is_available() {
     let (_temp, dir) = fixture();
-    nt::flush(&dir).unwrap();
+    dir.sync_all().unwrap();
     let read_only = PrivateDir::open(_temp.path().join("private")).unwrap();
     let reopened = nt::directory_for_sync(&read_only.handle).unwrap();
     assert_eq!(nt::metadata(&reopened, true, None).unwrap(), dir.id);

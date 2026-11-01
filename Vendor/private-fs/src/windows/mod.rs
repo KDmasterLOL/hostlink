@@ -119,7 +119,7 @@ impl PrivateDir {
         // Check ACL capability before creation, not after making an insecure entry
         // on a volume that would ignore the supplied security descriptor.
         nt::volume(parent)?;
-        let handle = nt::open(
+        let mut handle = nt::open(
             Some(parent),
             name,
             true,
@@ -131,6 +131,18 @@ impl PrivateDir {
             },
         )?;
         let id = nt::validate(&handle, true, None, user)?;
+        if disposition != FILE_OPEN as u32 {
+            // Creation keeps its original rights and protected DACL. Do not retain
+            // the broad creator handle: Win7 classic rename opens its destination
+            // directory internally and can conflict with that handle's access.
+            drop(handle);
+            #[cfg(test)]
+            tests::before_directory_reopen();
+            // Reopen relative to the same retained parent, never the absolute path.
+            // A replaced name must not become the capability returned to the caller.
+            handle = nt::open(Some(parent), name, true, FILE_OPEN as u32, None)?;
+            nt::validate(&handle, true, Some(id), user)?;
+        }
         Ok(Self {
             handle,
             id,
