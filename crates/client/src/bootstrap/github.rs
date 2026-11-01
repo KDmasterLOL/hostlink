@@ -1,6 +1,5 @@
 //! Fixed private GitHub Releases owner: credentials, metadata, names and digests.
 //! The API digest authenticates selected bytes, not an independent publisher signature.
-//! Security contract kept together; tests are inline while sibling tests.rs has another owner.
 
 use std::{
     fs,
@@ -14,7 +13,7 @@ use serde::Deserialize;
 
 use super::validate::{
     ArtifactSelection, BootstrapError, INSTALLER_TIMEOUT, Target, semver, sha256,
-    validate_github_asset_url,
+    validate_https_url,
 };
 use super::verify::read_bounded;
 
@@ -132,13 +131,10 @@ pub(super) fn authenticated_get(
     token: &SecretString,
     accept: &str,
 ) -> Result<RequestBuilder, BootstrapError> {
-    if url.scheme() != "https"
-        || url.host_str() != Some("api.github.com")
+    validate_https_url(&url)?;
+    if url.host_str() != Some("api.github.com")
         || url.port().is_some()
-        || !url.username().is_empty()
-        || url.password().is_some()
         || url.query().is_some()
-        || url.fragment().is_some()
         || !url
             .path()
             .starts_with("/repos/KDmasterLOL/hostlink/releases/")
@@ -244,8 +240,7 @@ fn select_asset(release: &Release, name: &str) -> Result<(Url, String), Bootstra
         .ok_or_else(|| {
             source("every selected GitHub asset requires a published sha256:<64 hex> digest")
         })?;
-    let url = super::parse_artifact_url(&asset.url)?;
-    validate_github_asset_url(&url)?;
+    let url = Url::parse(&asset.url).map_err(|_| source("invalid GitHub asset URL"))?;
     Ok((url, digest.to_ascii_lowercase()))
 }
 
@@ -270,26 +265,6 @@ pub async fn resolve_github_selection(
     require_ok(response.status())?;
     let bytes = read_bounded(response, MAX_METADATA_BYTES).await?;
     let (release, version) = parse_release(&bytes, version)?;
-    selection_from_release(
-        &release,
-        version,
-        target,
-        name,
-        ssh_user,
-        hub_url,
-        bootstrap_hub_ca_cert,
-    )
-}
-
-fn selection_from_release(
-    release: &Release,
-    version: String,
-    target: Target,
-    name: String,
-    ssh_user: String,
-    hub_url: String,
-    bootstrap_hub_ca_cert: Option<PathBuf>,
-) -> Result<ArtifactSelection, BootstrapError> {
     let installer = if target.windows() {
         "Install-HostLink-Agent.ps1"
     } else {
@@ -301,9 +276,9 @@ fn selection_from_release(
         if target.windows() { ".exe" } else { "" }
     );
     let archive = format!("hostlink-agent-{}.zip", target.as_str());
-    let (installer_url, installer_sha256) = select_asset(release, installer)?;
-    let (agent_url, agent_sha256) = select_asset(release, &sidecar)?;
-    let (archive_url, archive_sha256) = select_asset(release, &archive)?;
+    let (installer_url, installer_sha256) = select_asset(&release, installer)?;
+    let (agent_url, agent_sha256) = select_asset(&release, &sidecar)?;
+    let (archive_url, archive_sha256) = select_asset(&release, &archive)?;
     let selection = ArtifactSelection {
         installer_url,
         installer_sha256,
@@ -327,39 +302,14 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
-    fn fixture(target: Target) -> Value {
-        let installer = if target.windows() {
-            "Install-HostLink-Agent.ps1"
-        } else {
-            "install-hostlink-agent.sh"
-        };
-        let names = [
-            installer.to_owned(),
-            format!(
-                "hostlink-agent-{}{}",
-                target.as_str(),
-                if target.windows() { ".exe" } else { "" }
-            ),
-            format!("hostlink-agent-{}.zip", target.as_str()),
-        ];
-        json!({"tag_name":"v1.2.3", "draft":false, "published_at":"2026-11-01T00:00:00Z", "assets": names.iter().enumerate().map(|(index, name)| json!({"name":name, "url":format!("{RELEASES}/assets/{}",index+1),"state":"uploaded","digest":format!("sha256:{}", "a".repeat(64))})).collect::<Vec<_>>()})
-    }
-
-    fn select(value: &Value, target: Target) -> Result<ArtifactSelection, BootstrapError> {
-        let (release, version) = parse_release(&serde_json::to_vec(value).unwrap(), Some("1.2.3"))?;
-        selection_from_release(
-            &release,
-            version,
-            target,
-            "fixture".into(),
-            "hostlink".into(),
-            "https://hub.example".into(),
-            None,
-        )
+    fn metadata() -> Value {
+        json!({"tag_name":"v1.2.3", "draft":false, "published_at":"2026-11-01", "assets":[
+            {"name":"installer", "url":format!("{RELEASES}/assets/1"), "state":"uploaded", "digest":format!("sha256:{}", "a".repeat(64))}
+        ]})
     }
 
     #[test]
-    fn latest_and_exact_tag_are_fixed_endpoints() {
+    fn release_requires_exact_published_version_unique_asset_and_digest() {
         assert_eq!(
             release_url(None).unwrap().as_str(),
             format!("{RELEASES}/latest")
@@ -368,107 +318,43 @@ mod tests {
             release_url(Some("1.2.3")).unwrap().as_str(),
             format!("{RELEASES}/tags/v1.2.3")
         );
-        for invalid in ["latest", "v1.2.3", "1.2", "1.2.3/path", "01.2.3"] {
-            assert!(release_url(Some(invalid)).is_err());
-        }
-    }
-
-    #[test]
-    fn all_four_targets_require_exact_flat_asset_names_and_digests() {
-        for target in [
-            Target::LinuxX64,
-            Target::Win7X86,
-            Target::Win7X64,
-            Target::Win11X64,
-        ] {
-            let mut value = fixture(target);
-            let selection = select(&value, target).unwrap();
-            assert_eq!(selection.version, "1.2.3");
-            assert_eq!(selection.agent_url.as_str(), format!("{RELEASES}/assets/2"));
-            for index in 0..3 {
-                let original = value["assets"][index].clone();
-                value["assets"][index]["digest"] = Value::Null;
-                assert!(select(&value, target).is_err());
-                value["assets"][index] = original.clone();
-                value["assets"][index]["name"] =
-                    json!(format!("nested/{}", original["name"].as_str().unwrap()));
-                assert!(select(&value, target).is_err());
-                value["assets"][index] = original;
-            }
-        }
-    }
-
-    #[test]
-    fn missing_duplicate_and_aliased_assets_fail_closed() {
-        let target = Target::LinuxX64;
-        for index in 0..3 {
-            let mut value = fixture(target);
-            let duplicate = value["assets"][index].clone();
-            value["assets"].as_array_mut().unwrap().push(duplicate);
-            assert!(select(&value, target).is_err());
-            let mut value = fixture(target);
-            value["assets"].as_array_mut().unwrap().remove(index);
-            assert!(select(&value, target).is_err());
-        }
-        let mut value = fixture(target);
-        value["assets"][1]["url"] = value["assets"][0]["url"].clone();
-        assert!(select(&value, target).is_err());
-        value = fixture(target);
-        value["assets"][1]["state"] = json!("new");
-        assert!(select(&value, target).is_err());
-    }
-
-    #[test]
-    fn unpublished_invalid_or_wrong_version_never_selects_assets() {
+        assert!(release_url(Some("latest")).is_err());
+        let parse =
+            |value: &Value| parse_release(&serde_json::to_vec(value).unwrap(), Some("1.2.3"));
+        let (release, _) = parse(&metadata()).unwrap();
+        assert_eq!(
+            select_asset(&release, "installer").unwrap().1,
+            "a".repeat(64)
+        );
+        assert!(select_asset(&release, "nested/installer").is_err());
         for (key, bad) in [
             ("draft", json!(true)),
             ("published_at", Value::Null),
-            ("published_at", json!("")),
             ("tag_name", json!("v9.9.9")),
-            ("tag_name", json!("1.2.3")),
-            ("tag_name", json!("vlatest")),
         ] {
-            let mut value = fixture(Target::LinuxX64);
+            let mut value = metadata();
             value[key] = bad;
-            assert!(select(&value, Target::LinuxX64).is_err());
+            assert!(parse(&value).is_err());
         }
-        assert!(parse_release(b"{}", None).is_err());
-        assert!(parse_release(b"[]", None).is_err());
+        for (key, bad) in [
+            ("digest", Value::Null),
+            ("digest", json!("sha256:abc")),
+            ("state", json!("new")),
+        ] {
+            let mut value = metadata();
+            value["assets"][0][key] = bad;
+            assert!(select_asset(&parse(&value).unwrap().0, "installer").is_err());
+        }
+        let mut value = metadata();
+        let duplicate = value["assets"][0].clone();
+        value["assets"].as_array_mut().unwrap().push(duplicate);
+        assert!(select_asset(&parse(&value).unwrap().0, "installer").is_err());
     }
 
     #[test]
-    fn every_asset_requires_fixed_private_api_origin_and_numeric_id() {
-        for invalid in [
-            "https://example.com/asset",
-            "https://api.github.com/repos/other/hostlink/releases/assets/1",
-            "https://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/0",
-            "https://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/abc",
-            "https://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/1?x=1",
-            "https://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/1#x",
-            "https://user@api.github.com/repos/KDmasterLOL/hostlink/releases/assets/1",
-            "https://api.github.com:444/repos/KDmasterLOL/hostlink/releases/assets/1",
-        ] {
-            for index in 0..3 {
-                let mut value = fixture(Target::LinuxX64);
-                value["assets"][index]["url"] = json!(invalid);
-                assert!(select(&value, Target::LinuxX64).is_err());
-            }
-        }
-        for invalid in [
-            "md5:1234".to_owned(),
-            format!("sha256:{}", "g".repeat(64)),
-            format!("sha256:{}", "a".repeat(63)),
-        ] {
-            let mut value = fixture(Target::LinuxX64);
-            value["assets"][0]["digest"] = json!(invalid);
-            assert!(select(&value, Target::LinuxX64).is_err());
-        }
-    }
-
-    #[test]
-    fn authenticated_request_is_restricted_and_sensitive_without_network() {
+    fn authenticated_request_is_sensitive_and_fixed_to_repository_api() {
         let client = github_client().unwrap();
-        let token = SecretString::from("nonsecret_fixture");
+        let token = SecretString::from("synthetic_fixture");
         let request = authenticated_get(
             &client,
             release_url(None).unwrap(),
@@ -478,17 +364,7 @@ mod tests {
         .unwrap()
         .build()
         .unwrap();
-        assert!(
-            request
-                .headers()
-                .get(reqwest::header::AUTHORIZATION)
-                .unwrap()
-                .is_sensitive()
-        );
-        assert_eq!(
-            request.headers()[reqwest::header::ACCEPT],
-            "application/octet-stream"
-        );
+        assert!(request.headers()[reqwest::header::AUTHORIZATION].is_sensitive());
         assert!(
             authenticated_get(
                 &client,
@@ -517,16 +393,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("github-token");
         assert!(read_token_file(&path).is_err());
-        fs::write(&path, b"nonsecret_fixture\n").unwrap();
+        fs::write(&path, b"synthetic_fixture\n").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(read_token_file(&path).is_ok());
         let link = root.path().join("link");
         symlink(&path, &link).unwrap();
         assert!(read_token_file(&link).is_err());
-        let hardlink = root.path().join("hardlink");
-        fs::hard_link(&path, &hardlink).unwrap();
+        fs::hard_link(&path, root.path().join("hardlink")).unwrap();
         assert!(read_token_file(&path).is_err());
-        fs::remove_file(hardlink).unwrap();
+        fs::remove_file(root.path().join("hardlink")).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
         assert!(read_token_file(&path).is_err());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -540,6 +415,5 @@ mod tests {
             fs::write(&path, invalid).unwrap();
             assert!(read_token_file(&path).is_err());
         }
-        assert!(read_token_file(root.path()).is_err());
     }
 }

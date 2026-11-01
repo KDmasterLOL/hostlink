@@ -8,7 +8,7 @@ mod verify;
 pub use github::resolve_github_selection;
 pub use render::render_command;
 pub use validate::{ArtifactSelection, BootstrapError, Target, VerifiedInstaller};
-pub use verify::{parse_artifact_url, verify_installer};
+pub use verify::verify_installer;
 
 /// Deliberately render a credential-bearing bootstrap only for the explicit
 /// CLI opt-in. Never use this for a normal invitation or log the result.
@@ -34,15 +34,6 @@ pub fn render_command_embedded(
         Some(token.expose_secret()),
     ))
 }
-
-#[cfg(test)]
-use reqwest::Url;
-#[cfg(test)]
-use sha2::{Digest, Sha256};
-#[cfg(test)]
-use validate::{https_url, semver, validate_installer_contract};
-#[cfg(test)]
-use verify::{fetch_bytes, validate_installer_bytes};
 
 #[cfg(test)]
 mod tests;

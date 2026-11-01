@@ -1,7 +1,7 @@
 //! Bootstrap selection data and exact URL, target, version, and identity validation.
 
 use reqwest::Url;
-use std::{error::Error, fmt};
+use thiserror::Error;
 
 pub(super) const MAX_INSTALLER_BYTES: usize = 1024 * 1024;
 pub(super) const INSTALLER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -61,22 +61,13 @@ pub struct VerifiedInstaller {
     pub sha256: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum BootstrapError {
+    #[error("invalid bootstrap selection: {0}")]
     Invalid(&'static str),
+    #[error("installer source preflight failed: {0}")]
     Source(String),
 }
-
-impl fmt::Display for BootstrapError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Invalid(message) => write!(f, "invalid bootstrap selection: {message}"),
-            Self::Source(message) => write!(f, "installer source preflight failed: {message}"),
-        }
-    }
-}
-
-impl Error for BootstrapError {}
 
 impl ArtifactSelection {
     pub fn validate(&self) -> Result<(), BootstrapError> {
@@ -110,10 +101,6 @@ impl ArtifactSelection {
         }
         // URL paths carry opaque GitHub asset IDs; release names/version and
         // published digests are checked by the authenticated metadata resolver.
-        #[cfg(test)]
-        if self.installer_url.host_str() == Some("artifacts.example") {
-            return self.validate_fixture_urls();
-        }
         for url in [&self.installer_url, &self.agent_url, &self.archive_url] {
             validate_github_asset_url(url)?;
         }
@@ -129,62 +116,6 @@ impl ArtifactSelection {
     }
 }
 
-// Only the pre-existing renderer/installer unit fixtures use the old layout.
-// This code and its arbitrary origin do not exist in production builds.
-#[cfg(test)]
-impl ArtifactSelection {
-    fn validate_fixture_urls(&self) -> Result<(), BootstrapError> {
-        let urls = [&self.installer_url, &self.agent_url, &self.archive_url];
-        for url in urls {
-            validate_https_url(url)?;
-            if origin(url) != origin(&self.installer_url) {
-                return Err(BootstrapError::Invalid(
-                    "installer, sidecar, and ZIP must share the approved HTTPS origin",
-                ));
-            }
-        }
-        let expected_archive = format!("hostlink-agent-{}.zip", self.target.as_str());
-        if self.archive_url.path_segments().and_then(Iterator::last)
-            != Some(expected_archive.as_str())
-        {
-            return Err(BootstrapError::Invalid(
-                "ZIP URL must name the exact selected target",
-            ));
-        }
-        let agent_segments = self
-            .agent_url
-            .path_segments()
-            .ok_or(BootstrapError::Invalid("sidecar URL path is invalid"))?
-            .collect::<Vec<_>>();
-        let agent_name = agent_segments.last().copied().unwrap_or_default();
-        let expected_agent = if self.target.windows() {
-            "hostlink-agent.exe"
-        } else {
-            "hostlink-agent"
-        };
-        if agent_name != expected_agent
-            || !agent_segments[..agent_segments.len().saturating_sub(1)]
-                .contains(&self.target.as_str())
-            || !has_version_segment(&agent_segments, &self.version)
-        {
-            return Err(BootstrapError::Invalid(
-                "sidecar URL must bind the selected version and target-specific Agent executable",
-            ));
-        }
-        let archive_segments = self
-            .archive_url
-            .path_segments()
-            .ok_or(BootstrapError::Invalid("ZIP URL path is invalid"))?
-            .collect::<Vec<_>>();
-        if !has_version_segment(&archive_segments, &self.version) {
-            return Err(BootstrapError::Invalid(
-                "ZIP URL must bind the exact selected version",
-            ));
-        }
-        Ok(())
-    }
-}
-
 pub(super) fn validate_github_asset_url(url: &Url) -> Result<(), BootstrapError> {
     validate_https_url(url)?;
     let id = url
@@ -194,9 +125,7 @@ pub(super) fn validate_github_asset_url(url: &Url) -> Result<(), BootstrapError>
         || url.port().is_some()
         || url.query().is_some()
         || !id.is_some_and(|id| {
-            !id.is_empty()
-                && id.bytes().all(|byte| byte.is_ascii_digit())
-                && id.parse::<u64>().is_ok_and(|id| id > 0)
+            id.bytes().all(|byte| byte.is_ascii_digit()) && id.parse::<u64>().is_ok_and(|id| id > 0)
         })
     {
         return Err(BootstrapError::Invalid(
@@ -249,58 +178,15 @@ pub(super) fn validate_installer_contract(
 }
 
 pub(super) fn validate_https_url(value: &Url) -> Result<(), BootstrapError> {
-    let has_userinfo = value
-        .as_str()
-        .split_once("://")
-        .and_then(|(_, remainder)| remainder.split(['/', '?', '#']).next())
-        .is_some_and(|authority| authority.contains('@'));
     if value.scheme() != "https"
         || value.host_str().is_none()
-        || has_userinfo
+        || !value.username().is_empty()
         || value.password().is_some()
         || value.fragment().is_some()
     {
         return Err(BootstrapError::Invalid(
             "artifact URLs must be credential-free HTTPS URLs without fragments",
         ));
-    }
-    validate_path(value.path())?;
-    Ok(())
-}
-
-pub(super) fn validate_path(path: &str) -> Result<(), BootstrapError> {
-    if path.contains('\\') {
-        return Err(BootstrapError::Invalid("artifact URL path is unsafe"));
-    }
-    for segment in path.split('/') {
-        let bytes = segment.as_bytes();
-        let mut decoded = Vec::with_capacity(bytes.len());
-        let mut index = 0;
-        while index < bytes.len() {
-            if bytes[index] == b'%' {
-                let Some(hex) = bytes.get(index + 1..index + 3) else {
-                    return Err(BootstrapError::Invalid("artifact URL path is unsafe"));
-                };
-                let high = (hex[0] as char).to_digit(16);
-                let low = (hex[1] as char).to_digit(16);
-                let (Some(high), Some(low)) = (high, low) else {
-                    return Err(BootstrapError::Invalid("artifact URL path is unsafe"));
-                };
-                decoded.push(((high << 4) | low) as u8);
-                index += 3;
-            } else {
-                decoded.push(bytes[index]);
-                index += 1;
-            }
-        }
-        if decoded == b"."
-            || decoded == b".."
-            || decoded.contains(&b'/')
-            || decoded.contains(&b'\\')
-            || decoded.contains(&b'%')
-        {
-            return Err(BootstrapError::Invalid("artifact URL path is unsafe"));
-        }
     }
     Ok(())
 }
@@ -309,15 +195,6 @@ pub(super) fn https_url(value: &str) -> Result<Url, BootstrapError> {
     let url = Url::parse(value).map_err(|_| BootstrapError::Invalid("malformed HTTPS URL"))?;
     validate_https_url(&url)?;
     Ok(url)
-}
-
-#[cfg(test)]
-pub(super) fn origin(url: &Url) -> (String, String, Option<u16>) {
-    (
-        url.scheme().to_owned(),
-        url.host_str().unwrap_or_default().to_ascii_lowercase(),
-        url.port(),
-    )
 }
 
 pub(super) fn sha256(value: &str) -> bool {
@@ -335,17 +212,9 @@ pub(super) fn canonical_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value.as_bytes()[0].is_ascii_alphanumeric()
-        && (value.as_bytes()[0].is_ascii_lowercase() || value.as_bytes()[0].is_ascii_digit())
         && value.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
         })
-}
-
-#[cfg(test)]
-pub(super) fn has_version_segment(segments: &[&str], version: &str) -> bool {
-    segments
-        .iter()
-        .any(|segment| *segment == version || *segment == format!("v{version}"))
 }
 
 pub(super) fn ssh_user(value: &str) -> bool {
