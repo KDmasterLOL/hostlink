@@ -2,11 +2,11 @@
 //! The API digest authenticates selected bytes, not an independent publisher signature.
 
 use std::{
-    fs,
     io::Read,
     path::{Path, PathBuf},
 };
 
+use private_fs::PrivateDir;
 use reqwest::{Client, RequestBuilder, StatusCode, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -50,51 +50,13 @@ pub(super) fn read_token() -> Result<SecretString, BootstrapError> {
 fn read_token_file(path: &Path) -> Result<SecretString, BootstrapError> {
     let invalid = || {
         source(
-            "GitHub credential missing, unsafe or invalid; provision an owner-only credentials/github-token file with a fine-grained PAT (Contents:Read) on this controller",
+            "GitHub credential missing, unsafe or invalid; explicitly provision credentials/github-token with a fine-grained PAT (Contents:Read) on this controller; managed credentials require Unix file mode 0600 (0400 must be reprovisioned) and parent directory mode 0700, or Windows owner-only DACLs",
         )
     };
-    let before = fs::symlink_metadata(path).map_err(|_| invalid())?;
-    if !before.is_file() || before.file_type().is_symlink() || before.len() > MAX_TOKEN_BYTES as u64
-    {
-        return Err(invalid());
-    }
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
-    }
-    let file = options.open(path).map_err(|_| invalid())?;
-    let metadata = file.metadata().map_err(|_| invalid())?;
-    if !metadata.is_file() || metadata.len() > MAX_TOKEN_BYTES as u64 {
-        return Err(invalid());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // SAFETY: geteuid has no pointer arguments or memory-safety preconditions.
-        let uid = unsafe { libc::geteuid() };
-        if metadata.uid() != uid || metadata.mode() & 0o077 != 0 || metadata.nlink() != 1 {
-            return Err(invalid());
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if metadata.file_attributes() & 0x400 != 0 {
-            return Err(invalid());
-        }
-    }
-    #[cfg(windows)]
-    crate::connect::validate_private_file(&file).map_err(|_| invalid())?;
-    #[cfg(not(any(unix, windows)))]
-    return Err(invalid());
+    let parent = path.parent().ok_or_else(invalid)?;
+    let name = path.file_name().ok_or_else(invalid)?;
+    let directory = PrivateDir::open(parent).map_err(|_| invalid())?;
+    let file = directory.open_file(name).map_err(|_| invalid())?;
     let mut text = String::new();
     file.take((MAX_TOKEN_BYTES + 1) as u64)
         .read_to_string(&mut text)
