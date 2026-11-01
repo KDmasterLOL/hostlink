@@ -1,5 +1,6 @@
 use crate::cli::args::{Command, HubCommand};
 use hostlink::bootstrap::{self, ArtifactSelection, Target};
+use hostlink::host::Host;
 use hostlink::hub::{HubClient, HubConfig};
 use secrecy::ExposeSecret;
 use std::{
@@ -244,15 +245,8 @@ async fn invite(command: &Command) -> Result<i32, Box<dyn Error>> {
         None => None,
     };
     let client = HubClient::from_config(&config)?;
-    let invite = client.invite(name.clone(), *ttl_seconds).await?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64;
-    if !bootstrap::invitation_is_unexpired(invite.expires_at, now) {
-        return Err(
-            "Hub returned an already expired invitation; no bootstrap command was rendered".into(),
-        );
-    }
+    let pending = Host::create(&client, name.clone(), *ttl_seconds).await?;
+    let invite = pending.into_invitation();
     println!(
         "token: {}\nexpires_at: {}",
         invite.token.expose_secret(),

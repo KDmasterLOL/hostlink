@@ -1,11 +1,8 @@
-use crate::cli::{
-    args::Command,
-    commands::hub::{configured_hub_client, load_hub_config},
-};
+use crate::cli::{args::Command, commands::hub::configured_hub_client};
 use futures::{StreamExt, stream};
 use hostlink::{
-    HostSpec,
     connect::{HostConnection, SshClientError},
+    host::Host,
 };
 use std::{
     error::Error,
@@ -128,9 +125,8 @@ pub(super) async fn dispatch(command: &Command) -> Result<Option<i32>, Box<dyn E
             Ok(Some(0))
         }
         Command::Verify { host } => {
-            let (client, config) = configured_hub_client()?;
-            let spec = client.resolve_host_spec(host, &config).await?;
-            let connection = HostConnection::connect(&spec).await?;
+            let config_path = super::hub::default_hub_config_path()?;
+            let connection = connect_target(&config_path, Some(host)).await?;
             connection.close().await?;
             println!("verified {} using pinned russh identity", host);
             Ok(Some(0))
@@ -139,17 +135,19 @@ pub(super) async fn dispatch(command: &Command) -> Result<Option<i32>, Box<dyn E
     }
 }
 
-pub(super) async fn resolve_target_spec(
+pub(super) async fn connect_target(
     config_path: &Path,
     host: Option<&str>,
-) -> Result<HostSpec, Box<dyn Error>> {
+) -> Result<HostConnection, Box<dyn Error>> {
     match host {
         Some(host) => {
-            let config = load_hub_config(config_path)?;
-            Ok(hostlink::hub::HubClient::from_config(&config)?
-                .resolve_host_spec(host, &config)
-                .await?)
+            let (client, config) = hostlink::hub::HubClient::from_file(config_path)?;
+            let (_, connection) = Host::connect(&client, &config, host).await?;
+            Ok(connection)
         }
-        None => Ok(crate::cli::load_host_spec(config_path)?),
+        None => {
+            let spec = crate::cli::load_host_spec(config_path)?;
+            Ok(HostConnection::connect(&spec).await?)
+        }
     }
 }

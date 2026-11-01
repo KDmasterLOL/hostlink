@@ -5,9 +5,8 @@ mod remote;
 
 use crate::cli::{
     args::{Cli, Command},
-    commands::hosts::resolve_target_spec,
+    commands::hosts::connect_target,
 };
-use hostlink::connect::HostConnection;
 use std::{error::Error, path::PathBuf};
 
 pub(super) async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
@@ -62,8 +61,7 @@ pub(super) async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         Some(path) => path,
         None => hub::default_hub_config_path()?,
     };
-    let spec = resolve_target_spec(&config_path, selected_host.as_deref()).await?;
-    let mut client = HostConnection::connect(&spec).await?;
+    let mut client = connect_target(&config_path, selected_host.as_deref()).await?;
 
     // Keep cleanup errors visible alongside any command failure.
     let operation: Result<i32, Box<dyn Error>> = async {

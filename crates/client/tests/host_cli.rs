@@ -1,8 +1,10 @@
 use std::process::Command;
 
 fn hostlink(args: &[&str]) -> std::process::Output {
+    let root = tempfile::tempdir().expect("temporary CLI config directory");
     Command::new(env!("CARGO_BIN_EXE_hostlink"))
         .args(args)
+        .env("HOSTLINK_HUB_CONFIG", root.path().join("missing-hub.json"))
         .output()
         .expect("start hostlink CLI")
 }
@@ -36,26 +38,41 @@ fn host_target_is_required_before_any_connection_attempt() {
 #[cfg(unix)]
 #[test]
 fn explicit_config_is_independent_of_default_hub_environment() {
-    let output = Command::new(env!("CARGO_BIN_EXE_hostlink"))
-        .env_remove("HOME")
-        .args([
-            "check",
-            "--config",
-            "/definitely-missing-hostlink-fixture.json",
-        ])
-        .output()
-        .expect("start hostlink CLI without HOME");
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("No such file or directory"),
-        "explicit --config must read that file rather than requiring HOME: {stderr}"
-    );
+    let root = tempfile::tempdir().expect("temporary CLI config directory");
+    let invalid_hub = root.path().join("hub.json");
+    std::fs::write(&invalid_hub, "invalid Hub config").expect("write invalid Hub config");
+    let missing_host = root.path().join("missing-host.json");
+    for command in remote_commands() {
+        let output = Command::new(env!("CARGO_BIN_EXE_hostlink"))
+            .env_remove("HOME")
+            .env("HOSTLINK_HUB_CONFIG", &invalid_hub)
+            .args(*command)
+            .arg("--config")
+            .arg(&missing_host)
+            .output()
+            .expect("start hostlink CLI without HOME");
+        assert_eq!(output.status.code(), Some(1), "{command:?}");
+        assert!(output.stdout.is_empty(), "{command:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("No such file or directory"),
+            "{command:?}: explicit --config must read that file without consulting Hub or HOME: {stderr}"
+        );
+    }
 }
 
-#[test]
-fn forwarding_probe_and_rdp_accept_exactly_one_host_selection() {
-    let commands: &[&[&str]] = &[
+fn remote_commands() -> &'static [&'static [&'static str]] {
+    &[
+        &["check"],
+        &["exec", "--command", "true"],
+        &["upload", "--local", "input.bin", "--remote", "input.bin"],
+        &[
+            "download",
+            "--remote",
+            "output.bin",
+            "--local",
+            "output.bin",
+        ],
         &[
             "forward",
             "--listen",
@@ -65,8 +82,12 @@ fn forwarding_probe_and_rdp_accept_exactly_one_host_selection() {
         ],
         &["rdp"],
         &["probe", "--target", "127.0.0.1:443"],
-    ];
-    for command in commands {
+    ]
+}
+
+#[test]
+fn remote_commands_accept_exactly_one_host_selection() {
+    for command in remote_commands() {
         let mut selected = command.to_vec();
         selected.extend(["--host", "lab-win7"]);
         let output = hostlink(&selected);

@@ -1,11 +1,8 @@
 use crate::cli::{
     args::Command,
-    commands::{hosts::resolve_target_spec, hub::default_hub_config_path},
+    commands::{hosts::connect_target, hub::default_hub_config_path},
 };
-use hostlink::{
-    connect::HostConnection,
-    forward::{self, ForwardServer},
-};
+use hostlink::forward::{self, ForwardServer};
 use std::{
     error::Error,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -51,8 +48,7 @@ async fn forward_cli(
         Some(path) => path.to_owned(),
         None => default_hub_config_path()?,
     };
-    let spec = resolve_target_spec(&config_path, host).await?;
-    let connection = HostConnection::connect(&spec).await?;
+    let connection = connect_target(&config_path, host).await?;
     let server: ForwardServer = forward::start_local_forward(connection, listen, target).await?;
     eprintln!(
         "hostlink: forwarding {} to {} through pinned SSH; press Ctrl-C to stop",
