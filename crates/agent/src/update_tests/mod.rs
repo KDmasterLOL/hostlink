@@ -1,7 +1,5 @@
 use super::*;
-use std::fs;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use std::io;
+use std::{fs, io};
 
 mod fixture;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -16,38 +14,144 @@ const TARGET: &str = "x86_64-win7-windows-msvc";
 const TARGET: &str = "i686-win7-windows-msvc";
 
 #[test]
-fn selected_source_requires_exact_https_version_target_and_digest() {
+fn https_artifact_paths_and_queries_reach_the_lock_gate() {
     let fixture = Fixture::new();
+    let _lock = held_lock(&fixture, "update.lock");
+    let pin = digest(b"independent artifact");
+    for url in [
+        format!("https://artifacts.example/v2.0.0/hostlink-agent-{TARGET}.zip"),
+        "https://artifacts.example/objects/download".to_owned(),
+        "https://artifacts.example/a%20b/build%2Fagent.bin?signature=a%2Bb&key=user@example.com"
+            .to_owned(),
+        "https://ARTIFACTS.example:443/old/../objects/./bundle?version=unrelated".to_owned(),
+        "https://artifacts.example/%2e%2e/objects/bundle".to_owned(),
+    ] {
+        // A generic error could be URL rejection. Contention proves that URL,
+        // version, target and digest validation succeeded without network I/O.
+        assert_eq!(
+            update(&fixture.root, &url, &pin, TARGET, "2.0.0")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock,
+            "accepted URL must reach the held lock: {url}"
+        );
+    }
+}
+
+#[test]
+fn artifact_trust_boundary_rejects_invalid_inputs_before_the_lock_gate() {
+    let fixture = Fixture::new();
+    let _lock = held_lock(&fixture, "update.lock");
     let url = format!("https://artifacts.example/v2.0.0/hostlink-agent-{TARGET}.zip");
-    let digest = digest(b"independent artifact");
+    let pin = digest(b"independent artifact");
     for bad in [
         url.replace("https:", "http:"),
-        url.replace("/v2.0.0/", "/v3.0.0/"),
+        url.replace("https:", "ftp:"),
+        url.replace("https:", "file:"),
         url.replace("artifacts.example", "user@artifacts.example"),
+        url.replace("artifacts.example", "user:secret@artifacts.example"),
+        url.replace("artifacts.example", ":secret@artifacts.example"),
+        url.replace("artifacts.example", "%75ser@artifacts.example"),
         format!("{url}#fragment"),
-        url.replace("/v2.0.0/", "/%2e%2e/v2.0.0/"),
-        url.replace("/v2.0.0/", "/v2.0.0/../v2.0.0/"),
+        format!("{url}#"),
+        url.replace("artifacts.example", "artifacts.example:0"),
+        url.replace("artifacts.example", "artifacts.example:65536"),
+        url.replace("artifacts.example", "artifacts.example:invalid"),
+        "https://".to_owned(),
+        "not a URL".to_owned(),
+        "http://127.0.0.1:0/download".to_owned(),
+        "http://127.0.0.1/download".to_owned(),
+        "http://127.0.0.2:12345/download".to_owned(),
+        "http://localhost:12345/download".to_owned(),
+        "http://[::1]:12345/download".to_owned(),
     ] {
-        assert!(update(&fixture.root, &bad, &digest, TARGET, "2.0.0").is_err());
+        assert_eq!(
+            update(&fixture.root, &bad, &pin, TARGET, "2.0.0")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput,
+            "unsafe URL must fail before the held lock: {bad}"
+        );
     }
-    assert!(update(&fixture.root, &url, "bad digest", TARGET, "2.0.0").is_err());
-    assert!(update(&fixture.root, &url, &digest, "unsupported", "2.0.0").is_err());
-    assert!(update(&fixture.root, &url, &digest, TARGET, "not-semver").is_err());
+    for bad in [
+        "".to_owned(),
+        "a".repeat(63),
+        "a".repeat(65),
+        "A".repeat(64),
+        "g".repeat(64),
+    ] {
+        assert_eq!(
+            update(&fixture.root, &url, &bad, TARGET, "2.0.0")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+    let foreign_target = crate::package::supported_targets()
+        .iter()
+        .find(|target| !crate::package::target_matches_runtime(target))
+        .unwrap();
+    for bad in ["", "unsupported", *foreign_target] {
+        assert_eq!(
+            update(&fixture.root, &url, &pin, bad, "2.0.0")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+    for bad in ["", "not-semver", "v2.0.0", "2.0"] {
+        assert_eq!(
+            update(&fixture.root, &url, &pin, TARGET, bad)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+    assert_eq!(read_installed(&fixture.root).unwrap().0.version, "1.0.0");
+}
 
+#[test]
+fn selected_release_source_preserves_exact_version_and_asset() {
+    let url = "https://artifacts.example/objects/a%20b?signature=a%2Bb";
     let release = Release::builder()
         .version("2.0.0")
         .asset(ReleaseAsset::new(
             format!("hostlink-agent-{TARGET}.zip"),
-            &url,
+            url,
         ))
         .build()
         .unwrap();
     let selected = SelectedRelease(release);
-    assert!(selected.get_release_version("2.0.1").is_err());
+    assert_eq!(selected.get_releases().unwrap().len(), 1);
+    assert!(matches!(
+        selected.get_release_version("2.0.1"),
+        Err(self_update::Error::NoReleaseFound { .. })
+    ));
+    let exact = selected.get_release_version("2.0.0").unwrap();
+    assert_eq!(exact.version(), "2.0.0");
     assert_eq!(
-        selected.get_release_version("2.0.0").unwrap().assets()[0].download_url(),
-        url
+        exact.assets()[0].name(),
+        format!("hostlink-agent-{TARGET}.zip")
     );
+    assert_eq!(exact.assets()[0].download_url(), url);
+}
+
+fn held_lock(fixture: &Fixture, name: &str) -> fs::File {
+    let lock = ::private_fs::PrivateDir::open(&fixture.root)
+        .unwrap()
+        .open_file_with(
+            name,
+            ::private_fs::OpenOptions {
+                access: ::private_fs::FileAccess::ReadWrite,
+                creation: ::private_fs::FileCreation::OpenOrCreate,
+                ..::private_fs::OpenOptions::default()
+            },
+        )
+        .unwrap()
+        .try_clone_std()
+        .unwrap();
+    lock.try_lock().unwrap();
+    lock
 }
 
 #[test]
@@ -143,22 +247,8 @@ fn locks_alias_and_installed_integrity_fail_before_network() {
     let fixture = Fixture::new();
     let url = format!("https://artifacts.example/v2.0.0/hostlink-agent-{TARGET}.zip");
     let pin = digest(b"not downloaded");
-    let root = ::private_fs::PrivateDir::open(&fixture.root).unwrap();
     for name in ["jobs/runner.lock", "update.lock"] {
-        use crate::private_fs::PrivateFileExt;
-        let lock = root
-            .open_file_with(
-                name,
-                ::private_fs::OpenOptions {
-                    access: ::private_fs::FileAccess::ReadWrite,
-                    creation: ::private_fs::FileCreation::OpenOrCreate,
-                    ..::private_fs::OpenOptions::default()
-                },
-            )
-            .unwrap()
-            .try_clone_std()
-            .unwrap();
-        lock.try_lock().unwrap();
+        let _lock = held_lock(&fixture, name);
         assert_eq!(
             update(&fixture.root, &url, &pin, TARGET, "2.0.0")
                 .unwrap_err()

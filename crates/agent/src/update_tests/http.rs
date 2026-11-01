@@ -1,11 +1,11 @@
 //! Real HTTP, real high-level self_update and disposable Agent roots; no transport mocks.
 use super::*;
 use std::{
-    io::{Read, Write},
+    io::{Cursor, Read, Write},
     net::TcpListener,
     sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
@@ -14,7 +14,7 @@ use std::{
 struct Server {
     origin: String,
     stop: Arc<AtomicBool>,
-    requests: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<String>>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 impl Server {
@@ -23,7 +23,7 @@ impl Server {
         listener.set_nonblocking(true).unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let stop = Arc::new(AtomicBool::new(false));
-        let requests = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let stopped = Arc::clone(&stop);
         let received = Arc::clone(&requests);
         let headers=redirect.map_or_else(||format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()),
@@ -35,10 +35,21 @@ impl Server {
                         stream
                             .set_read_timeout(Some(Duration::from_secs(2)))
                             .unwrap();
-                        let mut request = [0; 8192];
-                        let count = stream.read(&mut request).unwrap();
-                        assert!(count > 0);
-                        received.fetch_add(1, Ordering::SeqCst);
+                        let mut request = Vec::new();
+                        while !request.ends_with(b"\r\n\r\n") {
+                            let mut byte = [0];
+                            stream.read_exact(&mut byte).unwrap();
+                            request.push(byte[0]);
+                            assert!(request.len() <= 8192);
+                        }
+                        received.lock().unwrap().push(
+                            std::str::from_utf8(&request)
+                                .unwrap()
+                                .lines()
+                                .next()
+                                .unwrap()
+                                .to_owned(),
+                        );
                         stream.write_all(headers.as_bytes()).unwrap();
                         stream.write_all(&body).unwrap();
                     }
@@ -57,8 +68,34 @@ impl Server {
         }
     }
     fn url(&self) -> String {
-        format!("{}/v2.0.0/hostlink-agent-{TARGET}.zip", self.origin)
+        format!("{}{ARTIFACT_PATH}", self.origin)
     }
+    fn request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
+const ARTIFACT_PATH: &str = "/objects/a%20b/payload.bin?signature=a%2Bb&download=1";
+
+fn wrong_target_package(body: &[u8]) -> Vec<u8> {
+    let mut source = zip::ZipArchive::new(Cursor::new(body)).unwrap();
+    let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for index in 0..source.len() {
+        let mut entry = source.by_index(index).unwrap();
+        if entry.name().ends_with("/manifest.json") {
+            let mut manifest: serde_json::Value = serde_json::from_reader(&mut entry).unwrap();
+            manifest["target"] = serde_json::json!("i686-win7-windows-msvc");
+            archive
+                .start_file(entry.name(), zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive
+                .write_all(&serde_json::to_vec(&manifest).unwrap())
+                .unwrap();
+        } else {
+            archive.raw_copy_file(entry).unwrap();
+        }
+    }
+    archive.finish().unwrap().into_inner()
 }
 impl Drop for Server {
     fn drop(&mut self) {
@@ -74,14 +111,27 @@ fn idempotency_and_same_version_changed_digest_use_real_upstream_update() {
     let body = package("2.0.0", b"new executable", false);
     let server = Server::start(body.clone(), None);
     assert!(fixture.apply(&server.url(), &body, "2.0.0").unwrap());
+    assert_eq!(
+        *server.requests.lock().unwrap(),
+        [format!("GET {ARTIFACT_PATH} HTTP/1.1")]
+    );
     let (manifest, source_sha) = read_installed(&fixture.root).unwrap();
     assert_eq!(manifest.version, "2.0.0");
+    assert_eq!(manifest.target, TARGET);
     assert_eq!(source_sha, digest(&body));
+    let archive = fixture.temp.path().join("source.zip");
+    fs::write(&archive, &body).unwrap();
+    let (_, source_manifest) =
+        crate::package::validate_contents(&archive, TARGET, "2.0.0").unwrap();
+    assert_eq!(
+        fs::read(fixture.root.join("bin/manifest.json")).unwrap(),
+        source_manifest
+    );
     assert_eq!(fixture.preserved(), before);
     assert!(!fixture.root.join("jobs/jobs.db").exists());
 
     assert!(!fixture.apply(&server.url(), &body, "2.0.0").unwrap());
-    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(server.request_count(), 1);
 
     let replacement = package("2.0.0", b"different exact executable", false);
     let other = Server::start(replacement.clone(), None);
@@ -96,7 +146,7 @@ fn idempotency_and_same_version_changed_digest_use_real_upstream_update() {
     );
     assert_eq!(fixture.preserved(), before);
 
-    let same_sha_different_version = format!("{}/v2.0.1/hostlink-agent-{TARGET}.zip", other.origin);
+    let same_sha_different_version = other.url();
     assert!(
         update(
             &fixture.root,
@@ -107,7 +157,7 @@ fn idempotency_and_same_version_changed_digest_use_real_upstream_update() {
         )
         .is_err()
     );
-    assert_eq!(other.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(other.request_count(), 1);
 }
 
 #[test]
@@ -117,9 +167,12 @@ fn bad_checksum_manifest_symlink_and_redirect_preserve_old_bundle() {
         package("2.0.0", b"changed executable", false),
         package("2.0.1", b"new executable", false),
         package("2.0.0", b"new executable", true),
+        wrong_target_package(&good),
     ] {
         let fixture = Fixture::new();
         let before = fixture.preserved();
+        let old_manifest = fs::read(fixture.root.join("bin/manifest.json")).unwrap();
+        let old_sha = read_installed(&fixture.root).unwrap().1;
         let server = Server::start(body.clone(), None);
         let pin = if body == package("2.0.0", b"changed executable", false) {
             digest(&good)
@@ -127,19 +180,50 @@ fn bad_checksum_manifest_symlink_and_redirect_preserve_old_bundle() {
             digest(&body)
         };
         assert!(update(&fixture.root, &server.url(), &pin, TARGET, "2.0.0").is_err());
+        assert_eq!(
+            server.request_count(),
+            1,
+            "failure must follow a real download"
+        );
         assert_eq!(read_installed(&fixture.root).unwrap().0.version, "1.0.0");
+        assert_eq!(read_installed(&fixture.root).unwrap().1, old_sha);
+        assert_eq!(
+            fs::read(fixture.root.join("bin/manifest.json")).unwrap(),
+            old_manifest
+        );
+        assert_eq!(
+            fs::read(fixture.root.join("bin/hostlink-agent")).unwrap(),
+            b"old executable"
+        );
         assert_eq!(fixture.preserved(), before);
     }
     let destination = Server::start(good.clone(), None);
-    let redirect = Server::start(Vec::new(), Some(&destination.url()));
+    for location in [destination.url(), "/redirected".to_owned()] {
+        let redirect = Server::start(Vec::new(), Some(&location));
+        let fixture = Fixture::new();
+        let before = fixture.preserved();
+        let old_sha = read_installed(&fixture.root).unwrap().1;
+        assert!(fixture.apply(&redirect.url(), &good, "2.0.0").is_err());
+        assert_eq!(
+            *redirect.requests.lock().unwrap(),
+            [format!("GET {ARTIFACT_PATH} HTTP/1.1")],
+            "only the initial request is allowed, including same-origin redirects"
+        );
+        assert_eq!(destination.request_count(), 0);
+        assert_eq!(read_installed(&fixture.root).unwrap().0.version, "1.0.0");
+        assert_eq!(read_installed(&fixture.root).unwrap().1, old_sha);
+        assert_eq!(
+            fs::read(fixture.root.join("bin/hostlink-agent")).unwrap(),
+            b"old executable"
+        );
+        assert_eq!(fixture.preserved(), before);
+    }
     let fixture = Fixture::new();
-    assert!(fixture.apply(&redirect.url(), &good, "2.0.0").is_err());
-    assert_eq!(destination.requests.load(Ordering::SeqCst), 0);
     fs::rename(fixture.root.join("bin"), fixture.root.join("alias-target")).unwrap();
     std::os::unix::fs::symlink(fixture.root.join("alias-target"), fixture.root.join("bin"))
         .unwrap();
     assert!(fixture.apply(&destination.url(), &good, "2.0.0").is_err());
-    assert_eq!(destination.requests.load(Ordering::SeqCst), 0);
+    assert_eq!(destination.request_count(), 0);
 }
 
 #[test]
@@ -251,7 +335,7 @@ fn already_current_manifest_does_not_download_again() {
     let current = package("1.0.0", b"old executable", false);
     assert_eq!(read_installed(&fixture.root).unwrap().1, digest(&current));
     let server = Server::start(current.clone(), None);
-    let url = format!("{}/v1.0.0/hostlink-agent-{TARGET}.zip", server.origin);
+    let url = server.url();
     assert!(!fixture.apply(&url, &current, "1.0.0").unwrap());
-    assert_eq!(server.requests.load(Ordering::SeqCst), 0);
+    assert_eq!(server.request_count(), 0);
 }
