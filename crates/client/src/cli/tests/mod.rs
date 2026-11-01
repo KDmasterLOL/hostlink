@@ -1,7 +1,88 @@
 use super::*;
 use crate::cli::args::{Cli, Command};
 use clap::Parser;
+use hostlink::bootstrap::Target;
 use std::fs::{self, File};
+
+#[test]
+fn release_invite_requires_name_target_and_preserves_token_only() {
+    let base = [
+        "hostlink",
+        "invite",
+        "--name",
+        "fixture",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+    ];
+    assert!(Cli::try_parse_from(base).is_ok());
+    assert!(Cli::try_parse_from(base.into_iter().chain(["--version", "1.2.3"])).is_ok());
+    assert!(Cli::try_parse_from(base.into_iter().chain(["--embed-github-token"])).is_ok());
+    assert!(Cli::try_parse_from(["hostlink", "invite", "--token-only"]).is_ok());
+    assert!(Cli::try_parse_from(["hostlink", "invite"]).is_err());
+    for flags in [
+        vec!["--target", "x86_64-unknown-linux-gnu"],
+        vec!["--ssh-user", "agent"],
+        vec!["--version", "1.2.3"],
+        vec!["--bootstrap-hub-ca-cert", "ca.pem"],
+        vec!["--embed-github-token"],
+    ] {
+        let error = Cli::try_parse_from(
+            ["hostlink", "invite", "--token-only"]
+                .into_iter()
+                .chain(flags),
+        )
+        .err()
+        .expect("token-only must conflict with bootstrap options");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+    assert!(Cli::try_parse_from(base.into_iter().chain(["--token-only"])).is_err());
+    for flag in [
+        "--installer-url",
+        "--installer-sha256",
+        "--agent-url",
+        "--agent-sha256",
+        "--archive-url",
+        "--archive-sha256",
+        "--github-token",
+    ] {
+        assert!(Cli::try_parse_from(base.into_iter().chain([flag, "fixture"])).is_err());
+    }
+}
+
+#[test]
+fn invitation_target_is_parsed_into_the_existing_bootstrap_type() {
+    for target in [
+        Target::Win7X86,
+        Target::Win7X64,
+        Target::Win11X64,
+        Target::LinuxX64,
+    ] {
+        let cli = Cli::try_parse_from([
+            "hostlink",
+            "invite",
+            "--name",
+            "fixture",
+            "--target",
+            target.as_str(),
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Command::Invite(crate::cli::args::InviteArgs { target: Some(parsed), .. }) if parsed == target)
+        );
+    }
+    let error = Cli::try_parse_from([
+        "hostlink",
+        "invite",
+        "--name",
+        "fixture",
+        "--target",
+        "unsupported-target",
+    ])
+    .err()
+    .expect("unsupported target must fail during parsing");
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    assert!(error.to_string().contains("unsupported bootstrap target"));
+}
 
 #[test]
 fn migration_preflight_requires_all_local_explicit_inputs() {

@@ -1,5 +1,5 @@
-use crate::cli::args::{Command, HubCommand};
-use hostlink::bootstrap::{self, Target};
+use crate::cli::args::{HubCommand, InviteArgs};
+use hostlink::bootstrap;
 use hostlink::host::Host;
 use hostlink::hub::{HubClient, HubConfig};
 use secrecy::ExposeSecret;
@@ -144,43 +144,35 @@ fn set_private_file_acl(_file: &mut File) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) async fn dispatch(
-    command: &crate::cli::args::Command,
-) -> Result<Option<i32>, Box<dyn Error>> {
-    match command {
-        crate::cli::args::Command::Hub { command } => Ok(Some(hub_command(command).await?)),
-        command @ crate::cli::args::Command::Invite { .. } => Ok(Some(invite(command).await?)),
-        crate::cli::args::Command::DisplayName { host, display_name } => {
-            let (client, _) = configured_hub_client()?;
-            let host = client.resolve_host(host).await?;
-            let updated = client.set_display_name(&host, display_name).await?;
-            serde_json::to_writer_pretty(io::stdout().lock(), &updated)?;
-            io::stdout().lock().write_all(b"\n")?;
-            Ok(Some(0))
-        }
-        crate::cli::args::Command::Remove { host, yes } => {
-            if !yes {
-                return Err("revocation requires explicit --yes confirmation".into());
-            }
-            let (client, _) = configured_hub_client()?;
-            let host = client.resolve_host(host).await?;
-            let receipt = client.revoke(&host).await?;
-            println!(
-                "revoked {}: new_connections={}, existing_sessions_terminated={}, remote_uninstall={}, projection={}",
-                host.machine_id,
-                receipt.revoked_new_connections,
-                receipt.confirmed_session_terminated,
-                receipt.remote_uninstall,
-                receipt.authorized_key_projection
-            );
-            Ok(Some(0))
-        }
-        _ => Ok(None),
-    }
+pub(super) async fn display_name(host: &str, display_name: &str) -> Result<i32, Box<dyn Error>> {
+    let (client, _) = configured_hub_client()?;
+    let host = client.resolve_host(host).await?;
+    let updated = client.set_display_name(&host, display_name).await?;
+    serde_json::to_writer_pretty(io::stdout().lock(), &updated)?;
+    io::stdout().lock().write_all(b"\n")?;
+    Ok(0)
 }
 
-async fn invite(command: &Command) -> Result<i32, Box<dyn Error>> {
-    let Command::Invite {
+pub(super) async fn remove(host: &str, yes: bool) -> Result<i32, Box<dyn Error>> {
+    if !yes {
+        return Err("revocation requires explicit --yes confirmation".into());
+    }
+    let (client, _) = configured_hub_client()?;
+    let host = client.resolve_host(host).await?;
+    let receipt = client.revoke(&host).await?;
+    println!(
+        "revoked {}: new_connections={}, existing_sessions_terminated={}, remote_uninstall={}, projection={}",
+        host.machine_id,
+        receipt.revoked_new_connections,
+        receipt.confirmed_session_terminated,
+        receipt.remote_uninstall,
+        receipt.authorized_key_projection
+    );
+    Ok(0)
+}
+
+pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
+    let InviteArgs {
         name,
         ssh_user,
         ttl_seconds,
@@ -189,34 +181,26 @@ async fn invite(command: &Command) -> Result<i32, Box<dyn Error>> {
         version,
         target,
         bootstrap_hub_ca_cert,
-    } = command
-    else {
-        return Err("internal invite dispatch mismatch".into());
-    };
+    } = args;
     let config_path = default_hub_config_path()?;
     let config = load_hub_config(&config_path)?;
-    let selection = if *token_only {
+    let selection = if token_only {
         if name.is_some() && name.as_deref().is_some_and(|value| value.trim().is_empty()) {
             return Err("invitation name cannot be empty".into());
         }
         None
     } else {
-        let get = |value: &Option<String>, flag: &str| -> Result<String, Box<dyn Error>> {
-            value
-                .clone()
-                .ok_or_else(|| format!("{flag} is required unless --token-only is used").into())
-        };
         let selected_name = name
             .clone()
             .ok_or("--name is required for a runnable bootstrap")?;
-        let selected_target = Target::parse(&get(target, "--target")?)?;
+        let selected_target = target.ok_or("--target is required unless --token-only is used")?;
         let selection = bootstrap::resolve_github_selection(
             version.as_deref(),
             selected_target,
             selected_name,
-            ssh_user.clone().unwrap_or_else(|| config.ssh_user.clone()),
+            ssh_user.unwrap_or_else(|| config.ssh_user.clone()),
             config.hub_url.clone(),
-            bootstrap_hub_ca_cert.clone(),
+            bootstrap_hub_ca_cert,
         )
         .await?;
         Some(selection)
@@ -224,7 +208,7 @@ async fn invite(command: &Command) -> Result<i32, Box<dyn Error>> {
     // Resolve the exact raw asset/digest and render before creating a Hub invite.
     // Target-side SHA-256 verification precedes the invite token prompt and install.
     let bootstrap_command = match &selection {
-        Some(selection) if *embed_github_token => {
+        Some(selection) if embed_github_token => {
             Some(bootstrap::render_command_embedded(selection)?)
         }
         Some(selection) => Some(bootstrap::render_command(selection)),
@@ -235,13 +219,13 @@ async fn invite(command: &Command) -> Result<i32, Box<dyn Error>> {
             "GitHub SHA-256 authenticates API-selected bytes; it is not an independent publisher signature."
         );
     }
-    if *embed_github_token {
+    if embed_github_token {
         eprintln!(
             "WARNING: bootstrap_command contains your GitHub PAT in plain text. Protect stdout, terminal history and clipboard; delete any saved Windows bootstrap helper after installation. Every target receiving this PAT can read the authorized private GitHub repository."
         );
     }
     let client = HubClient::from_config(&config)?;
-    let pending = Host::create(&client, name.clone(), *ttl_seconds).await?;
+    let pending = Host::create(&client, name, ttl_seconds).await?;
     let invite = pending.into_invitation();
     println!(
         "token: {}\nexpires_at: {}",

@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+use hostlink::bootstrap::Target;
 use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Parser)]
@@ -11,6 +12,40 @@ use std::{net::SocketAddr, path::PathBuf};
 pub(super) struct Cli {
     #[command(subcommand)]
     pub(super) command: Command,
+}
+
+/// Exactly one SSH destination source, enforced by clap before command execution.
+#[derive(Args)]
+#[group(id = "host_selection", required = true, multiple = false)]
+pub(super) struct HostTarget {
+    #[arg(long)]
+    pub(super) config: Option<PathBuf>,
+    #[arg(long)]
+    pub(super) host: Option<String>,
+}
+
+/// Inputs of one invitation, parsed and checked by clap before any Hub or GitHub I/O.
+#[derive(Args)]
+pub(super) struct InviteArgs {
+    #[arg(long, required_unless_present = "token_only")]
+    pub(super) name: Option<String>,
+    #[arg(long)]
+    pub(super) ssh_user: Option<String>,
+    #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(60..=86400))]
+    pub(super) ttl_seconds: u64,
+    /// Create a manual Hub invitation without selecting a GitHub binary.
+    #[arg(long, conflicts_with_all = ["ssh_user", "version", "target", "bootstrap_hub_ca_cert", "embed_github_token"])]
+    pub(super) token_only: bool,
+    /// Explicitly expose the Controller's GitHub PAT in the printed bootstrap.
+    #[arg(long, conflicts_with = "token_only")]
+    pub(super) embed_github_token: bool,
+    #[arg(long)]
+    pub(super) version: Option<String>,
+    #[arg(long, required_unless_present = "token_only", value_parser = parse_target)]
+    pub(super) target: Option<Target>,
+    /// PEM CA path available on the target during enrollment.
+    #[arg(long)]
+    pub(super) bootstrap_hub_ca_cert: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -37,29 +72,7 @@ pub(super) enum Command {
     /// Verify a registered host using its current Hub pins and SSH identity.
     Verify { host: String },
     /// Create an invitation using authenticated KDmasterLOL/hostlink GitHub Releases.
-    Invite {
-        #[arg(long, required_unless_present = "token_only")]
-        name: Option<String>,
-        #[arg(long)]
-        ssh_user: Option<String>,
-        #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(60..=86400))]
-        ttl_seconds: u64,
-        /// Create a manual Hub invitation without selecting a GitHub binary.
-        #[arg(long, conflicts_with_all = ["ssh_user", "version", "target", "bootstrap_hub_ca_cert", "embed_github_token"])]
-        token_only: bool,
-        /// Include the Controller's private GitHub PAT in the printed target bootstrap.
-        /// The resulting output is a SECRET (shell history, clipboard and saved script).
-        #[arg(long, conflicts_with = "token_only")]
-        embed_github_token: bool,
-        /// Exact semantic version (v-prefixed GitHub tag); omit for latest published release.
-        #[arg(long)]
-        version: Option<String>,
-        #[arg(long, required_unless_present = "token_only")]
-        target: Option<String>,
-        /// PEM CA path available on the target, passed only to the Linux bootstrap and enrollment.
-        #[arg(long)]
-        bootstrap_hub_ca_cert: Option<PathBuf>,
-    },
+    Invite(InviteArgs),
     /// Change a host's display-only label.
     DisplayName { host: String, display_name: String },
     /// Revoke new managed access; does not uninstall the Agent or terminate existing sessions.
@@ -70,17 +83,13 @@ pub(super) enum Command {
     },
     /// Establish and close a pinned authenticated SSH connection.
     Check {
-        #[arg(long, group = "host_selection", required_unless_present = "host")]
-        config: Option<PathBuf>,
-        #[arg(long, group = "host_selection", required_unless_present = "config")]
-        host: Option<String>,
+        #[command(flatten)]
+        host_target: HostTarget,
     },
     /// Forward a loopback TCP port to a target reachable from the SSH host.
     Forward {
-        #[arg(long, group = "host_selection", required_unless_present = "host")]
-        config: Option<PathBuf>,
-        #[arg(long, group = "host_selection", required_unless_present = "config")]
-        host: Option<String>,
+        #[command(flatten)]
+        host_target: HostTarget,
         #[arg(long, value_parser = parse_socket_addr)]
         listen: SocketAddr,
         #[arg(long, value_parser = parse_socket_addr)]
@@ -88,19 +97,15 @@ pub(super) enum Command {
     },
     /// Forward local RDP to 127.0.0.1:3389 on the SSH host.
     Rdp {
-        #[arg(long, group = "host_selection", required_unless_present = "host")]
-        config: Option<PathBuf>,
-        #[arg(long, group = "host_selection", required_unless_present = "config")]
-        host: Option<String>,
+        #[command(flatten)]
+        host_target: HostTarget,
         #[arg(long, default_value_t = 13389, value_parser = clap::value_parser!(u16).range(1..))]
         listen_port: u16,
     },
     /// Probe TCP reachability from the SSH host through a direct-tcpip channel.
     Probe {
-        #[arg(long, group = "host_selection", required_unless_present = "host")]
-        config: Option<PathBuf>,
-        #[arg(long, group = "host_selection", required_unless_present = "config")]
-        host: Option<String>,
+        #[command(flatten)]
+        host_target: HostTarget,
         #[arg(long, value_parser = parse_socket_addr)]
         target: SocketAddr,
         #[arg(long, default_value_t = 1500, value_parser = clap::value_parser!(u64).range(1..=60000))]
@@ -108,10 +113,8 @@ pub(super) enum Command {
     },
     /// Execute a single remote shell command with binary stdin/out and exact exit status.
     Exec {
-        #[arg(long, group = "host_selection", required_unless_present = "host")]
-        config: Option<PathBuf>,
-        #[arg(long, group = "host_selection", required_unless_present = "config")]
-        host: Option<String>,
+        #[command(flatten)]
+        host_target: HostTarget,
         #[arg(long)]
         command: String,
         /// Path to a bounded binary stdin payload; "-" reads controller stdin.
@@ -120,10 +123,8 @@ pub(super) enum Command {
     },
     /// Create a new remote file using authenticated SFTP (never overwrite).
     Upload {
-        #[arg(long, group = "host_selection", required_unless_present = "host")]
-        config: Option<PathBuf>,
-        #[arg(long, group = "host_selection", required_unless_present = "config")]
-        host: Option<String>,
+        #[command(flatten)]
+        host_target: HostTarget,
         #[arg(long)]
         local: PathBuf,
         #[arg(long)]
@@ -131,10 +132,8 @@ pub(super) enum Command {
     },
     /// Download an SFTP file to a new local file (never overwrite).
     Download {
-        #[arg(long, group = "host_selection", required_unless_present = "host")]
-        config: Option<PathBuf>,
-        #[arg(long, group = "host_selection", required_unless_present = "config")]
-        host: Option<String>,
+        #[command(flatten)]
+        host_target: HostTarget,
         #[arg(long)]
         remote: String,
         #[arg(long)]
@@ -192,40 +191,6 @@ pub(super) fn parse_socket_addr(value: &str) -> Result<SocketAddr, String> {
         .map_err(|_| "expected an IP:PORT socket address".into())
 }
 
-#[cfg(test)]
-mod github_invite_tests {
-    use super::*;
-
-    #[test]
-    fn release_invite_requires_name_target_and_preserves_token_only() {
-        let base = [
-            "hostlink",
-            "invite",
-            "--name",
-            "fixture",
-            "--target",
-            "x86_64-unknown-linux-gnu",
-        ];
-        assert!(Cli::try_parse_from(base).is_ok());
-        assert!(Cli::try_parse_from(base.into_iter().chain(["--version", "1.2.3"])).is_ok());
-        assert!(Cli::try_parse_from(base.into_iter().chain(["--embed-github-token"])).is_ok());
-        assert!(Cli::try_parse_from(["hostlink", "invite", "--token-only"]).is_ok());
-        assert!(
-            Cli::try_parse_from(["hostlink", "invite", "--token-only", "--embed-github-token"])
-                .is_err()
-        );
-        assert!(Cli::try_parse_from(["hostlink", "invite"]).is_err());
-        assert!(Cli::try_parse_from(base.into_iter().chain(["--token-only"])).is_err());
-        for flag in [
-            "--installer-url",
-            "--installer-sha256",
-            "--agent-url",
-            "--agent-sha256",
-            "--archive-url",
-            "--archive-sha256",
-            "--github-token",
-        ] {
-            assert!(Cli::try_parse_from(base.into_iter().chain([flag, "fixture"])).is_err());
-        }
-    }
+fn parse_target(raw: &str) -> Result<Target, String> {
+    Target::parse(raw).map_err(|error| error.to_string())
 }

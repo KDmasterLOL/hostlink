@@ -88,7 +88,8 @@ fn invalid_target_or_missing_github_credential_fail_before_any_hub_invite_reques
         ],
         &config,
     );
-    assert!(!invalid_target.status.success());
+    assert_eq!(invalid_target.status.code(), Some(2));
+    assert!(invalid_target.stdout.is_empty());
     assert!(
         String::from_utf8_lossy(&invalid_target.stderr).contains("unsupported bootstrap target")
     );
@@ -122,4 +123,27 @@ fn invalid_target_or_missing_github_credential_fail_before_any_hub_invite_reques
     assert!(String::from_utf8_lossy(&embedded.stderr).contains("GitHub credential"));
     assert!(!String::from_utf8_lossy(&embedded.stdout).contains("token:"));
     assert!(!stderr.contains("Hub request"), "{stderr}");
+}
+
+#[test]
+fn invalid_invitation_target_is_rejected_before_reading_hub_configuration() {
+    let root = tempfile::tempdir().expect("temporary config directory");
+    for embed in [false, true] {
+        let mut args = vec![
+            "invite",
+            "--name",
+            "lab-win7",
+            "--target",
+            "unsupported-target",
+        ];
+        if embed {
+            args.push("--embed-github-token");
+        }
+        let output = hostlink(&args, &root.path().join("missing-hub.json"));
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("unsupported bootstrap target"), "{stderr}");
+        assert!(!stderr.contains("No such file"), "{stderr}");
+    }
 }

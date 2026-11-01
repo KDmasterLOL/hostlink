@@ -3,94 +3,89 @@ pub(super) mod hosts;
 mod hub;
 mod remote;
 
-use crate::cli::{
-    args::{Cli, Command},
-    commands::hosts::connect_target,
+use crate::cli::args::{Cli, Command, MigrationCommand};
+use std::{
+    error::Error,
+    io::Write,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
 };
-use std::{error::Error, path::PathBuf};
 
 pub(super) async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
-    if let Some(code) = hub::dispatch(&cli.command).await? {
-        return Ok(code);
-    }
-    if let Some(code) = hosts::dispatch(&cli.command).await? {
-        return Ok(code);
-    }
-    if let Command::Migration {
-        command:
-            crate::cli::args::MigrationCommand::Preflight {
-                old_hub,
-                old_controller,
-                old_agent,
-                new_agent,
-                new_host,
-            },
-    } = &cli.command
-    {
-        let report =
-            hostlink::migration::preflight(old_hub, old_controller, old_agent, new_agent, new_host)
-                .map_err(std::io::Error::other)?;
-        serde_json::to_writer_pretty(std::io::stdout().lock(), &report)?;
-        use std::io::Write;
-        std::io::stdout().lock().write_all(b"\n")?;
-        return Ok(
-            if report
-                .hosts
-                .iter()
-                .any(|host| host.readiness == hostlink::migration::Readiness::Blocked)
-            {
-                2
-            } else {
-                0
-            },
-        );
-    }
-    if let Some(code) = forward::dispatch(&cli.command).await? {
-        return Ok(code);
-    }
-
-    if let Command::Probe {
-        target, timeout_ms, ..
-    } = &cli.command
-        && (target.port() == 0 || *timeout_ms == 0)
-    {
-        return Err("probe target port and timeout must be nonzero".into());
-    }
-    let (selected_config, selected_host) = selection(&cli.command)?;
-    let config_path = match selected_config {
-        Some(path) => path,
-        None => hub::default_hub_config_path()?,
-    };
-    let mut client = connect_target(&config_path, selected_host.as_deref()).await?;
-
-    // Keep cleanup errors visible alongside any command failure.
-    let operation: Result<i32, Box<dyn Error>> = async {
-        remote::execute(&mut client, &cli.command)
-            .await?
-            .ok_or_else(|| "internal remote command dispatch mismatch".into())
-    }
-    .await;
-    let cleanup = client.close().await;
-    match (operation, cleanup) {
-        (Ok(code), Ok(())) => Ok(code),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(Box::new(error)),
-        (Err(primary), Err(cleanup)) => {
-            Err(format!("operation failed: {primary}; SSH cleanup also failed: {cleanup}").into())
+    match cli.command {
+        Command::Migration {
+            command:
+                MigrationCommand::Preflight {
+                    old_hub,
+                    old_controller,
+                    old_agent,
+                    new_agent,
+                    new_host,
+                },
+        } => {
+            let report = hostlink::migration::preflight(
+                &old_hub,
+                &old_controller,
+                &old_agent,
+                &new_agent,
+                &new_host,
+            )
+            .map_err(std::io::Error::other)?;
+            serde_json::to_writer_pretty(std::io::stdout().lock(), &report)?;
+            std::io::stdout().lock().write_all(b"\n")?;
+            Ok(
+                if report
+                    .hosts
+                    .iter()
+                    .any(|host| host.readiness == hostlink::migration::Readiness::Blocked)
+                {
+                    2
+                } else {
+                    0
+                },
+            )
         }
+        Command::Hub { command } => hub::hub_command(&command).await,
+        Command::List { check, json } => hosts::list_command(check, json).await,
+        Command::Info { host } => hosts::info(&host).await,
+        Command::Verify { host } => hosts::verify(&host).await,
+        Command::Invite(args) => hub::invite(args).await,
+        Command::DisplayName { host, display_name } => {
+            hub::display_name(&host, &display_name).await
+        }
+        Command::Remove { host, yes } => hub::remove(&host, yes).await,
+        Command::Check { host_target } => remote::check(&host_target).await,
+        Command::Forward {
+            host_target,
+            listen,
+            target,
+        } => forward::forward_cli(&host_target, listen, target).await,
+        Command::Rdp {
+            host_target,
+            listen_port,
+        } => {
+            let listen = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listen_port);
+            let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3389);
+            forward::forward_cli(&host_target, listen, target).await
+        }
+        Command::Probe {
+            host_target,
+            target,
+            timeout_ms,
+        } => remote::probe(&host_target, target, timeout_ms).await,
+        Command::Exec {
+            host_target,
+            command,
+            stdin_file,
+        } => remote::exec(&host_target, &command, stdin_file.as_deref()).await,
+        Command::Upload {
+            host_target,
+            local,
+            remote,
+        } => remote::upload(&host_target, &local, &remote).await,
+        Command::Download {
+            host_target,
+            remote,
+            local,
+        } => remote::download(&host_target, &remote, &local).await,
     }
-}
-
-fn selection(command: &Command) -> Result<(Option<PathBuf>, Option<String>), Box<dyn Error>> {
-    let selected = match command {
-        Command::Check { config, host }
-        | Command::Exec { config, host, .. }
-        | Command::Upload { config, host, .. }
-        | Command::Download { config, host, .. }
-        | Command::Forward { config, host, .. }
-        | Command::Rdp { config, host, .. }
-        | Command::Probe { config, host, .. } => (config.clone(), host.clone()),
-        _ => return Err("internal command selection mismatch".into()),
-    };
-    Ok(selected)
 }
