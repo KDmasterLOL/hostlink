@@ -25,7 +25,13 @@ Three HOME user units were installed under `~/.config/systemd/user/`:
 
 The service and timer are enabled under `default.target` and
 `timers.target` respectively. Units use `UMask=0077`,
-`NoNewPrivileges=true` and run only under the HOME user. The pilot creates
+`NoNewPrivileges=true`, an explicit
+`PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin`, and run only under
+the HOME user. The fixed PATH is essential: the interactive/systemd
+environments otherwise resolve `caddy` and `sshd` through different
+`mise` shims, which the source-pinned pilot correctly rejects as a
+binary-identity mismatch. **Never repair this by changing saved binary
+digests without verifying the binaries.** The pilot creates
 its own loopback-bound Hub, Caddy HTTPS proxy, separate-port sshd and test
 Agent. It never edits the existing system Caddy, SSH, FRP, OneC Hub/Agent,
 client installations or 1C databases.
@@ -35,16 +41,22 @@ Check the actual status after boot or a code change:
 ```sh
 systemctl --user status hostlink-v2-owned-pilot.service
 systemctl --user list-timers hostlink-v2-owned-pilot-check.timer
+systemctl --user start hostlink-v2-owned-pilot-check.service
 systemctl --user show hostlink-v2-owned-pilot-check.service --property=Result,ExecMainStatus
 journalctl --user -u hostlink-v2-owned-pilot.service --no-pager -n 30
 ```
 
-For a real authenticated check and full test host verification, from the
-**pinned** worktree:
+The check runs **inside the user systemd unit**. On this HOME system,
+an ordinary unrelated process may lack Linux `/proc/<pid>/exe` and
+`environ` inspection rights for processes owned by systemd despite
+matching UID. Therefore calling the pilot script's `check` or `status`
+directly from an interactive shell can report a false identity failure;
+it is not an alternative to the verified unit check. The application-level
+Hub and pinned SSH probes are independently available from HOME:
 
 ```sh
-bash scripts/hostlink-v2-pilot.sh check --root "$HOME/.local/share/hostlink-v2-pilot-0c195d"
 HOSTLINK_HUB_CONFIG="$HOME/.local/share/hostlink-v2-pilot-0c195d/controller/hub.json" hostlink list --check --json
+HOSTLINK_HUB_CONFIG="$HOME/.local/share/hostlink-v2-pilot-0c195d/controller/hub.json" hostlink verify home-v2-pilot
 ```
 
 Expected authenticated observations from the 2026-11-02 run:
@@ -67,6 +79,21 @@ An unclean host shutdown may leave an uncertain process ledger and prevent
 automatic restart: **inspect the ledger and ownership** and reconcile
 explicitly rather than deleting it or forcing child termination. The systemd
 health timer is diagnostic, not a watchdog that replaces failed processes.
+
+The controlled restart test on 2026-11-02 stopped the source-pinned service
+only after confirming zero pending/running Agent jobs, then started it with
+the existing state: `HUB_API`, `SSHD_PINNED` and
+`AGENT_AUTHENTICATED_SSH` all passed. The Hub continued to identify the
+same `home-v2-pilot` machine ID
+`8a1bbb5c-32ca-43dc-84c5-18e99b3c09cc`.
+The first attempt to restart services originally launched **outside**
+systemd could not prove their PID ownership, then left a fail-closed
+partial ledger. An explicit one-time reconciliation verified the recorded
+PIDs were absent, all four pilot ports were free, and the Agent jobs path
+was owner-private before resetting the stopped ledger; no unrelated
+processes were signaled and no Agent state or keys were replaced.
+This does not constitute a power-loss recovery or guaranteed automatic
+repair of a stale ledger.
 
 ## Deployment gates not satisfied by the pilot
 
