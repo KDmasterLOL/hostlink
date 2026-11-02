@@ -89,6 +89,31 @@ and fails explicitly without executing candidates. It cannot validate the raw
 installation flow. Native Windows 7 x86/x64, Windows 11 and PowerShell 2
 acceptance must be recorded anew; see the acceptance document.
 
+## Local builds and acceptance
+
+HostLink does **not** use GitHub Actions CI for builds or validation. HOME PC
+(Linux) is the source-exact build machine, including cross-compiling Windows
+MSVC binaries with the pinned `cargo-xwin` toolchain. Record the complete Git
+SHA, compiler/SDK identity, target, PE imports and SHA-256 of every artifact.
+The Win7 x64/i686 builder and inspection receipt are documented in
+[Win7 acceptance](docs/WIN7_REWRITE_ACCEPTANCE.md); a successful cross-build
+is **not** proof that the executable runs on Windows.
+
+Native validation runs separately on WORK PC (non-elevated Windows 11) and on
+approved disposable Windows 7/server test roots. These checks cover owner-only
+ACLs, Hub/SSH trust and enrollment, installation, and safe offline updating.
+The `hostlink` Client belongs on HOME and WORK; only `hostlink-agent`
+is installed on managed servers. Existing OneC Agents and production services
+must not be replaced during testing.
+
+After source-exact local verification, push reviewed `task/*` slices to
+`dev`. GitHub is the source repository and, **only after separately authorized
+`main` promotion and immutable release tag**, the destination for manually
+uploaded, verified raw Agent release assets. No GitHub-hosted Windows runner,
+implicit build-on-push, automatic release publication, or CI status substitutes
+for local/native receipts. The four Agent assets are listed in
+[GitHub Releases](docs/GITHUB_RELEASES.md).
+
 ## Development commands
 
 ```sh
