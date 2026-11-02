@@ -16,6 +16,7 @@ native Windows and real private-release acceptance remain outstanding.
 - [Agent lifecycle](AGENT_LIFECYCLE.md) and [jobs](AGENT_MINIMAL_JOBS.md).
 - [Release history and gates](REWRITE_RELEASE_PLAN.md): historical source-bound evidence.
 - [HOME managed pilot service](HOME_PILOT_SERVICE.md): pinned-source user-systemd lifecycle and release blockers.
+- [Local Agent candidate evidence](LOCAL_AGENT_CANDIDATE_20261102.md): hashes and unfinished native acceptance for four raw binaries.
 
 Historical ZIP/bootstrap receipts do not prove raw installation. Native Windows
 acceptance and publication require separate evidence and authorization.
