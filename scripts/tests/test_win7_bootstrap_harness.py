@@ -1,6 +1,5 @@
 """The retired ZIP harness must never imply native raw-binary acceptance."""
 from pathlib import Path
-import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -16,17 +15,23 @@ class BootstrapHarnessRetirementTests(unittest.TestCase):
         self.assertIn("No native test executed", statements[0])
         self.assertIn("WIN7_REWRITE_ACCEPTANCE.md", statements[0])
 
-    def test_windows_ci_parses_only_existing_powershell_files(self):
-        workflow = (ROOT / ".github/workflows/dev-ci.yml").read_text()
-        self.assertIn("$assets = @(", workflow)
-        sources = workflow.split("$assets = @(", 1)[1].split(")", 1)[0]
-        paths = re.findall(r"'([^'\n]+\.ps1)'", sources)
-        self.assertTrue(paths)
-        self.assertIn("crates/client/assets/github-windows.ps1", paths)
-        self.assertIn("crates/client/assets/bootstrap-windows.ps1", paths)
+    def test_powershell_bootstrap_and_native_harness_sources_exist(self):
+        # Native PowerShell validation belongs to WORK/Win7, not GitHub Actions.
+        paths = (
+            "crates/client/assets/github-windows.ps1",
+            "crates/client/assets/bootstrap-windows.ps1",
+            "scripts/verify-win7-bootstrap-native.ps1",
+            "scripts/verify-windows-agent-lifecycle.ps1",
+        )
         for path in paths:
             with self.subTest(path=path):
                 self.assertTrue((ROOT / path).is_file(), path)
+
+    def test_no_hosted_github_actions_workflows(self):
+        # Source/release verification runs on HOME/WORK and disposable targets.
+        workflows = ROOT / ".github/workflows"
+        hosted = sorted((*workflows.glob("*.yml"), *workflows.glob("*.yaml")))
+        self.assertEqual(hosted, [], "HostLink builds and checks run locally")
 
 
 if __name__ == "__main__":
