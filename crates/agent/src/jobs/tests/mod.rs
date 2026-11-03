@@ -7,6 +7,9 @@ use private_fs::PrivateDir;
 use std::fs;
 use tower::ServiceExt;
 
+#[cfg(windows)]
+mod windows;
+
 fn private_job_root() -> (tempfile::TempDir, std::path::PathBuf) {
     let parent = tempfile::tempdir().unwrap();
     // The library creates the private root with 0700 or owner-only Windows ACL.
