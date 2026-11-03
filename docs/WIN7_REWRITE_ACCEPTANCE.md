@@ -71,6 +71,51 @@ target triples, binary hashes, PE machine/subsystem, and imported DLL sets. Its
 `NOT_RUN`. The receipt is evidence for the source-bound build and static PE
 inspection only. It does not claim runtime compatibility.
 
+## Source-bound raw bootstrap parser fixtures (1C-1044)
+
+On HOME, after committing the candidate and confirming a clean worktree, use a
+new, empty owner-private directory outside all credentials and configuration.
+The ignored test reads no token. It renders the six actual Windows helpers with
+synthetic selection data and writes exact marker-delimited bytes plus nonsecret
+`provenance.txt`. `private-fs` checks the directory, ownership, permissions and
+path components; existing entries are refused. The receipt records HEAD and
+checks the production renderer, selection and two script inputs against HEAD;
+clean worktree also binds the test exporter itself to that commit.
+
+```sh
+git status --porcelain
+git rev-parse HEAD
+FIXTURE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hostlink-ps2-parse.XXXXXXXX")"
+export HOSTLINK_PARSE_FIXTURE_DIR="$FIXTURE_DIR"
+cargo test --offline --locked -p hostlink --lib \
+  bootstrap::tests::export_raw_windows_parse_fixtures -- --ignored --exact
+cat "$FIXTURE_DIR/provenance.txt"
+sha256sum "$FIXTURE_DIR"/*.ps1
+```
+
+Transfer those six synthetic fixtures, their receipt, and
+`scripts/verify-raw-windows-bootstrap-parse.ps1` from the same commit to a
+private disposable directory on WORK or the authorized NT6.1 target. Compare
+every filename/hash with the HOME receipt before parsing; record source SHA,
+OS, architecture, actual `$PSVersionTable.PSVersion`, parser script hash and
+exit code. Run from PowerShell with explicit paths, for example:
+
+```powershell
+$PSVersionTable.PSVersion
+$files = @('C:\fixture\x86_64-win7-windows-msvc-prompt.ps1', 'C:\fixture\x86_64-win7-windows-msvc-embedded.ps1', 'C:\fixture\i686-win7-windows-msvc-prompt.ps1', 'C:\fixture\i686-win7-windows-msvc-embedded.ps1', 'C:\fixture\x86_64-pc-windows-msvc-prompt.ps1', 'C:\fixture\x86_64-pc-windows-msvc-embedded.ps1')
+& 'C:\fixture\verify-raw-windows-bootstrap-parse.ps1' -Path $files
+$LASTEXITCODE
+```
+
+Use Windows PowerShell 2 on native Win7 x64 and x86 for PS2 evidence; a newer
+WORK parser is separate evidence. The script checks a malformed syntax case on
+every run, reads only supplied files, and calls
+[`PSParser.Tokenize`](https://learn.microsoft.com/en-us/dotnet/api/system.management.automation.psparser.tokenize)
+without executing their contents. Transfer only these generated synthetic
+fixtures, never a real invitation or PAT. `PARSE_PASS` is **PARSE_ONLY**: it
+does not establish GitHub download, enrollment, Task Scheduler, or full raw
+release E2E. Native PS2 parsing remains **NOT RUN** until recorded on NT6.1.
+
 ## Raw artifact packaging and native harness retirement (1C-1164)
 
 Package each exact Agent executable with the matching source SHA and

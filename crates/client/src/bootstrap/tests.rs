@@ -27,6 +27,89 @@ fn windows_script(output: &str) -> &str {
         .0
 }
 
+// Explicitly invoked on HOME; no real credential or public selection constructor.
+#[test]
+#[ignore = "exports synthetic fixtures only when explicitly requested"]
+fn export_raw_windows_parse_fixtures() {
+    use sha2::{Digest, Sha256};
+    use std::{io::Write, path::PathBuf, process::Command};
+
+    let dir = PathBuf::from(
+        std::env::var_os("HOSTLINK_PARSE_FIXTURE_DIR").expect("explicit directory required"),
+    );
+    assert!(dir.is_absolute(), "absolute private directory required");
+    for config in [
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")),
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+        std::env::var_os("APPDATA").map(PathBuf::from),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|path| path.is_absolute())
+    {
+        assert!(
+            !dir.starts_with(config),
+            "configuration paths are forbidden"
+        );
+    }
+    let directory = private_fs::PrivateDir::open(&dir).expect("unsafe fixture directory");
+    assert!(
+        std::fs::read_dir(&dir).unwrap().next().is_none(),
+        "fixture directory must be empty"
+    );
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .args(args)
+            .output()
+            .expect("git required");
+        assert!(output.status.success(), "source verification failed");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let source = git(&["rev-parse", "HEAD"]);
+    // These are every production input used by this synthetic render.
+    git(&[
+        "diff",
+        "--quiet",
+        "HEAD",
+        "--",
+        "crates/client/src/bootstrap/render.rs",
+        "crates/client/src/bootstrap/validate.rs",
+        "crates/client/assets/github-windows.ps1",
+        "crates/client/assets/bootstrap-windows.ps1",
+    ]);
+    let mut receipt = format!(
+        "source_sha={source}\nproduction_render_inputs=match_HEAD\ncredential=synthetic_only\n"
+    );
+    for target in [Target::Win7X64, Target::Win7X86, Target::Win11X64] {
+        for (variant, token) in [
+            ("prompt", None),
+            ("embedded", Some("github_pat_synthetic_fixture_123")),
+        ] {
+            let selected = selection(target);
+            selected.validate().unwrap();
+            let output = super::render::render_command_with_token(&selected, token);
+            assert_eq!(output.matches("# BEGIN TARGET HELPER\n").count(), 1);
+            assert_eq!(output.matches("# END TARGET HELPER\n").count(), 1);
+            let bytes = windows_script(&output).as_bytes();
+            let name = format!("{}-{variant}.ps1", target.as_str());
+            directory.create(&name).unwrap().write_all(bytes).unwrap();
+            receipt.push_str(&format!(
+                "{}  {}  {}  {:x}\n",
+                name,
+                target.as_str(),
+                variant,
+                Sha256::digest(bytes)
+            ));
+        }
+    }
+    directory
+        .create("provenance.txt")
+        .unwrap()
+        .write_all(receipt.as_bytes())
+        .unwrap();
+}
+
 #[test]
 fn windows_output_requires_explicit_private_temporary_helper_execution() {
     for target in [Target::Win7X86, Target::Win7X64, Target::Win11X64] {
