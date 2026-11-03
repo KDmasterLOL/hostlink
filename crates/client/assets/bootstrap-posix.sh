@@ -1,6 +1,6 @@
 # shellcheck shell=sh
 # Inputs are quoted by the Controller renderer before this fragment.
-: "${agent_url:?}" "${agent_sha256:?}" "${hub_url:?}" "${name:?}" "${ssh_user:?}" "${hub_ca_cert?}"
+: "${agent_url:?}" "${agent_sha256:?}" "${hub_url:?}" "${name:?}" "${ssh_user:?}" "${hub_ca_cert?}" "${gateway_index?}"
 [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || hl_fail 'This bootstrap supports x86_64 Linux only.'
 case "${XDG_DATA_HOME:-}" in
     /*) hl_data=$XDG_DATA_HOME ;;
@@ -32,6 +32,7 @@ case "$token" in *[!0-9a-f]*) unset token; hl_fail 'Invalid invite token format.
 unset token
 set -- install --hub-url "$hub_url" --token-file "$token_file" --name "$name" --user "$ssh_user"
 if [ -n "$hub_ca_cert" ]; then set -- "$@" --hub-ca-cert "$hub_ca_cert"; fi
+if [ -n "$gateway_index" ]; then set -- "$@" --gateway-index "$gateway_index"; fi
 "$agent" "$@"
 cleanup
 trap - 0 HUP INT TERM

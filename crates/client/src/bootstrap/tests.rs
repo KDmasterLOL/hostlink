@@ -13,6 +13,7 @@ fn selection(target: Target) -> ArtifactSelection {
         ssh_user: "hostlink".into(),
         hub_url: "https://hub.example".into(),
         bootstrap_hub_ca_cert: None,
+        gateway_index: None,
     }
 }
 
@@ -133,7 +134,7 @@ fn bootstraps_verify_one_binary_before_invite_prompt_and_rust_install() {
             let download = script.rfind("    Get-GitHubAsset ").unwrap();
             let digest = script.rfind("Agent executable SHA-256 mismatch").unwrap();
             let prompt = script.rfind("    [void](Write-PrivateSecret ").unwrap();
-            let install = script.find("& $agentFile install --hub-url $HubUrl --token-file $tokenFile --name $Name --user $SshUser").unwrap();
+            let install = script.find("& $agentFile @installArgs").unwrap();
             assert!(download < digest && digest < prompt && prompt < install);
             assert!(script.contains("'HostLink\\Agent'"));
             assert!(script.contains("'bin\\hostlink-agent.exe'"));
@@ -187,7 +188,7 @@ fn render_quotes_values_and_embeds_only_explicit_synthetic_credential() {
             assert!(windows_script(&normal).contains("\n[void](Get-GitHubCredential $true)\n"));
             assert!(script.contains("$Name='lab''$(whoami)'"));
             assert!(script.contains(r"$HubCaCert='C:\Users\Fixture User\сертификат''s root.pem'"));
-            assert!(script.contains("--hub-ca-cert $HubCaCert"));
+            assert!(script.contains("'--hub-ca-cert', $HubCaCert"));
             assert!(script.contains(&format!("[void](Get-GitHubCredential $true '{token}')")));
             assert_eq!(embedded.matches(token).count(), 1);
             assert!(embedded.contains("WARNING: This helper contains your GitHub PAT"));
@@ -249,5 +250,29 @@ async fn metadata_download_is_bounded_and_unencoded() {
                 .await
                 .is_err()
         );
+    }
+}
+
+#[test]
+fn gateway_index_is_only_forwarded_when_explicitly_selected() {
+    for target in [Target::LinuxX64, Target::Win7X64] {
+        let mut selected = selection(target);
+        let default = render_command(&selected);
+        selected.gateway_index = Some(0);
+        let explicit = render_command(&selected);
+        selected.gateway_index = Some(12);
+        let other = render_command(&selected);
+        if target.windows() {
+            assert!(default.contains("$GatewayIndex=''"));
+            assert!(explicit.contains("$GatewayIndex='0'"));
+            assert!(other.contains("$GatewayIndex='12'"));
+            assert!(explicit.contains("if (-not [string]::IsNullOrEmpty($GatewayIndex)) { $installArgs += @('--gateway-index', $GatewayIndex) }"));
+        } else {
+            assert!(default.contains("gateway_index=''"));
+            assert!(explicit.contains("gateway_index='0'"));
+            assert!(other.contains("gateway_index='12'"));
+            assert!(explicit.contains("if [ -n \"$gateway_index\" ]; then set -- \"$@\" --gateway-index \"$gateway_index\"; fi"));
+            shell_syntax(&explicit);
+        }
     }
 }

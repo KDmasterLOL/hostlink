@@ -25,6 +25,8 @@ pub struct InstallOptions {
     pub name: String,
     /// SSH account name served by this Agent.
     pub user: String,
+    /// Zero-based index of the selected Hub-approved gateway.
+    pub gateway_index: Option<usize>,
 }
 
 /// Resolve the stable per-user Agent location, independently of the running executable.
@@ -126,22 +128,23 @@ pub async fn install(
         .ok_or_else(|| invalid("Agent root has no parent"))?;
     ensure_parent(parent)?;
     PrivateDir::open(parent).map_err(io::Error::other)?;
-    let result = prepare_enrollment_with_ca(
-        &EnrollmentOptions {
-            hub_url: options.hub_url.clone(),
-            token_file: options.token_file.clone(),
-            install_root: root.clone(),
-            name: options.name.clone(),
-            user: options.user.clone(),
-            gateway_index: None,
-            retain_pending: true,
-        },
-        hub_ca_cert,
-    )
-    .await?;
+    let result =
+        prepare_enrollment_with_ca(&enrollment_options(options, root.clone()), hub_ca_cert).await?;
     publish_executable(&root, &mut source).map_err(|error| io::Error::other(format!(
         "Agent installation incomplete; preserve enrollment.pending and reconcile the Hub before retrying ({error})")))?;
     Ok(result)
+}
+
+fn enrollment_options(options: &InstallOptions, root: PathBuf) -> EnrollmentOptions {
+    EnrollmentOptions {
+        hub_url: options.hub_url.clone(),
+        token_file: options.token_file.clone(),
+        install_root: root,
+        name: options.name.clone(),
+        user: options.user.clone(),
+        gateway_index: options.gateway_index,
+        retain_pending: true,
+    }
 }
 
 fn ensure_parent(path: &Path) -> io::Result<()> {

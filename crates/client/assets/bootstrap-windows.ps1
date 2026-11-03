@@ -22,11 +22,10 @@ try {
     if ($actual -cne $AgentSha256) { throw 'Agent executable SHA-256 mismatch.' }
     # No executable code or one-use token prompt before the digest matches.
     [void](Write-PrivateSecret $tokenFile $identity.User 'One-use HostLink invite token' '[0-9a-f]' 64 64)
-    if ([string]::IsNullOrEmpty($HubCaCert)) {
-        & $agentFile install --hub-url $HubUrl --token-file $tokenFile --name $Name --user $SshUser
-    } else {
-        & $agentFile install --hub-url $HubUrl --token-file $tokenFile --name $Name --user $SshUser --hub-ca-cert $HubCaCert
-    }
+    $installArgs = @('install', '--hub-url', $HubUrl, '--token-file', $tokenFile, '--name', $Name, '--user', $SshUser)
+    if (-not [string]::IsNullOrEmpty($HubCaCert)) { $installArgs += @('--hub-ca-cert', $HubCaCert) }
+    if (-not [string]::IsNullOrEmpty($GatewayIndex)) { $installArgs += @('--gateway-index', $GatewayIndex) }
+    & $agentFile @installArgs
     if ($LASTEXITCODE -ne 0) { throw 'Agent install failed.' }
     Remove-Item -LiteralPath $stage -Recurse -Force
     $installedAgent = Join-Path $root 'bin\hostlink-agent.exe'

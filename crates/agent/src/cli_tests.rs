@@ -143,3 +143,32 @@ fn top_level_and_service_require_subcommands() {
         );
     }
 }
+
+#[test]
+fn install_gateway_index_is_explicit_and_typed() {
+    let args = [
+        "hostlink-agent",
+        "install",
+        "--hub-url",
+        "https://hub.test",
+        "--token-file",
+        "token",
+        "--name",
+        "host",
+        "--user",
+        "agent",
+    ];
+    for (extra, expected) in [
+        (vec![], None),
+        (vec!["--gateway-index", "0"], Some(0)),
+        (vec!["--gateway-index", "2"], Some(2)),
+    ] {
+        let cli = Cli::try_parse_from(args.into_iter().chain(extra)).unwrap();
+        assert!(
+            matches!(cli.command, Command::Install(parsed) if parsed.gateway_index == expected)
+        );
+    }
+    for value in ["-1", "invalid", "1.5", "184467440737095516160"] {
+        assert!(Cli::try_parse_from(args.into_iter().chain(["--gateway-index", value])).is_err());
+    }
+}

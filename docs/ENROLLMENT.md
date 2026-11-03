@@ -17,9 +17,14 @@ one stable per-user root: absolute `$XDG_DATA_HOME/hostlink/Agent`, otherwise
 See [installation](AGENT_INSTALLATION.md). Manual `enroll` is a low-level
 operation, not a replacement installer or an alternate managed root policy.
 
-If Hub returns more than one approved gateway, enrollment stops. Select an
-entry from that exact response with `--gateway-index N`; the Agent does not
-guess a route. A successful enrollment writes a private `state/agent.json`,
+If Hub returns more than one approved gateway, enrollment stops unless an
+explicit zero-based `--gateway-index N` selects an entry in the enrollment
+response. Pass it to `hostlink-agent install`, or to `hostlink invite` to
+include it in the generated bootstrap. The Agent does not guess a route.
+Selection is validated after the Hub enrollment request: a missing or
+out-of-range index may consume the one-use invite and leaves a pending marker.
+Reconcile the Hub record before creating a new invite; do not retry the old one.
+A successful enrollment writes a private `state/agent.json`,
 `machine.json`, `manifest.json`, host and reverse-tunnel keys, approved gateway
 pin, Controller `authorized_keys`, and a private jobs directory. The machine ID
 is generated before the request and kept in the private attempt record. The

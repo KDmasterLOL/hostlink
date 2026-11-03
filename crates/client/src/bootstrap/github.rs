@@ -212,6 +212,7 @@ pub async fn resolve_github_selection(
     ssh_user: String,
     hub_url: String,
     bootstrap_hub_ca_cert: Option<PathBuf>,
+    gateway_index: Option<usize>,
 ) -> Result<ArtifactSelection, BootstrapError> {
     let url = release_url(version)?;
     let token = read_token()?;
@@ -232,6 +233,7 @@ pub async fn resolve_github_selection(
         ssh_user,
         hub_url,
         bootstrap_hub_ca_cert,
+        gateway_index,
     };
     selection.validate()?;
     Ok(selection)

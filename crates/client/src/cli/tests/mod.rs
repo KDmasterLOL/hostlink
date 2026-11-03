@@ -25,6 +25,7 @@ fn release_invite_requires_name_target_and_preserves_token_only() {
         vec!["--version", "1.2.3"],
         vec!["--bootstrap-hub-ca-cert", "ca.pem"],
         vec!["--embed-github-token"],
+        vec!["--gateway-index", "0"],
     ] {
         let error = Cli::try_parse_from(
             ["hostlink", "invite", "--token-only"]
@@ -179,4 +180,27 @@ fn new_output_never_overwrites_existing_data() {
     create_new_output(&path, b"old").unwrap();
     assert!(create_new_output(&path, b"new").is_err());
     assert_eq!(fs::read(&path).unwrap(), b"old");
+}
+
+#[test]
+fn invite_gateway_index_is_explicit_and_typed() {
+    let args = [
+        "hostlink",
+        "invite",
+        "--name",
+        "fixture",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+    ];
+    for (extra, expected) in [
+        (vec![], None),
+        (vec!["--gateway-index", "0"], Some(0)),
+        (vec!["--gateway-index", "2"], Some(2)),
+    ] {
+        let cli = Cli::try_parse_from(args.into_iter().chain(extra)).unwrap();
+        assert!(matches!(cli.command, Command::Invite(parsed) if parsed.gateway_index == expected));
+    }
+    for value in ["-1", "invalid", "1.5", "184467440737095516160"] {
+        assert!(Cli::try_parse_from(args.into_iter().chain(["--gateway-index", value])).is_err());
+    }
 }

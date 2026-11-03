@@ -132,3 +132,19 @@ fn unsafe_ancestor_is_rejected_without_creating_an_installation() {
     assert!(ensure_parent(&alias.join("hostlink")).is_err());
     assert!(!temp.path().join("hostlink").exists());
 }
+
+#[test]
+fn install_forwards_explicit_gateway_selection_to_enrollment() {
+    for index in [None, Some(0), Some(2)] {
+        let options = InstallOptions {
+            hub_url: "https://hub.test".into(),
+            token_file: "token".into(),
+            name: "host".into(),
+            user: "agent".into(),
+            gateway_index: index,
+        };
+        let enrollment = enrollment_options(&options, PathBuf::from("agent"));
+        assert_eq!(enrollment.gateway_index, index);
+        assert!(enrollment.retain_pending);
+    }
+}

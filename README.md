@@ -278,3 +278,8 @@ Vendor/         Pinned dependencies with local compatibility changes
 | Install/update and enrollment | Agent Rust modules; [source map](docs/SOURCE_LAYOUT.md) |
 | Generated bootstrap and invite | Controller `bootstrap/` and Hub command modules |
 | Artifact packaging and staging | Existing Python scripts and `scripts/tests/` |
+
+For a Hub with multiple approved gateways, pass `--gateway-index N` to
+`hostlink invite` (or directly to `hostlink-agent install`). The zero-based
+index selects an entry in the Hub enrollment response; no route is chosen
+implicitly. See [enrollment](docs/ENROLLMENT.md) before using a one-use invite.

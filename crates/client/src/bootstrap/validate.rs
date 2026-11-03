@@ -58,6 +58,7 @@ pub struct ArtifactSelection {
     pub(super) ssh_user: String,
     pub(super) hub_url: String,
     pub(super) bootstrap_hub_ca_cert: Option<std::path::PathBuf>,
+    pub(super) gateway_index: Option<usize>,
 }
 
 #[derive(Debug, Error)]

@@ -24,6 +24,10 @@ fn render_powershell(selection: &ArtifactSelection, token: Option<&str>) -> Stri
         .as_deref()
         .map(|path| path.to_string_lossy())
         .unwrap_or_default();
+    let gateway_index = selection
+        .gateway_index
+        .map(|index| index.to_string())
+        .unwrap_or_default();
     let vars = [
         ("HubUrl", selection.hub_url.as_str()),
         ("Name", selection.name.as_str()),
@@ -32,6 +36,7 @@ fn render_powershell(selection: &ArtifactSelection, token: Option<&str>) -> Stri
         ("AgentSha256", selection.agent_sha256.as_str()),
         ("Target", selection.target.as_str()),
         ("HubCaCert", ca.as_ref()),
+        ("GatewayIndex", &gateway_index),
     ]
     .into_iter()
     .map(|(name, value)| format!("${name}={}\n", ps_quote(value)))
@@ -61,6 +66,10 @@ fn render_posix(selection: &ArtifactSelection, token: Option<&str>) -> String {
         .as_deref()
         .map(|path| path.to_string_lossy())
         .unwrap_or_default();
+    let gateway_index = selection
+        .gateway_index
+        .map(|index| index.to_string())
+        .unwrap_or_default();
     let vars = [
         ("hub_url", selection.hub_url.as_str()),
         ("name", selection.name.as_str()),
@@ -68,6 +77,7 @@ fn render_posix(selection: &ArtifactSelection, token: Option<&str>) -> String {
         ("agent_url", selection.agent_url.as_str()),
         ("agent_sha256", selection.agent_sha256.as_str()),
         ("hub_ca_cert", ca.as_ref()),
+        ("gateway_index", &gateway_index),
     ]
     .into_iter()
     .map(|(name, value)| format!("{name}={}\n", sh_quote(value)))

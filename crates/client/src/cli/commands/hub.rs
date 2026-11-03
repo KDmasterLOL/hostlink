@@ -132,6 +132,7 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
         version,
         target,
         bootstrap_hub_ca_cert,
+        gateway_index,
     } = args;
     let config_path = default_hub_config_path()?;
     let config = load_hub_config(&config_path)?;
@@ -152,6 +153,7 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
             ssh_user.unwrap_or_else(|| config.ssh_user.clone()),
             config.hub_url.clone(),
             bootstrap_hub_ca_cert,
+            gateway_index,
         )
         .await?;
         Some(selection)

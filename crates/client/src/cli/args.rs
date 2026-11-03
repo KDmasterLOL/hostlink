@@ -34,7 +34,7 @@ pub(super) struct InviteArgs {
     #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(60..=86400))]
     pub(super) ttl_seconds: u64,
     /// Create a manual Hub invitation without selecting a GitHub binary.
-    #[arg(long, conflicts_with_all = ["ssh_user", "version", "target", "bootstrap_hub_ca_cert", "embed_github_token"])]
+    #[arg(long, conflicts_with_all = ["ssh_user", "version", "target", "bootstrap_hub_ca_cert", "embed_github_token", "gateway_index"])]
     pub(super) token_only: bool,
     /// Explicitly expose the Controller's GitHub PAT in the printed bootstrap.
     #[arg(long, conflicts_with = "token_only")]
@@ -43,6 +43,9 @@ pub(super) struct InviteArgs {
     pub(super) version: Option<String>,
     #[arg(long, required_unless_present = "token_only", value_parser = parse_target)]
     pub(super) target: Option<Target>,
+    /// Zero-based index in the Hub-approved gateway list for Agent installation.
+    #[arg(long)]
+    pub(super) gateway_index: Option<usize>,
     /// PEM CA path available on the target during enrollment.
     #[arg(long)]
     pub(super) bootstrap_hub_ca_cert: Option<PathBuf>,

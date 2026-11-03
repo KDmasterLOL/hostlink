@@ -12,6 +12,9 @@ pub(crate) struct Args {
     name: String,
     #[arg(long)]
     user: String,
+    /// Zero-based index in the Hub-approved gateway list.
+    #[arg(long)]
+    pub(crate) gateway_index: Option<usize>,
     /// Additional private Hub CA (PEM); normal certificate verification remains enabled.
     #[arg(long)]
     hub_ca_cert: Option<PathBuf>,
@@ -24,6 +27,7 @@ pub(crate) async fn execute(args: Args) -> io::Result<()> {
             token_file: args.token_file,
             name: args.name,
             user: args.user,
+            gateway_index: args.gateway_index,
         },
         args.hub_ca_cert.as_deref(),
     )
