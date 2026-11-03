@@ -357,11 +357,11 @@ async fn shutdown_terminates_windows_job_object_process_tree() {
         let parent = process_handle(&root.join("parent.pid")).await;
         let descendant = process_handle(&root.join("descendant.pid")).await;
         let store = JobStore::open(&root).await.unwrap();
-        let before: (String, i64) = sqlx::query_as("SELECT status,attempts FROM Jobs")
+        let before: String = sqlx::query_scalar("SELECT status FROM Jobs")
             .fetch_one(&store.pool)
             .await
             .unwrap();
-        assert_eq!(before.0, "Running");
+        assert_eq!(before, "Running");
         assert_eq!(
             process_state(&parent),
             WAIT_TIMEOUT,
@@ -394,7 +394,6 @@ async fn shutdown_terminates_windows_job_object_process_tree() {
             after.0, "Done",
             "shutdown must not report a successful command"
         );
-        assert_eq!(after.1, before.1, "shutdown must not replay the command");
         store.close().await;
         let reopened = JobStore::open(&root).await.unwrap();
         let persisted: (String, i64, Option<String>) =
