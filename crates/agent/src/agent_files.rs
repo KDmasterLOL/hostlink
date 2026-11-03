@@ -170,6 +170,13 @@ pub(super) fn validate_path_has_no_reparse_components(path: &Path) -> io::Result
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(component, Component::Prefix(_)) {
+            // A canonical Win7 path begins with \\?\C:. This prefix alone
+            // is not an openable filesystem root (ERROR_INVALID_FUNCTION).
+            // The next RootDir checks \\?\C:\ before any child is trusted.
+            continue;
+        }
         let metadata = fs::symlink_metadata(&current)?;
         if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
             return Err(invalid(
@@ -179,3 +186,7 @@ pub(super) fn validate_path_has_no_reparse_components(path: &Path) -> io::Result
     }
     Ok(())
 }
+
+#[cfg(all(test, windows))]
+#[path = "agent_files_tests.rs"]
+mod tests;
