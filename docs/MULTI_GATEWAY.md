@@ -56,8 +56,10 @@ For Hub-managed commands, the controller requires an exact
 `preferred_gateway: "host:port"` in its local Hub config whenever `/v2/info`
 contains multiple routes. It validates the entire bounded route list and every
 Ed25519 host pin before connecting. The selected primary is tried first; other
-approved edges are attempted only after transient gateway connection failures.
-Authentication denial, pin mismatch, reverse-port refusal, and nested Agent
-pin mismatch are permanent. A started command or durable job is never replayed
-after route loss. See [CLIENT_HUB.md](CLIENT_HUB.md) for the Client CLI and
-configuration details.
+approved edges are attempted after transient gateway connection failures or an
+explicit `ConnectFailed` response when opening the loopback reverse port, after
+the failed gateway session has been closed. Other forwarding rejections,
+including administrative policy denial, are permanent, as are authentication
+denial, pin mismatch, and nested Agent pin or authentication failure. A started
+command or durable job is never replayed after route loss. See
+[CLIENT_HUB.md](CLIENT_HUB.md) for the Client CLI and configuration details.

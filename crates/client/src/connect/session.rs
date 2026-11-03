@@ -105,43 +105,55 @@ impl HostConnection {
             let routes = validate_gateway_routes(gateway)?;
             let mut connected = None;
             for (index, (address, user, identity, key)) in routes.into_iter().enumerate() {
-                match connect_authenticated(address, &user, identity, key).await {
-                    Ok(session) => {
-                        connected = Some(session);
-                        break;
-                    }
-                    Err(error)
+                let gateway_session =
+                    match connect_authenticated(address, &user, identity, key).await {
+                        Ok(session) => session,
+                        Err(error)
+                            if index + 1 < 1 + gateway.alternates.len()
+                                && is_transient_gateway_connect_error(&error) =>
+                        {
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                // Only a confirmed missing listener permits trying another approved route.
+                let channel = match tokio::time::timeout(
+                    CONNECT_TIMEOUT,
+                    gateway_session.channel_open_direct_tcpip(
+                        "127.0.0.1",
+                        u32::from(gateway.reverse_port),
+                        "127.0.0.1",
+                        0,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(channel)) => channel,
+                    Ok(Err(error)) => {
+                        close_session(gateway_session, "gateway forwarding rejected").await?;
                         if index + 1 < 1 + gateway.alternates.len()
-                            && is_transient_gateway_connect_error(&error) => {}
-                    Err(error) => return Err(error),
-                }
+                            && matches!(
+                                error,
+                                russh::Error::ChannelOpenFailure(
+                                    russh::ChannelOpenFailure::ConnectFailed
+                                )
+                            )
+                        {
+                            continue;
+                        }
+                        return Err(error.into());
+                    }
+                    Err(_) => {
+                        close_session(gateway_session, "gateway forwarding timed out").await?;
+                        return Err(SshClientError::Timeout);
+                    }
+                };
+                connected = Some((gateway_session, channel));
+                break;
             }
-            let gateway_session = connected.ok_or_else(|| {
+            let (gateway_session, channel) = connected.ok_or_else(|| {
                 SshClientError::Invalid("no approved gateway route connected".into())
             })?;
-
-            // The gateway's configured reverse listener is explicitly loopback-only.
-            let channel = match tokio::time::timeout(
-                CONNECT_TIMEOUT,
-                gateway_session.channel_open_direct_tcpip(
-                    "127.0.0.1",
-                    u32::from(gateway.reverse_port),
-                    "127.0.0.1",
-                    0,
-                ),
-            )
-            .await
-            {
-                Ok(Ok(channel)) => channel,
-                Ok(Err(error)) => {
-                    close_session(gateway_session, "gateway forwarding rejected").await?;
-                    return Err(error.into());
-                }
-                Err(_) => {
-                    close_session(gateway_session, "gateway forwarding timed out").await?;
-                    return Err(SshClientError::Timeout);
-                }
-            };
 
             let target_session = match connect_stream_authenticated(
                 channel.into_stream(),
@@ -262,6 +274,8 @@ async fn close_session_from_ref(
         session.disconnect(russh::Disconnect::ByApplication, description, "en"),
     )
     .await;
+    // A completed session task confirms termination even if its transport closed
+    // before the disconnect message could be sent.
     if tokio::time::timeout_at(deadline, session).await.is_err() {
         return Err(SshClientError::CleanupUnconfirmed);
     }

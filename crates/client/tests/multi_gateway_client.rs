@@ -258,6 +258,44 @@ async fn unavailable_primary_fails_over_and_pinned_nested_agent_execs_and_sftp()
     assert_eq!(host.sftp_download(&name).await.unwrap(), data);
     host.close().await.unwrap();
 
+    // The primary authenticates, but its target socket has no listener.
+    let (refused_addr, refused_pin, refused_task) =
+        gateway(dead_addr, gateway_user.public_key().clone(), reverse_port).await;
+    let mut refused = spec.clone();
+    let primary = refused.gateway.as_mut().unwrap();
+    primary.address = refused_addr;
+    primary.host_public_key = refused_pin;
+    primary.alternates = vec![route(active_addr, active_pin.clone(), "gateway")];
+    let mut host = HostConnection::connect(&refused)
+        .await
+        .expect("missing reverse listener advances to approved route");
+    assert_eq!(host.exec("exit 7", &[]).await.unwrap().exit_code, 7);
+    // The preceding successful connection already created `name` in this
+    // Controller's private SFTP directory; EXCLUDE must remain enforced.
+    let failover_name = format!("{name}.secondary");
+    host.sftp_upload(&failover_name, data).await.unwrap();
+    assert_eq!(host.sftp_download(&failover_name).await.unwrap(), data);
+    host.close().await.unwrap();
+
+    // A policy rejection must not reach the healthy alternate.
+    let (policy_addr, policy_pin, policy_task) = gateway(
+        agent_address,
+        gateway_user.public_key().clone(),
+        reverse_port + 1,
+    )
+    .await;
+    let mut policy = spec.clone();
+    let primary = policy.gateway.as_mut().unwrap();
+    primary.address = policy_addr;
+    primary.host_public_key = policy_pin;
+    primary.alternates = vec![route(active_addr, active_pin.clone(), "gateway")];
+    assert!(matches!(
+        HostConnection::connect(&policy).await,
+        Err(hostlink::connect::SshClientError::Russh(
+            russh::Error::ChannelOpenFailure(ChannelOpenFailure::AdministrativelyProhibited)
+        ))
+    ));
+
     // A healthy alternate is never consulted after the selected gateway presents the wrong key.
     let mut wrong_pin = spec.clone();
     let gateway = wrong_pin.gateway.as_mut().unwrap();
@@ -269,14 +307,27 @@ async fn unavailable_primary_fails_over_and_pinned_nested_agent_execs_and_sftp()
     // Route user ownership is part of the approved record and cannot be silently corrected.
     let mut wrong_owner = spec.clone();
     wrong_owner.gateway.as_mut().unwrap().address = active_addr;
+    wrong_owner.gateway.as_mut().unwrap().host_public_key = active_pin.clone();
     wrong_owner.gateway.as_mut().unwrap().alternates =
-        vec![route(second_addr, second_pin, "gateway")];
+        vec![route(second_addr, second_pin.clone(), "gateway")];
     // A user mismatch is rejected by the gateway, and auth denial is not a failover signal.
     wrong_owner.gateway.as_mut().unwrap().user = "other-owner".into();
     assert!(HostConnection::connect(&wrong_owner).await.is_err());
+    let mut wrong_target = spec.clone();
+    let primary = wrong_target.gateway.as_mut().unwrap();
+    primary.address = active_addr;
+    primary.host_public_key = active_pin;
+    primary.alternates = vec![route(second_addr, second_pin.clone(), "gateway")];
+    wrong_target.host_public_key = wrong_key.public_key().to_openssh().unwrap();
+    assert!(HostConnection::connect(&wrong_target).await.is_err());
+    wrong_target.host_public_key = spec.host_public_key.clone();
+    wrong_target.user = "other-agent".into();
+    assert!(HostConnection::connect(&wrong_target).await.is_err());
     assert_eq!(spec.gateway.as_ref().unwrap().reverse_port, reverse_port);
     let _ = shutdown_tx.send(());
     agent_task.abort();
     active_task.abort();
     second_task.abort();
+    refused_task.abort();
+    policy_task.abort();
 }
