@@ -15,7 +15,7 @@ foreach ($item in $Path) {
         if ($bytes.Length -eq 0 -or $bytes.Length -gt 1048576) { throw 'Invalid fixture size' }
         $sha = [System.Security.Cryptography.SHA256]::Create()
         try { $hash = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
-        finally { $sha.Dispose() }
+        finally { $sha.Clear() }
         $text = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes)
         $provision = [regex]::Matches($text, '(?m)^\[void\]\(Get-GitHubCredential \$true(?: ''github_pat_synthetic_fixture_123'')?\)\r?$')
         if ($provision.Count -ne 1) { throw 'Invalid synthetic fixture credential provision' }
