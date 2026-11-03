@@ -114,7 +114,24 @@ every run, reads only supplied files, and calls
 without executing their contents. Transfer only these generated synthetic
 fixtures, never a real invitation or PAT. `PARSE_PASS` is **PARSE_ONLY**: it
 does not establish GitHub download, enrollment, Task Scheduler, or full raw
-release E2E. Native PS2 parsing remains **NOT RUN** until recorded on NT6.1.
+release E2E.
+
+**Native PS2 parse receipt (2026-11-03, Huly 1C-1044):** HOME clean
+`dev@6930eb9d3c91aa5d834c8fc5f15087a429fbe6df` generated all six helpers
+from the production renderer with only a synthetic GitHub credential. The
+opt-in fixture test passed (1/1), its provenance reported
+`production_render_inputs=match_HEAD`, and source SHA-256 matched for every
+helper. The exact parser script SHA-256 was
+`b531d508b5d60d92818bbda583477e815eeb482ad5e75c4ea0e6043f5ee3ea48`.
+On the real SERVER-1C (Windows NT 6.1.7601, Windows PowerShell 2.0), all eight
+transferred files (six helpers, parser, provenance) matched HOME SHA-256 in a
+new owner-private disposable fixture directory. The parser reported
+`MALFORMED_REJECTED` and **6/6 `PARSE_PASS`, exit 0**. Only the parser ran;
+none of the bootstrap helpers was executed. This is native PowerShell 2
+**syntax** evidence for the three target variants, not a Win7 x86 OS runtime
+or actual binary download, invitation redemption, Agent install, service,
+Task Scheduler, update, or private GitHub Release acceptance. Those gates
+remain open under 1C-1044/1008/1011/1164.
 
 ## Raw artifact packaging and native harness retirement (1C-1164)
 
