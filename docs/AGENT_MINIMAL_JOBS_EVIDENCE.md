@@ -1,7 +1,16 @@
-# Current HostLink Apalis and redundant-guard audit — 2026-10-29 (1C-1101)
+# HostLink Apalis and redundant-guard audit — 2026-10-29 (1C-1101)
 
-This section supersedes the architecture and lifecycle claims in historical
-snapshots below. Development branch: `task/1c-1101-apalis-state-simplify-20261029`
+**Historical, source-bound audit:** The control-pipe Windows maintenance design
+recorded in this section belongs to the original October 29 revision and was
+subsequently retired. The current Windows Agent uses stopped-only Task Scheduler
+removal, the same process-lifetime `jobs/runner.lock` as its updater, and
+`self_update` GitHub RAW publication, with no handoff pipe or durable crash
+journal. See [current Windows update contract](AGENT_UPDATE_WINDOWS.md) and
+[Agent jobs contract](AGENT_MINIMAL_JOBS.md); the original verification receipts
+below remain historical evidence, not current-source acceptance.
+
+This section superseded the architecture and lifecycle claims in earlier
+snapshots below **at the source revision recorded here**. Development branch: `task/1c-1101-apalis-state-simplify-20261029`
 based on `dev@a25722e1c44cecc8934ff07cf6ae59053b2bd61f`.
 
 The user explicitly requested removing HostLink-owned safeguards and schema

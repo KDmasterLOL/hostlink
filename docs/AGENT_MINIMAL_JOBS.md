@@ -55,15 +55,19 @@ SQLx/Apalis errors surface when they open or use incompatible state.
 The Board passes native task lifecycle headers, attempt limits and scheduling
 parameters directly to Apalis, without HostLink-specific restrictions.
 Neither service nor updater reads Apalis's Jobs table or blocks process
-shutdown on queued tasks. On Linux `ssh::serve_on` holds
-`jobs/runner.lock` throughout the Agent process; the updater fails if that
-lock is held, and serializes separate update invocations with `update.lock`.
-On Windows, registered updates stop through the owner-authenticated service
-control pipe and wait for the process handle; the updater retains its
-transaction/rollback lock. Pending tasks remain in the Apalis database for
-later delivery; a task interrupted by shutdown may execute again after
-restart. Shutdown/proc-tree failure and native Windows 7/11 acceptance
-remain explicit release gates.
+shutdown on queued tasks. `runtime::serve_on` holds the process-lifetime
+`jobs/runner.lock` on Linux and Windows; the updater requires the **same**
+canonical lock to be free and serializes update invocations via `update.lock`.
+On Windows, updates are **offline only**: the operator explicitly stops and
+removes the verified current-user Task Scheduler registration, then runs a
+separate verified updater executable under the stable Agent root but outside
+`bin`. The updater refuses registered or running Agents; it neither invokes
+a control pipe nor restarts the Agent. The sole raw publisher is upstream
+`self_update` with published SHA-256 and installed-binary identity readback.
+Normal publication errors have best-effort rollback, not durable power-loss
+recovery. Pending tasks remain in Apalis for later delivery; an interrupted
+task may run again after restart. Shutdown/process-tree safety and source-
+exact native Windows 7/11 updater acceptance remain separate release gates.
 
 SFTP is independent of jobs and stays within private
 `transfers/<controller-fingerprint>` directories. The `hostlink` CLI
