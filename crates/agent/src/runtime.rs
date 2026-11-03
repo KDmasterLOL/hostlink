@@ -3,7 +3,65 @@
 
 use crate::{AgentConfig, private_fs::PrivateFileExt, ssh};
 use private_fs::{FileAccess, FileCreation, OpenOptions, PrivateDir};
-use std::{future::Future, io};
+use std::{
+    future::Future,
+    io,
+    path::{Path, PathBuf},
+};
+
+fn runner_root(executable: &Path, installed_root: &Path, jobs_root: &Path) -> io::Result<PathBuf> {
+    let executable = executable.canonicalize()?;
+    let installed_binary = installed_root
+        .join("bin")
+        .join(crate::package::EXECUTABLE_NAME);
+    let installed_binary_real = match installed_binary.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // Publication can temporarily remove the installed file. Do not
+            // misclassify an already-running installed process as a dev binary.
+            if let Some(parent) = installed_binary.parent() {
+                match parent.canonicalize() {
+                    Ok(parent) if executable == parent.join(crate::package::EXECUTABLE_NAME) => {
+                        return Err(error);
+                    }
+                    Ok(_) => {}
+                    Err(parent_error) if parent_error.kind() == io::ErrorKind::NotFound => {}
+                    Err(parent_error) => return Err(parent_error),
+                }
+            }
+            return std::path::absolute(jobs_root);
+        }
+        Err(error) => return Err(error),
+    };
+    if executable != installed_binary_real {
+        return std::path::absolute(jobs_root);
+    }
+
+    // The updater opens this exact private directory. Never accept an alias or
+    // traversal which could cause the worker and updater to lock different files.
+    crate::agent_files::validate_path_has_no_reparse_components(&installed_binary)?;
+    let canonical_jobs = installed_root.join("jobs");
+    crate::agent_files::validate_path_has_no_reparse_components(&canonical_jobs)?;
+    let configured_jobs = crate::agent_files::validate_path_has_no_reparse_components(jobs_root)
+        .and_then(|()| jobs_root.canonicalize())
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "installed Agent jobs_root does not exist",
+                )
+            } else {
+                error
+            }
+        })?;
+    if configured_jobs != canonical_jobs.canonicalize()? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "installed Agent jobs_root must be the installation root's jobs directory",
+        ));
+    }
+    Ok(canonical_jobs)
+}
 
 /// Serves authenticated SSH/SFTP traffic on the configured loopback listener until shutdown.
 pub async fn serve<F>(config: &AgentConfig, shutdown: F) -> io::Result<()>
@@ -39,7 +97,12 @@ where
     }
     // The Agent owns this process-lifetime lock, not the Apalis job backend.
     // An updater must not replace its executable while it is running.
-    let lifetime = PrivateDir::open(std::path::absolute(&config.jobs_root)?)
+    let lock_root = runner_root(
+        &std::env::current_exe()?,
+        &crate::installation::installation_root()?,
+        &config.jobs_root,
+    )?;
+    let lifetime = PrivateDir::open(lock_root)
         .map_err(io::Error::other)?
         .open_file_with(
             "runner.lock",
@@ -100,6 +163,10 @@ where
     lifetime.unlock()?;
     outcome
 }
+
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod tests;
 
 #[cfg(windows)]
 fn ensure_limited_windows_token() -> io::Result<()> {
