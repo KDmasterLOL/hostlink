@@ -1,69 +1,20 @@
-# Managed HostLink with one russh execution transport
+# HostLink engineering guide
 
-The russh rewrite has explicit user authorization for development integration into
-HostLink `dev` for testing under Huly 1C-987. This authorization is limited to
-that dev testing integration; it does not authorize changes to `main`, tags,
-releases, deployed infrastructure, installed agents, or production data. The
-main coordinator performs a controlled fast-forward only after independent tests.
-The former Agent JSONL TCP listener, Win32 OpenSSH/sshd, legacy Toolkit release engine,
-and legacy Nextest attestation are excluded. **Hub registration/inventory/invitation/revocation
-are REQUIRED product functions**: implement them under a separate HostLink Hub management owner,
-without restoring the old Agent RPC or a second execution transport. The target workspace includes
-Agent, Client and a focused Hub; see docs/MANAGED_FLEET_ARCHITECTURE.md. Keep russh + russh-sftp
-as the sole Agent/Controller execution and file-transfer carrier.
+HostLink comprises `hostlink` (Controller), `hostlink-agent` (managed Agent), and `hostlink-hub` (HTTPS control plane). Read [architecture](docs/ARCHITECTURE.md), [source layout](docs/SOURCE_LAYOUT.md), and the relevant subsystem document before changing behavior.
 
-Short SSH exec cancels on channel close. Agent-local commands are independent
-Apalis SQLite jobs, managed through upstream apalis-board (loopback HTTP UI/API),
-not through SSH/SFTP jobs commands. The user approved replacing the old remote
-jobs carrier on 2026-10-29. Never reintroduce a bespoke SSH jobs protocol,
-local scheduler, start-claim ledger or duplicate result store. Apalis may
-automatically replay commands after a crash, repeating side effects. Board
-HTTP accepts arbitrary commands with Agent user privileges: bind only to a
-nonzero loopback port, reject unsafe hosts/origins, and use authenticated SSH
-forwarding for remote browser access. No unauthenticated public bind.
-Use exact host key pins, controller authorized Ed25519 keys, private owned paths,
-bounded concurrency and byte streams, fail-closed security and Windows 7 PS2 support.
-No unmanaged background processes, false success or unbounded retries.
-A minimal Agent-only updater is REQUIRED: exact version/target/SHA,
-self_update GitHub backend with RAW binary staging (native permissions/ACL),
-an exclusive updater lock, Agent process shutdown before Linux publication,
-installed-file integrity, upstream in-process rollback on failed publication,
-and offline stopped-only Windows update after removal of the current-user
-Task Scheduler task. Apalis alone owns its SQLite job state; service and
-updater must not inspect its tables.
-Under user authorization for 1C-1159, GitHub Releases in the fixed private
-`KDmasterLOL/hostlink` repository are the SOLE production artifact source for
-fresh invites and installed updates. Both Controller and target use separate
-current-user, private `hostlink/credentials/github-token` files; on first
-target bootstrap the credential is securely prompted by default. Under
-explicit 1C-1160 user authorization, `hostlink invite --embed-github-token`
-may instead print the Controller's PAT in the bootstrap command and provision
-the target credential without prompting. Treat printed commands and any
-saved PowerShell helper as secret material and dispose of them after use.
-Without this explicit opt-in no PAT is included. PATs are never committed
-in source, binaries, Hub records, download URLs or release assets. No
-arbitrary-site `invite` or `update` flags and no alternate publisher fallback.
-Under 1C-1164, publish only the four exact raw hostlink-agent-{target}[.exe]
-assets: no ZIP, installed installer/wrapper scripts, release manifest,
-archive.sha256 or bootstrap receipt. Local packaging/release receipts are
-provenance only and must not be uploaded. Keep DISTINCT state/manifest.json
-for private enrollment keys. Controller renders disposable Win7 PowerShell 2
-or POSIX bootstrap; verify the single binary SHA-256 before consuming a Hub invite.
-Rust Agent install owns enrollment and executable publication; never install Git
-or default tools. Use one stable per-user root: absolute XDG_DATA_HOME/hostlink/Agent
-or HOME/.local/share/hostlink/Agent on Linux, LocalAppData/HostLink/Agent on Windows.
-No random installation roots. GitHub-digest checks do not replace filesystem,
-locks or stopped-Agent checks; native Windows 7/11 acceptance remains a release gate.
-Under the explicit 2026-10-31 user trade-off for 1C-1147, no bespoke Windows
-staging ACL hardening or durable update journal is required. Sudden kill/power loss
-may leave bin missing; there is no automatic crash recovery. Persistent
-state/jobs/keys and the install root remain private-fs protected.
-Queued tasks may resume after the Agent restarts. It is NOT
-another SSH transport, not a general release engine and not the Toolkit updater.
-Changes to real servers require independently verified disposable scope; do not
-alter 1C production databases, running services or original OneC Toolkit.
+## Ownership and invariants
 
-For multi-file Rust modules use `module/mod.rs` with sibling source files, never
-both `module.rs` and `module/mod.rs`. Target ~200 lines per cohesive file;
-exceptions for protocol/security contracts and E2E tests are documented in
-`docs/SOURCE_LAYOUT.md`. Move private unit tests into sibling test modules.
+- Use `russh` and `russh-sftp` as the only remote execution/file-transfer transport. The Hub owns enrollment, inventory, revocation and gateway SSH authorization; it does not execute commands.
+- Agent-local durable jobs belong to Apalis SQLite and the upstream Apalis Board, available only on loopback. Do not reintroduce a custom SSH jobs protocol, queue engine, or unauthenticated public Board listener.
+- Preserve Ed25519 identity pins, bounded I/O and concurrency, private files, and one-use enrollment semantics. Do not print, commit, or propagate private credentials in tests or logs.
+- `hostlink-agent install` owns stable-root enrollment and executable publication. Updates use a single verified raw Agent executable; Windows publication is stopped-only and requires removal of the owned Task Scheduler task first.
+- Keep `state/manifest.json` (enrollment-key identity) distinct from any release metadata. Do not restore legacy installer archives, ZIP-based updater, or installed bootstrap scripts.
+- Use `module/mod.rs` for multi-file Rust modules, not a mixture of `module.rs` and `module/mod.rs`. Prefer focused modules and tests.
+
+## Workflow
+
+- Inspect existing code, tests, docs and Git state; make scoped changes on task branches and run the relevant Rust/Python checks.
+- Verify actual native behavior before claiming Windows 7/11 or service-lifecycle acceptance. Cross-compilation alone is insufficient.
+- Do not mutate customer databases, production services, running legacy Agents, Hub state, tags or releases without the corresponding explicit authorization.
+- Never publish real credentials, machine-specific configuration, private infrastructure addresses, or raw logs in repository files.
+- Release artifacts are published only through an explicitly reviewed, source-bound workflow; see [GitHub Releases](docs/GITHUB_RELEASES.md).

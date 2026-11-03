@@ -1,5 +1,5 @@
 //! Current-user Task Scheduler 2.0 lifecycle. Scheduler alone owns execution.
-//! 1C-1124: keep direct COM. schtasks adds password/locale/overwrite handling;
+//! Keep direct COM. schtasks adds password/locale/overwrite handling;
 //! planif 1.0 only builds registrations, leaving lifecycle ownership here.
 //! windows 0.62's typed property out-parameters exceed this XML identity check.
 use super::ServiceStatus;

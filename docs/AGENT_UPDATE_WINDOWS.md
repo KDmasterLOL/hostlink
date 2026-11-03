@@ -1,40 +1,17 @@
-# Windows raw Agent offline update (1C-1164)
+# Windows offline Agent update
 
-The only installation root is the current user's OS-resolved
-`%LOCALAPPDATA%\HostLink\Agent`. Stop the Agent and remove its current-user
-Task Scheduler task before publication. Run a verified separate
-`hostlink-agent.exe` updater outside installed `bin`; never replace a running
-Agent image. The updater does not kill processes or change task registrations.
+Windows Agent binaries are updated only while their user service is offline. The updater never replaces the running executable.
 
-```text
-hostlink-agent.exe update
-hostlink-agent.exe update --version 1.2.3
-```
+## Procedure
 
-The updater holds exclusive `update.lock` and `jobs/runner.lock`, checks no
-registered task or running installed Agent image, and fails closed when offline
-admission is uncertain. It uses the `self_update` GitHub RAW backend with the
-exact target asset, version and published SHA-256 from private
-`KDmasterLOL/hostlink`. No ZIP extraction or wrapper script is involved.
-The target's `%APPDATA%\HostLink\credentials\github-token` remains a private
-current-user-only protected-DACL file; updates never take a token from argv,
-environment variables or Hub records.
+1. Stop the Agent through its owned user Task Scheduler registration.
+2. Remove that task with `hostlink-agent service remove --root ROOT`.
+3. Confirm the installed Agent image is no longer running.
+4. From a verified **separate** `hostlink-agent.exe` outside `ROOT/bin`, execute `update --root ROOT` or `update --root ROOT --version X.Y.Z`.
+5. Reinstall the owned task with `service install --root ROOT --config ROOT/state/agent.json`, then `service start --root ROOT`.
 
-Keep `state/manifest.json` for enrollment-key integrity, other private keys,
-config and Apalis jobs. Do not publish or preserve release manifests,
-`archive.sha256`, bootstrap receipts or installed PS1 wrappers. Apalis alone
-owns its SQLite tables. Upstream in-process rollback handles ordinary failed
-publication; there is no durable journal, automatic crash recovery or restart.
-Sudden kill/power loss can require manual executable recovery.
+The updater enforces private-root identity, exclusive `update.lock` and `jobs/runner.lock`, no active installed Agent image, and no registered task. The `self_update` GitHub RAW backend verifies the selected version, target and SHA-256 before publication.
 
-Controller-generated PowerShell 2 bootstrap is disposable. By default it prompts
-for the target PAT without echo. Explicit `--embed-github-token` prints a
-secret-bearing helper; protect it and delete after use. Bootstrap downloads one
-raw Agent binary and verifies SHA-256 before consuming the Hub invite, then
-invokes Rust install for enrollment and executable publication. It never
-installs Git or default commands.
+All enrollment keys, private configuration, `state/manifest.json`, and Apalis SQLite jobs remain in place. Task removal does not uninstall the Agent files. An interrupted update or power loss can require manual recovery; no automatic journal replay or restart is implemented.
 
-Native Windows 7 x86/x64, Windows 11, PowerShell 2, ACL and Task Scheduler
-acceptance is **NOT RUN**. The retired ZIP harness
-cannot supply that evidence. See [Win7 gates](WIN7_REWRITE_ACCEPTANCE.md),
-[release contract](GITHUB_RELEASES.md) and [installation](AGENT_INSTALLATION.md).
+See [Agent lifecycle](AGENT_LIFECYCLE.md) and [installation](AGENT_INSTALLATION.md).

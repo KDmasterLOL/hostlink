@@ -1,24 +1,30 @@
-# HostLink source development
+# Getting started
 
-Start with the [workspace README](../README.md) for Agent, Controller and Hub
-roles and development commands. This branch is for source integration testing;
-no release, deployed fleet or production cutover is implied.
+HostLink is a Rust workspace with three packages: `hostlink` (Controller), `hostlink-agent` (Agent) and `hostlink-hub` (Hub).
 
-For the integrated binary-only source, run from the repository root:
+## Development
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -v
-bash -n scripts/build-win7-candidate.sh
-shellcheck scripts/build-win7-candidate.sh
-git diff --check
+rustc --version
+cargo build --locked --workspace
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+python3 -m unittest discover -s scripts/tests
 ```
 
-Tests use disposable source trees and synthetic binaries/credentials. They do
-not read the real HOME PAT or establish runtime installation/native acceptance.
-Agent, Controller and packaging compile and pass the Linux workspace tests.
-No real Release or native Windows acceptance has been performed. Avoid
-concurrent full builds in shared `target`.
+Check the command-line interfaces without connecting to any host:
 
-For one-raw-binary packaging and four-target release staging follow
-[artifact packaging](ARTIFACTS_AND_INVITES.md). Neither script publishes.
-See the [documentation index](index.md) for installation and acceptance gates.
+```sh
+cargo run --locked -p hostlink -- --help
+cargo run --locked -p hostlink-agent -- --help
+cargo run --locked -p hostlink-hub -- --help
+```
+
+## Next steps
+
+- [Architecture](ARCHITECTURE.md) describes the transport and control plane.
+- [Controller and Hub](CLIENT_HUB.md) describes Hub configuration and managed host operations.
+- [GitHub Releases](GITHUB_RELEASES.md) describes the current release and bootstrap contract.
+- [Agent installation](AGENT_INSTALLATION.md) explains stable roots and updates.
+
+Use disposable development machines for first-time enrollment and lifecycle testing.

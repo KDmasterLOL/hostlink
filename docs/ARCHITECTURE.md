@@ -1,122 +1,38 @@
-# HostLink architecture — Agent-local jobs
+# Architecture
 
-> 1C-1114 supersedes the historical Windows maintenance/live-handoff details below:
-> Windows now uses a current-user Task Scheduler logon task and offline stopped-only
-> update after task removal. See [lifecycle](AGENT_LIFECYCLE.md) and
-> [updater](AGENT_UPDATE_WINDOWS.md). Native Win7/11 acceptance remains NOT RUN.
+HostLink uses three independently installed components.
 
-Development architecture for Huly 1C-1098. This replaces the old SSH jobs
-design; earlier source snapshots and rollout notes are historical, not a
-description of current `dev`.
-
-## Components
-
-- **HostLink Hub:** fleet registry, invitations, revocation, route and SSH
-  identity. Hub does not run commands or store Agent job data.
-- **HostLink Client:** selects a managed or explicitly configured host and
-  uses pinned `russh` for short SSH `exec`, private SFTP transfers, and
-  loopback TCP forwarding. There is no Client jobs API or command uploader.
-- **HostLink Agent:** an unprivileged user process with an embedded `russh`
-  server and optional outbound pinned reverse SSH tunnel. Separately, one
-  Apalis SQLite `commands` queue and `WorkerBuilder` execute `CommandJob`
-  entries and retain native state and results. `runtime.rs` owns their
-  common shutdown and process-lifetime lock; the SSH server itself does
-  not own the Apalis queue or reconnect policy.
-- **Apalis Board:** the upstream `apalis-board-api 1.0.0` Axum router and
-  embedded UI on an independently configured **loopback-only** listener. A
-  tiny `/new` form submits JSON directly to the upstream Board task API;
-  `/` serves the upstream board for listing tasks/workers.
-
-## Deployment topology
-
-| Installation | Binary | Responsibility |
-| --- | --- | --- |
-| HOME PC (Linux) | `hostlink` (Client/Controller) | Managed Hub inventory, invitations, pinned SSH, transfers and forwarding |
-| WORK PC (Windows 11) | `hostlink.exe` (Client/Controller) | The same Controller operations under its own user credentials and SSH key identity |
-| Managed Windows/Linux servers, including supported Win7 targets | `hostlink-agent[.exe]` | User-scoped enrollment, embedded SSH/SFTP, reverse tunnel, Apalis worker and updates |
-| Independent management infrastructure | `hostlink-hub` and SSH gateway | Authoritative fleet identity/invites/revocation and approved SSH routing |
-
-Client installation does not install or register an Agent on HOME or WORK.
-Controller credentials and host keys must remain private to each Controller
-user; do not share a target's Agent private keys with either Controller.
-Server Agents are admitted through an explicit one-use Hub invite and run
-side-by-side with existing OneC Agent installations until separately approved
-replacement. The Hub is not a second execution/data transport.
-
-The four raw GitHub Release assets are **Agent binaries for server targets**,
-not installers for the HOME/WORK Controller. Build and verify the `hostlink`
-Client independently on HOME (Linux) and WORK (Windows 11). Windows 7
-Controller installation is not a release requirement; Win7 shared private-fs
-tests may use the Client as a diagnostic reproducer, but server Agent
-enrollment, protected storage and publication still require native NT6.1
-acceptance. See [release assets](GITHUB_RELEASES.md) and
-[cross-platform acceptance](WIN7_REWRITE_ACCEPTANCE.md).
+| Component | Responsibility |
+| --- | --- |
+| Hub | HTTPS enrollment, one-use invitations, inventory, revocation and approved gateway keys/routes |
+| Controller | Managed host selection, pinned SSH `exec`, SFTP and TCP forwarding |
+| Agent | Embedded SSH server, outbound reverse SSH, Agent-local jobs, installation and updates |
 
 ```text
-Browser ── loopback HTTP/SSH TCP forward ──> Agent Apalis Board
-                                               │ native TaskSink
-                                            SQLite Jobs
-                                               │ Apalis WorkerBuilder
-                                        CommandJob -> ProcessKit
-
-HostLink Client ── pinned SSH exec/SFTP/forward ──> Agent SSH
-Hub ── inventory/enroll/route/revoke ──> Client + Agent
+Controller ── HTTPS ──> Hub <── HTTPS ── Agent
+    │                                │
+    └── pinned SSH ──> gateway ──────┘
+                                       Agent loopback
+                                       ├── SSH/SFTP
+                                       └── Apalis Board + SQLite jobs
 ```
 
-## Binary-only installation owner (1C-1164)
+## Transport and identity
 
-Controller resolves the private fixed GitHub release and generates disposable
-PS2/POSIX bootstrap. Download one raw target executable and verify SHA-256
-before consuming a Hub invite. Agent Rust install owns enrollment and
-executable publication at one stable per-user root; no installed wrappers or
-Git/default tools. Agent update uses the `self_update` GitHub RAW backend
-with exact asset/version/digest and offline locks. Preserve private
-`state/manifest.json` for enrollment keys; remove release manifests, archives
-and bootstrap receipts. See [installation](AGENT_INSTALLATION.md).
-The integrated source passes Linux workspace tests; native Windows and
-private-release end-to-end acceptance remain outstanding.
+The Controller resolves current machine identity and approved gateways from the Hub, then uses `russh` with pinned Ed25519 keys. The Hub is not a second command transport. Controller and Agent private keys are distinct. An Agent registers using a one-use Hub invitation.
 
-## Job execution contract
+HostLink can be installed alongside an existing management Agent. Enrollment is separate from migration or removal of an older Agent.
 
-The typed payload is `CommandJob { program, args, cwd? }`. There is no
-automatic shell interpretation: calling `sh -c` or
-`powershell.exe -Command` is an explicit command choice. The handler
-returns the real process exit code (`Ok(i32)`, including nonzero) or an
-execution error (`Err`); Apalis owns queue state, orphan retry and result
-storage. After Agent/worker failure an already-started task may be retried
-and its side effects repeated. No exactly-once guarantee.
+## Jobs and Board
 
-The Agent uses ProcessKit OS group containment and refuses weak POSIX
-fallback to avoid orphaned child trees on normal shutdown. Durable state
-does **not** mean an OS process lives through an Agent crash. Process
-output is not a separate HostLink durable stdout/stderr store; Board
-displays upstream task/worker state and tracing information.
+Short interactive commands use SSH `exec`. Durable commands are queued locally through Apalis SQLite and the upstream Apalis Board; there is no separate Client jobs protocol. The Board is bound to loopback and can be exposed to an authorized Controller through pinned SSH forwarding.
 
-The Board's HTTP endpoint can execute arbitrary code as the Agent user.
-Only loopback binding is permitted, with exact Host and Origin checks.
-Remote browser use must go through trusted pinned SSH TCP forwarding
-using the **same local port** as `board_listen`. Never publish this service
-on an unauthenticated network listener.
+Apalis may retry an interrupted job. Job handlers must tolerate duplicate side effects. ProcessKit owns child-process groups; it does not guarantee survival of an Agent crash.
 
-Fresh enrollment allocates distinct loopback SSH and Board listener
-addresses and writes them to the private Agent configuration. Legacy
-configs without `board_listen` remain valid but do not serve the UI.
-Existing v5 Apalis databases are reused, but new installs now create only
-upstream Apalis SQLite tables. HostLink does not maintain a separate
-`DurableMeta` version or validate internal migrations/files on every
-connection. No older jobs data is automatically converted or deleted.
+## Installation and updates
 
-The updater no longer reads Apalis's Jobs table; the process lifecycle is
-the quiescence boundary. On Linux the Agent holds `jobs/runner.lock` while
-running, so the updater refuses publication until the process has stopped.
-Windows uses the same runtime lock plus offline stopped-image checks and requires
-removal of its current-user Task Scheduler task before update.
-`update.lock` continues to serialize updater invocations and rollback.
-Pending and interrupted Apalis tasks are retained, not interpreted by
-HostLink. A restarted worker may replay an interrupted command.
+The Controller currently resolves an exact Agent executable from GitHub Releases and renders a disposable PowerShell 2 or POSIX bootstrap. The bootstrap verifies the raw executable digest before passing the one-use invitation to Rust `hostlink-agent install`.
 
-See [Agent jobs](../crates/agent/src/jobs/README.md),
-[Agent jobs contract](AGENT_MINIMAL_JOBS.md),
-[Client/Hub](CLIENT_HUB.md),
-[Source layout](SOURCE_LAYOUT.md), and
-[verification evidence](AGENT_MINIMAL_JOBS_EVIDENCE.md).
+Agent installs use a stable, per-user root. Services are managed through systemd user units on Linux or user Task Scheduler tasks on Windows. Updates preserve enrollment keys and jobs; on Windows the Agent must be stopped and its owned task removed before replacing the executable.
+
+See [installation](AGENT_INSTALLATION.md), [GitHub releases](GITHUB_RELEASES.md), [Windows lifecycle](AGENT_LIFECYCLE.md) and [source layout](SOURCE_LAYOUT.md).

@@ -1,104 +1,48 @@
-# HostLink binary-only GitHub Releases (1C-1164)
+# GitHub Releases
 
-The sole production artifact source is the private `KDmasterLOL/hostlink`
-GitHub Releases repository. Latest means published stable; explicit versions
-select exact `vX.Y.Z` tags. No arbitrary URL, mirror or alternate publisher.
-This is a source contract; no release or deployment is authorized by this change.
+HostLink currently resolves production Agent binaries from GitHub Releases in `KDmasterLOL/hostlink`. The repository is **private at the time of this documentation update**. Making the repository public does not, by itself, remove the current Client and Agent code's credential-file requirements; those require a separate implementation change.
 
 ## Release assets
 
-Exactly four raw executables are eligible for publication:
+A release contains four raw Agent executables:
 
-- `hostlink-agent-x86_64-unknown-linux-gnu`
-- `hostlink-agent-x86_64-pc-windows-msvc.exe`
-- `hostlink-agent-x86_64-win7-windows-msvc.exe`
-- `hostlink-agent-i686-win7-windows-msvc.exe`
-
-These assets install **Agent on managed servers**. They do not install the
-`hostlink` Client on HOME Linux or WORK Windows 11, and cannot silently
-enroll either Controller as a server Agent. Controller installation and
-native Client checks are a separate deployment step; the Hub and gateway
-are independently hosted infrastructure.
-
-Each asset needs a GitHub API-published `sha256:<hex>` digest. The updater
-uses the upstream `self_update` GitHub backend in RAW mode with the exact
-named target asset, version and published digest. A digest authenticates
-bytes relative to GitHub metadata; it is not an independent publisher signature.
-
-The Client library's `ArtifactSelection` is issued by the authenticated
-GitHub release resolver, not constructed or mutated by library callers;
-the rendered bootstrap consumes that validated selection and exposes only
-the read-only selected SHA-256 to the CLI.
-
-No ZIP, release manifest, checksum sidecar, installer PS1 or shell asset is
-published. Packaging produces one raw executable and a **local**
-`artifact-receipt.json`; staging emits only the selected raw assets and a
-hidden `.release-receipt.json`. Both receipts stay on the build machine.
-Neither is a runtime installation format. See [local packaging](ARTIFACTS_AND_INVITES.md).
-
-## Credentials and invitation
-
-Controller and target each own a separate private credential file:
-
-| Platform | Credential |
+| Target | Asset |
 | --- | --- |
-| Linux | absolute `$XDG_CONFIG_HOME/hostlink/credentials/github-token`, otherwise `$HOME/.config/hostlink/credentials/github-token` |
+| Linux x64 (glibc) | `hostlink-agent-x86_64-unknown-linux-gnu` |
+| Windows x64 | `hostlink-agent-x86_64-pc-windows-msvc.exe` |
+| Windows 7 x64 | `hostlink-agent-x86_64-win7-windows-msvc.exe` |
+| Windows 7 x86 | `hostlink-agent-i686-win7-windows-msvc.exe` |
+
+Each asset requires a GitHub-published SHA-256 digest. No installer archives, scripts, manifests, or checksums are published as separate release assets. `state/manifest.json` is unrelated private enrollment metadata and must remain installed.
+
+An explicit version selects `vX.Y.Z`; otherwise the Client uses the latest published stable release. Only an authenticated, exact match for the requested target and its digest is eligible for installation or update.
+
+## Credentials
+
+The current implementation reads a fine-grained GitHub PAT with repository `Contents: Read` permission:
+
+| System | User-owned credential path |
+| --- | --- |
+| Linux | `$XDG_CONFIG_HOME/hostlink/credentials/github-token` or `$HOME/.config/hostlink/credentials/github-token` |
 | Windows | `%APPDATA%\HostLink\credentials\github-token` |
 
-The target bootstrap prompts without echo by default, or reuses its validated
-private credential. `hostlink invite --embed-github-token` explicitly embeds
-the Controller PAT in the printed bootstrap. Treat stdout, shell history,
-clipboard and saved helpers as secret material and dispose of them after use.
-Different existing credentials must not be silently overwritten. Without
-this opt-in no PAT is included in the generated invitation.
+Controller and target credentials are independent. Files must be owner-only (Unix directories `0700` and token `0600`; Windows protected current-user-only ACLs). The PAT is never needed by the Hub to register a host.
 
-Use repository-scoped `Contents: Read`; this grants source access as well as
-binary access. Target credentials require Unix `0600` and private directories,
-or a protected current-user-only Windows DACL. A PAT never enters Hub records,
-release assets, binaries, download URLs or logs. Tests use synthetic credentials
-and temporary roots; never read or copy the real HOME PAT.
+By default, the target bootstrap requests its own PAT without echo. `--embed-github-token` explicitly puts the Controller PAT into its generated bootstrap; that output is secret material. Do not commit, share, or retain it.
 
-The Controller's fixed `credentials/github-token` is HostLink-managed private
-state: the `hostlink/credentials` directory must be `0700` and its token
-exactly `0600` on Unix, or use the single-current-user protected ACL required
-by `private-fs` on Windows. Existing `0400` Controller PAT files are not
-silently changed; explicitly set `0600` only after reviewing ownership and
-path safety. Credential and directory symlinks, hardlinks and unexpected ACLs
-are rejected. User-supplied Hub/SSH input paths are a separate contract.
+## Installation
 
-The Controller resolves the exact raw asset and digest before creating a
-Hub invite, then generates disposable POSIX or Windows 7 PowerShell 2 bootstrap
-text. Bootstrap downloads **one** executable and verifies SHA-256 before
-consuming the separate one-use Hub invitation. It invokes Rust Agent install
-for enrollment and executable publication at the stable per-user root.
-No Git or other default command installation is part of this flow.
+```sh
+hostlink invite --name lab-win7 --target x86_64-win7-windows-msvc
+hostlink invite --name lab-linux --target x86_64-unknown-linux-gnu --version 0.1.0
+```
 
-Windows output always contains a disposable PowerShell 2 helper between
-`# BEGIN TARGET HELPER` and `# END TARGET HELPER` markers. On the target,
-protect the temporary file so only the current user can read or modify it,
-then save only the text between the markers as
-`%TEMP%\hostlink-bootstrap.ps1`, encoded as UTF-8 with BOM. Review it and
-explicitly execute the printed `powershell -NoProfile -ExecutionPolicy Bypass
--File "%TEMP%\hostlink-bootstrap.ps1"` command in an unelevated `cmd.exe`;
-optionally append `-NoRun` to install without starting the Agent. Delete the
-helper after installation, including on failure. The helper is never installed.
-With `--embed-github-token`, its PAT is cleartext and the output warns about it;
-without that opt-in it contains no GitHub credential. The helper is not encoded
-in a command line: the full script exceeds the `cmd.exe` limit of 8191 characters.
-Linux keeps the disposable POSIX bootstrap flow.
+The current Controller prints a disposable POSIX or PowerShell 2 bootstrap rather than a short URL. It validates the release metadata before issuing a one-use Hub invitation. The target downloads the selected raw executable, checks its SHA-256, and invokes Rust `hostlink-agent install`. The one-use invitation is consumed during enrollment, not during the download.
 
-Authenticated requests go only to the fixed GitHub API origin. A bounded
-HTTPS CDN redirect must not receive Authorization. Missing assets, digests,
-private credentials or inaccessible releases fail closed.
+The current Windows helper must be saved to a private temporary file and executed explicitly. See [artifact packaging](ARTIFACTS_AND_INVITES.md), [enrollment](ENROLLMENT.md), and [installation](AGENT_INSTALLATION.md).
 
-## Runtime and acceptance boundaries
+## Updating
 
-See [installation](AGENT_INSTALLATION.md) for stable paths, identity and locks,
-and [Windows offline update](AGENT_UPDATE_WINDOWS.md) for the stopped-task gate.
-No durable crash journal or automatic crash recovery is promised. Native Win7
-x86/x64, Win11, PowerShell 2, ACLs and Task Scheduler acceptance remain separate
-release gates. Cross-builds and offline fixtures do not establish them.
+`hostlink-agent update` currently uses the `self_update` GitHub RAW backend and a target-owned PAT. Update admission is serialized and Windows replacement requires the Agent stopped with its owned task unregistered. See [Windows offline update](AGENT_UPDATE_WINDOWS.md).
 
-The binary-only source is integrated across Agent, Controller and packaging,
-with Linux workspace and synthetic fixture checks. No actual GitHub Release
-or native Windows installation/update has been accepted yet.
+The release digest ties the downloaded bytes to GitHub metadata. It is not an independent publisher signature.
