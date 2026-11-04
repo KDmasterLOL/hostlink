@@ -371,3 +371,114 @@ printf '200\n'
         }
     }
 }
+
+// Keep the real wrapper and complete bootstrap body, but return before any
+// bootstrap operation. PowerShell must parse the whole body before running it.
+fn windows_parser_fixture() -> String {
+    let token = "a".repeat(64);
+    let command = render_inline(&selections(&[
+        Target::Win7X86,
+        Target::Win7X64,
+        Target::Win11X64,
+    ]))
+    .unwrap()
+    .bind(&token)
+    .unwrap();
+    let script = unpack(&command);
+    let (first, rest) = script.split_once('\n').unwrap();
+    assert_eq!(first, "$Invite=$args[0]");
+    let guard = format!(
+        "if ($Invite -cne '{token}') {{ throw 'Synthetic token binding failed' }}\nif ('Проверка' -cne ([string][char]0x41f + [char]0x440 + [char]0x43e + [char]0x432 + [char]0x435 + [char]0x440 + [char]0x43a + [char]0x430)) {{ throw 'Synthetic UTF8 decoding failed' }}\nWrite-Output 'HOSTLINK_SYNTHETIC_PARSER_OK'\nreturn"
+    );
+    let safe_script = format!("{first}\n{guard}\n{rest}");
+    let mut gzip = GzEncoder::new(Vec::new(), Compression::best());
+    gzip.write_all(safe_script.as_bytes()).unwrap();
+    let payload = STANDARD.encode(gzip.finish().unwrap());
+    let start = command.find("FromBase64String('").unwrap() + "FromBase64String('".len();
+    let end = start + command[start..].find('\'').unwrap();
+    let fixture = format!("{}{}{}", &command[..start], payload, &command[end..]);
+    assert!(fixture.len() <= CMD_LIMIT);
+    fixture
+}
+
+#[test]
+fn windows_synthetic_parser_fixture_preserves_wrapper_and_stops_before_bootstrap() {
+    let fixture = windows_parser_fixture();
+    let original = render_inline(&selections(&[
+        Target::Win7X86,
+        Target::Win7X64,
+        Target::Win11X64,
+    ]))
+    .unwrap()
+    .bind(&"a".repeat(64))
+    .unwrap();
+    let payload_span = |s: &str| {
+        let start = s.find("FromBase64String('").unwrap() + "FromBase64String('".len();
+        let end = start + s[start..].find('\'').unwrap();
+        (start, end)
+    };
+    let (a, b) = payload_span(&original);
+    let (c, d) = payload_span(&fixture);
+    assert_eq!(&original[..a], &fixture[..c]);
+    assert_eq!(&original[b..], &fixture[d..]);
+    assert!(!fixture.contains('$'));
+    assert!(!fixture.contains('%') && !fixture.contains('!'));
+    assert!(fixture.starts_with("powershell -NoProfile -ExecutionPolicy Bypass -Command \"& ("));
+    assert!(fixture.ends_with(&format!(" '{0}'\"", "a".repeat(64))));
+    assert_eq!(fixture.matches('"').count(), 2);
+    let script = unpack(&fixture);
+    let marker = "Write-Output 'HOSTLINK_SYNTHETIC_PARSER_OK'\nreturn\n";
+    let (guard, tail) = script.split_once(marker).unwrap();
+    assert!(guard.starts_with("$Invite=$args[0]\nif ($Invite -cne"));
+    assert_eq!(tail, original_script_tail(&original));
+
+    // Opt-in artifact generation: no file is created during ordinary tests.
+    if let Some(path) = std::env::var_os("HOSTLINK_SYNTHETIC_WINDOWS_FIXTURE") {
+        std::fs::write(path, format!("{fixture}\n")).unwrap();
+    }
+}
+
+fn original_script_tail(command: &str) -> String {
+    unpack(command).split_once('\n').unwrap().1.to_owned()
+}
+
+// Feed the actual paste line to each shell on stdin. In particular, do not
+// pass it as a cmd /C argument: Windows argv quoting changes that input.
+#[cfg(windows)]
+#[test]
+fn windows_synthetic_fixture_runs_as_shell_input() {
+    use std::process::{Command, Stdio};
+
+    let fixture = windows_parser_fixture();
+    for (program, args) in [
+        ("cmd.exe", &["/D", "/Q"][..]),
+        (
+            "powershell.exe",
+            &["-NoProfile", "-NonInteractive", "-Command", "-"][..],
+        ),
+    ] {
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        writeln!(input, "{fixture}").unwrap();
+        if program == "cmd.exe" {
+            writeln!(input, "exit").unwrap();
+        }
+        drop(input);
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{program}: {stderr}");
+        // The marker is compressed in the input, so shell prompts cannot
+        // produce a false positive even if a prompt shares the output line.
+        assert!(
+            stdout.contains("HOSTLINK_SYNTHETIC_PARSER_OK"),
+            "{program}: {stdout} {stderr}"
+        );
+    }
+}
