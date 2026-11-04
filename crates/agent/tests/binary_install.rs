@@ -8,12 +8,23 @@ use std::{
     process::{Command, Output},
 };
 
+fn copy_executable(source: &Path, destination: &Path) {
+    // Keep the writable descriptor out of this process: a concurrent fork
+    // could inherit it until exec and cause ETXTBSY.
+    let copy = Command::new("cp")
+        .arg(source)
+        .arg(destination)
+        .status()
+        .expect("start fixture binary copy");
+    assert!(copy.success(), "fixture binary copy failed: {copy}");
+}
+
 fn fixture() -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let staging = temp.path().join("staging-agent");
-    fs::copy(env!("CARGO_BIN_EXE_hostlink-agent"), &staging).unwrap();
+    copy_executable(Path::new(env!("CARGO_BIN_EXE_hostlink-agent")), &staging);
     (temp, staging)
 }
 
@@ -116,7 +127,7 @@ fn cli_update_checks_root_and_installed_image_before_release_network_io() {
     let dir = PrivateDir::open(&root).unwrap();
     dir.create_dir("jobs").unwrap();
     dir.create_dir("bin").unwrap();
-    fs::copy(&executable, root.join("bin/hostlink-agent")).unwrap();
+    copy_executable(&executable, &root.join("bin/hostlink-agent"));
     let alternate = temp.path().join("other-Agent");
     let diagnostic = error(
         command(temp.path(), &executable)
