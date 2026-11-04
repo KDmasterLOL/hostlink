@@ -17,6 +17,10 @@ Each asset requires a GitHub-published SHA-256 digest. The Controller fails befo
 
 An explicit version selects `vX.Y.Z`; otherwise the Client uses the latest published stable release. Only an exact match for the requested target and its digest is eligible for installation or update.
 
+## Local release preparation
+
+Build and verify a candidate locally from one clean, committed source revision as described in [artifact packaging](ARTIFACTS_AND_INVITES.md). An operator explicitly invokes `just publish`; it verifies the candidate and uses `gh release create` to upload the four raw assets above, then checks the published inventory and SHA-256 digests. Keep the source-bound receipt private and local. GitHub hosts the public release; GitHub Actions does not build or upload it.
+
 ## Installation
 
 ```sh

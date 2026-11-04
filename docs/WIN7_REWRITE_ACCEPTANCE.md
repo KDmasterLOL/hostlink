@@ -4,6 +4,8 @@ Windows 7 uses the Tier 3 Rust targets `x86_64-win7-windows-msvc` and `i686-win7
 
 ## Cross-compile and inspect
 
+Use `just build-win7-x64` and `just build-win7-x86` for local builds; `just stage` and `just verify-candidate` inspect the staged Agent assets. The commands below also describe the pinned build and manual inspection requirements.
+
 Use a clean, committed worktree and record `git rev-parse HEAD` before and after building. Both status checks (`git status --porcelain=v1`) must be empty. Provision `nightly-2026-08-22` with `rust-src`, cargo-xwin 0.23.1, clang-cl, and an xwin cache containing SDK 10.0.26100.0 and CRT 14.44.17.14 for both x86 and x86_64. Verify the cache provenance independently.
 
 ```sh
@@ -24,7 +26,7 @@ for target in x86_64-win7-windows-msvc i686-win7-windows-msvc; do
 done
 ```
 
-Review each PE report: machine must be `0x8664` for x64 or `0x14c` for x86; subsystem version must be 6.0. Imports must exclude dynamic CRT DLLs (`api-ms-win-crt*`, `ucrtbase.dll`, `msvcrt.dll`, `vcruntime*`, `msvcp*`, `concrt*`) and `combase.dll`. Record reports and hashes with the source SHA and tool versions. The dispatched source workflow also rejects these PE conditions and retains a source-bound candidate; the commands above remain a manual inspection path. Cross-compilation does not establish native compatibility. Package the raw Agent executables as described in [artifact packaging](ARTIFACTS_AND_INVITES.md).
+Review each PE report: machine must be `0x8664` for x64 or `0x14c` for x86; subsystem version must be 6.0. Imports must exclude dynamic CRT DLLs (`api-ms-win-crt*`, `ucrtbase.dll`, `msvcrt.dll`, `vcruntime*`, `msvcp*`, `concrt*`) and `combase.dll`. Record reports and hashes with the source SHA and tool versions. Inspect the reports locally and reject a candidate that fails any of these conditions. Check that the PE subsystem is console (`0x3`) and that the import list is nonempty. Cross-compilation does not establish native compatibility. Package the raw Agent executables as described in [artifact packaging](ARTIFACTS_AND_INVITES.md).
 
 ## PowerShell 2 syntax
 

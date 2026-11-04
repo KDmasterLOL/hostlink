@@ -4,20 +4,13 @@ Release packaging and inviting a machine are separate operations. Packaging does
 
 ## Build and verify raw assets
 
-Build each target from the same clean, committed revision and record the full Git SHA, toolchain, target and version. For Linux:
+Build all four targets locally from the same clean, committed revision. Record the full Git SHA before and after the build and require `git status --porcelain=v1 --untracked-files=all` to be empty at both points. Record the version, target, toolchain, size and SHA-256 of each executable. Compare staged bytes with their build outputs; verify the exact four nonempty, unique asset names in [GitHub Releases](GITHUB_RELEASES.md). A digest confirms byte identity, not publisher authenticity.
 
-```sh
-git status --porcelain=v1
-git rev-parse HEAD
-cargo build --locked --release -p hostlink-agent --target x86_64-unknown-linux-gnu
-sha256sum target/x86_64-unknown-linux-gnu/release/hostlink-agent
-```
+The root `Justfile` provides `just check`, `just build-linux`, `just build-windows`, `just build-win7-x64`, `just build-win7-x86`, `just build-all`, `just stage`, `just verify-candidate`, and `just publish`. Build all targets, stage the candidate, and verify it locally. Consult `just --list` and the Justfile for prerequisites.
 
-The status must be empty before and after building. For Windows build on the corresponding MSVC environment; for Win7 follow [Win7 build and inspection](WIN7_REWRITE_ACCEPTANCE.md). Copy each executable to its exact asset name listed in [GitHub Releases](GITHUB_RELEASES.md), then calculate SHA-256 on the copied bytes and compare it with the source. Record the four target names, sizes, digests, version and source SHA together. Verify all four are unique, nonempty and built from the same revision before release. Compare the published GitHub digests with those recorded locally.
+An operator explicitly invokes `just publish` to publish: it verifies the candidate, requires the version tag to already point to the source commit and no existing release for that tag, then runs `gh release create` to upload exactly the four raw Agent executables. It checks the published asset inventory and SHA-256 digests against the local candidate. Keep the source-bound receipt and verification records private and local; never upload them as release assets. GitHub Actions does not build or upload release candidates.
 
-For a release candidate, dispatch `Source checks and release candidate` on the intended commit. All four builds and the aggregate job must succeed in that run. The retained `release-candidate-<source SHA>` artifact contains the four raw executables, `SOURCE_SHA`, and `SHA256SUMS`; check the source SHA, version and digests before publication and compare each published GitHub digest with the candidate. The workflow does not publish or enforce release permissions, so release operators must not substitute a push/PR source-check result for the successful dispatch. A digest confirms byte identity, not publisher authenticity.
-
-The Win7 jobs cross-compile and inspect both PE files, including static CRT imports; they do not execute `binary-info` on Windows 7. Native identity and compatibility acceptance on each Windows version remain separate. The source SHA is workflow provenance, not embedded in the executable.
+For Win7, retain the pinned cross-build and PE inspections in [Win7 build and inspection](WIN7_REWRITE_ACCEPTANCE.md). These checks do not execute `binary-info` on Windows 7. Native identity and compatibility acceptance on each Windows version remain separate; the source SHA in the local record is not embedded in the executable.
 
 ## Invite a machine
 

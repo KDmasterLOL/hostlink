@@ -27,15 +27,9 @@ Windows 10 is not currently enabled in the bootstrap compatibility check; macOS 
 
 ## Build and test
 
-Requirements: Rust and Cargo, the toolchain specified in `rust-toolchain.toml`, and platform build dependencies.
+Build and verification run locally through the root `Justfile`; GitHub Actions is not used. Run `just check` for the workspace check, and `just test` and `just clippy` for the corresponding local tests and lint. Use `just --list` for available recipes.
 
-```sh
-cargo build --locked --workspace
-cargo test --locked --workspace
-cargo clippy --locked --workspace --all-targets -- -D warnings
-```
-
-Windows 7 targets use an additional cross-compilation workflow; see [Windows 7 compatibility](docs/WIN7_REWRITE_ACCEPTANCE.md).
+See [local artifact preparation](docs/ARTIFACTS_AND_INVITES.md) for builds, candidate verification, and explicitly invoked publication, and [Windows 7 compatibility](docs/WIN7_REWRITE_ACCEPTANCE.md) for cross-build and native acceptance requirements.
 
 ## Controller examples
 

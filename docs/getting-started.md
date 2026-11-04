@@ -4,11 +4,12 @@ HostLink is a Rust workspace with three packages: `hostlink` (Controller), `host
 
 ## Development
 
+Use the root Justfile for local checks:
+
 ```sh
-rustc --version
-cargo build --locked --workspace
-cargo test --locked --workspace
-cargo clippy --locked --workspace --all-targets -- -D warnings
+just check
+just test
+just clippy
 ```
 
 Check the command-line interfaces without connecting to any host:
@@ -23,7 +24,8 @@ cargo run --locked -p hostlink-hub -- --help
 
 - [Architecture](ARCHITECTURE.md) describes the transport and control plane.
 - [Controller and Hub](CLIENT_HUB.md) describes Hub configuration and managed host operations.
-- [GitHub Releases](GITHUB_RELEASES.md) describes the current release and bootstrap contract.
+- [Artifact preparation](ARTIFACTS_AND_INVITES.md) describes local builds and explicitly invoked publication.
+- [GitHub Releases](GITHUB_RELEASES.md) describes the public assets and bootstrap contract.
 - [Agent installation](AGENT_INSTALLATION.md) explains stable roots and updates.
 
 Use disposable development machines for first-time enrollment and lifecycle testing.
