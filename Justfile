@@ -45,6 +45,8 @@ _build target:
     test "$(rustc +1.99.1 -Vv | sed -n 's/^commit-hash: //p')" = 58cf8f9c35b355199727627d07ae34a4e2846d67
     if [[ "$target" == *windows* ]]; then
       test "$(cargo +1.99.1 xwin --version)" = 'cargo-xwin-xwin 0.23.1'
+      # Cache only x86 and x64; avoid the cargo-xwin default aarch64 download.
+      export XWIN_ARCH=x86,x86_64
       export XWIN_CACHE_DIR="${XWIN_CACHE_DIR:-$HOME/.cache/hostlink/win7-xwin-current-14368fb}"
       done_file="$XWIN_CACHE_DIR/xwin/DONE"
       test -f "$done_file"
