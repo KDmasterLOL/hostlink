@@ -1,14 +1,9 @@
-name: Linux and Windows x64 source checks
+name: Source checks and release candidate
 
 on:
   pull_request:
   push:
   workflow_dispatch:
-    inputs:
-      check_win7:
-        description: Run experimental Win7 cross-build and PE checks
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -55,7 +50,8 @@ jobs:
           set -euo pipefail
           cargo +1.99.1 build --locked --release -p hostlink-agent --target "$TARGET"
           source="target/$TARGET/release/hostlink-agent$SUFFIX"
-          staging=$(mktemp -d)
+          staging="$RUNNER_TEMP/${TARGET}"
+          mkdir -p "$staging"
           asset="$staging/hostlink-agent-${TARGET}${SUFFIX}"
           test -f "$source" && test ! -L "$source" && test -s "$source"
           test "$(wc -c < "$source")" -le 268435456
@@ -75,12 +71,21 @@ jobs:
           fi
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          (cd "$staging" && sha256sum "$(basename "$asset")" > SHA256SUMS)
+          printf "%s\n" "$EXPECTED_SHA" > "$staging/SOURCE_SHA"
           size=$(wc -c < "$asset")
           printf 'Source: %s\nTarget: %s\nVersion: %s\nSize: %s\nSHA256: %s\n' "$EXPECTED_SHA" "$TARGET" "$version" "$size" "$asset_sha" >> "$GITHUB_STEP_SUMMARY"
 
+      - uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: build-${{ matrix.target }}
+          path: ${{ runner.temp }}/${{ matrix.target }}/
+          if-no-files-found: error
+
   win7-cross-check:
-    name: Opt-in Win7 cross-build and PE checks
-    if: github.event_name == 'workflow_dispatch' && inputs.check_win7
+    name: Win7 cross-build and PE checks
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -117,8 +122,16 @@ jobs:
           test -f "$done_file"
           grep -q 'Win11SDK_10\.0\.26100' "$done_file"
           grep -q 'Microsoft\.VC\.14\.44\.17\.14\.CRT\.x86' "$done_file"
-          staging=$(mktemp -d)
-          export CARGO_TARGET_DIR="$staging/target"
+          grep -q 'Microsoft\.VC\.14\.44\.17\.14\.CRT\.x64' "$done_file"
+          test -s "$XWIN_CACHE_DIR/xwin/sdk/include/ucrt/assert.h"
+          for arch in x86 x86_64; do
+            test -s "$XWIN_CACHE_DIR/xwin/crt/lib/$arch/libcmt.lib"
+            test -s "$XWIN_CACHE_DIR/xwin/sdk/lib/um/$arch/kernel32.lib"
+            test -s "$XWIN_CACHE_DIR/xwin/sdk/lib/ucrt/$arch/libucrt.lib"
+          done
+          staging="$RUNNER_TEMP/win7-assets"
+          mkdir -p "$staging"
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/win7-target"
           for target in x86_64-win7-windows-msvc i686-win7-windows-msvc; do
             env -u CARGO_ENCODED_RUSTFLAGS RUSTFLAGS='-C target-feature=+crt-static' \
               cargo +nightly-2026-08-22 xwin build --cross-compiler clang-cl \
@@ -131,13 +144,13 @@ jobs:
             cp "$source" "$asset"
             cmp "$source" "$asset"
             test "$(sha256sum "$source" | cut -d ' ' -f 1)" = "$(sha256sum "$asset" | cut -d ' ' -f 1)"
-            llvm-readobj --file-headers --coff-imports "$asset" > "$staging/pe.txt"
+            llvm-readobj --file-headers --coff-imports "$asset" > "$RUNNER_TEMP/pe.txt"
             if [[ "$target" == i686-* ]]; then machine=0x14C; else machine=0x8664; fi
-            grep -Eiq "Machine: .*\($machine\)" "$staging/pe.txt"
-            grep -Eq 'Subsystem: .*\(0x3\)' "$staging/pe.txt"
-            grep -Eq 'MajorSubsystemVersion: 6$' "$staging/pe.txt"
-            grep -Eq 'MinorSubsystemVersion: 0$' "$staging/pe.txt"
-            imports=$(awk '/^[[:space:]]*Name:/ { if ($NF ~ /\.[Dd][Ll][Ll]$/) print tolower($NF) }' "$staging/pe.txt")
+            grep -Eiq "Machine: .*\($machine\)" "$RUNNER_TEMP/pe.txt"
+            grep -Eq 'Subsystem: .*\(0x3\)' "$RUNNER_TEMP/pe.txt"
+            grep -Eq 'MajorSubsystemVersion: 6$' "$RUNNER_TEMP/pe.txt"
+            grep -Eq 'MinorSubsystemVersion: 0$' "$RUNNER_TEMP/pe.txt"
+            imports=$(awk '/^[[:space:]]*Name:/ { if ($NF ~ /\.[Dd][Ll][Ll]$/) print tolower($NF) }' "$RUNNER_TEMP/pe.txt")
             test -n "$imports"
             if grep -Eqi '^(api-ms-win-crt.*|ucrtbase\.dll|msvcrt\.dll|vcruntime.*\.dll|msvcp.*\.dll|concrt.*\.dll|combase\.dll)$' <<< "$imports"; then
               echo '::error::Win7 binary imports a forbidden DLL'
@@ -145,5 +158,49 @@ jobs:
             fi
             printf 'Source: %s, target: %s, size: %s, SHA256: %s\n' "$EXPECTED_SHA" "$target" "$(wc -c < "$asset")" "$(sha256sum "$asset" | cut -d ' ' -f 1)" >> "$GITHUB_STEP_SUMMARY"
           done
+          (cd "$staging" && sha256sum hostlink-agent-*.exe > SHA256SUMS)
+          printf '%s\n' "$EXPECTED_SHA" > "$staging/SOURCE_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+        with:
+          name: build-win7
+          path: ${{ runner.temp }}/win7-assets/
+          if-no-files-found: error
+
+  candidate:
+    name: Verify four-asset candidate
+    if: github.event_name == 'workflow_dispatch'
+    needs: [source-build, win7-cross-check]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          pattern: build-*
+          path: builds
+      - name: Verify source, inventory and digests
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir candidate
+          for dir in builds/build-x86_64-unknown-linux-gnu builds/build-x86_64-pc-windows-msvc builds/build-win7; do
+            test "$(cat "$dir/SOURCE_SHA")" = "$EXPECTED_SHA"
+            (cd "$dir" && sha256sum --strict --check SHA256SUMS && sha256sum hostlink-agent-* | cmp - SHA256SUMS)
+            for asset in "$dir"/hostlink-agent-*; do
+              test -f "$asset" && test ! -L "$asset" && test -s "$asset"
+              test ! -e "candidate/$(basename "$asset")"
+              cp "$asset" candidate/
+            done
+          done
+          printf '%s\n' hostlink-agent-i686-win7-windows-msvc.exe hostlink-agent-x86_64-pc-windows-msvc.exe hostlink-agent-x86_64-unknown-linux-gnu hostlink-agent-x86_64-win7-windows-msvc.exe > expected
+          find candidate -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > actual
+          diff -u expected actual
+          (cd candidate && sha256sum hostlink-agent-* > SHA256SUMS)
+          printf '%s\n' "$EXPECTED_SHA" > candidate/SOURCE_SHA
+          cat candidate/SOURCE_SHA candidate/SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: candidate/
+          if-no-files-found: error
