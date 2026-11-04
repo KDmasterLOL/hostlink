@@ -1,14 +1,12 @@
 //! GitHub-only raw executable updates; self_update owns download, verification and replacement.
 
 use crate::{
-    agent_files::github_token,
     executable::{asset_name, read_identity, read_installed},
     installation::validate_installation_root,
     package::{EXECUTABLE_NAME, invalid, verify_executable},
     private_fs::PrivateFileExt,
 };
 use private_fs::{FileAccess, FileCreation, OpenOptions, PrivateDir};
-use secrecy::ExposeSecret;
 use self_update::{Checksum, backends::github::Update, update::ReleaseAsset};
 use semver::Version;
 use std::{
@@ -18,12 +16,12 @@ use std::{
     time::Duration,
 };
 
-/// Update a stopped Agent from the fixed private repository. An exact version may downgrade;
+/// Update a stopped Agent from the fixed public repository. An exact version may downgrade;
 /// omitting it selects GitHub's latest stable release. Installed identity comes from the
 /// installed executable even when a separate offline Windows updater is running.
 ///
 /// # Errors
-/// Refuses unsafe or alternate roots, active Agents, missing credentials,
+/// Refuses unsafe or alternate roots, active Agents,
 /// ambiguous/missing raw assets, checksum failures and unsuccessful replacement.
 pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
     validate_installation_root(root)?;
@@ -39,7 +37,6 @@ pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
     crate::service::ensure_agent_offline(root)?;
 
     let (installed, installed_sha) = read_installed(root)?;
-    let token = github_token()?;
     let mut github = Update::configure();
     github
         .repo_owner("KDmasterLOL")
@@ -49,7 +46,6 @@ pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
         .bin_path_in_archive(EXECUTABLE_NAME)
         .bin_install_path(root.join("bin").join(EXECUTABLE_NAME))
         .target(&installed.target)
-        .auth_token(token.expose_secret())
         .unattended()
         .retries(0)
         .ureq_agent(
@@ -191,9 +187,6 @@ fn selected_asset(assets: &[ReleaseAsset], target: &str) -> io::Result<(ReleaseA
     Ok((asset.clone(), hex::encode(sha)))
 }
 
-#[cfg(test)]
-#[path = "update_tests/credentials.rs"]
-mod credential_tests;
 #[cfg(test)]
 #[path = "update_tests/raw.rs"]
 mod raw_tests;

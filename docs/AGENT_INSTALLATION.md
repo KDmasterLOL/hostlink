@@ -22,7 +22,7 @@ hostlink-agent update
 hostlink-agent update --version 0.1.0
 ```
 
-The current updater selects the exact raw executable from GitHub Releases using the target's GitHub credential and verifies its published SHA-256 and binary identity.
+The current updater selects the exact raw executable from GitHub Releases from the public repository without a GitHub credential and verifies its published SHA-256 and binary identity.
 
 The Agent must be stopped before update. Publication holds `update.lock` and `jobs/runner.lock`; on Windows the user Task Scheduler task must also be removed, and an independently verified executable outside the installed `bin` performs the update. The updater does not automatically restart the Agent or restore a task.
 

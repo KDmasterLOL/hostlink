@@ -110,7 +110,7 @@ fn cli_uncertain_install_preserves_pending_and_never_installs_scripts_or_command
 }
 
 #[test]
-fn cli_update_enforces_root_and_reads_installed_identity_before_missing_fixture_credential() {
+fn cli_update_checks_root_and_installed_image_before_release_network_io() {
     let (temp, executable) = fixture();
     let root = private_root(temp.path());
     let dir = PrivateDir::open(&root).unwrap();
@@ -128,6 +128,9 @@ fn cli_update_enforces_root_and_reads_installed_identity_before_missing_fixture_
     );
     assert!(diagnostic.contains("stable current-user"), "{diagnostic}");
     assert!(!alternate.exists());
+    // A corrupt installed image must fail locally before any public GitHub
+    // release discovery, including on completely offline machines.
+    fs::write(root.join("bin/hostlink-agent"), b"").unwrap();
     let diagnostic = error(
         command(temp.path(), &executable)
             .arg("update")
@@ -135,7 +138,7 @@ fn cli_update_enforces_root_and_reads_installed_identity_before_missing_fixture_
             .unwrap(),
     );
     assert!(
-        diagnostic.contains("GitHub credential missing or unsafe"),
+        diagnostic.contains("Agent executable is not a bounded regular file"),
         "{diagnostic}"
     );
     assert!(!temp.path().join("config").exists());
