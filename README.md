@@ -63,6 +63,8 @@ The Agent's SSH protocol login defaults to the Controller Hub configuration's `s
 
 Start with the [documentation index](docs/index.md) for installation, upgrades, managed routing, Agent lifecycle, and development.
 
+The opt-in pinned SSH/SFTP smoke harness and its safety limits are documented in [tests/support](tests/support/README.md).
+
 ## License
 
 [MIT](LICENSE).
