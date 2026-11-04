@@ -32,6 +32,8 @@ The current Controller prints a disposable POSIX or PowerShell 2 bootstrap rathe
 
 The output is one paste-ready command containing the one-use invitation. The Windows command is intended for pasting into cmd.exe or PowerShell; native shell acceptance remains unverified. Treat it as a secret, including terminal history and clipboard. Windows selects NT 6.1 x86/x64 or NT 10 x64 from build 10240 (the initial Windows 10 release); native acceptance remains separate. On NT 6.1 the interactive bootstrap uses WinINet with redirects, authentication, cookies and caching disabled, explicitly allowing one HTTPS redirect to GitHub asset hosts. Certificate validation is not disabled; successful TLS still depends on system configuration. The bootstrap registers and starts the current-user service after installation. See [artifact packaging](ARTIFACTS_AND_INVITES.md), [enrollment](ENROLLMENT.md), and [installation](AGENT_INSTALLATION.md).
 
+The Linux bootstrap allows at most 600 seconds for its bounded raw Agent download (maximum 256 MiB). The default invitation lifetime is 900 seconds; keep the TTL longer than the expected download and enrollment time, especially on very slow links. A failed or timed-out download is removed before the one-use invitation token is written or enrollment starts.
+
 ## Updating
 
 `hostlink-agent update` currently uses the `self_update` GitHub RAW backend and a public GitHub release, without a PAT. Update admission is serialized and Windows replacement requires the Agent stopped with its owned task unregistered. See [Windows offline update](AGENT_UPDATE_WINDOWS.md).

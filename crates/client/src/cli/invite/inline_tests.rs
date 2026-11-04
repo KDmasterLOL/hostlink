@@ -89,6 +89,23 @@ fn inline_commands_bind_fixed_token_and_verify_before_install() {
                 assert!(script.contains("trap cleanup 0"));
                 assert!(script.contains("curl -q"));
                 assert!(!script.contains("--location"));
+                assert!(script.contains("hl_download \"$agent_url\" \"$agent\" 268435456 600"));
+                assert!(script.contains("--proto '=https' --tlsv1.2"));
+                assert!(script.contains(
+                    "release-assets.githubusercontent.com/*|https://objects.githubusercontent.com/*"
+                ));
+                assert!(
+                    script.find("sha256sum -c -").unwrap()
+                        < script
+                            .find("(set -C; printf '%s' \"$HL_INVITE\" > \"$token_file\")")
+                            .unwrap()
+                );
+                assert!(
+                    script
+                        .find("(set -C; printf '%s' \"$HL_INVITE\" > \"$token_file\")")
+                        .unwrap()
+                        < script.find("\"$agent\" \"$@\"").unwrap()
+                );
                 assert!(command.starts_with("(HL_INVITE="));
                 assert!(command.ends_with(')'));
                 #[cfg(unix)]
@@ -116,6 +133,68 @@ fn inline_commands_bind_fixed_token_and_verify_before_install() {
             .bind("bad")
             .is_err()
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn posix_transfer_failure_cleans_partial_without_creating_invite_token() {
+    use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+
+    let dir = tempfile::tempdir().unwrap();
+    let curl = dir.path().join("curl");
+    fs::write(
+        &curl,
+        r##"#!/bin/sh
+if [ "$2" = --version ]; then echo 'curl 8.4.0'; exit 0; fi
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = --output ]; then shift; out=$1; fi
+    shift
+done
+printf partial > "$out"
+exit 28
+"##,
+    )
+    .unwrap();
+    fs::set_permissions(&curl, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let rm = dir.path().join("rm");
+    fs::write(
+        &rm,
+        r##"#!/bin/sh
+if [ "$1" = -rf ]; then
+    if [ -e "$2/invite-token" ]; then printf token-present > "$HL_RM_LOG"; else printf no-token > "$HL_RM_LOG"; fi
+fi
+exec /bin/rm "$@"
+"##,
+    )
+    .unwrap();
+    fs::set_permissions(&rm, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let command = render_inline(&selections(&[Target::LinuxX64]))
+        .unwrap()
+        .bind(&"a".repeat(64))
+        .unwrap();
+    let rm_log = dir.path().join("rm-log");
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()))
+        .env("HOME", dir.path())
+        .env("TMPDIR", dir.path())
+        .env("HL_RM_LOG", &rm_log)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("GitHub asset download failed"));
+    assert_eq!(fs::read_to_string(rm_log).unwrap(), "no-token");
+    assert!(!fs::read_dir(dir.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("hostlink-bootstrap.")
+    }));
 }
 
 #[test]
@@ -176,6 +255,15 @@ fn posix_token_creation_refuses_overwrite_and_command_keeps_parent_environment()
         &command[..start],
         STANDARD.encode(gzip.finish().unwrap()),
         &command[end..]
+    );
+    assert!(
+        Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(&safe_command)
+            .status()
+            .unwrap()
+            .success()
     );
     let output = Command::new("sh")
         .arg("-c")
