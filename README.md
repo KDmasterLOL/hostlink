@@ -41,6 +41,11 @@ hostlink list
 hostlink list --check
 hostlink verify lab-host
 hostlink exec --host lab-host --command 'hostname'
+
+# Detached shell command (supply the Agent's exact loopback Board port)
+hostlink exec --host lab-host --board-port 39123 --detach --command 'long-running-command'
+# Direct --config targets must specify --os linux or --os windows
+hostlink job status --host lab-host --board-port 39123 JOB_ID
 hostlink upload --host lab-host --local ./input.bin --remote input.bin
 ```
 

@@ -123,10 +123,22 @@ pub(super) enum Command {
         #[command(flatten)]
         host_target: HostTarget,
         #[arg(long)]
+        detach: bool,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+        board_port: Option<u16>,
+        /// Target operating system when using a direct --config target; Hub hosts use registry OS.
+        #[arg(long, value_parser = ["linux", "windows"])]
+        os: Option<String>,
+        #[arg(long)]
         command: String,
         /// Path to a bounded binary stdin payload; "-" reads controller stdin.
         #[arg(long)]
         stdin_file: Option<String>,
+    },
+    /// Read status for an Agent-local Apalis job.
+    Job {
+        #[command(subcommand)]
+        command: JobCommand,
     },
     /// Create a new remote file using authenticated SFTP (never overwrite).
     Upload {
@@ -145,6 +157,17 @@ pub(super) enum Command {
         remote: String,
         #[arg(long)]
         local: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+pub(super) enum JobCommand {
+    Status {
+        #[command(flatten)]
+        host_target: HostTarget,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+        board_port: u16,
+        job_id: String,
     },
 }
 

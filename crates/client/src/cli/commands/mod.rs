@@ -74,9 +74,54 @@ pub(super) async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         } => remote::probe(&host_target, target, timeout_ms).await,
         Command::Exec {
             host_target,
+            detach,
+            board_port,
+            os,
             command,
             stdin_file,
-        } => remote::exec(&host_target, &command, stdin_file.as_deref()).await,
+        } => {
+            if detach {
+                let port = board_port.ok_or("--board-port is required with --detach")?;
+                let target_os = if let Some(name) = &host_target.host {
+                    let path = match &host_target.config {
+                        Some(p) => p.clone(),
+                        None => hub::default_hub_config_path()?,
+                    };
+                    let (hub, _) = hostlink::hub::HubClient::from_file(&path)?;
+                    let host = hub.resolve_host(name).await?;
+                    match host.os.as_str() {
+                        "linux" | "windows" => host.os,
+                        other => {
+                            return Err(format!(
+                                "unsupported or unknown target OS from Hub: {other}"
+                            )
+                            .into());
+                        }
+                    }
+                } else {
+                    os.clone().ok_or(
+                        "--os linux|windows is required for detached exec with direct --config",
+                    )?
+                };
+                if stdin_file.is_some() {
+                    return Err("--stdin-file cannot be used with --detach".into());
+                }
+                remote::exec_detached(&host_target, port, &command, &target_os).await
+            } else {
+                if board_port.is_some() || os.is_some() {
+                    return Err("--board-port and --os are valid only with --detach".into());
+                }
+                remote::exec(&host_target, &command, stdin_file.as_deref()).await
+            }
+        }
+        Command::Job {
+            command:
+                crate::cli::args::JobCommand::Status {
+                    host_target,
+                    board_port,
+                    job_id,
+                },
+        } => remote::job_status(&host_target, board_port, &job_id).await,
         Command::Upload {
             host_target,
             local,
