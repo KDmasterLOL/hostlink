@@ -257,7 +257,8 @@ fn actual_posix_command_runs_offline_and_cleans_failures() {
 
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
-    let tmp = dir.path().join("tmp");
+    // Exercise sha256sum's checksum-file format with a valid unusual TMPDIR.
+    let tmp = dir.path().join("tmp\\with\nnewline");
     fs::create_dir(&bin).unwrap();
     fs::create_dir(&tmp).unwrap();
     let agent = dir.path().join("synthetic-agent");

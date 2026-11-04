@@ -15,7 +15,9 @@ cleanup() { rm -rf "$stage"; }
 trap cleanup 0
 trap 'exit 130' HUP INT TERM
 hl_download "$agent_url" "$agent" 268435456 120
-printf '%s  %s\n' "$agent_sha256" "$agent" | sha256sum -c -
+# Check a fixed relative filename: sha256sum's input format escapes newlines and
+# backslashes in filenames, while TMPDIR may legitimately contain either.
+(cd "$stage" && printf '%s  hostlink-agent\n' "$agent_sha256" | sha256sum -c -)
 chmod 700 "$agent"
 # The stage is private; CreateNew prevents replacing an existing file.
 (set -C; printf '%s' "$HL_INVITE" > "$token_file")
