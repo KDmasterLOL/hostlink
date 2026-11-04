@@ -26,7 +26,15 @@ fn fixture(name: &str) -> (TempDir, PathBuf, PathBuf) {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
     let binary = root.join("bin/hostlink-agent");
-    fs::copy(env!("CARGO_BIN_EXE_hostlink-agent"), &binary).unwrap();
+    // Keep the writable executable descriptor out of this multithreaded test
+    // process. A concurrent fork can otherwise inherit it until exec, causing
+    // ETXTBSY even after fs::copy has returned and closed its own descriptor.
+    let copy = Command::new("cp")
+        .arg(env!("CARGO_BIN_EXE_hostlink-agent"))
+        .arg(&binary)
+        .status()
+        .expect("start fixture binary copy");
+    assert!(copy.success(), "fixture binary copy failed: {copy}");
     fs::set_permissions(binary, fs::Permissions::from_mode(0o700)).unwrap();
     // Service lifecycle treats these as opaque data, including the jobs store.
     for name in ["agent.json", "host_key", "machine.json", "jobs.db"] {
