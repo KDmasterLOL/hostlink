@@ -198,7 +198,10 @@ fn selected_asset(assets: &[ReleaseAsset], target: &str) -> io::Result<(ReleaseA
         .download_url()
         .strip_prefix("https://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/")
         .ok_or_else(|| invalid("invalid GitHub Agent asset URL"))?;
-    if id.starts_with('0') || id.parse::<u64>().is_err() {
+    if id.starts_with('0')
+        || !id.bytes().all(|byte| byte.is_ascii_digit())
+        || id.parse::<u64>().is_err()
+    {
         return Err(invalid("invalid GitHub Agent asset URL"));
     }
     let digest = asset

@@ -86,6 +86,7 @@ fn asset_api_url_is_exact_and_public_download_is_bound_to_release() {
         prefix.to_owned(),
         format!("{prefix}0"),
         format!("{prefix}0001"),
+        format!("{prefix}+1"),
         format!("{prefix}184467440737095516160"),
         format!("{prefix}1/extra"),
         format!("{prefix}1?query=1"),
