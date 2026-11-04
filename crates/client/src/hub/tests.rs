@@ -260,6 +260,9 @@ fn gateway_selection_requires_exact_approved_host_and_port() {
         host_public_key: public_key(),
     };
     let gateways = vec![first, second];
+    assert!(select_primary_gateway(&[], None).is_err());
+    assert_eq!(select_primary_gateway(&gateways[..1], None).unwrap(), 0);
+    assert!(select_primary_gateway(&gateways[..1], Some("stale.example:2222")).is_err());
     assert!(select_primary_gateway(&gateways, None).is_err());
     assert_eq!(
         select_primary_gateway(&gateways, Some("edge-b.example:2222")).unwrap(),

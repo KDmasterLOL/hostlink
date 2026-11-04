@@ -1,7 +1,7 @@
 use crate::cli::args::{HubCommand, InviteArgs};
 use crate::cli::invite as invite_source;
 use hostlink::host::Host;
-use hostlink::hub::{HubClient, HubConfig};
+use hostlink::hub::{HubClient, HubConfig, select_primary_gateway};
 use private_fs::{Durability, PrivateDir, Publication};
 use secrecy::ExposeSecret;
 use std::{
@@ -138,6 +138,14 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
     let name = name.or(legacy_name);
     let config_path = default_hub_config_path()?;
     let config = load_hub_config(&config_path)?;
+    // Resolve against the authenticated, pin-validated inventory before minting a one-use invite.
+    let client = HubClient::from_config(&config)?;
+    let gateways = client.info().await?;
+    let gateway_index = match gateway_index {
+        Some(index) if index < gateways.len() => index,
+        Some(_) => return Err("--gateway-index is outside the Hub-approved gateway list; check hostlink hub check and /v2/info".into()),
+        None => select_primary_gateway(&gateways, config.preferred_gateway.as_deref())?,
+    };
     let selection = if token_only {
         if name.is_some() && name.as_deref().is_some_and(|value| value.trim().is_empty()) {
             return Err("invitation name cannot be empty".into());
@@ -161,7 +169,7 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
                 selected_user,
                 config.hub_url.clone(),
                 bootstrap_hub_ca_cert,
-                gateway_index,
+                Some(gateway_index),
             )
             .await?
         } else {
@@ -173,7 +181,7 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
                     selected_user,
                     config.hub_url.clone(),
                     bootstrap_hub_ca_cert,
-                    gateway_index,
+                    Some(gateway_index),
                 )
                 .await?,
             ]
@@ -196,7 +204,6 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
             "WARNING: the command contains a one-use invitation; protect terminal history and clipboard."
         );
     }
-    let client = HubClient::from_config(&config)?;
     let pending = Host::create(&client, name, ttl_seconds).await?;
     let invite = pending.into_invitation();
     if let Some(bootstrap_command) = bootstrap_command {

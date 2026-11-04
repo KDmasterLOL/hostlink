@@ -9,7 +9,7 @@ New Agents register using a one-use Hub invitation over HTTPS. The Controller cr
 3. `hostlink-agent install` consumes the invitation and creates a fresh installation root.
 4. Enrollment creates independent machine, SSH host and reverse-tunnel identities, the Agent configuration, and private persistent state. The bootstrap invokes the installed Agent to register and start its service.
 
-The Hub provides approved gateway public-key pins and route information. If multiple gateways are available, pass `--gateway-index N` to the invite or installer. No gateway is selected implicitly.
+Before issuing an invitation, the Controller reads the authenticated Hub's approved gateway routes and pins. It selects the sole route, or the exact `preferred_gateway` configured as `host:port` when multiple routes exist. An explicit `--gateway-index N` overrides the preference and must be in range. If no preferred route matches, configure one or supply an index before retrying. The selected index is embedded in the bootstrap; the Agent still validates the approved pins during enrollment.
 
 An enrollment request may succeed on the Hub before local publication finishes. When `enrollment.pending` remains, inspect the Hub inventory and reconcile the attempt; do not replay the original one-use token.
 

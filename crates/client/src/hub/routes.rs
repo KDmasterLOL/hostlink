@@ -31,15 +31,7 @@ pub async fn host_spec_from_approved_routes(
     config: &HubConfig,
 ) -> Result<HostSpec, HubClientError> {
     validate_gateway_list(gateways)?;
-    let primary_index = match (gateways, config.preferred_gateway.as_deref()) {
-        ([_], None) => 0,
-        ([], _) => {
-            return Err(HubClientError::Invalid(
-                "Hub has no approved gateway".into(),
-            ));
-        }
-        (_, selected) => select_primary_gateway(gateways, selected)?,
-    };
+    let primary_index = select_primary_gateway(gateways, config.preferred_gateway.as_deref())?;
     // A healthy explicitly selected gateway must not become unusable merely
     // because an optional Hub-approved alternate is temporarily missing in DNS.
     // Resolve alternates concurrently so many offline edges do not multiply
@@ -155,13 +147,27 @@ pub(super) fn validate_gateway_list(gateways: &[GatewayEndpoint]) -> Result<(), 
     Ok(())
 }
 
-pub(super) fn select_primary_gateway(
+/// Selects a primary from previously validated Hub-approved routes without guessing
+/// among multiple routes. This function does not validate the routes or their pins.
+///
+/// # Errors
+/// Returns an error if there are no routes or the configured preference is absent,
+/// ambiguous, or does not match when a preference is required or supplied.
+pub fn select_primary_gateway(
     gateways: &[GatewayEndpoint],
     preferred: Option<&str>,
 ) -> Result<usize, HubClientError> {
+    if gateways.is_empty() {
+        return Err(HubClientError::Invalid(
+            "Hub has no approved gateway".into(),
+        ));
+    }
+    if gateways.len() == 1 && preferred.is_none() {
+        return Ok(0);
+    }
     let Some(preferred) = preferred else {
         return Err(HubClientError::Invalid(
-            "Hub lists multiple gateways; set preferred_gateway to an exact host:port from /v2/info".into(),
+            "Hub lists multiple gateways; set preferred_gateway to an exact host:port from /v2/info or pass --gateway-index".into(),
         ));
     };
     let matches: Vec<_> = gateways
@@ -173,7 +179,7 @@ pub(super) fn select_primary_gateway(
     match matches.as_slice() {
         [index] => Ok(*index),
         _ => Err(HubClientError::Invalid(
-            "preferred_gateway does not match exactly one Hub-approved host:port".into(),
+            "preferred_gateway does not match exactly one Hub-approved host:port; update it or pass --gateway-index".into(),
         )),
     }
 }

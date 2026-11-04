@@ -50,7 +50,7 @@ A new machine requires a one-use Hub invitation:
 hostlink invite lab-win7 --os windows
 ```
 
-The command prints one paste-ready bootstrap containing a one-use invitation. Protect it as a secret. Public release downloads require no GitHub PAT; see [Releases and bootstrap](docs/GITHUB_RELEASES.md) for target shell and platform requirements.
+The command prints one paste-ready bootstrap containing a one-use invitation. Protect it as a secret. Before issuing it, the Controller selects the sole Hub-approved gateway or the configured `preferred_gateway`; use `--gateway-index N` to explicitly select another approved route. Public release downloads require no GitHub PAT; see [Releases and bootstrap](docs/GITHUB_RELEASES.md) for target shell and platform requirements.
 
 ## Documentation
 
