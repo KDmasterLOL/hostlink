@@ -1,7 +1,6 @@
 //! Current-user Task Scheduler 2.0 lifecycle. Scheduler alone owns execution.
 //! Keep direct COM. schtasks adds password/locale/overwrite handling;
 //! planif 1.0 only builds registrations, leaving lifecycle ownership here.
-//! windows 0.62's typed property out-parameters exceed this XML identity check.
 use super::ServiceStatus;
 use crate::private_fs::PrivateFileExt;
 use private_fs::{FileAccess, FileCreation, OpenOptions, PrivateDir};
@@ -21,8 +20,8 @@ use windows::{
         },
         TaskScheduler::{
             IRegisteredTask, ITaskFolder, ITaskService, TASK_CREATE, TASK_LOGON_INTERACTIVE_TOKEN,
-            TASK_STATE_DISABLED, TASK_STATE_QUEUED, TASK_STATE_READY, TASK_STATE_RUNNING,
-            TASK_UPDATE, TaskScheduler,
+            TASK_RUNLEVEL_HIGHEST, TASK_RUNLEVEL_LUA, TASK_STATE_DISABLED, TASK_STATE_QUEUED,
+            TASK_STATE_READY, TASK_STATE_RUNNING, TASK_UPDATE, TaskScheduler,
         },
         Variant::VARIANT,
     },
@@ -293,7 +292,23 @@ fn verify_task(task: &IRegisteredTask, root: &Path) -> io::Result<()> {
     let (command, arguments) = action(root)?;
     // SAFETY: read-only query of a live registered task.
     let xml = unsafe { task.Xml().map_err(com_error)?.to_string() };
-    verify_definition(&xml, &command, &arguments, &current_sid()?)
+    // SAFETY: the COM principal writes to a valid, initialized out-parameter.
+    let mut run_level = TASK_RUNLEVEL_HIGHEST;
+    unsafe {
+        task.Definition()
+            .map_err(com_error)?
+            .Principal()
+            .map_err(com_error)?
+            .RunLevel(&mut run_level)
+            .map_err(com_error)?
+    };
+    verify_definition(
+        &xml,
+        &command,
+        &arguments,
+        &current_sid()?,
+        run_level == TASK_RUNLEVEL_LUA,
+    )
 }
 fn active(task: &IRegisteredTask) -> io::Result<bool> {
     // SAFETY: read-only OS state/instance queries on a live interface.
@@ -366,7 +381,13 @@ fn definition(command: &str, arguments: &str, sid: &str) -> String {
 }
 
 /// Check execution ownership fields, not Scheduler serialization or file hashes.
-fn verify_definition(xml: &str, command: &str, arguments: &str, sid: &str) -> io::Result<()> {
+fn verify_definition(
+    xml: &str,
+    command: &str,
+    arguments: &str,
+    sid: &str,
+    limited: bool,
+) -> io::Result<()> {
     let document = roxmltree::Document::parse(xml).map_err(io::Error::other)?;
     let task = document.root_element();
     if !task.has_tag_name((TASK_NAMESPACE, "Task")) {
@@ -386,7 +407,8 @@ fn verify_definition(xml: &str, command: &str, arguments: &str, sid: &str) -> io
             ));
         }
     }
-    if principal.attribute("id").is_none()
+    if !limited
+        || principal.attribute("id").is_none()
         || actions.attribute("Context") != principal.attribute("id")
         || principal
             .children()
@@ -406,8 +428,6 @@ fn verify_definition(xml: &str, command: &str, arguments: &str, sid: &str) -> io
     for (parent, name, expected) in [
         (principal, "UserId", sid),
         (principal, "LogonType", "InteractiveToken"),
-        (principal, "RunLevel", "LeastPrivilege"),
-        (trigger, "UserId", sid),
         (exec, "Command", command),
         (exec, "Arguments", arguments),
         (settings, "MultipleInstancesPolicy", "IgnoreNew"),
@@ -420,6 +440,42 @@ fn verify_definition(xml: &str, command: &str, arguments: &str, sid: &str) -> io
             return Err(invalid(
                 "foreign or changed Agent task; registration preserved",
             ));
+        }
+    }
+    let mut levels = principal
+        .children()
+        .filter(|n| n.has_tag_name((TASK_NAMESPACE, "RunLevel")));
+    if let Some(level) = levels.next()
+        && (levels.next().is_some()
+            || level.children().any(|n| n.is_element())
+            || level.children().filter(|n| n.is_text()).count() != 1
+            || level.text() != Some("LeastPrivilege"))
+    {
+        return Err(invalid("foreign Agent task run level"));
+    }
+    let user = child(trigger, "UserId")?;
+    if user.children().any(|n| n.is_element())
+        || user.children().filter(|n| n.is_text()).count() != 1
+    {
+        return Err(invalid("foreign Agent task trigger user"));
+    }
+    let user = user
+        .text()
+        .ok_or_else(|| invalid("missing Agent task trigger user"))?;
+    if user != sid {
+        let (domain, name) = user
+            .split_once('\\')
+            .ok_or_else(|| invalid("unqualified Agent task trigger user"))?;
+        if domain.is_empty() || name.is_empty() || name.contains('\\') || user.contains('\0') {
+            return Err(invalid("invalid Agent task trigger user"));
+        }
+        let (resolved, _, kind) =
+            windows_permissions::wrappers::LookupAccountName(None::<&std::ffi::OsStr>, user)
+                .map_err(io::Error::other)?;
+        if kind != windows_permissions::constants::SidNameUse::SidTypeUser
+            || resolved.to_string() != sid
+        {
+            return Err(invalid("foreign Agent task trigger user"));
         }
     }
     Ok(())
@@ -439,4 +495,74 @@ fn child<'a>(parent: roxmltree::Node<'a, 'a>, name: &str) -> io::Result<roxmltre
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scheduler_identity_normalization_is_fail_closed() {
+        let owner = windows_permissions::utilities::current_process_sid().unwrap();
+        let sid = owner.to_string();
+        let (name, domain) = windows_permissions::wrappers::LookupAccountSid(&owner).unwrap();
+        let account = format!("{}\\{}", domain.to_string_lossy(), name.to_string_lossy());
+        let account = account
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        let xml = definition("C:\\agent.exe", "run", &sid);
+        let verify =
+            |xml: &str, limited| verify_definition(xml, "C:\\agent.exe", "run", &sid, limited);
+        assert!(verify(&xml, true).is_ok());
+        let normalized = xml
+            .replacen(
+                &format!("<UserId>{sid}</UserId>"),
+                &format!("<UserId>{account}</UserId>"),
+                1,
+            )
+            .replace("<RunLevel>LeastPrivilege</RunLevel>", "");
+        assert!(verify(&normalized, true).is_ok());
+        assert!(verify(&normalized, false).is_err());
+        for foreign in [
+            xml.replace("LeastPrivilege", "HighestAvailable"),
+            xml.replacen(
+                &format!("<UserId>{sid}</UserId>"),
+                "<UserId>S-1-5-18</UserId>",
+                1,
+            ),
+            xml.replacen(
+                &format!("<UserId>{sid}</UserId>"),
+                "<UserId>BUILTIN\\Administrators</UserId>",
+                1,
+            ),
+            xml.replacen(
+                &format!("<UserId>{sid}</UserId>"),
+                "<UserId>missing-domain\\missing-user-1c1203</UserId>",
+                1,
+            ),
+            xml.replacen(&format!("<UserId>{sid}</UserId>"), "", 1),
+            xml.replacen(
+                &format!("<UserId>{sid}</UserId>"),
+                "<UserId>S-1-5-18</UserId>",
+                2,
+            ),
+            xml.replacen(
+                &format!("<UserId>{sid}</UserId>"),
+                &format!("<UserId>{sid}</UserId><UserId>{sid}</UserId>"),
+                1,
+            ),
+            xml.replace("C:\\agent.exe", "C:\\other.exe"),
+            xml.replace("<Arguments>run</Arguments>", "<Arguments>other</Arguments>"),
+            xml.replace("</Principals>", "<Principal id=\"other\"/></Principals>"),
+            xml.replace("</Triggers>", "<LogonTrigger/></Triggers>"),
+            xml.replace("</Actions>", "<Exec/></Actions>"),
+            xml.replace(
+                "</Principal>",
+                "<RunLevel>LeastPrivilege</RunLevel></Principal>",
+            ),
+        ] {
+            assert!(verify(&foreign, true).is_err(), "accepted {foreign}");
+        }
+    }
 }

@@ -259,15 +259,26 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
             .unwrap()
     };
     assert_eq!(value("LogonType"), "InteractiveToken");
-    assert_eq!(value("RunLevel"), "LeastPrivilege");
+    if let Some(level) = xml.descendants().find(|n| n.has_tag_name("RunLevel")) {
+        assert_eq!(level.text(), Some("LeastPrivilege"));
+    }
     assert_eq!(value("MultipleInstancesPolicy"), "IgnoreNew");
     assert_eq!(value("ExecutionTimeLimit"), "PT0S");
     let sid = windows_permissions::utilities::current_process_sid()
         .unwrap()
         .to_string();
-    for user in xml.descendants().filter(|n| n.has_tag_name("UserId")) {
-        assert_eq!(user.text(), Some(sid.as_str()));
-    }
+    let principal = xml
+        .descendants()
+        .find(|n| n.has_tag_name("Principal"))
+        .unwrap();
+    assert_eq!(
+        principal
+            .children()
+            .find(|n| n.has_tag_name("UserId"))
+            .unwrap()
+            .text(),
+        Some(sid.as_str())
+    );
     assert_eq!(
         value("Command"),
         root.canonicalize()
@@ -301,7 +312,17 @@ async fn current_user_lifecycle_installs_reports_and_removes_only_its_disposable
         original_xml.replace("run --config=", "check --config="),
         original_xml.replace("hostlink-agent.exe</Command>", "foreign.exe</Command>"),
         original_xml.replace("agent.json", "foreign.json"),
-        original_xml.replace("<RunLevel>LeastPrivilege", "<RunLevel>HighestAvailable"),
+        if original_xml.contains("<RunLevel>LeastPrivilege</RunLevel>") {
+            original_xml.replace(
+                "<RunLevel>LeastPrivilege</RunLevel>",
+                "<RunLevel>HighestAvailable</RunLevel>",
+            )
+        } else {
+            original_xml.replace(
+                "</Principal>",
+                "<RunLevel>HighestAvailable</RunLevel></Principal>",
+            )
+        },
         original_xml.replace(
             "<MultipleInstancesPolicy>IgnoreNew",
             "<MultipleInstancesPolicy>Parallel",
