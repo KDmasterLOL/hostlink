@@ -70,7 +70,7 @@ fn inline_commands_bind_fixed_token_and_verify_before_install() {
                 assert!(script.contains("SetAccessRuleProtection($true, $false)"));
                 assert!(script.contains("Read-Host $Prompt -AsSecureString"));
                 assert!(script.contains("$version.Major -eq 6 -and $version.Minor -eq 1"));
-                assert!(script.contains("$os.BuildNumber -ge 22000"));
+                assert!(script.contains("$os.BuildNumber -ge 10240"));
                 assert!(
                     script.find("Agent executable SHA-256 mismatch").unwrap()
                         < script.find("Write-PrivateSecret $tokenFile").unwrap()
@@ -523,4 +523,48 @@ fn windows_synthetic_fixture_runs_as_shell_input() {
             "{program}: {stdout} {stderr}"
         );
     }
+}
+
+#[test]
+fn windows_native_download_guards_precede_token_and_install() {
+    let assets = selections(&[Target::Win7X86, Target::Win7X64, Target::Win11X64]);
+    let script = unpack(
+        &render_inline(&assets)
+            .unwrap()
+            .bind(&"a".repeat(64))
+            .unwrap(),
+    );
+    for asset in &assets {
+        assert!(script.contains(&asset.agent_sha256));
+    }
+    let native = script
+        .split("function Get-Win7Asset")
+        .nth(1)
+        .unwrap()
+        .split("function Get-GitHubAsset")
+        .next()
+        .unwrap();
+    assert!(native.contains("[uint32]2217476096")); // 0x842c0000
+    assert!(native.contains("$status -ne 302 -or $hop -ne 0"));
+    assert!(native.contains("release-assets|objects"));
+    assert!(native.contains("$total -gt $MaximumBytes"));
+    assert!(
+        native.find("$total -gt $MaximumBytes").unwrap()
+            < native.find("$output.Write($buffer").unwrap()
+    );
+    assert!(native.contains("$created -and -not $complete"));
+    assert!(native.contains("InternetCloseHandle($request)"));
+    assert!(native.contains("InternetCloseHandle($session)"));
+    assert!(
+        script.find("Get-Win7Asset $AgentUri $agentFile").unwrap()
+            < script.find("ComputeHash($stream)").unwrap()
+    );
+    assert!(
+        script.find("ComputeHash($stream)").unwrap()
+            < script.find("Write-PrivateSecret $tokenFile").unwrap()
+    );
+    assert!(
+        script.find("Write-PrivateSecret $tokenFile").unwrap()
+            < script.find("& $agentFile @installArgs").unwrap()
+    );
 }

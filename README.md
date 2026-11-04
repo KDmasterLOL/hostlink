@@ -19,11 +19,11 @@ The Hub does not execute remote commands or host the Agent's jobs database. The 
 | Platform | Release target |
 | --- | --- |
 | Linux x86-64 (glibc) | `x86_64-unknown-linux-gnu` |
-| Windows 11 x86-64 | `x86_64-pc-windows-msvc` |
+| Windows 10 / 11 x86-64 | `x86_64-pc-windows-msvc` |
 | Windows 7 / Server 2008 R2 x86-64 | `x86_64-win7-windows-msvc` |
 | Windows 7 x86 | `i686-win7-windows-msvc` |
 
-Windows 10 is not currently enabled in the bootstrap compatibility check; macOS is not implemented. The exact native acceptance criteria are in [Windows 7 compatibility](docs/WIN7_REWRITE_ACCEPTANCE.md).
+The bootstrap selects NT 10 x86-64 from build 10240; native acceptance remains separate. macOS is not implemented. The exact native acceptance criteria are in [Windows 7 compatibility](docs/WIN7_REWRITE_ACCEPTANCE.md).
 
 ## Build and test
 

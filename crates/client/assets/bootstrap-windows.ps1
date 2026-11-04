@@ -7,7 +7,7 @@ if ($version.Major -eq 6 -and $version.Minor -eq 1) {
     if ($arch -eq 'AMD64') { $Target = 'x86_64-win7-windows-msvc'; $AgentSha256 = $ShaWin7X64 }
     elseif ($arch -eq 'x86') { $Target = 'i686-win7-windows-msvc'; $AgentSha256 = $ShaWin7X86 }
     else { throw 'Unsupported Windows architecture.' }
-} elseif ($version.Major -eq 10 -and [int]$os.BuildNumber -ge 22000 -and $arch -eq 'AMD64') {
+} elseif ($version.Major -eq 10 -and [int]$os.BuildNumber -ge 10240 -and $arch -eq 'AMD64') {
     $Target = 'x86_64-pc-windows-msvc'; $AgentSha256 = $ShaWin11X64
 } else { throw 'Unsupported Windows version or architecture.' }
 if ($RequestedTarget -and $RequestedTarget -ne $Target) { throw 'Selected target does not match this Windows system.' }
@@ -21,7 +21,8 @@ Set-PrivateDirectory $stage $identity.User
 $agentFile = Join-Path $stage 'hostlink-agent.exe'
 $tokenFile = Join-Path $stage 'invite-token'
 try {
-    Get-GitHubAsset $AgentUri $agentFile 268435456 120
+    if ($version.Major -eq 6) { Get-Win7Asset $AgentUri $agentFile 268435456 120 }
+    else { Get-GitHubAsset $AgentUri $agentFile 268435456 120 }
     $algorithm = New-Object Security.Cryptography.SHA256Managed
     $stream = [IO.File]::OpenRead($agentFile)
     try { $actual = ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }

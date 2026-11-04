@@ -32,7 +32,7 @@ Review each PE report: machine must be `0x8664` for x64 or `0x14c` for x86; subs
 
 ## PowerShell 2 syntax
 
-The new inline bootstrap targets PowerShell 2, but its generated command and decompressed script require native parser and execution checks on Windows 7. The old saved-helper fixture exporter was deleted. Native GitHub TLS, download, SHA-256, enrollment and service startup remain separate acceptance gates; PowerShell syntax alone is not acceptance.
+The new inline bootstrap targets PowerShell 2, but its generated command and decompressed script require native parser and execution checks on Windows 7. The old saved-helper fixture exporter was deleted. A separate native NT 6.1 PowerShell 2 experiment fetched the public x64 release using WinINet with redirects disabled and verified its SHA-256. This does not test the final packed bootstrap. Native download, negative redirect and digest cases, enrollment and service startup remain separate acceptance gates; PowerShell syntax alone is not acceptance.
 
 ## Native acceptance
 
