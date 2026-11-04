@@ -3,7 +3,7 @@
 - Upstream: https://github.com/orielhaim/private-fs
 - Version: `v0.2.1`, source commit `07d542518b76d4eef6200523b6a7a57dd401b0e7`.
 - Licenses: MIT OR Apache-2.0 (tracked `LICENSE-MIT` and `LICENSE-APACHE`).
-- HostLink integration: `Vendor/private-fs` as a Cargo path dependency.
+- HostLink integration: `vendor/private-fs` as a Cargo path dependency.
   Only the upstream nested `[workspace]` declaration was removed for workspace integration.
 - Scope: private Agent enrollment, credentials, SFTP, locks, updater and Apalis
   storage. Existing `PrivateDir`/`PrivateFile` public APIs remain unchanged.
@@ -43,7 +43,7 @@ Its build dependencies are not part of the Agent runtime graph. Generated
 the native backend casts them when comparing to Win32 `u32` device fields.
 
 ```sh
-cargo run --locked --manifest-path Vendor/private-fs/tools/windows-bindings/Cargo.toml -- --check
+cargo run --locked --manifest-path vendor/private-fs/tools/windows-bindings/Cargo.toml -- --check
 ```
 
 ## Verification and remaining compatibility gate

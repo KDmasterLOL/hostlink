@@ -7,7 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-private-fs = { path = "../../Vendor/private-fs" }
+private-fs = { path = "../../vendor/private-fs" }
 russh.workspace = true
 russh-sftp.workspace = true
 tokio.workspace = true
