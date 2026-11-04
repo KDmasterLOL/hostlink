@@ -162,6 +162,9 @@ verify-candidate:
 publish: verify-candidate
     #!/usr/bin/env bash
     set -euo pipefail
+    export MISE_QUIET=1
+    export GH_REPO=KDmasterLOL/hostlink
+    test "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" = "$GH_REPO"
     sha=$(git rev-parse HEAD)
     version=$(cargo +1.99.1 metadata --locked --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "hostlink-agent") | .version')
     tag="v$version"
@@ -180,7 +183,7 @@ publish: verify-candidate
     releases=$(gh api repos/KDmasterLOL/hostlink/releases --paginate --slurp)
     jq -e --arg tag "$tag" 'all(.[][]; .tag_name != $tag)' <<< "$releases" >/dev/null
     dir="target/release-candidate/$sha"
-    gh release create "$tag" --repo KDmasterLOL/hostlink --verify-tag --notes-from-tag "$dir/hostlink-agent-x86_64-unknown-linux-gnu" "$dir/hostlink-agent-x86_64-pc-windows-msvc.exe" "$dir/hostlink-agent-x86_64-win7-windows-msvc.exe" "$dir/hostlink-agent-i686-win7-windows-msvc.exe"
+    gh release create "$tag" --verify-tag --notes-from-tag "$dir/hostlink-agent-x86_64-unknown-linux-gnu" "$dir/hostlink-agent-x86_64-pc-windows-msvc.exe" "$dir/hostlink-agent-x86_64-win7-windows-msvc.exe" "$dir/hostlink-agent-i686-win7-windows-msvc.exe"
     release=$(gh api "repos/KDmasterLOL/hostlink/releases/tags/$tag")
     jq -e '.immutable == true and (.assets | length == 4)' <<< "$release" >/dev/null
     while read -r digest name; do
