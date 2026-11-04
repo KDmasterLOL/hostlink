@@ -24,7 +24,7 @@ for target in x86_64-win7-windows-msvc i686-win7-windows-msvc; do
 done
 ```
 
-Review each PE report: machine must be `0x8664` for x64 or `0x14c` for x86; subsystem version must be 6.0. Imports must exclude dynamic CRT DLLs (`api-ms-win-crt*`, `ucrtbase.dll`, `msvcrt.dll`, `vcruntime*`, `msvcp*`, `concrt*`) and `combase.dll`. Record reports and hashes with the source SHA and tool versions. These checks are manual; no automated receipt or PE rejection gate currently exists. Cross-compilation does not establish native compatibility. Package the raw Agent executables as described in [artifact packaging](ARTIFACTS_AND_INVITES.md).
+Review each PE report: machine must be `0x8664` for x64 or `0x14c` for x86; subsystem version must be 6.0. Imports must exclude dynamic CRT DLLs (`api-ms-win-crt*`, `ucrtbase.dll`, `msvcrt.dll`, `vcruntime*`, `msvcp*`, `concrt*`) and `combase.dll`. Record reports and hashes with the source SHA and tool versions. The opt-in GitHub Actions Win7 check can reject incompatible PE headers and imports, but a complete source-bound release receipt and native Win7 acceptance remain separate; the CI Win7 job has not yet been validated in a live run. Cross-compilation does not establish native compatibility. Package the raw Agent executables as described in [artifact packaging](ARTIFACTS_AND_INVITES.md).
 
 ## PowerShell 2 syntax
 

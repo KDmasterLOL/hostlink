@@ -7,7 +7,7 @@ HostLink is a Rust workspace with three components and one vendored filesystem d
 | Controller CLI and dispatch | `crates/client/src/cli/` |
 | Controller Hub client, registry and routes | `crates/client/src/hub/`, `host/` |
 | SSH connections, commands and SFTP | `crates/client/src/connect/`, `exec/`, `sftp.rs` |
-| Release selection and bootstrap | `crates/client/src/bootstrap/`, `crates/client/assets/` |
+| Release selection and bootstrap | `crates/client/src/cli/invite/`, `crates/client/assets/` |
 | Agent CLI and runtime | `crates/agent/src/cli.rs`, `commands/`, `runtime.rs` |
 | Agent SSH and reverse tunnel | `crates/agent/src/ssh/`, `tunnel/`, `sftp/` |
 | Agent enrollment, installation and update | `crates/agent/src/enrollment/`, `installation.rs`, `update.rs` |

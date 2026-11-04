@@ -25,6 +25,6 @@ The `Linux and Windows x64 source checks` workflow builds only those two Agents 
 hostlink invite --name lab-host --target x86_64-pc-windows-msvc
 ```
 
-The Controller checks the selected GitHub release before creating a one-use Hub invitation. The target verifies downloaded executable bytes before enrolling with that invitation. The default bootstrap requests a target-owned GitHub PAT; `--embed-github-token` is an explicit secret-bearing alternative.
+The Controller checks the selected GitHub release before creating a one-use Hub invitation. The target verifies downloaded executable bytes before enrolling with that invitation. The controller embeds the one-use Hub invite in a single target-side command; public Release downloads do not require a GitHub PAT or a separate install script.
 
 Use `hostlink invite --help` for optional version, gateway and token-only controls. See [enrollment](ENROLLMENT.md) for reconciliation after an ambiguous enrollment attempt.
