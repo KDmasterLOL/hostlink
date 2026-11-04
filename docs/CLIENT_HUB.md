@@ -47,11 +47,11 @@ For unmanaged configurations, use `--config PATH` instead of `--host`.
 ## Invitations
 
 ```sh
-hostlink invite --name lab-host --target x86_64-pc-windows-msvc
-hostlink invite --name lab-linux --target x86_64-unknown-linux-gnu --version 0.1.0
+hostlink invite lab-host --os windows
+hostlink invite lab-linux --os linux --version 0.1.0
 ```
 
-The current CLI selects a raw executable from the fixed GitHub repository before issuing a one-use invitation. It requires the Controller's read-only GitHub PAT and generates a disposable platform bootstrap. By default the target bootstrap prompts for its own GitHub PAT; the explicit `--embed-github-token` option embeds the Controller's PAT into the output.
+The CLI resolves all required raw executables for the OS from one fixed GitHub release before issuing a one-use invitation. The output is one command containing that invitation; protect the command as a secret. The public release needs no GitHub credential. The Windows command is intended for pasting into cmd.exe or PowerShell; paste the Linux command into a POSIX shell. Native Windows shell acceptance remains unverified.
 
 See [GitHub Releases](GITHUB_RELEASES.md) and [enrollment](ENROLLMENT.md) for prerequisites and credential handling.
 

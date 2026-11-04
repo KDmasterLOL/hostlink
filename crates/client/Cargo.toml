@@ -22,6 +22,8 @@ reqwest.workspace = true
 futures.workspace = true
 hostlink-hub = { path = "../hub", default-features = false }
 private-fs = { path = "../../vendor/private-fs" }
+base64.workspace = true
+flate2 = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.191"
@@ -30,7 +32,6 @@ libc = "=0.2.191"
 windows-permissions = "=0.2.4"
 
 [dev-dependencies]
-base64.workspace = true
 processkit.workspace = true
 hostlink-agent = { path = "../agent" }
 hostlink-hub = { path = "../hub", features = ["server"] }

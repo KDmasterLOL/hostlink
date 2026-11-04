@@ -1,6 +1,6 @@
 # Target-local bootstrap helpers, never installed; compatible with PowerShell 2/.NET 3.5.
 function Assert-GitHubAsset([string]$Url) {
-    if ($Url -cnotmatch '\Ahttps://api\.github\.com/repos/KDmasterLOL/hostlink/releases/assets/[1-9][0-9]*\z') { throw 'Expected a HostLink GitHub API release asset URL.' }
+    if ($Url -cnotmatch '\Ahttps://github\.com/KDmasterLOL/hostlink/releases/download/v[^/]+/hostlink-agent-[^/]+\z') { throw 'Expected a public HostLink release asset URL.' }
 }
 function Assert-NoReparse([string]$Path) {
     $part = New-Object IO.DirectoryInfo($Path)
@@ -74,72 +74,8 @@ function Write-PrivateSecret([string]$Path, [Security.Principal.SecurityIdentifi
         if ($null -ne $secure) { $secure.Dispose() }
     }
 }
-function Get-GitHubCredential([bool]$Provision, [string]$EmbeddedToken) {
-    $identity = Get-BootstrapIdentity
-    $sid = $identity.User
-    $appData = $env:APPDATA
-    if ([string]::IsNullOrEmpty($appData) -or -not [IO.Path]::IsPathRooted($appData) -or -not [IO.Directory]::Exists($appData)) { throw 'Current-user APPDATA is unavailable.' }
-    Assert-NoReparse $appData
-    $ancestor = New-Object IO.DirectoryInfo($appData)
-    $writeMask = [Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
-    while ($null -ne $ancestor) {
-        $acl = $ancestor.GetAccessControl()
-        $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier])
-        # Windows volume/profile ancestors may be owned by SYSTEM or Administrators.
-        # TrustedInstaller is also the normal owner of protected Windows directories.
-        $trustedOwners = @('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
-        if (-not $owner.Equals($sid) -and $trustedOwners -notcontains $owner.Value) { throw 'Unsafe credential ancestor owner.' }
-        if ($ancestor.FullName -eq $appData -and -not $owner.Equals($sid)) { throw 'APPDATA must be owned by the current user.' }
-        foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
-            # Ignore inherit-only ACEs: they do not grant mutation of this ancestor.
-            if (($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
-            if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and ($rule.FileSystemRights -band $writeMask) -ne 0 -and -not $rule.IdentityReference.Equals($sid) -and $trustedOwners -notcontains $rule.IdentityReference.Value) { throw 'Credential ancestor is writable by another user.' }
-        }
-        $ancestor = $ancestor.Parent
-    }
-    $hostDirectory = Join-Path $appData 'HostLink'
-    $credentialDirectory = Join-Path $hostDirectory 'credentials'
-    foreach ($directory in @($hostDirectory, $credentialDirectory)) {
-        if (-not [IO.Directory]::Exists($directory) -and $Provision) { Set-PrivateDirectory $directory $sid }
-        Assert-NoReparse $directory
-        Assert-PrivateDirectory $directory $sid
-    }
-    $path = Join-Path $credentialDirectory 'github-token'
-    # GetAttributes observes reparse points; only a genuine missing file permits prompting.
-    $missing = $false
-    try { $attributes = [IO.File]::GetAttributes($path) }
-    catch [IO.FileNotFoundException] { $missing = $true }
-    if ($missing) {
-        if (-not $Provision) { throw 'Provision the target GitHub credential through the invite bootstrap first.' }
-        # EmbeddedToken is supplied only by the Controller's explicit --embed-github-token opt-in.
-        [void](Write-PrivateSecret $path $sid 'GitHub fine-grained PAT (HostLink Contents:Read only)' '[A-Za-z0-9_]' 1 1024 $EmbeddedToken)
-        $attributes = [IO.File]::GetAttributes($path)
-    }
-    if (($attributes -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Directory)) -ne 0) { throw 'GitHub credential must be a regular file, not a reparse point.' }
-    $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-    try {
-        $acl = $stream.GetAccessControl()
-        if (-not $acl.AreAccessRulesProtected -or -not $acl.GetOwner([Security.Principal.SecurityIdentifier]).Equals($sid)) { throw 'Unsafe GitHub credential owner or ACL.' }
-        $rules = $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
-        if ($rules.Count -ne 1 -or -not $rules[0].IdentityReference.Equals($sid) -or $rules[0].AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or $rules[0].FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or $rules[0].InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or $rules[0].PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) { throw 'GitHub credential must have a protected owner-only DACL.' }
-        if ($stream.Length -lt 1 -or $stream.Length -gt 1024) { throw 'Invalid GitHub credential size.' }
-        $reader = New-Object -TypeName System.IO.BinaryReader -ArgumentList $stream
-        $bytes = $reader.ReadBytes([int]$stream.Length)
-        if ($bytes.Length -ne $stream.Length) { throw 'GitHub credential read failed.' }
-        $existing = [Text.Encoding]::ASCII.GetString($bytes)
-        if ($existing -cnotmatch '\A[A-Za-z0-9_]{1,1024}\z') { throw 'Invalid GitHub credential format.' }
-        if (-not [string]::IsNullOrEmpty($EmbeddedToken) -and $EmbeddedToken -cne $existing) {
-            throw 'Existing GitHub credential differs; rotate it explicitly instead of overwriting.'
-        }
-        return $existing
-    } finally {
-        if ($null -ne $bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
-        $stream.Close()
-    }
-}
 function Get-GitHubAsset([string]$Url, [string]$Destination, [long]$MaximumBytes, [int]$DeadlineSeconds) {
     Assert-GitHubAsset $Url
-    $credential = Get-GitHubCredential $false
     $response = $null; $output = $null; $inputStream = $null; $request = $null; $created = $false; $complete = $false
     $clock = [Diagnostics.Stopwatch]::StartNew()
     try {
@@ -155,9 +91,7 @@ function Get-GitHubAsset([string]$Url, [string]$Destination, [long]$MaximumBytes
             $request.Accept = 'application/octet-stream'
             $request.Timeout = [Math]::Min(30000, $remaining)
             $request.ReadWriteTimeout = [Math]::Min(30000, $remaining)
-            if ($hop -eq 0) { $request.Headers['Authorization'] = 'Bearer ' + $credential }
             $response = $request.GetResponse()
-            $credential = $null
             if ([int]$response.StatusCode -eq 200) { break }
             if ([int]$response.StatusCode -ne 302 -or $hop -ne 0) { throw 'Download response rejected.' }
             $Url = $response.Headers['Location']
@@ -182,9 +116,8 @@ function Get-GitHubAsset([string]$Url, [string]$Destination, [long]$MaximumBytes
         }
         $output.Flush()
         $complete = $true
-    } catch { throw 'GitHub asset download failed (credential, TLS, HTTP, deadline or size); no fallback.' }
+    } catch { throw 'GitHub asset download failed (TLS, HTTP, deadline or size); no fallback.' }
     finally {
-        $credential = $null
         if ($null -ne $request) { $request.Abort() }
         if ($null -ne $inputStream) { $inputStream.Close() }
         if ($null -ne $response) { $response.Close() }

@@ -2,6 +2,7 @@
 
 mod args;
 mod commands;
+mod invite;
 #[cfg(test)]
 mod tests;
 

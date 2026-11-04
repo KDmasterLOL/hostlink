@@ -1,5 +1,5 @@
+use crate::cli::invite::Target;
 use clap::{Args, Parser, Subcommand};
-use hostlink::bootstrap::Target;
 use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Parser)]
@@ -27,22 +27,25 @@ pub(super) struct HostTarget {
 /// Inputs of one invitation, parsed and checked by clap before any Hub or GitHub I/O.
 #[derive(Args)]
 pub(super) struct InviteArgs {
-    #[arg(long, required_unless_present = "token_only")]
+    #[arg(value_name = "NAME", conflicts_with = "legacy_name", required_unless_present_any = ["token_only", "legacy_name"])]
     pub(super) name: Option<String>,
+    /// Legacy spelling for the machine name.
+    #[arg(long = "name", conflicts_with = "name")]
+    pub(super) legacy_name: Option<String>,
     #[arg(long)]
     pub(super) ssh_user: Option<String>,
     #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(60..=86400))]
     pub(super) ttl_seconds: u64,
     /// Create a manual Hub invitation without selecting a GitHub binary.
-    #[arg(long, conflicts_with_all = ["ssh_user", "version", "target", "bootstrap_hub_ca_cert", "embed_github_token", "gateway_index"])]
+    #[arg(long, conflicts_with_all = ["ssh_user", "version", "target", "os", "bootstrap_hub_ca_cert", "gateway_index"])]
     pub(super) token_only: bool,
-    /// Explicitly expose the Controller's GitHub PAT in the printed bootstrap.
-    #[arg(long, conflicts_with = "token_only")]
-    pub(super) embed_github_token: bool,
     #[arg(long)]
     pub(super) version: Option<String>,
-    #[arg(long, required_unless_present = "token_only", value_parser = parse_target)]
+    #[arg(long, required_unless_present_any = ["token_only", "os"], conflicts_with = "os", value_parser = parse_target)]
     pub(super) target: Option<Target>,
+    /// Target operating-system family; the target chooses its compatible binary.
+    #[arg(long, value_parser = ["windows", "linux"], conflicts_with = "target")]
+    pub(super) os: Option<String>,
     /// Zero-based index in the Hub-approved gateway list for Agent installation.
     #[arg(long)]
     pub(super) gateway_index: Option<usize>,
@@ -74,7 +77,7 @@ pub(super) enum Command {
     Info { host: String },
     /// Verify a registered host using its current Hub pins and SSH identity.
     Verify { host: String },
-    /// Create an invitation using authenticated KDmasterLOL/hostlink GitHub Releases.
+    /// Create an invitation using public KDmasterLOL/hostlink GitHub Releases.
     Invite(InviteArgs),
     /// Change a host's display-only label.
     DisplayName { host: String, display_name: String },

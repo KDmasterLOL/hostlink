@@ -7,7 +7,7 @@ fn hostlink(args: &[&str], config: &std::path::Path) -> std::process::Output {
         .args(args)
         .env("HOSTLINK_HUB_CONFIG", config)
         .env("HOME", config.parent().unwrap())
-        // Release tests must never consult a developer's real GitHub PAT.
+        // Keep fixture resolution isolated from the developer configuration.
         .env(
             "XDG_CONFIG_HOME",
             config.parent().unwrap().join("missing-test-config"),
@@ -29,10 +29,10 @@ fn invite_selects_only_github_release_and_keeps_token_only_mode() {
     );
     for option in [
         "--token-only",
-        "--embed-github-token",
         "--ssh-user",
         "--version",
         "--target",
+        "--os",
         "--bootstrap-hub-ca-cert",
     ] {
         assert!(
@@ -41,6 +41,7 @@ fn invite_selects_only_github_release_and_keeps_token_only_mode() {
         );
     }
     for removed in [
+        "--embed-github-token",
         "--installer-url",
         "--installer-sha256",
         "--agent-url",
@@ -56,7 +57,7 @@ fn invite_selects_only_github_release_and_keeps_token_only_mode() {
 }
 
 #[test]
-fn invalid_target_or_missing_github_credential_fail_before_any_hub_invite_request() {
+fn invalid_target_fails_without_contacting_hub() {
     let root = tempfile::tempdir().expect("temporary config directory");
     // The config is HostLink-managed state, not an arbitrary public fixture.
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
@@ -96,57 +97,22 @@ fn invalid_target_or_missing_github_credential_fail_before_any_hub_invite_reques
     assert!(
         String::from_utf8_lossy(&invalid_target.stderr).contains("unsupported bootstrap target")
     );
-
-    let output = hostlink(
-        &[
-            "invite",
-            "--name",
-            "lab-win7",
-            "--target",
-            "x86_64-win7-windows-msvc",
-        ],
-        &config,
-    );
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("GitHub credential"), "{stderr}");
-    assert!(!stderr.contains("disposable-operator-token"));
-    let embedded = hostlink(
-        &[
-            "invite",
-            "--name",
-            "lab-win7",
-            "--target",
-            "x86_64-win7-windows-msvc",
-            "--embed-github-token",
-        ],
-        &config,
-    );
-    assert!(!embedded.status.success());
-    assert!(String::from_utf8_lossy(&embedded.stderr).contains("GitHub credential"));
-    assert!(!String::from_utf8_lossy(&embedded.stdout).contains("token:"));
-    assert!(!stderr.contains("Hub request"), "{stderr}");
 }
 
 #[test]
 fn invalid_invitation_target_is_rejected_before_reading_hub_configuration() {
     let root = tempfile::tempdir().expect("temporary config directory");
-    for embed in [false, true] {
-        let mut args = vec![
-            "invite",
-            "--name",
-            "lab-win7",
-            "--target",
-            "unsupported-target",
-        ];
-        if embed {
-            args.push("--embed-github-token");
-        }
-        let output = hostlink(&args, &root.path().join("missing-hub.json"));
-        assert_eq!(output.status.code(), Some(2));
-        assert!(output.stdout.is_empty());
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("unsupported bootstrap target"), "{stderr}");
-        assert!(!stderr.contains("No such file"), "{stderr}");
-    }
+    let args = [
+        "invite",
+        "--name",
+        "lab-win7",
+        "--target",
+        "unsupported-target",
+    ];
+    let output = hostlink(&args, &root.path().join("missing-hub.json"));
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unsupported bootstrap target"), "{stderr}");
+    assert!(!stderr.contains("No such file"), "{stderr}");
 }

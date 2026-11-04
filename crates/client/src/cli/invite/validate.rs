@@ -13,6 +13,22 @@ pub enum Target {
     LinuxX64,
 }
 
+/// Operating-system family for release preflight, independent of the Controller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OsFamily {
+    Windows,
+    Linux,
+}
+
+impl OsFamily {
+    pub fn targets(self) -> &'static [Target] {
+        match self {
+            Self::Windows => &[Target::Win7X86, Target::Win7X64, Target::Win11X64],
+            Self::Linux => &[Target::LinuxX64],
+        }
+    }
+}
+
 impl Target {
     pub fn parse(value: &str) -> Result<Self, BootstrapError> {
         match value {
@@ -48,7 +64,7 @@ impl Target {
 
 #[derive(Clone, Debug)]
 pub struct ArtifactSelection {
-    // Only the authenticated GitHub resolver may issue a selection to callers.
+    // Only the public GitHub resolver may issue a selection to callers.
     // Rendering a caller-built set of untrusted URL/digest fields bypasses that
     // ownership boundary even if the target-side downloader fails closed.
     pub(super) agent_url: Url,
@@ -70,11 +86,6 @@ pub enum BootstrapError {
 }
 
 impl ArtifactSelection {
-    /// Verified GitHub-published digest associated with the selected executable.
-    pub fn agent_sha256(&self) -> &str {
-        &self.agent_sha256
-    }
-
     pub(super) fn validate(&self) -> Result<(), BootstrapError> {
         if !canonical_name(&self.name) {
             return Err(BootstrapError::Invalid(
@@ -93,8 +104,7 @@ impl ArtifactSelection {
         if hub.path() != "/" || hub.query().is_some() {
             return Err(BootstrapError::Invalid("Hub URL must be an HTTPS origin"));
         }
-        // URL paths carry opaque GitHub asset IDs; release names/version and
-        // published digests are checked by the authenticated metadata resolver.
+        // Release names and published digests are checked by the metadata resolver.
         validate_github_asset_url(&self.agent_url)?;
         Ok(())
     }
@@ -102,18 +112,15 @@ impl ArtifactSelection {
 
 pub(super) fn validate_github_asset_url(url: &Url) -> Result<(), BootstrapError> {
     validate_https_url(url)?;
-    let id = url
-        .path()
-        .strip_prefix("/repos/KDmasterLOL/hostlink/releases/assets/");
-    if url.host_str() != Some("api.github.com")
+    if url.host_str() != Some("github.com")
         || url.port().is_some()
         || url.query().is_some()
-        || !id.is_some_and(|id| {
-            id.bytes().all(|byte| byte.is_ascii_digit()) && id.parse::<u64>().is_ok_and(|id| id > 0)
-        })
+        || !url
+            .path()
+            .starts_with("/KDmasterLOL/hostlink/releases/download/v")
     {
         return Err(BootstrapError::Invalid(
-            "exact credential-free KDmasterLOL/hostlink GitHub API asset URL required",
+            "public GitHub release URL required",
         ));
     }
     Ok(())

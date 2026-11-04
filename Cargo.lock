@@ -1448,6 +1448,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "clap",
+ "flate2",
  "futures",
  "hostlink-agent",
  "hostlink-hub",

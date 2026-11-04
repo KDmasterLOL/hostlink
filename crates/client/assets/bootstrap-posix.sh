@@ -17,23 +17,14 @@ trap 'exit 130' HUP INT TERM
 hl_download "$agent_url" "$agent" 268435456 120
 printf '%s  %s\n' "$agent_sha256" "$agent" | sha256sum -c -
 chmod 700 "$agent"
-# A verified binary is required before even asking for the one-use Hub token.
-hl_tty_state=$(stty -g </dev/tty) || hl_fail 'An interactive target terminal is required.'
-trap 'stty "$hl_tty_state" </dev/tty; cleanup' 0
-stty -echo </dev/tty
-printf 'One-use HostLink invite token: ' >/dev/tty
-IFS= read -r token </dev/tty
-stty "$hl_tty_state" </dev/tty
-trap cleanup 0
-printf '\n' >/dev/tty
-[ "${#token}" -eq 64 ] || hl_fail 'Invalid invite token size.'
-case "$token" in *[!0-9a-f]*) unset token; hl_fail 'Invalid invite token format.' ;; esac
-(set -C; printf '%s' "$token" > "$token_file")
-unset token
+# The stage is private; CreateNew prevents replacing an existing file.
+(set -C; printf '%s' "$HL_INVITE" > "$token_file")
+unset HL_INVITE
 set -- install --hub-url "$hub_url" --token-file "$token_file" --name "$name" --user "$ssh_user"
 if [ -n "$hub_ca_cert" ]; then set -- "$@" --hub-ca-cert "$hub_ca_cert"; fi
 if [ -n "$gateway_index" ]; then set -- "$@" --gateway-index "$gateway_index"; fi
 "$agent" "$@"
 cleanup
 trap - 0 HUP INT TERM
-exec "$root/bin/hostlink-agent" run --config "$root/state/agent.json"
+"$root/bin/hostlink-agent" service install --root "$root" --config "$root/state/agent.json"
+"$root/bin/hostlink-agent" service start --root "$root"

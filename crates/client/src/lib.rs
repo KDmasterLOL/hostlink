@@ -1,6 +1,5 @@
 //! Pure-Rust SSH controller: pinned russh transport and direct/forwarded execution.
 
-pub mod bootstrap;
 pub mod connect;
 pub mod exec;
 pub mod forward;

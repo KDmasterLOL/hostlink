@@ -1,7 +1,7 @@
 use super::*;
 use crate::cli::args::{Cli, Command};
+use crate::cli::invite::Target;
 use clap::Parser;
-use hostlink::bootstrap::Target;
 use std::fs::{self, File};
 
 #[test]
@@ -16,7 +16,7 @@ fn release_invite_requires_name_target_and_preserves_token_only() {
     ];
     assert!(Cli::try_parse_from(base).is_ok());
     assert!(Cli::try_parse_from(base.into_iter().chain(["--version", "1.2.3"])).is_ok());
-    assert!(Cli::try_parse_from(base.into_iter().chain(["--embed-github-token"])).is_ok());
+    assert!(Cli::try_parse_from(base.into_iter().chain(["--embed-github-token"])).is_err());
     assert!(Cli::try_parse_from(["hostlink", "invite", "--token-only"]).is_ok());
     assert!(Cli::try_parse_from(["hostlink", "invite"]).is_err());
     for flags in [
@@ -24,7 +24,6 @@ fn release_invite_requires_name_target_and_preserves_token_only() {
         vec!["--ssh-user", "agent"],
         vec!["--version", "1.2.3"],
         vec!["--bootstrap-hub-ca-cert", "ca.pem"],
-        vec!["--embed-github-token"],
         vec!["--gateway-index", "0"],
     ] {
         let error = Cli::try_parse_from(
@@ -47,6 +46,30 @@ fn release_invite_requires_name_target_and_preserves_token_only() {
         "--github-token",
     ] {
         assert!(Cli::try_parse_from(base.into_iter().chain([flag, "fixture"])).is_err());
+    }
+}
+
+#[test]
+fn invite_family_and_legacy_flags_are_exclusive() {
+    for os in ["windows", "linux"] {
+        assert!(Cli::try_parse_from(["hostlink", "invite", "fixture", "--os", os]).is_ok());
+        assert!(
+            Cli::try_parse_from(["hostlink", "invite", "--name", "fixture", "--os", os]).is_ok()
+        );
+    }
+    for args in [
+        vec!["fixture", "--os", "macos"],
+        vec![
+            "fixture",
+            "--os",
+            "linux",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+        ],
+        vec!["fixture", "--name", "other", "--os", "linux"],
+        vec!["--token-only", "--os", "linux"],
+    ] {
+        assert!(Cli::try_parse_from(["hostlink", "invite"].into_iter().chain(args)).is_err());
     }
 }
 

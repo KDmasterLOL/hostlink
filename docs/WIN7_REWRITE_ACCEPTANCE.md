@@ -28,7 +28,7 @@ Review each PE report: machine must be `0x8664` for x64 or `0x14c` for x86; subs
 
 ## PowerShell 2 syntax
 
-Generate credential-free fixtures with `cargo test --locked -p hostlink --lib bootstrap::tests::export_raw_windows_parse_fixtures -- --ignored --exact` after setting `HOSTLINK_PARSE_FIXTURE_DIR` to a new private directory. Verify hashes after transfer and parse each fixture on PowerShell 2 using its parser without executing it. An automated native parser gate is currently missing.
+The new inline bootstrap targets PowerShell 2, but its generated command and decompressed script require native parser and execution checks on Windows 7. The old saved-helper fixture exporter was deleted. Native GitHub TLS, download, SHA-256, enrollment and service startup remain separate acceptance gates; PowerShell syntax alone is not acceptance.
 
 ## Native acceptance
 

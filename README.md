@@ -50,13 +50,13 @@ hostlink exec --host lab-host --command 'hostname'
 hostlink upload --host lab-host --local ./input.bin --remote input.bin
 ```
 
-A new machine requires a one-use Hub invitation. **The current CLI requires an exact release target**:
+A new machine requires a one-use Hub invitation:
 
 ```sh
-hostlink invite --name lab-win7 --target x86_64-win7-windows-msvc
+hostlink invite lab-win7 --os windows
 ```
 
-The current bootstrap prints a disposable platform-specific helper. Its target-side GitHub credential requirement and the optional `--embed-github-token` mode are documented in [Releases and bootstrap](docs/GITHUB_RELEASES.md). A shorter OS-based invite command is a proposed enhancement, not yet part of the CLI.
+The command prints one paste-ready bootstrap containing a one-use invitation. Protect it as a secret. Public release downloads require no GitHub PAT; see [Releases and bootstrap](docs/GITHUB_RELEASES.md) for target shell and platform requirements.
 
 ## Documentation
 

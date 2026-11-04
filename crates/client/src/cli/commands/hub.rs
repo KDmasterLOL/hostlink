@@ -1,5 +1,5 @@
 use crate::cli::args::{HubCommand, InviteArgs};
-use hostlink::bootstrap;
+use crate::cli::invite as invite_source;
 use hostlink::host::Host;
 use hostlink::hub::{HubClient, HubConfig};
 use private_fs::{Durability, PrivateDir, Publication};
@@ -125,15 +125,17 @@ pub(super) async fn remove(host: &str, yes: bool) -> Result<i32, Box<dyn Error>>
 pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
     let InviteArgs {
         name,
+        legacy_name,
         ssh_user,
         ttl_seconds,
         token_only,
-        embed_github_token,
         version,
         target,
+        os,
         bootstrap_hub_ca_cert,
         gateway_index,
     } = args;
+    let name = name.or(legacy_name);
     let config_path = default_hub_config_path()?;
     let config = load_hub_config(&config_path)?;
     let selection = if token_only {
@@ -145,54 +147,66 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
         let selected_name = name
             .clone()
             .ok_or("--name is required for a runnable bootstrap")?;
-        let selected_target = target.ok_or("--target is required unless --token-only is used")?;
-        let selection = bootstrap::resolve_github_selection(
-            version.as_deref(),
-            selected_target,
-            selected_name,
-            ssh_user.unwrap_or_else(|| config.ssh_user.clone()),
-            config.hub_url.clone(),
-            bootstrap_hub_ca_cert,
-            gateway_index,
-        )
-        .await?;
-        Some(selection)
+        let selected_user = ssh_user.unwrap_or_else(|| config.ssh_user.clone());
+        let selections = if let Some(os) = os {
+            let family = if os == "windows" {
+                invite_source::OsFamily::Windows
+            } else {
+                invite_source::OsFamily::Linux
+            };
+            invite_source::resolve_github_family(
+                version.as_deref(),
+                family,
+                selected_name,
+                selected_user,
+                config.hub_url.clone(),
+                bootstrap_hub_ca_cert,
+                gateway_index,
+            )
+            .await?
+        } else {
+            vec![
+                invite_source::resolve_github_selection(
+                    version.as_deref(),
+                    target.ok_or("--os or --target is required")?,
+                    selected_name,
+                    selected_user,
+                    config.hub_url.clone(),
+                    bootstrap_hub_ca_cert,
+                    gateway_index,
+                )
+                .await?,
+            ]
+        };
+        Some(selections)
     };
     // Resolve the exact raw asset/digest and render before creating a Hub invite.
     // Target-side SHA-256 verification precedes the invite token prompt and install.
     let bootstrap_command = match &selection {
-        Some(selection) if embed_github_token => {
-            Some(bootstrap::render_command_embedded(selection)?)
-        }
-        Some(selection) => Some(bootstrap::render_command(selection)),
+        Some(selection) => Some(invite_source::prepare_inline(selection)?),
         None => None,
     };
     if selection.is_some() {
         eprintln!(
-            "GitHub SHA-256 authenticates API-selected bytes; it is not an independent publisher signature."
+            "GitHub metadata supplies the SHA-256 pin; it is not an independent publisher signature."
         );
     }
-    if embed_github_token {
+    if selection.is_some() {
         eprintln!(
-            "WARNING: bootstrap_command contains your GitHub PAT in plain text. Protect stdout, terminal history and clipboard; delete any saved Windows bootstrap helper after installation. Every target receiving this PAT can read the authorized private GitHub repository."
+            "WARNING: the command contains a one-use invitation; protect terminal history and clipboard."
         );
     }
     let client = HubClient::from_config(&config)?;
     let pending = Host::create(&client, name, ttl_seconds).await?;
     let invite = pending.into_invitation();
-    println!(
-        "token: {}\nexpires_at: {}",
-        invite.token.expose_secret(),
-        invite.expires_at
-    );
-    if let (Some(selection), Some(bootstrap_command)) = (&selection, bootstrap_command) {
-        println!(
-            "artifact_binding: target-verifies-before-enrollment\nagent_sha256: {}\nbootstrap_command:\n{}",
-            selection.agent_sha256(),
-            bootstrap_command
-        );
+    if let Some(bootstrap_command) = bootstrap_command {
+        println!("{}", bootstrap_command.bind(invite.token.expose_secret())?);
     } else {
-        println!("artifact_binding: token-only; no bootstrap command");
+        println!(
+            "token: {}\nexpires_at: {}\nartifact_binding: token-only; no bootstrap command",
+            invite.token.expose_secret(),
+            invite.expires_at
+        );
     }
     Ok(0)
 }
