@@ -138,20 +138,20 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
     let name = name.or(legacy_name);
     let config_path = default_hub_config_path()?;
     let config = load_hub_config(&config_path)?;
-    // Resolve against the authenticated, pin-validated inventory before minting a one-use invite.
     let client = HubClient::from_config(&config)?;
-    let gateways = client.info().await?;
-    let gateway_index = match gateway_index {
-        Some(index) if index < gateways.len() => index,
-        Some(_) => return Err("--gateway-index is outside the Hub-approved gateway list; check hostlink hub check and /v2/info".into()),
-        None => select_primary_gateway(&gateways, config.preferred_gateway.as_deref())?,
-    };
     let selection = if token_only {
         if name.is_some() && name.as_deref().is_some_and(|value| value.trim().is_empty()) {
             return Err("invitation name cannot be empty".into());
         }
         None
     } else {
+        // Resolve against the authenticated, pin-validated inventory before minting a one-use invite.
+        let gateways = client.info().await?;
+        let gateway_index = match gateway_index {
+            Some(index) if index < gateways.len() => index,
+            Some(_) => return Err("--gateway-index is outside the Hub-approved gateway list; check hostlink hub check and /v2/info".into()),
+            None => select_primary_gateway(&gateways, config.preferred_gateway.as_deref())?,
+        };
         let selected_name = name
             .clone()
             .ok_or("--name is required for a runnable bootstrap")?;

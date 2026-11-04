@@ -10,34 +10,7 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
-// The fixture serves actual authenticated HTTPS; GitHub metadata remains the production source.
-const SERVER: &str = r#"
-import http.server, json, ssl, sys
-root, cert, key = sys.argv[1:]
-class Handler(http.server.BaseHTTPRequestHandler):
-    def log_message(self, *args): pass
-    def handle_request(self):
-        with open(root + '/requests', 'a') as f: f.write(self.command + ' ' + self.path + '\n')
-        if self.headers.get('Authorization') != 'Bearer fixture-operator-token':
-            self.send_error(401); return
-        if self.command == 'GET' and self.path == '/v2/info':
-            with open(root + '/info.json') as f: body = json.load(f)
-        elif self.command == 'POST' and self.path == '/v2/invites':
-            self.rfile.read(int(self.headers['Content-Length']))
-            body = {'token': 'a' * 64, 'expires_at': 4102444800}
-        else:
-            self.send_error(404); return
-        data = json.dumps(body).encode()
-        self.send_response(200); self.send_header('Content-Length', str(len(data)))
-        self.end_headers(); self.wfile.write(data)
-    do_GET = handle_request
-    do_POST = handle_request
-server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
-ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain(cert, key)
-server.socket = ctx.wrap_socket(server.socket, server_side=True)
-print(server.server_port, flush=True)
-server.serve_forever()
-"#;
+const SERVER: &str = include_str!("fixtures/invite_hub.py");
 
 struct Server(Child);
 impl Drop for Server {
@@ -86,22 +59,7 @@ fn exercise_invites(online: bool) {
     let key = root.path().join("key.pem");
     assert!(
         Command::new("openssl")
-            .args([
-                "req",
-                "-x509",
-                "-newkey",
-                "rsa:2048",
-                "-nodes",
-                "-days",
-                "1",
-                "-subj",
-                "/CN=localhost",
-                "-addext",
-                "subjectAltName=IP:127.0.0.1",
-                "-addext",
-                "basicConstraints=critical,CA:FALSE",
-                "-keyout"
-            ])
+            .args("req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost -addext subjectAltName=IP:127.0.0.1 -addext basicConstraints=critical,CA:FALSE -keyout".split_whitespace())
             .arg(&key)
             .arg("-out")
             .arg(&cert)
@@ -146,6 +104,7 @@ fn exercise_invites(online: bool) {
         (2, Some("edge-b.example:22"), None, "windows", Some(1)),
         (1, None, None, "linux", Some(0)),
         (2, Some("edge-b.example:22"), Some("0"), "linux", Some(0)),
+        (2, None, None, "token", None),
         (2, None, Some("2"), "linux", None),
         (2, None, None, "linux", None),
         (2, Some("stale.example:22"), None, "linux", None),
@@ -160,15 +119,30 @@ fn exercise_invites(online: bool) {
         fs::write(&requests, "").unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_hostlink"));
         command
-            .args(["invite", "lab-host", "--os", os, "--version", "0.1.1"])
+            .args(["invite", "lab-host"])
             .env("HOSTLINK_HUB_CONFIG", &config)
             .env("HOME", root.path());
+        if os == "token" {
+            command.arg("--token-only");
+        } else {
+            command.args(["--os", os, "--version", "0.1.1"]);
+        }
         if let Some(index) = explicit {
             command.args(["--gateway-index", index]);
         }
         let output = command.output().unwrap();
         let log = fs::read_to_string(&requests).unwrap();
-        if let Some(index) = expected {
+        if os == "token" {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(log, "POST /v2/invites\n");
+            let text = String::from_utf8(output.stdout).unwrap();
+            assert!(text.contains(&format!("token: {}", "a".repeat(64))));
+            assert!(text.contains("artifact_binding: token-only; no bootstrap command"));
+        } else if let Some(index) = expected {
             assert!(
                 output.status.success(),
                 "{}",
