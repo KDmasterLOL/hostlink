@@ -17,6 +17,8 @@ The status must be empty before and after building. For Windows build on the cor
 
 There is currently no automated source-bound packaging or staging receipt gate; these checks require independent review before publication. A digest confirms byte identity, not publisher authenticity.
 
+The `Linux and Windows x64 source checks` workflow builds only those two Agents on push and pull requests. It checks the checkout SHA, binary identity, size and copied-byte hashes. Its optional `check_win7` dispatch also attempts both Win7 cross-builds and rejects incompatible PE headers and imports. This optional check depends on provisioning the pinned SDK/CRT and has not been established as a complete release producer: Win7 binary identity, a retained set of four assets, a combined receipt and publication digest comparison remain required. The SHA is workflow provenance, not a value embedded in the executable. Native Win7 acceptance remains separate.
+
 ## Invite a machine
 
 ```sh

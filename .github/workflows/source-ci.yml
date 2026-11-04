@@ -1,0 +1,149 @@
+name: Linux and Windows x64 source checks
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+    inputs:
+      check_win7:
+        description: Run experimental Win7 cross-build and PE checks
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  source-build:
+    name: Build and inspect ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            suffix: ''
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            suffix: .exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Pin Rust and verify source
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup target add --toolchain 1.99.1 "${{ matrix.target }}"
+          test "$(rustc +1.99.1 -Vv | sed -n 's/^commit-hash: //p')" = 58cf8f9c35b355199727627d07ae34a4e2846d67
+          rustc +1.99.1 -Vv
+          cargo +1.99.1 -V
+      - name: Build and verify copied bytes and identity
+        env:
+          TARGET: ${{ matrix.target }}
+          SUFFIX: ${{ matrix.suffix }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cargo +1.99.1 build --locked --release -p hostlink-agent --target "$TARGET"
+          source="target/$TARGET/release/hostlink-agent$SUFFIX"
+          staging=$(mktemp -d)
+          asset="$staging/hostlink-agent-${TARGET}${SUFFIX}"
+          test -f "$source" && test ! -L "$source" && test -s "$source"
+          test "$(wc -c < "$source")" -le 268435456
+          cp "$source" "$asset"
+          cmp "$source" "$asset"
+          source_sha=$(sha256sum "$source" | cut -d ' ' -f 1)
+          asset_sha=$(sha256sum "$asset" | cut -d ' ' -f 1)
+          test "$source_sha" = "$asset_sha"
+          version=$(cargo +1.99.1 metadata --locked --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "hostlink-agent") | .version')
+          "$asset" binary-info | jq -e --arg version "$version" --arg target "$TARGET" '. == {version: $version, target: $target}'
+          if [[ "$TARGET" == *windows* ]]; then
+            '/c/Program Files/LLVM/bin/llvm-readobj.exe' --file-headers --coff-imports "$asset" > "$staging/agent-pe.txt"
+            grep -Eq 'Machine: .*\(0x8664\)' "$staging/agent-pe.txt"
+            grep -Eq 'Subsystem: .*\(0x3\)' "$staging/agent-pe.txt"
+            grep -Eq 'MajorSubsystemVersion: [0-9]+' "$staging/agent-pe.txt"
+            grep -Eq 'MinorSubsystemVersion: [0-9]+' "$staging/agent-pe.txt"
+          fi
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          size=$(wc -c < "$asset")
+          printf 'Source: %s\nTarget: %s\nVersion: %s\nSize: %s\nSHA256: %s\n' "$EXPECTED_SHA" "$TARGET" "$version" "$size" "$asset_sha" >> "$GITHUB_STEP_SUMMARY"
+
+  win7-cross-check:
+    name: Opt-in Win7 cross-build and PE checks
+    if: github.event_name == 'workflow_dispatch' && inputs.check_win7
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust and cargo-xwin
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup toolchain install nightly-2026-08-22 --profile minimal --component rust-src
+          test "$(rustc +nightly-2026-08-22 -Vv | sed -n 's/^commit-hash: //p')" = c656540d6467dee1381f0cbd882412d6bd1cd5ae
+          cargo +1.99.1 install cargo-xwin --version 0.23.1 --locked
+          test "$(cargo +nightly-2026-08-22 xwin --version)" = 'cargo-xwin-xwin 0.23.1'
+          command -v clang-cl
+          command -v lld-link
+          command -v llvm-readobj
+          clang-cl --version
+          llvm-readobj --version
+      - name: Provision fresh SDK and inspect Win7 binaries
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          XWIN_ARCH: x86,x86_64
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          export XWIN_CACHE_DIR
+          XWIN_CACHE_DIR=$(mktemp -d)
+          cargo +nightly-2026-08-22 xwin cache xwin --cross-compiler clang-cl \
+            --xwin-version 17 --xwin-sdk-version 10.0.26100.0 --xwin-crt-version 14.44.17.14
+          done_file="$XWIN_CACHE_DIR/xwin/DONE"
+          test -f "$done_file"
+          grep -q 'Win11SDK_10\.0\.26100' "$done_file"
+          grep -q 'Microsoft\.VC\.14\.44\.17\.14\.CRT\.x86' "$done_file"
+          staging=$(mktemp -d)
+          export CARGO_TARGET_DIR="$staging/target"
+          for target in x86_64-win7-windows-msvc i686-win7-windows-msvc; do
+            env -u CARGO_ENCODED_RUSTFLAGS RUSTFLAGS='-C target-feature=+crt-static' \
+              cargo +nightly-2026-08-22 xwin build --cross-compiler clang-cl \
+              --xwin-version 17 --xwin-sdk-version 10.0.26100.0 --xwin-crt-version 14.44.17.14 \
+              --locked --release --target "$target" -Z build-std=std,panic_abort -p hostlink-agent
+            source="$CARGO_TARGET_DIR/$target/release/hostlink-agent.exe"
+            asset="$staging/hostlink-agent-$target.exe"
+            test -f "$source" && test ! -L "$source" && test -s "$source"
+            test "$(wc -c < "$source")" -le 268435456
+            cp "$source" "$asset"
+            cmp "$source" "$asset"
+            test "$(sha256sum "$source" | cut -d ' ' -f 1)" = "$(sha256sum "$asset" | cut -d ' ' -f 1)"
+            llvm-readobj --file-headers --coff-imports "$asset" > "$staging/pe.txt"
+            if [[ "$target" == i686-* ]]; then machine=0x14C; else machine=0x8664; fi
+            grep -Eiq "Machine: .*\($machine\)" "$staging/pe.txt"
+            grep -Eq 'Subsystem: .*\(0x3\)' "$staging/pe.txt"
+            grep -Eq 'MajorSubsystemVersion: 6$' "$staging/pe.txt"
+            grep -Eq 'MinorSubsystemVersion: 0$' "$staging/pe.txt"
+            imports=$(awk '/^[[:space:]]*Name:/ { if ($NF ~ /\.[Dd][Ll][Ll]$/) print tolower($NF) }' "$staging/pe.txt")
+            test -n "$imports"
+            if grep -Eqi '^(api-ms-win-crt.*|ucrtbase\.dll|msvcrt\.dll|vcruntime.*\.dll|msvcp.*\.dll|concrt.*\.dll|combase\.dll)$' <<< "$imports"; then
+              echo '::error::Win7 binary imports a forbidden DLL'
+              exit 1
+            fi
+            printf 'Source: %s, target: %s, size: %s, SHA256: %s\n' "$EXPECTED_SHA" "$target" "$(wc -c < "$asset")" "$(sha256sum "$asset" | cut -d ' ' -f 1)" >> "$GITHUB_STEP_SUMMARY"
+          done
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
