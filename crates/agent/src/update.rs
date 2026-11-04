@@ -7,7 +7,11 @@ use crate::{
     private_fs::PrivateFileExt,
 };
 use private_fs::{FileAccess, FileCreation, OpenOptions, PrivateDir};
-use self_update::{Checksum, backends::github::Update, update::ReleaseAsset};
+use self_update::{
+    Checksum,
+    backends::github::Update,
+    update::{Release, ReleaseAsset},
+};
 use semver::Version;
 use std::{
     fs::{self, File},
@@ -41,6 +45,7 @@ pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
     github
         .repo_owner("KDmasterLOL")
         .repo_name("hostlink")
+        .tag_prefix("v")
         .current_version(&installed.version)
         .bin_name(EXECUTABLE_NAME)
         .bin_path_in_archive(EXECUTABLE_NAME)
@@ -72,6 +77,7 @@ pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
             .ok_or_else(|| invalid("no published HostLink release on GitHub"))?
     };
     let version = Version::parse(release.version()).map_err(io::Error::other)?;
+    validate_release_tag(&release, &version)?;
     if requested.is_some_and(|requested| *requested != version) {
         return Err(invalid("GitHub release differs from the requested version"));
     }
@@ -136,6 +142,16 @@ pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
         ));
     }
     Ok(true)
+}
+
+fn validate_release_tag(release: &Release, version: &Version) -> io::Result<()> {
+    let expected = format!("https://github.com/KDmasterLOL/hostlink/releases/tag/v{version}");
+    if release.release_notes_url() != Some(expected.as_str()) {
+        return Err(invalid(
+            "GitHub release tag URL differs from the selected version",
+        ));
+    }
+    Ok(())
 }
 
 fn public_download_asset(

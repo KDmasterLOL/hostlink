@@ -147,3 +147,43 @@ fn offline_locks_are_exclusive_without_inspecting_apalis() {
     }
     assert!(!root.join("jobs/jobs.db").exists());
 }
+
+#[test]
+fn release_tag_url_must_match_the_exact_canonical_version() {
+    let version = Version::parse("1.2.3").unwrap();
+    for (url, valid) in [
+        (
+            "https://github.com/KDmasterLOL/hostlink/releases/tag/v1.2.3",
+            true,
+        ),
+        (
+            "https://github.com/KDmasterLOL/hostlink/releases/tag/1.2.3",
+            false,
+        ),
+        (
+            "https://github.com/KDmasterLOL/hostlink/releases/tag/vv1.2.3",
+            false,
+        ),
+        (
+            "https://github.com/KDmasterLOL/hostlink/releases/tag/v1.2.4",
+            false,
+        ),
+        (
+            "https://github.com.evil.test/KDmasterLOL/hostlink/releases/tag/v1.2.3",
+            false,
+        ),
+    ] {
+        let release = Release::builder()
+            .version("1.2.3")
+            .release_notes_url(url)
+            .build()
+            .unwrap();
+        assert_eq!(
+            validate_release_tag(&release, &version).is_ok(),
+            valid,
+            "{url}"
+        );
+    }
+    let release = Release::builder().version("1.2.3").build().unwrap();
+    assert!(validate_release_tag(&release, &version).is_err());
+}
