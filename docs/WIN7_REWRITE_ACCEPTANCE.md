@@ -8,6 +8,8 @@ Use `just build-win7-x64` and `just build-win7-x86` for local builds; `just stag
 
 Use a clean, committed worktree and record `git rev-parse HEAD` before and after building. Both status checks (`git status --porcelain=v1`) must be empty. Provision `nightly-2026-08-22` with `rust-src`, cargo-xwin 0.23.1, clang-cl, and an xwin cache containing SDK 10.0.26100.0 and CRT 14.44.17.14 for both x86 and x86_64. Verify the cache provenance independently.
 
+`XWIN_CACHE_DIR` must be writable: cargo-xwin updates compiler links and generated toolchain files in the cache even when the SDK is already present. The Justfile checks that the cache's `xwin/DONE` lists both architectures on its first line before invoking cargo-xwin, avoiding an automatic SDK download for a missing architecture. Build output under ignored `target/` does not make the Git worktree dirty.
+
 ```sh
 export XWIN_CACHE_DIR="$HOME/.cache/hostlink/msvc-sdk-v17/mount"
 export XWIN_ARCH=x86,x86_64

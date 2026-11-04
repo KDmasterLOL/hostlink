@@ -50,6 +50,10 @@ _build target:
       export XWIN_CACHE_DIR="${XWIN_CACHE_DIR:-$HOME/.cache/hostlink/win7-xwin-current-14368fb}"
       done_file="$XWIN_CACHE_DIR/xwin/DONE"
       test -f "$done_file"
+      # cargo-xwin uses the first line to decide whether to download more SDKs.
+      for arch in x86 x86_64; do
+        head -n 1 "$done_file" | grep -qw "$arch" || { echo "xwin cache missing architecture: $arch" >&2; exit 1; }
+      done
       grep -q 'Win11SDK_10\.0\.26100' "$done_file"
       for arch in x86 x64; do grep -q "Microsoft\.VC\.14\.44\.17\.14\.CRT\.$arch" "$done_file"; done
       test -s "$XWIN_CACHE_DIR/xwin/sdk/include/ucrt/assert.h"
