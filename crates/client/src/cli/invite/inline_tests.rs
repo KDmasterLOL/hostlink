@@ -248,3 +248,126 @@ fn windows_wrapper_passes_synthetic_invite_without_parent_expansion() {
     assert!(unpack(&command).contains("$Invite=$args[0]"));
     assert!(command.len() <= CMD_LIMIT);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn actual_posix_command_runs_offline_and_cleans_failures() {
+    use sha2::{Digest, Sha256};
+    use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    let tmp = dir.path().join("tmp");
+    fs::create_dir(&bin).unwrap();
+    fs::create_dir(&tmp).unwrap();
+    let agent = dir.path().join("synthetic-agent");
+    let agent_script = r##"#!/bin/sh
+set -eu
+if [ "$1" = install ]; then
+    [ "$FIXTURE_MODE" != agent_fail ] || exit 1
+    shift
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = --token-file ]; then shift; token=$1; fi
+        if [ "$1" = --hub-ca-cert ]; then shift; printf '%s' "$1" > "$FIXTURE_CA"; fi
+        shift
+    done
+    [ "$(stat -c %a "$token")" = 600 ]
+    [ "$(cat "$token")" = "$(printf '%064d' 0 | tr 0 a)" ]
+    printf install >> "$FIXTURE_LOG"
+    mkdir -p "$XDG_DATA_HOME/hostlink/Agent/bin"
+    cp "$FIXTURE_AGENT" "$XDG_DATA_HOME/hostlink/Agent/bin/hostlink-agent"
+else
+    printf ' %s' "$2" >> "$FIXTURE_LOG"
+fi
+"##;
+    fs::write(&agent, agent_script).unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
+    let curl = bin.join("curl");
+    fs::write(&curl, r##"#!/bin/sh
+set -eu
+if [ "$2" = --version ]; then echo 'curl 8.4.0'; exit; fi
+out= url=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output) shift; out=$1 ;;
+        --location|--location-trusted|*[Aa]uthorization*) exit 91 ;;
+        https://*) url=$1 ;;
+    esac
+    shift
+done
+printf '%s\n' "$url" >> "$FIXTURE_URLS"
+case "$FIXTURE_MODE" in
+    download_fail) exit 22 ;;
+    unsafe_redirect) printf '302\nhttps://evil.invalid/asset'; exit ;;
+    redirect) case "$url" in
+        https://github.com/*) printf '302\nhttps://release-assets.githubusercontent.com/synthetic'; exit ;;
+        https://release-assets.githubusercontent.com/*) ;;
+        *) exit 92 ;;
+    esac ;;
+esac
+cp "$FIXTURE_AGENT" "$out"
+printf '200\n'
+"##).unwrap();
+    fs::set_permissions(&curl, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut assets = selections(&[Target::LinuxX64]);
+    assets[0].agent_sha256 = format!("{:x}", Sha256::digest(agent_script.as_bytes()));
+    assets[0].bootstrap_hub_ca_cert = Some("a'b;$(touch should-not-exist)".into());
+    let command = render_inline(&assets)
+        .unwrap()
+        .bind(&"a".repeat(64))
+        .unwrap();
+    assert!(!command.contains('\n'));
+    let syntax = Command::new("sh")
+        .args(["-n", "-c", &command])
+        .status()
+        .unwrap();
+    assert!(syntax.success());
+    for mode in [
+        "redirect",
+        "download_fail",
+        "unsafe_redirect",
+        "bad_digest",
+        "agent_fail",
+    ] {
+        let log = dir.path().join("log");
+        let urls = dir.path().join("urls");
+        let ca = dir.path().join("ca");
+        let _ = fs::remove_file(&log);
+        let _ = fs::remove_file(&urls);
+        let mut selected = assets.clone();
+        if mode == "bad_digest" {
+            selected[0].agent_sha256 = "0".repeat(64);
+        }
+        let command = render_inline(&selected)
+            .unwrap()
+            .bind(&"a".repeat(64))
+            .unwrap();
+        let output = Command::new("sh").arg("-c")
+            .arg(format!("HL_INVITE=parent; HL_SCRIPT=parent; {command}; result=$?; [ \"$HL_INVITE\" = parent ] && [ \"$HL_SCRIPT\" = parent ] || exit 99; exit \"$result\""))
+            .current_dir(dir.path()).env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("HOME", dir.path()).env("XDG_DATA_HOME", dir.path().join("data"))
+            .env("TMPDIR", &tmp).env("FIXTURE_AGENT", &agent).env("FIXTURE_LOG", &log)
+            .env("FIXTURE_URLS", &urls).env("FIXTURE_CA", &ca).env("FIXTURE_MODE", mode)
+            .output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            mode == "redirect",
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read_dir(&tmp).unwrap().count(), 0, "{mode}");
+        assert!(!dir.path().join("should-not-exist").exists());
+        if mode == "redirect" {
+            assert_eq!(fs::read_to_string(&log).unwrap(), "install install start");
+            assert_eq!(
+                fs::read_to_string(&ca).unwrap(),
+                "a'b;$(touch should-not-exist)"
+            );
+            let urls = fs::read_to_string(&urls).unwrap();
+            assert_eq!(urls.lines().count(), 2);
+            assert!(urls.starts_with("https://github.com/KDmasterLOL/hostlink/releases/download/"));
+        } else {
+            assert!(!log.exists(), "agent ran on {mode}");
+        }
+    }
+}

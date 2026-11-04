@@ -18,7 +18,7 @@ hl_download() (
     hl_major=${hl_curl_version%%.*}; hl_minor=${hl_curl_version#*.}; hl_minor=${hl_minor%%.*}
     [ "$hl_major" -gt 8 ] || { [ "$hl_major" -eq 8 ] && [ "$hl_minor" -ge 4 ]; } || hl_fail 'curl 8.4 or newer is required for bounded streaming.'
     hl_url=$1; hl_dest=$2; hl_max=$3; hl_deadline=$(($(date +%s) + $4)); hl_first=1
-    trap 'rm -f "$hl_dest"' EXIT
+    trap 'rm -f "$hl_dest"' 0
     trap 'exit 130' HUP INT TERM
     while :; do
         hl_remaining=$((hl_deadline - $(date +%s)))
@@ -44,5 +44,5 @@ hl_download() (
             *) hl_fail 'GitHub asset response status rejected.' ;;
         esac
     done
-    trap - EXIT HUP INT TERM
+    trap - 0 HUP INT TERM
 )
