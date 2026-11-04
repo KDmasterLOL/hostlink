@@ -9,7 +9,6 @@ rustc --version
 cargo build --locked --workspace
 cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets -- -D warnings
-python3 -m unittest discover -s scripts/tests
 ```
 
 Check the command-line interfaces without connecting to any host:

@@ -2,53 +2,33 @@
 
 Windows 7 uses the Tier 3 Rust targets `x86_64-win7-windows-msvc` and `i686-win7-windows-msvc`. They require a nightly Rust toolchain with `rust-src` and `-Z build-std`; ordinary Windows MSVC builds are not substitutes. See [Rust platform support](https://doc.rust-lang.org/nightly/rustc/platform-support/win7-windows-msvc.html).
 
-## Cross-compile
+## Cross-compile and inspect
 
-The repository provides `scripts/build-win7-candidate.sh`, which pins the toolchain, Windows SDK and MSVC CRT and performs PE inspection for both targets.
-
-From a clean, committed worktree:
+Use a clean, committed worktree and record `git rev-parse HEAD` before and after building. Both status checks (`git status --porcelain=v1`) must be empty. Provision `nightly-2026-08-22` with `rust-src`, cargo-xwin 0.23.1, clang-cl, and an xwin cache containing SDK 10.0.26100.0 and CRT 14.44.17.14 for both x86 and x86_64. Verify the cache provenance independently.
 
 ```sh
 export XWIN_CACHE_DIR="$HOME/.cache/hostlink/msvc-sdk-v17/mount"
-export XWIN_ARCH="x86,x86_64"
-SOURCE_SHA="$(git rev-parse HEAD)"
-scripts/build-win7-candidate.sh \
-  --source-sha "$SOURCE_SHA" \
-  --output-dir "target/win7-candidate-$SOURCE_SHA"
-```
-
-The builder requires `nightly-2026-08-22`, `cargo-xwin` 0.23.1, SDK 10.0.26100.0, CRT 14.44.17.14 and `clang-cl`. It checks the requested source SHA, clean working tree, PE machine types, subsystem and imports. The resulting `receipt.json` records binary hashes and build identity. A successful cross-build is not a native Windows 7 runtime test.
-
-## Package the executables
-
-```sh
-SOURCE_SHA="$(git rev-parse HEAD)"
-VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("crates/agent/Cargo.toml", "rb"))["package"]["version"])')"
-for TARGET in x86_64-win7-windows-msvc i686-win7-windows-msvc; do
-  python3 scripts/package-hostlink-agent.py \
-    --source-sha "$SOURCE_SHA" \
-    --target "$TARGET" \
-    --version "$VERSION" \
-    --binary "target/win7-candidate-$SOURCE_SHA/$TARGET/hostlink-agent.exe" \
-    --build-receipt "target/win7-candidate-$SOURCE_SHA/receipt.json" \
-    --output-dir "target/win7-package-$SOURCE_SHA-$TARGET"
+export XWIN_ARCH=x86,x86_64
+for target in x86_64-win7-windows-msvc i686-win7-windows-msvc; do
+  env -u CARGO_ENCODED_RUSTFLAGS RUSTFLAGS='-C target-feature=+crt-static' \
+    cargo +nightly-2026-08-22 xwin build --cross-compiler clang-cl \
+    --xwin-version 17 --xwin-sdk-version 10.0.26100.0 --xwin-crt-version 14.44.17.14 \
+    --locked --release --target "$target" -Z build-std=std,panic_abort \
+    -p hostlink-agent -p hostlink || exit 1
+  for exe in hostlink-agent.exe hostlink.exe; do
+    binary="target/$target/release/$exe"
+    test -s "$binary" || exit 1
+    sha256sum "$binary"
+    llvm-readobj --file-headers --coff-imports "$binary" > "$binary.pe.txt" || exit 1
+  done
 done
 ```
 
-Packaging emits one raw Agent executable and local provenance. See [artifact packaging](ARTIFACTS_AND_INVITES.md).
+Review each PE report: machine must be `0x8664` for x64 or `0x14c` for x86; subsystem version must be 6.0. Imports must exclude dynamic CRT DLLs (`api-ms-win-crt*`, `ucrtbase.dll`, `msvcrt.dll`, `vcruntime*`, `msvcp*`, `concrt*`) and `combase.dll`. Record reports and hashes with the source SHA and tool versions. These checks are manual; no automated receipt or PE rejection gate currently exists. Cross-compilation does not establish native compatibility. Package the raw Agent executables as described in [artifact packaging](ARTIFACTS_AND_INVITES.md).
 
-## Test PowerShell 2 bootstrap syntax
+## PowerShell 2 syntax
 
-The current Windows bootstrap supports Windows PowerShell 2. Generate synthetic, credential-free fixtures using a clean source worktree and a new private directory:
-
-```sh
-FIXTURE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hostlink-ps2-parse.XXXXXXXX")"
-export HOSTLINK_PARSE_FIXTURE_DIR="$FIXTURE_DIR"
-cargo test --offline --locked -p hostlink --lib \
-  bootstrap::tests::export_raw_windows_parse_fixtures -- --ignored --exact
-```
-
-On a Windows test machine, verify transferred fixture hashes and run `scripts/verify-raw-windows-bootstrap-parse.ps1` using PowerShell 2. The parser only checks syntax; it does not execute the bootstrap, download assets or register an Agent. The retired `scripts/verify-win7-bootstrap-native.ps1` is not a replacement for these tests.
+Generate credential-free fixtures with `cargo test --locked -p hostlink --lib bootstrap::tests::export_raw_windows_parse_fixtures -- --ignored --exact` after setting `HOSTLINK_PARSE_FIXTURE_DIR` to a new private directory. Verify hashes after transfer and parse each fixture on PowerShell 2 using its parser without executing it. An automated native parser gate is currently missing.
 
 ## Native acceptance
 

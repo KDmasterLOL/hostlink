@@ -33,7 +33,6 @@ Requirements: Rust and Cargo, the toolchain specified in `rust-toolchain.toml`, 
 cargo build --locked --workspace
 cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets -- -D warnings
-python3 -m unittest discover -s scripts/tests
 ```
 
 Windows 7 targets use an additional cross-compilation workflow; see [Windows 7 compatibility](docs/WIN7_REWRITE_ACCEPTANCE.md).

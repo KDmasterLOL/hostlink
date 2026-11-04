@@ -2,38 +2,20 @@
 
 Release packaging and inviting a machine are separate operations. Packaging does not create a Git tag, publish a release, enroll a host, or install an Agent.
 
-## Build and package
+## Build and verify raw assets
 
-Build from an exact, clean source revision:
-
-```sh
-SOURCE_SHA="$(git rev-parse HEAD)"
-cargo build --offline --locked --release -p hostlink-agent
-python3 scripts/package-hostlink-agent.py \
-  --source-sha "$SOURCE_SHA" \
-  --target x86_64-unknown-linux-gnu \
-  --version 0.1.0 \
-  --binary target/release/hostlink-agent \
-  --output-dir target/agent-package-linux-x64
-```
-
-The packaging script copies one raw executable and produces a local `artifact-receipt.json` recording its source revision, target, version, size and SHA-256. It checks source consistency and file ownership, size and content. Win7 assets additionally require a build inspection receipt from `scripts/build-win7-candidate.sh`.
-
-## Stage a release
+Build each target from the same clean, committed revision and record the full Git SHA, toolchain, target and version. For Linux:
 
 ```sh
-python3 scripts/stage-hostlink-github-release.py \
-  --package-dir target/agent-package-linux-x64 \
-  --package-dir target/agent-package-win11-x64 \
-  --package-dir target/agent-package-win7-x64 \
-  --package-dir target/agent-package-win7-x86 \
-  --output-dir target/hostlink-release-v0.1.0 \
-  --require-all-targets
+git status --porcelain=v1
+git rev-parse HEAD
+cargo build --locked --release -p hostlink-agent --target x86_64-unknown-linux-gnu
+sha256sum target/x86_64-unknown-linux-gnu/release/hostlink-agent
 ```
 
-All four packages must represent the same source revision and version. Staging verifies unique targets, binary sizes and hashes. Only the raw executable assets are uploaded to GitHub; local packaging and staging receipts remain local.
+The status must be empty before and after building. For Windows build on the corresponding MSVC environment; for Win7 follow [Win7 build and inspection](WIN7_REWRITE_ACCEPTANCE.md). Copy each executable to its exact asset name listed in [GitHub Releases](GITHUB_RELEASES.md), then calculate SHA-256 on the copied bytes and compare it with the source. Record the four target names, sizes, digests, version and source SHA together. Verify all four are unique, nonempty and built from the same revision before release. Compare the published GitHub digests with those recorded locally.
 
-See [GitHub Releases](GITHUB_RELEASES.md) for exact asset names and the current private-source policy.
+There is currently no automated source-bound packaging or staging receipt gate; these checks require independent review before publication. A digest confirms byte identity, not publisher authenticity.
 
 ## Invite a machine
 

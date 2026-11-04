@@ -15,7 +15,6 @@ HostLink is a Rust workspace with three components and one vendored filesystem d
 | Agent-local jobs and Board | `crates/agent/src/jobs/` |
 | Hub HTTPS endpoints and state | `crates/hub/src/server/`, `state.rs` |
 | Private filesystem support | `vendor/private-fs/`, `crates/agent/src/private_fs.rs` |
-| Build/package scripts and tests | `scripts/`, `scripts/tests/` |
 
 Modules with children use `name/mod.rs` and sibling files, not both `name.rs` and `name/mod.rs`. Keep visibility narrow, write focused unit/integration tests, and avoid duplicating ownership across components.
 
