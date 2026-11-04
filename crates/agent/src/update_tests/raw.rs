@@ -59,7 +59,10 @@ fn published_sha256_is_mandatory_and_must_be_exactly_32_bytes() {
     let name = asset_name(target).unwrap();
     assert!(
         selected_asset(
-            &[ReleaseAsset::new(&name, "https://api.github.com/asset")],
+            &[ReleaseAsset::new(
+                &name,
+                "https://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/1"
+            )],
             target
         )
         .is_err()
@@ -67,6 +70,60 @@ fn published_sha256_is_mandatory_and_must_be_exactly_32_bytes() {
     for digest in ["sha256:", "sha512:aa", "sha256:abcd", "sha256:not-hex"] {
         assert!(selected_asset(&[asset(&name).with_digest(digest)], target).is_err());
     }
+}
+
+#[test]
+fn asset_api_url_is_exact_and_public_download_is_bound_to_release() {
+    let target = "x86_64-unknown-linux-gnu";
+    let name = asset_name(target).unwrap();
+    let prefix = "https://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/";
+    for url in [
+        "http://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/1".to_owned(),
+        "https://user@api.github.com/repos/KDmasterLOL/hostlink/releases/assets/1".to_owned(),
+        "https://api.github.com.evil.test/repos/KDmasterLOL/hostlink/releases/assets/1".to_owned(),
+        "https://api.github.com:443/repos/KDmasterLOL/hostlink/releases/assets/1".to_owned(),
+        "https://api.github.com/repos/other/hostlink/releases/assets/1".to_owned(),
+        prefix.to_owned(),
+        format!("{prefix}0"),
+        format!("{prefix}0001"),
+        format!("{prefix}184467440737095516160"),
+        format!("{prefix}1/extra"),
+        format!("{prefix}1?query=1"),
+        format!("{prefix}1#fragment"),
+        format!("{prefix}%31"),
+    ] {
+        let bad = ReleaseAsset::new(&name, &url).with_digest(format!("sha256:{}", "ab".repeat(32)));
+        assert!(selected_asset(&[bad], target).is_err(), "accepted {url}");
+    }
+    let selected = selected_asset(&[asset(&name)], target).unwrap().0;
+    let version = Version::parse("1.2.3").unwrap();
+    let download =
+        public_download_asset(std::slice::from_ref(&selected), &selected, &version).unwrap();
+    assert_eq!(
+        download.download_url(),
+        format!("https://github.com/KDmasterLOL/hostlink/releases/download/v1.2.3/{name}")
+    );
+    assert_eq!(download.digest(), selected.digest());
+    assert!(
+        public_download_asset(&[selected.clone(), selected.clone()], &selected, &version).is_none()
+    );
+    assert!(
+        public_download_asset(
+            &[asset(&name).with_digest(format!("sha256:{}", "cd".repeat(32)))],
+            &selected,
+            &version
+        )
+        .is_none()
+    );
+    assert!(
+        public_download_asset(
+            &[ReleaseAsset::new(&name, format!("{prefix}2"))
+                .with_digest(selected.digest().unwrap())],
+            &selected,
+            &version
+        )
+        .is_none()
+    );
 }
 
 #[test]

@@ -12,6 +12,8 @@ Windows Agent binaries are updated only while their user service is offline. The
 
 The updater enforces private-root identity, exclusive `update.lock` and `jobs/runner.lock`, no active installed Agent image, and no registered task. The `self_update` GitHub RAW backend verifies the selected version, target and SHA-256 before publication.
 
+Release metadata must identify the asset through the canonical GitHub API endpoint for this repository. The download starts at the exact public GitHub Releases URL for the selected version and target; HTTPS redirects to GitHub's asset delivery infrastructure remain enabled. Redirect hosts are not pinned: their TLS connections and the SHA-256 published in GitHub metadata are trusted, so this digest provides integrity rather than an independent signature. No authorization headers are forwarded on redirects.
+
 All enrollment keys, private configuration, `state/manifest.json`, and Apalis SQLite jobs remain in place. Task removal does not uninstall the Agent files. An interrupted update or power loss can require manual recovery; no automatic journal replay or restart is implemented.
 
 See [Agent lifecycle](AGENT_LIFECYCLE.md) and [installation](AGENT_INSTALLATION.md).

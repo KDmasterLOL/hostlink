@@ -100,19 +100,11 @@ pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
         version: version.to_string(),
     };
     let verified_identity = expected.clone();
+    let download_version = version.clone();
     let status = github
         .release_tag(format!("v{version}"))
         // Re-fetching a tag must not change the exact selected asset or its digest.
-        .asset_matcher(move |assets| {
-            assets
-                .iter()
-                .find(|candidate| {
-                    candidate.name() == asset.name()
-                        && candidate.digest() == asset.digest()
-                        && candidate.download_url() == asset.download_url()
-                })
-                .cloned()
-        })
+        .asset_matcher(move |assets| public_download_asset(assets, &asset, &download_version))
         .verify_checksum(Checksum::Sha256(sha.clone()))
         .verify_binary(move |binary| {
             #[cfg(unix)]
@@ -146,6 +138,28 @@ pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
     Ok(true)
 }
 
+fn public_download_asset(
+    assets: &[ReleaseAsset],
+    selected: &ReleaseAsset,
+    version: &Version,
+) -> Option<ReleaseAsset> {
+    let mut matches = assets
+        .iter()
+        .filter(|candidate| candidate.name() == selected.name());
+    let candidate = matches.next()?;
+    if matches.next().is_some()
+        || candidate.digest() != selected.digest()
+        || candidate.download_url() != selected.download_url()
+    {
+        return None;
+    }
+    let url = format!(
+        "https://github.com/KDmasterLOL/hostlink/releases/download/v{version}/{}",
+        candidate.name()
+    );
+    Some(ReleaseAsset::new(candidate.name(), url).with_digest(candidate.digest()?))
+}
+
 fn lock(parent: &Path, name: &str) -> io::Result<File> {
     let file = PrivateDir::open(parent)
         .and_then(|dir| {
@@ -177,6 +191,15 @@ fn selected_asset(assets: &[ReleaseAsset], target: &str) -> io::Result<(ReleaseA
         .ok_or_else(|| invalid("GitHub release lacks the exact Agent raw asset"))?;
     if matches.next().is_some() {
         return Err(invalid("GitHub release has ambiguous Agent raw assets"));
+    }
+    // self_update's GitHub backend exposes the API `url`, not `browser_download_url`.
+    // Accept only the canonical repository asset endpoint with a numeric GitHub asset ID.
+    let id = asset
+        .download_url()
+        .strip_prefix("https://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/")
+        .ok_or_else(|| invalid("invalid GitHub Agent asset URL"))?;
+    if id.starts_with('0') || id.parse::<u64>().is_err() {
+        return Err(invalid("invalid GitHub Agent asset URL"));
     }
     let digest = asset
         .digest()
