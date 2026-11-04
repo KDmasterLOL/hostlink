@@ -8,6 +8,8 @@ Build all four targets locally from the same clean, committed revision. Record t
 
 The root `Justfile` provides `just check`, `just build-linux`, `just build-windows`, `just build-win7-x64`, `just build-win7-x86`, `just build-all`, `just stage`, `just verify-candidate`, and `just publish`. Build all targets, stage the candidate, and verify it locally. Consult `just --list` and the Justfile for prerequisites.
 
+`stage` checks all four build outputs, their checksums and toolchain records before creating the candidate directory. A later staging or verification failure can still leave an incomplete candidate at `target/release-candidate/<source-sha>`; inspect and remove that local directory before retrying. Run the preflight regression with `python3 tests/release/test_stage.py`.
+
 An operator explicitly invokes `just publish` to publish: it verifies the candidate, requires the version tag to already point to the source commit and no existing release for that tag, then runs `gh release create` to upload exactly the four raw Agent executables. It checks the published asset inventory and SHA-256 digests against the local candidate. Keep the source-bound receipt and verification records private and local; never upload them as release assets. GitHub Actions does not build or upload release candidates.
 
 For Win7, retain the pinned cross-build and PE inspections in [Win7 build and inspection](WIN7_REWRITE_ACCEPTANCE.md). These checks do not execute `binary-info` on Windows 7. Native identity and compatibility acceptance on each Windows version remain separate; the source SHA in the local record is not embedded in the executable.

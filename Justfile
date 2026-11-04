@@ -40,7 +40,7 @@ _build target:
     target='{{target}}'
     export CARGO_TARGET_DIR="$PWD/target/local-build/$sha/$target"
     mkdir -p "$CARGO_TARGET_DIR"
-    rm -f "$CARGO_TARGET_DIR/build.sha256"
+    rm -f "$CARGO_TARGET_DIR/build.sha256" "$CARGO_TARGET_DIR/toolchain"
     unset CARGO_ENCODED_RUSTFLAGS RUSTFLAGS
     test "$(rustc +1.99.1 -Vv | sed -n 's/^commit-hash: //p')" = 58cf8f9c35b355199727627d07ae34a4e2846d67
     if [[ "$target" == *windows* ]]; then
@@ -77,13 +77,13 @@ _build target:
     test -z "$(git status --porcelain=v1 --untracked-files=all)"
     file="$CARGO_TARGET_DIR/$target/release/hostlink-agent$suffix"
     test -f "$file" && test ! -L "$file" && test -s "$file" && test "$(wc -c < "$file")" -le 268435456
-    sha256sum "$file" > "$CARGO_TARGET_DIR/build.sha256"
     {
       cargo +1.99.1 --version
       rustc +1.99.1 -Vv
       if [[ "$target" == *windows* ]]; then cargo +1.99.1 xwin --version; fi
       if [[ "$target" == *win7* ]]; then cargo +nightly-2026-08-22 --version; rustc +nightly-2026-08-22 -Vv; fi
     } > "$CARGO_TARGET_DIR/toolchain"
+    sha256sum "$file" > "$CARGO_TARGET_DIR/build.sha256"
 
 # Copy and inspect the four previously built assets into a private candidate.
 stage:
@@ -94,13 +94,20 @@ stage:
     sha=$(git rev-parse HEAD)
     dir="$PWD/target/release-candidate/$sha"
     test ! -e "$dir" || { echo 'Candidate already exists' >&2; exit 1; }
-    mkdir -p "$dir"
+    # Check every input before creating a candidate, so a missing build is retryable.
     for target in x86_64-unknown-linux-gnu x86_64-pc-windows-msvc x86_64-win7-windows-msvc i686-win7-windows-msvc; do
       root="$PWD/target/local-build/$sha/$target"
       suffix=.exe; test "$target" != x86_64-unknown-linux-gnu || suffix=
       src="$root/$target/release/hostlink-agent$suffix"
       test -f "$src" && test ! -L "$src" && test -s "$src" && test "$(wc -c < "$src")" -le 268435456
       sha256sum "$src" | cmp - "$root/build.sha256"
+      test -s "$root/toolchain"
+    done
+    mkdir -p "$dir"
+    for target in x86_64-unknown-linux-gnu x86_64-pc-windows-msvc x86_64-win7-windows-msvc i686-win7-windows-msvc; do
+      root="$PWD/target/local-build/$sha/$target"
+      suffix=.exe; test "$target" != x86_64-unknown-linux-gnu || suffix=
+      src="$root/$target/release/hostlink-agent$suffix"
       cp "$src" "$dir/hostlink-agent-$target$suffix"
       cmp "$src" "$dir/hostlink-agent-$target$suffix"
       printf '[%s]\n' "$target" >> "$dir/TOOLCHAINS"
