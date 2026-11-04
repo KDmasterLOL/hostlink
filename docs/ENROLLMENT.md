@@ -11,6 +11,8 @@ New Agents register using a one-use Hub invitation over HTTPS. The Controller cr
 
 Before issuing a runnable bootstrap invitation, the Controller reads the authenticated Hub's approved gateway routes and pins. It selects the sole route, or the exact `preferred_gateway` configured as `host:port` when multiple routes exist. An explicit `--gateway-index N` overrides the preference and must be in range. If no preferred route matches, configure one or supply an index before retrying. Token-only invitations skip route selection for manual installation. The selected index is embedded in the bootstrap; the Agent still validates the approved pins during enrollment.
 
+The bootstrap uses the Controller Hub configuration's `ssh_user` as the Agent's SSH protocol login, independently of the target Windows or Linux OS account. An explicit `--ssh-user` must match that configured login; a mismatch is rejected before any Hub or GitHub request and before an invitation is created. `--token-only` remains a manual flow and cannot be combined with `--ssh-user`.
+
 An enrollment request may succeed on the Hub before local publication finishes. When `enrollment.pending` remains, inspect the Hub inventory and reconcile the attempt; do not replay the original one-use token.
 
 ## Trust and storage

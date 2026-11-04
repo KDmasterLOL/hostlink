@@ -138,6 +138,12 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
     let name = name.or(legacy_name);
     let config_path = default_hub_config_path()?;
     let config = load_hub_config(&config_path)?;
+    if ssh_user
+        .as_deref()
+        .is_some_and(|user| user != config.ssh_user)
+    {
+        return Err("--ssh-user must match the Controller Hub config ssh_user (SSH protocol login, not the target OS account)".into());
+    }
     let client = HubClient::from_config(&config)?;
     let selection = if token_only {
         if name.is_some() && name.as_deref().is_some_and(|value| value.trim().is_empty()) {

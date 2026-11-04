@@ -100,15 +100,26 @@ fn exercise_invites(online: bool) {
     let _server = Server(child);
     let config = root.path().join("hub.json");
     let requests = root.path().join("requests");
-    for (count, preferred, explicit, os, expected) in [
-        (2, Some("edge-b.example:22"), None, "windows", Some(1)),
-        (1, None, None, "linux", Some(0)),
-        (2, Some("edge-b.example:22"), Some("0"), "linux", Some(0)),
-        (2, None, None, "token", None),
-        (2, None, Some("2"), "linux", None),
-        (2, None, None, "linux", None),
-        (2, Some("stale.example:22"), None, "linux", None),
-        (0, None, None, "linux", None),
+    for (count, preferred, explicit, os, user, expected) in [
+        (2, Some("edge-b.example:22"), None, "windows", None, Some(1)),
+        (1, None, None, "linux", None, Some(0)),
+        (
+            2,
+            Some("edge-b.example:22"),
+            Some("0"),
+            "linux",
+            Some("hostlink"),
+            Some(0),
+        ),
+        (1, None, None, "windows", Some("hostlink"), Some(0)),
+        (2, None, None, "token", None, None),
+        (2, None, None, "token", Some("other"), None),
+        (2, None, None, "windows", Some("other"), None),
+        (2, None, None, "linux", Some("other"), None),
+        (2, None, Some("2"), "linux", None, None),
+        (2, None, None, "linux", None, None),
+        (2, Some("stale.example:22"), None, "linux", None, None),
+        (0, None, None, "linux", None, None),
     ] {
         if expected.is_some() != online {
             continue;
@@ -130,9 +141,22 @@ fn exercise_invites(online: bool) {
         if let Some(index) = explicit {
             command.args(["--gateway-index", index]);
         }
+        if let Some(user) = user {
+            command.args(["--ssh-user", user]);
+        }
         let output = command.output().unwrap();
         let log = fs::read_to_string(&requests).unwrap();
-        if os == "token" {
+        if user == Some("other") {
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            assert!(log.is_empty(), "unexpected Hub requests: {log}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if os == "token" {
+                assert!(stderr.contains("cannot be used with"), "{stderr}");
+            } else {
+                assert!(stderr.contains("--ssh-user must match"), "{stderr}");
+            }
+        } else if os == "token" {
             assert!(
                 output.status.success(),
                 "{}",
@@ -156,6 +180,12 @@ fn exercise_invites(online: bool) {
                 assert!(cmd.len() <= 8191);
             }
             let script = unpack(cmd, os == "windows");
+            let user_assignment = if os == "windows" {
+                "$SshUser='hostlink'"
+            } else {
+                "ssh_user='hostlink'"
+            };
+            assert!(script.lines().any(|line| line == user_assignment));
             let assignment = if os == "windows" {
                 format!("$GatewayIndex='{index}'")
             } else {

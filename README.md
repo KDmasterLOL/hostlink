@@ -52,6 +52,8 @@ hostlink invite lab-win7 --os windows
 
 The command prints one paste-ready bootstrap containing a one-use invitation. Protect it as a secret. Before issuing it, the Controller selects the sole Hub-approved gateway or the configured `preferred_gateway`; use `--gateway-index N` to explicitly select another approved route. Public release downloads require no GitHub PAT; see [Releases and bootstrap](docs/GITHUB_RELEASES.md) for target shell and platform requirements.
 
+The Agent's SSH protocol login defaults to the Controller Hub configuration's `ssh_user`, independently of the target OS account. If `--ssh-user` is supplied, it must match that configured login.
+
 ## Documentation
 
 Start with the [documentation index](docs/index.md) for installation, upgrades, managed routing, Agent lifecycle, and development.

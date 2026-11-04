@@ -32,6 +32,7 @@ pub(super) struct InviteArgs {
     /// Legacy spelling for the machine name.
     #[arg(long = "name", conflicts_with = "name")]
     pub(super) legacy_name: Option<String>,
+    /// SSH protocol login, not the target OS account; must match the Controller Hub config ssh_user.
     #[arg(long)]
     pub(super) ssh_user: Option<String>,
     #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(60..=86400))]
