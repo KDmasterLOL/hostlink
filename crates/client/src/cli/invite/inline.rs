@@ -9,7 +9,7 @@ use super::{ArtifactSelection, BootstrapError, Target};
 const PLACEHOLDER: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const CMD_LIMIT: usize = 8191;
 
-pub struct InlineBootstrap(String);
+pub struct InlineBootstrap(String, usize);
 
 impl InlineBootstrap {
     /// Bind the Hub token without altering the preflighted command length.
@@ -23,7 +23,9 @@ impl InlineBootstrap {
                 "Hub invitation token has an invalid format",
             ));
         }
-        Ok(self.0.replacen(PLACEHOLDER, token, 1))
+        let mut command = self.0;
+        command.replace_range(self.1..self.1 + PLACEHOLDER.len(), token);
+        Ok(command)
     }
 }
 
@@ -46,6 +48,23 @@ fn render_inline(selections: &[ArtifactSelection]) -> Result<InlineBootstrap, Bo
     for s in selections {
         s.validate()?;
     }
+    for (index, selection) in selections.iter().enumerate() {
+        if selections[..index]
+            .iter()
+            .any(|previous| previous.target == selection.target)
+            || selection.name != first.name
+            || selection.ssh_user != first.ssh_user
+            || selection.hub_url != first.hub_url
+            || selection.bootstrap_hub_ca_cert != first.bootstrap_hub_ca_cert
+            || selection.gateway_index != first.gateway_index
+            || selection.agent_url.path().split('/').nth(5)
+                != first.agent_url.path().split('/').nth(5)
+        {
+            return Err(BootstrapError::Invalid(
+                "inconsistent or duplicate release selections",
+            ));
+        }
+    }
     let ca = first
         .bootstrap_hub_ca_cert
         .as_deref()
@@ -57,6 +76,11 @@ fn render_inline(selections: &[ArtifactSelection]) -> Result<InlineBootstrap, Bo
         .unwrap_or_default();
     let windows = first.target.windows();
     let script = if windows {
+        if selections.len() != 1 && selections.len() != 3 {
+            return Err(BootstrapError::Invalid(
+                "incomplete Windows release selection",
+            ));
+        }
         let mut vars = String::new();
         for (key, value) in [
             ("HubUrl", first.hub_url.as_str()),
@@ -153,7 +177,18 @@ fn render_inline(selections: &[ArtifactSelection]) -> Result<InlineBootstrap, Bo
             "inline bootstrap exceeds cmd.exe 8191 character limit",
         ));
     }
-    Ok(InlineBootstrap(command))
+    // The placeholder is at the end of the Windows command and at the start
+    // of the POSIX command, independently of the compressed payload contents.
+    let token_offset = if windows {
+        command.len() - 2 - PLACEHOLDER.len()
+    } else {
+        "(HL_INVITE='".len()
+    };
+    debug_assert_eq!(
+        &command[token_offset..token_offset + PLACEHOLDER.len()],
+        PLACEHOLDER
+    );
+    Ok(InlineBootstrap(command, token_offset))
 }
 
 // Long diagnostics dominate the compressed command. Keep an identifiable prefix

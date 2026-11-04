@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 fn metadata() -> Value {
     json!({"tag_name":"v1.2.3", "draft":false, "published_at":"2026-11-01", "assets":[
-        {"name":"hostlink-agent-x86_64-unknown-linux-gnu", "url":format!("{RELEASES}/assets/1"), "state":"uploaded", "digest":format!("sha256:{}", "a".repeat(64))}
+        {"name":"hostlink-agent-x86_64-unknown-linux-gnu", "url":format!("{RELEASES}/assets/1"), "state":"uploaded", "size":123, "digest":format!("sha256:{}", "a".repeat(64))}
     ]})
 }
 
@@ -13,7 +13,7 @@ fn family_preflight_requires_every_exact_asset_from_one_release() {
     for (index, target) in OsFamily::Windows.targets().iter().enumerate() {
         value["assets"].as_array_mut().unwrap().push(json!({
             "name": target.asset_name(), "url": format!("{RELEASES}/assets/{}", index + 2),
-            "state": "uploaded", "digest": format!("sha256:{}", "b".repeat(64))
+            "state": "uploaded", "size": 123, "digest": format!("sha256:{}", "b".repeat(64))
         }));
     }
     let resolve = |value: &Value| {
@@ -88,6 +88,8 @@ fn release_requires_exact_published_version_unique_asset_and_digest() {
         ("digest", Value::Null),
         ("digest", json!("sha256:abc")),
         ("state", json!("new")),
+        ("size", json!(0)),
+        ("size", json!(268435457)),
     ] {
         let mut value = metadata();
         value["assets"][0][key] = bad;

@@ -105,19 +105,25 @@ impl ArtifactSelection {
             return Err(BootstrapError::Invalid("Hub URL must be an HTTPS origin"));
         }
         // Release names and published digests are checked by the metadata resolver.
-        validate_github_asset_url(&self.agent_url)?;
+        validate_github_asset_url(&self.agent_url, self.target)?;
         Ok(())
     }
 }
 
-pub(super) fn validate_github_asset_url(url: &Url) -> Result<(), BootstrapError> {
+pub(super) fn validate_github_asset_url(url: &Url, target: Target) -> Result<(), BootstrapError> {
     validate_https_url(url)?;
+    let path = url
+        .path()
+        .strip_prefix("/KDmasterLOL/hostlink/releases/download/");
+    let valid_path = path
+        .and_then(|path| path.split_once('/'))
+        .is_some_and(|(tag, asset)| {
+            tag.strip_prefix('v').is_some_and(semver) && asset == target.asset_name()
+        });
     if url.host_str() != Some("github.com")
         || url.port().is_some()
         || url.query().is_some()
-        || !url
-            .path()
-            .starts_with("/KDmasterLOL/hostlink/releases/download/v")
+        || !valid_path
     {
         return Err(BootstrapError::Invalid(
             "public GitHub release URL required",

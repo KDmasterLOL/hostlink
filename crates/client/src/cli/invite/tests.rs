@@ -3,9 +3,10 @@ use reqwest::Url;
 
 fn selection(target: Target) -> ArtifactSelection {
     ArtifactSelection {
-        agent_url: Url::parse(
-            "https://github.com/KDmasterLOL/hostlink/releases/download/v1.2.3/hostlink-agent-x86_64-unknown-linux-gnu",
-        )
+        agent_url: Url::parse(&format!(
+            "https://github.com/KDmasterLOL/hostlink/releases/download/v1.2.3/{}",
+            target.asset_name()
+        ))
         .unwrap(),
         agent_sha256: "b".repeat(64),
         target,
@@ -46,6 +47,9 @@ fn four_exact_raw_asset_names_and_fixed_api_digest_pins() {
         "https://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/%31",
         "https://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/1?x=1",
         "https://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/1#frag",
+        "https://github.com/KDmasterLOL/hostlink/releases/download/vgarbage/hostlink-agent-x86_64-unknown-linux-gnu",
+        "https://github.com/KDmasterLOL/hostlink/releases/download/v1.2.3/hostlink-agent-x86_64-pc-windows-msvc.exe",
+        "https://github.com/KDmasterLOL/hostlink/releases/download/v1.2.3/other/hostlink-agent-x86_64-unknown-linux-gnu",
     ] {
         let mut selected = selection(Target::LinuxX64);
         selected.agent_url = Url::parse(url).unwrap();

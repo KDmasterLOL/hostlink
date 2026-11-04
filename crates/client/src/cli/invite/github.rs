@@ -52,6 +52,7 @@ struct Asset {
     name: String,
     digest: Option<String>,
     state: String,
+    size: u64,
 }
 
 fn release_url(version: Option<&str>) -> Result<Url, BootstrapError> {
@@ -92,9 +93,12 @@ fn select_asset(release: &Release, name: &str) -> Result<(Url, String), Bootstra
     let asset = matches
         .next()
         .ok_or_else(|| source(&format!("GitHub release lacks required asset {name}")))?;
-    if matches.next().is_some() || asset.state != "uploaded" {
+    if matches.next().is_some()
+        || asset.state != "uploaded"
+        || !(1..=268_435_456).contains(&asset.size)
+    {
         return Err(source(
-            "GitHub release asset name is ambiguous or not uploaded",
+            "GitHub release asset is ambiguous, not uploaded, empty, or exceeds the download limit",
         ));
     }
     let digest = asset

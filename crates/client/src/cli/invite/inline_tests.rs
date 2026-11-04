@@ -234,6 +234,47 @@ fn oversized_windows_command_is_rejected_before_binding() {
 }
 
 #[test]
+fn selections_must_be_unique_and_share_release_and_invitation_parameters() {
+    assert!(render_inline(&[]).is_err());
+    let assets = selections(&[Target::Win7X86, Target::Win7X64, Target::Win11X64]);
+    assert!(render_inline(&assets[..2]).is_err());
+    let mut duplicate = assets.clone();
+    duplicate.push(assets[0].clone());
+    assert!(render_inline(&duplicate).is_err());
+    for field in 0..6 {
+        let mut mixed = assets.clone();
+        match field {
+            0 => mixed[1].name = "other".into(),
+            1 => mixed[1].ssh_user = "other".into(),
+            2 => mixed[1].hub_url = "https://other.example".into(),
+            3 => mixed[1].bootstrap_hub_ca_cert = Some("other".into()),
+            4 => mixed[1].gateway_index = None,
+            _ => {
+                mixed[1].agent_url = Url::parse(&format!(
+                    "https://github.com/KDmasterLOL/hostlink/releases/download/v2.0.0/{}",
+                    mixed[1].target.asset_name()
+                ))
+                .unwrap()
+            }
+        }
+        assert!(render_inline(&mixed).is_err(), "field {field}");
+    }
+}
+
+#[test]
+fn binding_uses_token_position_even_if_placeholder_occurs_earlier() {
+    let mut prepared = render_inline(&selections(&[Target::Win7X64])).unwrap();
+    prepared.0.insert_str(0, PLACEHOLDER);
+    prepared.1 += PLACEHOLDER.len();
+    let command = prepared.bind(&"a".repeat(64)).unwrap();
+    assert!(command.starts_with(PLACEHOLDER));
+    assert_eq!(
+        &command[command.len() - 66..command.len() - 2],
+        "a".repeat(64)
+    );
+}
+
+#[test]
 fn windows_wrapper_passes_synthetic_invite_without_parent_expansion() {
     let command = render_inline(&selections(&[
         Target::Win7X86,
