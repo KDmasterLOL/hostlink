@@ -19,7 +19,18 @@ pub(super) fn router(store: &JobStore, address: std::net::SocketAddr) -> Router 
         .build();
     Router::new()
         .nest("/api/v1", api)
-        .route("/new", get(|| async { Html(include_str!("new.html")) }))
+        .route(
+            "/new",
+            get(|| async {
+                (
+                    [(
+                        "x-hostlink-command-timeout-max",
+                        MAX_COMMAND_TIMEOUT_SECONDS.to_string(),
+                    )],
+                    Html(include_str!("new.html")),
+                )
+            }),
+        )
         .fallback_service(ServeUI::new())
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(middleware::from_fn(move |request, next| {

@@ -180,6 +180,37 @@ async fn board_creates_and_lists_typed_tasks_and_serves_assets() {
 }
 
 #[tokio::test]
+async fn board_advertises_bounded_command_timeout_without_submitting_a_job() {
+    let (_parent, root) = private_job_root();
+    let store = JobStore::initialize_fresh(&root).await.unwrap();
+    let app = board::router(&store, "127.0.0.1:4040".parse().unwrap());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/new")
+                .header("host", "127.0.0.1:4040")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-hostlink-command-timeout-max")
+            .unwrap(),
+        "14400"
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM Jobs")
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "capability read must never create a job");
+    store.close().await;
+}
+
+#[tokio::test]
 async fn board_host_header_uses_exact_tower_validation() {
     let (_parent, root) = private_job_root();
     let store = JobStore::initialize_fresh(&root).await.unwrap();
