@@ -192,6 +192,7 @@ async fn board_executes_windows_command_and_persists_exit_code() {
                 .expect("ComSpec must identify the Windows command interpreter"),
             args: vec!["/C".into(), "exit /B 7".into()],
             cwd: None,
+            timeout_seconds: None,
         },
     )
     .await;
@@ -351,6 +352,7 @@ async fn shutdown_terminates_windows_job_object_process_tree() {
                     "jobs::tests::windows::process_tree_parent_fixture".into(),
                 ],
                 cwd: Some(root.to_str().unwrap().into()),
+                timeout_seconds: None,
             },
         )
         .await;

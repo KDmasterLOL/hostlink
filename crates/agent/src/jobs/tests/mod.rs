@@ -10,6 +10,90 @@ use tower::ServiceExt;
 #[cfg(windows)]
 mod windows;
 
+#[test]
+fn command_job_timeout_is_optional_and_legacy_payloads_remain_compatible() {
+    let legacy: CommandJob =
+        serde_json::from_str(r#"{"program":"example","args":[],"cwd":null}"#).unwrap();
+    assert_eq!(legacy.timeout_seconds, None);
+    assert_eq!(
+        command_timeout_seconds(legacy.timeout_seconds).unwrap(),
+        900
+    );
+    assert_eq!(
+        serde_json::to_value(&legacy).unwrap(),
+        serde_json::json!({"program":"example","args":[],"cwd":null})
+    );
+
+    let configured = CommandJob {
+        program: "example".into(),
+        args: Vec::new(),
+        cwd: None,
+        timeout_seconds: Some(1),
+    };
+    assert_eq!(
+        serde_json::to_value(configured).unwrap()["timeout_seconds"],
+        1
+    );
+}
+
+#[test]
+fn command_job_timeout_bounds_are_positive_and_capped_at_four_hours() {
+    assert_eq!(command_timeout_seconds(Some(1)).unwrap(), 1);
+    assert_eq!(command_timeout_seconds(Some(14_400)).unwrap(), 14_400);
+    assert_eq!(
+        command_timeout_seconds(Some(0)).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        command_timeout_seconds(Some(14_401)).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+}
+
+#[tokio::test]
+async fn worker_rejects_invalid_timeout_before_process_group_creation() {
+    let result = super::worker::execute(
+        CommandJob {
+            program: "example".into(),
+            args: Vec::new(),
+            cwd: None,
+            timeout_seconds: Some(0),
+        },
+        apalis_core::task::data::Data(super::worker::ExecutionContext {
+            stop: processkit::CancellationToken::new(),
+            uncertain: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }),
+    )
+    .await;
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn worker_enforces_short_command_timeout_with_processkit_containment() {
+    let group = processkit::ProcessGroup::new().unwrap();
+    if group.mechanism() != processkit::Mechanism::CgroupV2 {
+        eprintln!("NOT RUN: cgroup-v2 containment unavailable for real command timeout");
+        return;
+    }
+    drop(group);
+
+    let result = super::worker::execute(
+        CommandJob {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "sleep 5".into()],
+            cwd: None,
+            timeout_seconds: Some(1),
+        },
+        apalis_core::task::data::Data(super::worker::ExecutionContext {
+            stop: processkit::CancellationToken::new(),
+            uncertain: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }),
+    )
+    .await;
+    assert!(result.is_err(), "a command exceeding its timeout must fail");
+}
+
 fn private_job_root() -> (tempfile::TempDir, std::path::PathBuf) {
     let parent = tempfile::tempdir().unwrap();
     // The library creates the private root with 0700 or owner-only Windows ACL.
@@ -345,6 +429,7 @@ async fn board_submitted_command_executes_and_apalis_persists_exit_code() {
                 program: "/bin/sh".into(),
                 args: vec!["-c".into(), "exit 7".into()],
                 cwd: None,
+                timeout_seconds: None,
             })
             .send()
             .await

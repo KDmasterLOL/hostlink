@@ -12,12 +12,12 @@ use std::{
 };
 
 #[derive(Clone)]
-struct ExecutionContext {
-    stop: processkit::CancellationToken,
-    uncertain: Arc<AtomicBool>,
+pub(super) struct ExecutionContext {
+    pub(super) stop: processkit::CancellationToken,
+    pub(super) uncertain: Arc<AtomicBool>,
 }
 
-async fn execute(job: CommandJob, ctx: Data<ExecutionContext>) -> io::Result<i32> {
+pub(super) async fn execute(job: CommandJob, ctx: Data<ExecutionContext>) -> io::Result<i32> {
     if job.program.is_empty()
         || job.args.len() > 256
         || job.program.len() > 8192
@@ -28,6 +28,7 @@ async fn execute(job: CommandJob, ctx: Data<ExecutionContext>) -> io::Result<i32
             "invalid command bounds",
         ));
     }
+    let timeout = Duration::from_secs(command_timeout_seconds(job.timeout_seconds)?);
     let group = processkit::ProcessGroup::new().map_err(io::Error::other)?;
     let trusted = match group.mechanism() {
         #[cfg(target_os = "linux")]
@@ -59,7 +60,7 @@ async fn execute(job: CommandJob, ctx: Data<ExecutionContext>) -> io::Result<i32
     let outcome = tokio::select! {
         outcome = &mut drain => outcome.map_err(io::Error::other),
         _ = ctx.stop.cancelled() => stop_and_drain(&group, &mut drain).await,
-        _ = tokio::time::sleep(Duration::from_secs(15 * 60)) => {
+        _ = tokio::time::sleep(timeout) => {
             timed_out = true;
             stop_and_drain(&group, &mut drain).await
         }
