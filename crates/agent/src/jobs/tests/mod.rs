@@ -426,7 +426,7 @@ async fn board_serves_http_until_shutdown() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn board_submitted_command_executes_and_apalis_persists_exit_code() {
+async fn board_marks_zero_exit_done_and_nonzero_exit_failed() {
     // Real process execution requires a delegated cgroup v2, not the weaker
     // POSIX process-group fallback.
     let group = processkit::ProcessGroup::new().unwrap();
@@ -452,45 +452,78 @@ async fn board_submitted_command_executes_and_apalis_persists_exit_code() {
     let server = tokio::spawn(async move { serve_until(&jobs, Some(addr), stop).await });
     let client = reqwest::Client::new();
     let url = format!("http://{addr}/api/v1/queues/commands/tasks");
-    let mut accepted = false;
-    for _ in 0..60 {
-        if let Ok(reply) = client
-            .put(&url)
-            .json(&CommandJob {
-                program: "/bin/sh".into(),
-                args: vec!["-c".into(), "exit 7".into()],
-                cwd: None,
-                timeout_seconds: None,
-            })
-            .send()
-            .await
-        {
-            assert!(reply.status().is_success(), "native Apalis push: {reply:?}");
-            accepted = true;
-            break;
+    let jobs = [
+        ("exit-zero", "exit 0", "Done", r#"{"Ok":0}"#),
+        (
+            "exit-seven",
+            "exit 7",
+            "Failed",
+            r#"{"Err":"command exited with code 7"}"#,
+        ),
+    ];
+    let mut ids = Vec::with_capacity(jobs.len());
+    for (name, command, expected_status, expected_result) in jobs {
+        let id = ulid::Ulid::generate().to_string();
+        let mut accepted = false;
+        for _ in 0..60 {
+            match client
+                .put(&url)
+                .header("x-task-id", &id)
+                // A terminal Failed state is deterministic only when the
+                // upstream retry budget is explicitly one attempt.
+                .header("x-task-max-attempts", "1")
+                .json(&CommandJob {
+                    program: "/bin/sh".into(),
+                    args: vec!["-c".into(), command.into()],
+                    cwd: None,
+                    timeout_seconds: None,
+                })
+                .send()
+                .await
+            {
+                Ok(reply) => {
+                    assert!(reply.status().is_success(), "native Apalis push: {reply:?}");
+                    accepted = true;
+                    break;
+                }
+                Err(error) if error.is_connect() => {}
+                Err(error) => panic!("Board task submission outcome is uncertain: {error}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert!(accepted, "board HTTP listener must accept {name}");
+        ids.push((id, name, command, expected_status, expected_result));
     }
-    assert!(accepted, "board HTTP listener must accept a real command");
 
     let store = JobStore::open(&root).await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            let (status, result): (String, Option<String>) =
-                sqlx::query_as("SELECT status,last_result FROM Jobs LIMIT 1")
+    for (id, name, command, expected_status, expected_result) in ids {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let (status, result, attempts, max_attempts): (String, Option<String>, i64, i64) =
+                    sqlx::query_as(
+                        "SELECT status,last_result,attempts,max_attempts FROM Jobs WHERE id=?",
+                    )
+                    .bind(&id)
                     .fetch_one(&store.pool)
                     .await
                     .unwrap();
-            if status == "Done" {
-                assert_eq!(result.unwrap(), r#"{"Ok":7}"#);
-                break;
+                if status == expected_status {
+                    assert_eq!(result.as_deref(), Some(expected_result));
+                    assert_eq!((attempts, max_attempts), (1, 1));
+                    break;
+                }
+                assert!(
+                    matches!(status.as_str(), "Pending" | "Queued" | "Running"),
+                    "unexpected state for {name} ({command}): {status}, {result:?}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
-            assert!(matches!(status.as_str(), "Pending" | "Queued" | "Running"));
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the real native command completes and Apalis persists its result");
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("the real native command did not reach its expected state: {name}")
+        });
+    }
     store.close().await;
     shutdown.cancel();
     tokio::time::timeout(std::time::Duration::from_secs(5), server)

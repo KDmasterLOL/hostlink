@@ -87,7 +87,10 @@ pub(super) async fn execute(job: CommandJob, ctx: Data<ExecutionContext>) -> io:
         return Err(io::Error::other("Agent stopping or command timed out"));
     }
     match outcome? {
-        processkit::Outcome::Exited(code) => Ok(code),
+        processkit::Outcome::Exited(0) => Ok(0),
+        processkit::Outcome::Exited(code) => {
+            Err(io::Error::other(format!("command exited with code {code}")))
+        }
         _ => Err(io::Error::other("process did not exit normally")),
     }
 }

@@ -181,44 +181,51 @@ async fn finish(
 }
 
 #[tokio::test]
-async fn board_executes_windows_command_and_persists_exit_code() {
+async fn board_marks_windows_zero_exit_done_and_nonzero_exit_failed() {
     require_job_object();
-    let (_parent, root) = private_job_root();
-    let (url, shutdown, server) = start_board(&root).await;
-    submit(
-        &url,
-        &CommandJob {
-            program: std::env::var("ComSpec")
-                .expect("ComSpec must identify the Windows command interpreter"),
-            args: vec!["/C".into(), "exit /B 7".into()],
-            cwd: None,
-            timeout_seconds: None,
-        },
-    )
-    .await;
-    let store = JobStore::open(&root).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let (status, result): (String, Option<String>) =
-                sqlx::query_as("SELECT status,last_result FROM Jobs")
-                    .fetch_one(&store.pool)
-                    .await
-                    .unwrap();
-            if status == "Done" {
-                assert_eq!(result.as_deref(), Some(r#"{"Ok":7}"#));
-                break;
+    let interpreter =
+        std::env::var("ComSpec").expect("ComSpec must identify the Windows command interpreter");
+    for (code, expected_status, expected_result) in [
+        (0, "Done", r#"{"Ok":0}"#),
+        (7, "Failed", r#"{"Err":"command exited with code 7"}"#),
+    ] {
+        let (_parent, root) = private_job_root();
+        let (url, shutdown, server) = start_board(&root).await;
+        submit(
+            &url,
+            &CommandJob {
+                program: interpreter.clone(),
+                args: vec!["/C".into(), format!("exit /B {code}")],
+                cwd: None,
+                timeout_seconds: None,
+            },
+        )
+        .await;
+        let store = JobStore::open(&root).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let (status, result, attempts, max_attempts): (String, Option<String>, i64, i64) =
+                    sqlx::query_as("SELECT status,last_result,attempts,max_attempts FROM Jobs")
+                        .fetch_one(&store.pool)
+                        .await
+                        .unwrap();
+                if status == expected_status {
+                    assert_eq!(result.as_deref(), Some(expected_result));
+                    assert_eq!((attempts, max_attempts), (1, 1));
+                    break;
+                }
+                assert!(
+                    matches!(status.as_str(), "Pending" | "Queued" | "Running"),
+                    "unexpected task state for exit {code}: {status}, {result:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
             }
-            assert!(
-                matches!(status.as_str(), "Pending" | "Queued" | "Running"),
-                "unexpected task state: {status}, {result:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("native Windows task did not finish");
-    store.close().await;
-    finish(shutdown, server).await;
+        })
+        .await
+        .unwrap_or_else(|_| panic!("native Windows task for exit {code} did not finish"));
+        store.close().await;
+        finish(shutdown, server).await;
+    }
 }
 
 // These ignored tests are invoked as separate processes in the private test root.
