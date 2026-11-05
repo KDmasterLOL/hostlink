@@ -31,3 +31,13 @@ Without `--job`, this harness does not test detached jobs or their Job IDs. In a
 ## Separate physical-network outage test
 
 This harness does not cut the network. To test an actual outage separately, use a disposable Agent and an isolated Controller-to-test-gateway network namespace. Submit only the same sleep-only detached task, record its acknowledged Job ID, sever that namespace's test route, wait past the task duration, restore the route, and poll the same ID over pinned SSH. Do not interrupt a shared gateway, kill the Agent, or involve production/customer workloads. This experiment remains separate from this harness and requires its own native evidence.
+
+## Source-built native Linux Agent executable acceptance
+
+Run explicitly on an owner-controlled Linux test host with delegated cgroup v2:
+
+```sh
+cargo +1.99.1 test --offline --locked -p hostlink-agent --test agent_cli_detached_jobs -- --ignored --nocapture
+```
+
+This integration test is ignored by default because it needs delegated native process containment. It fails rather than silently skipping if that containment is absent. It runs the new Cargo-built Agent executable with private temporary keys, its own Agent-local Apalis SQLite store, and loopback SSH/Board listeners. It submits an exit-0 and an exit-7 command once each, checks the official Board statuses Done and Failed, verifies both stored results and one-attempt policy, then shuts the disposable process down normally. It neither replaces the installed Agent nor accesses real Hub/Gateway/customer infrastructure. It does not prove the pinned Controller SSH route, network loss, Windows native execution, or a production release.
