@@ -16,6 +16,16 @@ The run performs `verify HOST`, `check --host HOST`, a read-only `exec --host HO
 
 The detached-job smoke is opt-in. `--job`, `--board-port INT`, and `--job-os linux|windows` must be supplied together; otherwise the base smoke runs without job submission. Set `--job-os` to match the disposable host. Before connecting to the host, it checks that the selected Controller exposes `exec --host --detach --board-port` and `job status --host --board-port JOB_ID`; older binaries fail locally without running the remote smoke. Linux uses only `sleep 8`; Windows uses only `Start-Sleep -Seconds 8`. The script accepts exactly one strict ULID from the submit response, requires the response within six seconds, then polls the same ID for up to 60 seconds using a new Controller invocation and SSH connection for each status query. Only an unambiguous `Done` is success; `Failed`, `Killed`, unknown states, malformed IDs and timeout fail the smoke. It does not assert job stdout or exit code. The short-lived detached submitter exiting before the eight-second task completes checks client-close preservation. It does **not** simulate physical network loss, Agent crash/restart, reboot, or service lifecycle.
 
+An optional negative check is available only when all four flags are supplied:
+
+```sh
+nu tests/support/hostlink-native-smoke.nu --host disposable-linux --hostlink ./target/debug/hostlink --job --board-port 39123 --job-os linux --job-negative
+```
+
+`--job-negative` requires `--job --board-port INT --job-os linux|windows`. It runs only after the positive detached-job check succeeds, submits the harmless `exit 7` shell command once, and requires exactly one acknowledged strict ULID. An ambiguous or failed submission is never retried because the job may already have been accepted. The harness polls that same ID for at most 60 seconds, using a fresh Controller invocation and pinned SSH connection for each status query. Success requires status `Failed` and Controller CLI exit code `1`; `Done`, `Killed`, unknown or ambiguous status, malformed ID, failed SSH, unexpected exit code and timeout fail the run. The base mode and existing positive `--job` behavior are unchanged.
+
+This negative check validates the behavior of the **deployed Agent binary** on the selected disposable host. A successful source build or this harness's self-test does not prove the installed Agent matches that source. Run it only against a separately authorized, source-exact Agent release; do not use the currently known v0.1.2 deployment, which is known to classify exit code 7 as `Done`. Native Linux and Windows E2E for this new mode has not been run and remains a separate release/tag gate.
+
 Without `--job`, this harness does not test detached jobs or their Job IDs. In all modes it does not test physical SSH-channel disconnection/reconnection, Agent crashes, reboot recovery, Board UI access, or Linux/Windows service lifecycle. The optional job path requires the newer detached-job CLI; omitting the option remains compatible with older Controller builds. Run destructive lifecycle and controlled-disconnect scenarios only on separately isolated, owner-controlled fixtures.
 
 ## Separate physical-network outage test

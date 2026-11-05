@@ -85,6 +85,14 @@ def task-command [job_os: string] {
     }
 }
 
+def negative-task-command [job_os: string] {
+    match $job_os {
+        "linux" => "exit 7"
+        "windows" => "exit 7"
+        _ => { error make {msg: "--job-os must be linux or windows"} }
+    }
+}
+
 def detached-job-args [host: string, command: string, board_port: int] {
     ["exec"] ++ (host-args $host) ++ ["--command" $command "--detach" "--board-port" ($board_port | into string)]
 }
@@ -105,12 +113,12 @@ def require-detached-cli [binary: string] {
     }
 }
 
-def job-config [job: bool, board_port_arg: string, job_os: string] {
+def job-config [job: bool, job_negative: bool, board_port_arg: string, job_os: string] {
     let port_provided = not ($board_port_arg | is-empty)
     let os_provided = not ($job_os | is-empty)
-    let any_provided = $job or $port_provided or $os_provided
+    let any_provided = $job or $job_negative or $port_provided or $os_provided
     if not $any_provided {
-        return {enabled: false, board_port: 0, job_os: ""}
+        return {enabled: false, negative: false, board_port: 0, job_os: ""}
     }
     if not ($job and $port_provided and $os_provided) {
         error make {msg: "detached smoke requires --job, --board-port INT, and --job-os linux|windows together"}
@@ -125,7 +133,7 @@ def job-config [job: bool, board_port_arg: string, job_os: string] {
     if $job_os not-in ["linux" "windows"] {
         error make {msg: "--job-os must be linux or windows"}
     }
-    {enabled: true, board_port: $port, job_os: $job_os}
+    {enabled: true, negative: $job_negative, board_port: $port, job_os: $job_os}
 }
 
 def upload-args [host: string, local: string, remote: string] {
@@ -191,6 +199,36 @@ def run-detached-job-smoke [binary: string, host: string, board_port: int, job_o
     print $"PASS: detached smoke job ($job_id) reached Done after the submitting Controller process exited"
 }
 
+def run-detached-job-negative-smoke [binary: string, host: string, board_port: int, job_os: string] {
+    let command = (negative-task-command $job_os)
+    # Submit once only. If acknowledgment is lost or ambiguous, fail closed and never resubmit.
+    let acknowledgment = (run-cli $binary (detached-job-args $host $command $board_port))
+    let job_id = (parse-job-id $acknowledgment)
+    print $"Negative smoke accepted job ($job_id)"
+
+    let deadline = (date now) + 60sec
+    mut state = "Unobserved"
+    while ((date now) < $deadline) and ($state not-in ["Failed" "Done" "Killed"]) {
+        # Each status invocation is a new Controller process and a fresh pinned SSH connection.
+        let status_result = (^$binary ...(job-status-args $host $board_port $job_id) | complete)
+        if not ($status_result.stderr | str trim | is-empty) {
+            error make {msg: $"negative smoke status query failed: ($status_result.stderr | str trim)"}
+        }
+        $state = (parse-status-command-result $status_result.exit_code $status_result.stdout)
+        print $"Negative smoke job ($job_id): ($state)"
+        if $state not-in ["Failed" "Done" "Killed"] {
+            sleep 1sec
+        }
+    }
+    if ((date now) >= $deadline) and ($state not-in ["Failed" "Done" "Killed"]) {
+        error make {msg: $"negative smoke job ($job_id) did not reach a terminal state within 60 seconds; last observed state: ($state)"}
+    }
+    if $state != "Failed" {
+        error make {msg: $"negative smoke job ($job_id) reached ($state), expected Failed with CLI exit 1"}
+    }
+    print $"PASS: negative smoke job ($job_id) reached Failed and job status returned CLI exit 1"
+}
+
 def self-test [] {
     expect (remote-name-valid (remote-name (new-run-id))) "generated random basename rejected"
     expect (remote-name-valid (remote-name "0123456789abcdef0123456789abcdef")) "generated basename rejected"
@@ -226,16 +264,20 @@ def self-test [] {
     expect (try { parse-job-state "Status: Running\nStatus: Done"; false } catch { true }) "ambiguous job states accepted"
     expect ((task-command "linux") == "sleep 8") "Linux task command changed"
     expect ((task-command "windows") == "Start-Sleep -Seconds 8") "Windows task command changed"
+    expect ((negative-task-command "linux") == "exit 7") "Linux negative task command changed"
+    expect ((negative-task-command "windows") == "exit 7") "Windows negative task command changed"
     expect ((detached-job-args "lab" "sleep 8" 4321) == ["exec" "--host" "lab" "--command" "sleep 8" "--detach" "--board-port" "4321"]) "detached exec argv changed"
     expect ((job-status-args "lab" 4321 $valid_job_id) == ["job" "status" "--host" "lab" "--board-port" "4321" $valid_job_id]) "job status argv changed"
     expect (detached-cli-help-valid "exec --host HOST --detach --board-port PORT" "job status --host HOST --board-port PORT JOB_ID") "detached CLI capability help rejected"
     expect (not (detached-cli-help-valid "exec --command" "unknown command")) "old CLI accepted for optional detached smoke"
-    expect (not ((job-config false "" "").enabled)) "job smoke must remain opt-in"
-    expect ((job-config true "4321" "linux").enabled) "complete job opt-in rejected"
-    expect (try { job-config true "" "linux"; false } catch { true }) "missing Board port accepted"
-    expect (try { job-config false "4321" "linux"; false } catch { true }) "job smoke accepted without --job"
-    expect (try { job-config true "0" "linux"; false } catch { true }) "invalid Board port accepted"
-    expect (try { job-config true "4321" "macos"; false } catch { true }) "unsupported job OS accepted"
+    expect (not ((job-config false false "" "").enabled)) "job smoke must remain opt-in"
+    expect ((job-config true false "4321" "linux").enabled) "complete positive job opt-in rejected"
+    expect ((job-config true true "4321" "windows").negative) "complete negative job opt-in rejected"
+    expect (try { job-config false true "" ""; false } catch { true }) "negative job smoke accepted without required positive job flags"
+    expect (try { job-config true false "" "linux"; false } catch { true }) "missing Board port accepted"
+    expect (try { job-config false false "4321" "linux"; false } catch { true }) "job smoke accepted without --job"
+    expect (try { job-config true false "0" "linux"; false } catch { true }) "invalid Board port accepted"
+    expect (try { job-config true false "4321" "macos"; false } catch { true }) "unsupported job OS accepted"
     print "hostlink native smoke self-tests passed"
 }
 
@@ -243,6 +285,7 @@ def main [
     --host: string = ""
     --hostlink: string = "hostlink"
     --job
+    --job-negative
     --board-port: string = ""
     --job-os: string = ""
     --self-test
@@ -254,7 +297,7 @@ def main [
     if ($host | str trim | is-empty) {
         error make {msg: "--host must name an explicitly selected managed test host"}
     }
-    let config = (job-config $job $board_port $job_os)
+    let config = (job-config $job $job_negative $board_port $job_os)
     if $config.enabled {
         require-detached-cli $hostlink
     }
@@ -294,6 +337,9 @@ def main [
     print $"SFTP basename retained in this Controller's private Agent transfer root: ($remote)"
     if $config.enabled {
         run-detached-job-smoke $hostlink $host $config.board_port $config.job_os
+        if $config.negative {
+            run-detached-job-negative-smoke $hostlink $host $config.board_port $config.job_os
+        }
     } else {
         print "Not exercised: detached Apalis job status, Agent crash/restart, or OS service lifecycle."
     }
