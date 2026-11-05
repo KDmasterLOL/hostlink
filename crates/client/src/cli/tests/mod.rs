@@ -109,6 +109,68 @@ fn invitation_target_is_parsed_into_the_existing_bootstrap_type() {
 }
 
 #[test]
+fn detached_timeout_is_bounded_optional_and_requires_detach() {
+    let base = [
+        "hostlink",
+        "exec",
+        "--host",
+        "fixture",
+        "--board-port",
+        "39123",
+        "--detach",
+        "--command",
+        "long-running-command",
+    ];
+    let legacy = Cli::try_parse_from(base).unwrap();
+    assert!(matches!(
+        legacy.command,
+        Command::Exec {
+            timeout_seconds: None,
+            ..
+        }
+    ));
+
+    for value in ["1", "900", "14400"] {
+        let parsed =
+            Cli::try_parse_from(base.into_iter().chain(["--timeout-seconds", value])).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Exec {
+                timeout_seconds: Some(_),
+                ..
+            }
+        ));
+    }
+    for value in ["0", "14401", "-1", "nonsense"] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--timeout-seconds", value])).is_err());
+    }
+    assert!(
+        Cli::try_parse_from([
+            "hostlink",
+            "exec",
+            "--host",
+            "fixture",
+            "--command",
+            "echo ok",
+            "--timeout-seconds",
+            "900",
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "hostlink",
+            "exec",
+            "--host",
+            "fixture",
+            "--command",
+            "echo ok",
+        ])
+        .is_ok()
+    );
+}
+
+#[test]
 fn migration_preflight_requires_all_local_explicit_inputs() {
     let cli = Cli::try_parse_from([
         "hostlink",

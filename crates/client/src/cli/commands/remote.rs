@@ -71,11 +71,12 @@ pub(super) async fn exec_detached(
     port: u16,
     command: &str,
     target_os: &str,
+    timeout_seconds: Option<u64>,
 ) -> Result<i32, Box<dyn Error>> {
     let (program, args) = shell_command(command, target_os)?;
     // Apalis uses ULIDs as its native task identifiers.
     let id = ulid::Ulid::generate().to_string();
-    let payload = serde_json::json!({"program": program, "args": args, "cwd": null});
+    let payload = command_job_payload(program, args, timeout_seconds);
     execute(target, async |client| {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let mut stream = client.open_forward(addr).await?;
@@ -92,6 +93,18 @@ pub(super) async fn exec_detached(
         println!("{id}");
         Ok(0)
     }).await
+}
+
+fn command_job_payload(
+    program: String,
+    args: Vec<String>,
+    timeout_seconds: Option<u64>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({"program": program, "args": args, "cwd": null});
+    if let Some(timeout_seconds) = timeout_seconds {
+        payload["timeout_seconds"] = serde_json::json!(timeout_seconds);
+    }
+    payload
 }
 
 fn board_submit_request(address: SocketAddr, id: &str, content_length: usize) -> String {
@@ -126,9 +139,22 @@ pub(super) async fn job_status(
         let native_id = ctx.get("task_id").and_then(serde_json::Value::as_str).ok_or("Apalis response missing task ID")?;
         let state = ctx.get("status").and_then(serde_json::Value::as_str).ok_or("Apalis response missing task status")?;
         if native_id != id { return Err("Apalis response task ID mismatch".into()); }
-        println!("id: {native_id}\nstatus: {state}\nexit code: unavailable (not exposed by the upstream Board task response)\noutput: unavailable (use the Board UI or have the command write its own result file)");
+        let result = upstream_run_result(ctx);
+        let result_line = result.map_or_else(
+            || "result: unavailable (not present in the upstream Board task response)".to_owned(),
+            |value| format!("upstream result: {}", value),
+        );
+        println!("id: {native_id}\nstatus: {state}\nexit code: unavailable (the upstream run result is not defined as a process exit code)\n{result_line}\noutput: unavailable (use the Board UI or have the command write its own result file)");
         Ok(0)
     }).await
+}
+
+fn upstream_run_result(ctx: &serde_json::Value) -> Option<String> {
+    let runs = ctx.get("runs")?.as_array()?;
+    runs.iter()
+        .rev()
+        .find_map(|run| run.get("result").filter(|result| !result.is_null()))
+        .map(ToString::to_string)
 }
 
 fn shell_command(command: &str, target_os: &str) -> Result<(String, Vec<String>), Box<dyn Error>> {
@@ -262,6 +288,31 @@ mod board_http_tests {
         assert!(request.contains("\r\nContent-Length: 42\r\n"));
         assert!(request.contains("\r\nx-task-max-attempts: 1\r\n"));
         assert!(request.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn command_job_timeout_is_optional_for_legacy_agents() {
+        let old = command_job_payload("sh".into(), vec!["-c".into(), "true".into()], None);
+        assert_eq!(
+            old,
+            serde_json::json!({"program":"sh", "args":["-c", "true"], "cwd":null})
+        );
+        assert!(old.get("timeout_seconds").is_none());
+
+        let new = command_job_payload("sh".into(), vec!["-c".into(), "true".into()], Some(901));
+        assert_eq!(new["timeout_seconds"], 901);
+    }
+
+    #[test]
+    fn status_reads_only_a_present_official_upstream_run_result() {
+        let response = serde_json::json!({"ctx":{"runs":[{"result":null},{"result":{"Ok":7}}]}});
+        assert_eq!(
+            upstream_run_result(&response["ctx"]).as_deref(),
+            Some("{\"Ok\":7}")
+        );
+
+        let unavailable = serde_json::json!({"ctx":{"runs":[]}});
+        assert_eq!(upstream_run_result(&unavailable["ctx"]), None);
     }
 
     #[test]

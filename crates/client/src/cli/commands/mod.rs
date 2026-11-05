@@ -75,6 +75,7 @@ pub(super) async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         Command::Exec {
             host_target,
             detach,
+            timeout_seconds,
             board_port,
             os,
             command,
@@ -106,10 +107,14 @@ pub(super) async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
                 if stdin_file.is_some() {
                     return Err("--stdin-file cannot be used with --detach".into());
                 }
-                remote::exec_detached(&host_target, port, &command, &target_os).await
+                remote::exec_detached(&host_target, port, &command, &target_os, timeout_seconds)
+                    .await
             } else {
-                if board_port.is_some() || os.is_some() {
-                    return Err("--board-port and --os are valid only with --detach".into());
+                if board_port.is_some() || os.is_some() || timeout_seconds.is_some() {
+                    return Err(
+                        "--board-port, --os, and --timeout-seconds are valid only with --detach"
+                            .into(),
+                    );
                 }
                 remote::exec(&host_target, &command, stdin_file.as_deref()).await
             }

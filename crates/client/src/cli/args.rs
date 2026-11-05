@@ -124,6 +124,9 @@ pub(super) enum Command {
         host_target: HostTarget,
         #[arg(long)]
         detach: bool,
+        /// Maximum Agent command runtime in seconds (1..=14400); requires --detach.
+        #[arg(long, requires = "detach", value_parser = clap::value_parser!(u64).range(1..=14400))]
+        timeout_seconds: Option<u64>,
         #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
         board_port: Option<u16>,
         /// Target operating system when using a direct --config target; Hub hosts use registry OS.

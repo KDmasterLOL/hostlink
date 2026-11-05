@@ -4,13 +4,13 @@ HostLink uses Apalis SQLite and the upstream Apalis Board for durable Agent-loca
 
 ## Execution
 
-Jobs contain a program, argv and optional working directory, represented as `CommandJob { program, args, cwd }`. They execute directly as the Agent's OS user through ProcessKit, without implicit shell expansion. Apalis owns SQLite persistence, queue delivery, retries, statuses and results.
+Jobs contain a program, argv and optional working directory, represented as `CommandJob { program, args, cwd }`. They execute directly as the Agent's OS user through ProcessKit, without implicit shell expansion. `hostlink exec --detach --board-port PORT --timeout-seconds N --command ...` optionally adds `timeout_seconds` to the job, bounded to 1..=14400 seconds. Omitting the flag omits the JSON field, keeping submission compatible with older Agents that do not understand it. The option is valid only with `--detach`; it configures Agent command runtime, not the Controller's SSH/Board request timeout. Apalis owns SQLite persistence, queue delivery, retries, statuses and results.
 
 The Board exposes `PUT /api/v1/queues/commands/tasks` and upstream task/worker listing endpoints. The Agent also supplies a small `/new` task form.
 
 After a crash, Apalis may run a task that had already started. Applications must tolerate repeated side effects; job execution is not exactly once.
 
-The upstream task endpoint reports status but not shell stdout, stderr, or exit code; `job status` marks these unavailable. Use the Board UI or have the command write its own result file when output is needed. A timeout or lost connection during submit leaves the outcome unknown, so do not blindly resubmit side-effectful work. Controller generates a ULID accepted by Apalis `TaskId` and sends it via upstream `x-task-id`.
+The upstream task endpoint reports status and may include a serialized result under `ctx.runs`; `job status` displays that upstream value when present, without treating it as a process exit code. When no upstream run result is present, result and exit code remain unavailable. Shell stdout/stderr are not exposed; use the Board UI or have the command write its own result file when output is needed. A timeout or lost connection during submit leaves the outcome unknown, so do not blindly resubmit side-effectful work. Controller generates a ULID accepted by Apalis `TaskId` and sends it via upstream `x-task-id`.
 
 ## Access and lifecycle
 
