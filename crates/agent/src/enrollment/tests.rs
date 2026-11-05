@@ -72,12 +72,19 @@ fn reserve_listener_candidates(count: usize) -> Vec<TcpListener> {
 #[test]
 fn listener_address_binds_a_nonzero_loopback_port_in_the_selected_range() {
     let _guard = listener_address_test_guard();
-    let address = available_loopback_addr().expect("available loopback listener port");
-
-    assert!(address.ip().is_loopback());
-    assert_ne!(address.port(), 0);
-    assert!(AGENT_LISTENER_PORTS.contains(&address.port()));
-    TcpListener::bind(address).expect("probe listener is released before returning");
+    for _ in 0..128 {
+        let address = available_loopback_addr().expect("available loopback listener port");
+        assert!(address.ip().is_loopback());
+        assert_ne!(address.port(), 0);
+        assert!(AGENT_LISTENER_PORTS.contains(&address.port()));
+        match TcpListener::bind(address) {
+            Ok(listener) => return drop(listener),
+            // The probe intentionally releases its socket before enrollment.
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => continue,
+            Err(error) => panic!("could not bind selected port: {error}"),
+        }
+    }
+    panic!("could not rebind any of 128 probed ports");
 }
 
 #[test]
@@ -101,11 +108,26 @@ fn listener_address_allocations_avoid_ports_still_held_by_prior_probes() {
     let mut listeners = Vec::new();
     let mut ports = std::collections::BTreeSet::new();
 
-    for _ in 0..8 {
+    for _ in 0..128 {
+        if listeners.len() == 8 {
+            break;
+        }
         let address = available_loopback_addr().expect("available loopback listener port");
-        assert!(ports.insert(address.port()), "port was reused while held");
-        listeners.push(TcpListener::bind(address).expect("reserve selected port"));
+        match TcpListener::bind(address) {
+            Ok(listener) => {
+                assert!(ports.insert(address.port()), "port was reused while held");
+                listeners.push(listener);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                assert!(
+                    !ports.contains(&address.port()),
+                    "allocator reused a held port"
+                );
+            }
+            Err(error) => panic!("could not reserve selected port: {error}"),
+        }
     }
+    assert_eq!(listeners.len(), 8, "could not reserve eight distinct ports");
 }
 
 #[test]
