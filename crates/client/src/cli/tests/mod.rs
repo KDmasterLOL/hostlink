@@ -171,6 +171,52 @@ fn detached_timeout_is_bounded_optional_and_requires_detach() {
 }
 
 #[test]
+fn foreground_exec_timeout_is_bounded_optional_and_conflicts_with_detach() {
+    let base = [
+        "hostlink",
+        "exec",
+        "--host",
+        "fixture",
+        "--command",
+        "echo ok",
+    ];
+    let default = Cli::try_parse_from(base).unwrap();
+    assert!(matches!(
+        default.command,
+        Command::Exec {
+            exec_timeout_seconds: None,
+            timeout_seconds: None,
+            ..
+        }
+    ));
+
+    for value in ["1", "300", "600"] {
+        let parsed =
+            Cli::try_parse_from(base.into_iter().chain(["--exec-timeout-seconds", value])).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Exec {
+                exec_timeout_seconds: Some(_),
+                ..
+            }
+        ));
+    }
+    for value in ["0", "601", "-1", "nonsense"] {
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain(["--exec-timeout-seconds", value]),)
+                .is_err()
+        );
+    }
+    assert!(
+        Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--detach", "--exec-timeout-seconds", "300"]),
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn migration_preflight_requires_all_local_explicit_inputs() {
     let cli = Cli::try_parse_from([
         "hostlink",

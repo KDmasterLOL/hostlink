@@ -124,6 +124,9 @@ pub(super) enum Command {
         host_target: HostTarget,
         #[arg(long)]
         detach: bool,
+        /// Total foreground SSH exec deadline in seconds (1..=600); cannot be used with --detach.
+        #[arg(long, conflicts_with = "detach", value_parser = clap::value_parser!(u64).range(1..=600))]
+        exec_timeout_seconds: Option<u64>,
         /// Maximum Agent command runtime in seconds (1..=14400); requires --detach.
         #[arg(long, requires = "detach", value_parser = clap::value_parser!(u64).range(1..=14400))]
         timeout_seconds: Option<u64>,

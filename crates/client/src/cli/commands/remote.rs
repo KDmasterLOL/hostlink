@@ -48,6 +48,7 @@ pub(super) async fn exec(
     target: &HostTarget,
     command: &str,
     stdin_file: Option<&str>,
+    timeout_seconds: Option<u64>,
 ) -> Result<i32, Box<dyn Error>> {
     execute(target, async |client| {
         let payload = match stdin_file {
@@ -55,7 +56,14 @@ pub(super) async fn exec(
             Some(path) => read_existing_file(Path::new(path), MAX_FILE_BYTES)?,
             None => Vec::new(),
         };
-        let response = client.exec(command, &payload).await?;
+        let response = match timeout_seconds {
+            Some(seconds) => {
+                client
+                    .exec_with_timeout(command, &payload, Duration::from_secs(seconds))
+                    .await?
+            }
+            None => client.exec(command, &payload).await?,
+        };
         io::stdout().lock().write_all(&response.stdout)?;
         io::stderr().lock().write_all(&response.stderr)?;
         let code = i32::try_from(response.exit_code).map_err(|_| {

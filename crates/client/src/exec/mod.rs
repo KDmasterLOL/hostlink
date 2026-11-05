@@ -18,6 +18,8 @@ pub struct ExecOutput {
 
 const EXEC_STDIN_CHUNK_BYTES: usize = 32 * 1024;
 const EXEC_CHANNEL_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+const MIN_EXEC_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(600);
 
 impl HostConnection {
     /// Runs one UTF-8 SSH command string and sends raw binary standard input.
@@ -33,19 +35,44 @@ impl HostConnection {
         command: &str,
         input: &[u8],
     ) -> Result<ExecOutput, SshClientError> {
+        self.exec_with_timeout(command, input, OPERATION_TIMEOUT)
+            .await
+    }
+
+    /// Runs one SSH command with an explicit total deadline for channel setup,
+    /// stdin transfer, EOF, and remote process completion.
+    ///
+    /// The deadline must be between 1 and 600 seconds. A timeout does not retry
+    /// the command because the remote side may already have performed effects.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid deadline or command, transport errors,
+    /// missing status, timeout, or output exceeding the transfer limit.
+    pub async fn exec_with_timeout(
+        &mut self,
+        command: &str,
+        input: &[u8],
+        timeout: Duration,
+    ) -> Result<ExecOutput, SshClientError> {
+        if !(MIN_EXEC_TIMEOUT..=MAX_EXEC_TIMEOUT).contains(&timeout) {
+            return Err(SshClientError::Invalid(
+                "SSH exec timeout must be between 1 and 600 seconds".into(),
+            ));
+        }
         validate_command(command)?;
         if input.len() > MAX_TRANSFER_BYTES {
             return Err(SshClientError::TransferTooLarge);
         }
-        self.exec_inner(command, input).await
+        self.exec_inner(command, input, timeout).await
     }
 
     async fn exec_inner(
         &mut self,
         command: &str,
         input: &[u8],
+        timeout: Duration,
     ) -> Result<ExecOutput, SshClientError> {
-        let deadline = tokio::time::Instant::now() + OPERATION_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + timeout;
         let channel = tokio::time::timeout_at(deadline, self.session.channel_open_session())
             .await
             .map_err(|_| SshClientError::Timeout)??;

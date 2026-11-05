@@ -25,6 +25,7 @@ enum ServerBehavior {
     BinaryOutput,
     CloseWithoutStatus,
     CloseDuringInput,
+    SlowExecRequest,
 }
 
 struct EchoHandler {
@@ -60,7 +61,9 @@ impl server::Handler for EchoHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
-        if matches!(self.behavior, ServerBehavior::CloseWithoutStatus) {
+        if matches!(self.behavior, ServerBehavior::SlowExecRequest) {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        } else if matches!(self.behavior, ServerBehavior::CloseWithoutStatus) {
             session.close(channel)?;
         } else if matches!(self.behavior, ServerBehavior::BinaryOutput) {
             session.data(channel, vec![0, 255, 10])?;
@@ -222,6 +225,59 @@ async fn exec_preserves_binary_stdout_stderr_and_nonzero_status() {
     assert_eq!(output.stdout, [0, 255, 10]);
     assert_eq!(output.stderr, [255, 0, 13]);
     assert_eq!(output.exit_code, 7);
+    connection.close().await.expect("close SSH session");
+    server_task
+        .await
+        .expect("join fixture server")
+        .expect("server stopped");
+}
+
+#[tokio::test]
+async fn exec_with_timeout_accepts_supported_bounds_and_times_out_slow_server() {
+    let (mut connection, server_task, _, _) = authenticated_pair(ServerBehavior::Echo).await;
+    for seconds in [1, 300, 600] {
+        let output = connection
+            .exec_with_timeout("fixture-timeout-range", b"ok", Duration::from_secs(seconds))
+            .await
+            .expect("supported timeout should run command");
+        assert_eq!(output.stdout, b"ok");
+        assert_eq!(output.exit_code, 0);
+    }
+    connection.close().await.expect("close SSH session");
+    server_task
+        .await
+        .expect("join fixture server")
+        .expect("server stopped");
+
+    let (mut connection, server_task, _, _) =
+        authenticated_pair(ServerBehavior::SlowExecRequest).await;
+    let result = connection
+        .exec_with_timeout("fixture-slow", b"single attempt", Duration::from_secs(1))
+        .await;
+    assert!(matches!(result, Err(SshClientError::Timeout)));
+    connection.close().await.expect("close SSH session");
+    let server_result = server_task.await.expect("join fixture server");
+    assert!(matches!(
+        server_result,
+        Err(russh::Error::IO(error)) if error.kind() == std::io::ErrorKind::BrokenPipe
+    ));
+}
+
+#[tokio::test]
+async fn exec_with_timeout_rejects_values_outside_cli_bounds() {
+    let (mut connection, server_task, _, _) = authenticated_pair(ServerBehavior::Echo).await;
+    for timeout in [
+        Duration::ZERO,
+        Duration::from_millis(999),
+        Duration::from_secs(601),
+    ] {
+        assert!(matches!(
+            connection
+                .exec_with_timeout("fixture-invalid-timeout", &[], timeout)
+                .await,
+            Err(SshClientError::Invalid(_))
+        ));
+    }
     connection.close().await.expect("close SSH session");
     server_task
         .await

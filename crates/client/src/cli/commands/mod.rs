@@ -75,6 +75,7 @@ pub(super) async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         Command::Exec {
             host_target,
             detach,
+            exec_timeout_seconds,
             timeout_seconds,
             board_port,
             os,
@@ -82,6 +83,9 @@ pub(super) async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
             stdin_file,
         } => {
             if detach {
+                if exec_timeout_seconds.is_some() {
+                    return Err("--exec-timeout-seconds cannot be used with --detach".into());
+                }
                 let port = board_port.ok_or("--board-port is required with --detach")?;
                 let target_os = if let Some(name) = &host_target.host {
                     let path = match &host_target.config {
@@ -116,7 +120,13 @@ pub(super) async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
                             .into(),
                     );
                 }
-                remote::exec(&host_target, &command, stdin_file.as_deref()).await
+                remote::exec(
+                    &host_target,
+                    &command,
+                    stdin_file.as_deref(),
+                    exec_timeout_seconds,
+                )
+                .await
             }
         }
         Command::Job {

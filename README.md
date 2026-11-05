@@ -41,6 +41,8 @@ hostlink list
 hostlink list --check
 hostlink verify lab-host
 hostlink exec --host lab-host --command 'hostname'
+# Optional total foreground SSH deadline (1..=600 seconds) for slow stdin upload
+hostlink exec --host lab-host --exec-timeout-seconds 300 --stdin-file ./artifact.exe --command 'stage-artifact'
 
 # Detached shell command (supply the Agent's exact loopback Board port)
 hostlink exec --host lab-host --board-port 39123 --detach --command 'long-running-command'
