@@ -150,6 +150,15 @@ def run-cli [binary: string, argv: list<string>] {
     $result.stdout
 }
 
+def parse-status-command-result [exit_code: int, stdout: string] {
+    let state = (parse-job-state $stdout)
+    let expected_exit = if $state in ["Failed" "Killed"] { 1 } else { 0 }
+    if $exit_code != $expected_exit {
+        error make {msg: $"job status CLI returned ($exit_code) for ($state), expected ($expected_exit)"}
+    }
+    $state
+}
+
 def run-detached-job-smoke [binary: string, host: string, board_port: int, job_os: string] {
     let command = (task-command $job_os)
     let submitted_at = (date now)
@@ -163,8 +172,8 @@ def run-detached-job-smoke [binary: string, host: string, board_port: int, job_o
     mut state = "Unobserved"
     while ((date now) < $deadline) and ($state not-in ["Done" "Failed" "Killed"]) {
         # Each status invocation is a new Controller process and a fresh pinned SSH connection.
-        let status_output = (run-cli $binary (job-status-args $host $board_port $job_id))
-        $state = (parse-job-state $status_output)
+        let status_result = (^$binary ...(job-status-args $host $board_port $job_id) | complete)
+        $state = (parse-status-command-result $status_result.exit_code $status_result.stdout)
         print $"Detached smoke job ($job_id): ($state)"
         if $state not-in ["Done" "Failed" "Killed"] {
             sleep 1sec
@@ -206,6 +215,12 @@ def self-test [] {
     expect ((parse-job-state "{\"job_id\": \"$valid_job_id\", \"status\": \"Done\"}") == "Done") "JSON job state parser changed"
     expect ((parse-job-state "Status: Failed") == "Failed") "Failed state parser changed"
     expect ((parse-job-state "Status: Killed") == "Killed") "Killed state parser changed"
+    expect ((parse-status-command-result 0 "Status: Done") == "Done") "successful job status rejected"
+    expect ((parse-status-command-result 0 "Status: Running") == "Running") "in-progress job status rejected"
+    expect ((parse-status-command-result 1 "Status: Failed") == "Failed") "terminal Failed state rejected"
+    expect ((parse-status-command-result 1 "Status: Killed") == "Killed") "terminal Killed state rejected"
+    expect (try { parse-status-command-result 0 "Status: Failed"; false } catch { true }) "Failed with zero CLI exit accepted"
+    expect (try { parse-status-command-result 1 "Status: Done"; false } catch { true }) "Done with failure CLI exit accepted"
     expect (try { parse-job-state "Status: Unknown"; false } catch { true }) "unknown job state accepted"
     expect (try { parse-job-state "Message: Done"; false } catch { true }) "unlabeled Done text accepted as job state"
     expect (try { parse-job-state "Status: Running\nStatus: Done"; false } catch { true }) "ambiguous job states accepted"

@@ -242,14 +242,27 @@ pub(super) async fn job_status(
         let native_id = ctx.get("task_id").and_then(serde_json::Value::as_str).ok_or("Apalis response missing task ID")?;
         let state = ctx.get("status").and_then(serde_json::Value::as_str).ok_or("Apalis response missing task status")?;
         if native_id != id { return Err("Apalis response task ID mismatch".into()); }
+        let status_exit_code = job_status_cli_exit_code(state)?;
         let result = upstream_run_result(ctx);
         let result_line = result.map_or_else(
             || "result: unavailable (not present in the upstream Board task response)".to_owned(),
             |value| format!("upstream result: {}", value),
         );
-        println!("id: {native_id}\nstatus: {state}\nexit code: unavailable (the upstream run result is not defined as a process exit code)\n{result_line}\noutput: unavailable (use the Board UI or have the command write its own result file)");
-        Ok(0)
+        println!("id: {native_id}\nstatus: {state}\nexit code: unavailable (the upstream run result is not defined as a process exit code)\n{result_line}\noutput: unavailable (have the command write its own result file)");
+        Ok(status_exit_code)
     }).await
+}
+
+// CLI status reports query success/failure, not the original process exit code.
+fn job_status_cli_exit_code(state: &str) -> io::Result<i32> {
+    match state {
+        "Pending" | "Queued" | "Running" | "Done" => Ok(0),
+        "Failed" | "Killed" => Ok(1),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported Apalis task status: {state}"),
+        )),
+    }
 }
 
 fn upstream_run_result(ctx: &serde_json::Value) -> Option<String> {
@@ -465,6 +478,21 @@ mod board_http_tests {
 
         let new = command_job_payload("sh".into(), vec!["-c".into(), "true".into()], Some(901));
         assert_eq!(new["timeout_seconds"], 901);
+    }
+
+    #[test]
+    fn job_status_cli_distinguishes_terminal_failure_from_query_success() {
+        for state in ["Pending", "Queued", "Running", "Done"] {
+            assert_eq!(job_status_cli_exit_code(state).unwrap(), 0, "{state}");
+        }
+        for state in ["Failed", "Killed"] {
+            assert_eq!(job_status_cli_exit_code(state).unwrap(), 1, "{state}");
+        }
+        assert_eq!(
+            job_status_cli_exit_code("Unexpected").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(job_status_cli_exit_code("").is_err());
     }
 
     #[test]
