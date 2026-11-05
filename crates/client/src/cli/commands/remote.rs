@@ -5,6 +5,7 @@ use crate::cli::{
 use hostlink::connect::{HostConnection, SshClientError};
 use std::{
     error::Error,
+    future::Future,
     io::{self, Write},
     net::SocketAddr,
     path::Path,
@@ -14,6 +15,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const BOARD_TIMEOUT: Duration = Duration::from_secs(10);
 const BOARD_MAX_RESPONSE: usize = 64 * 1024;
+const COMMAND_TIMEOUT_HEADER: &str = "x-hostlink-command-timeout-max";
+const COMMAND_TIMEOUT_MAX: u64 = 14_400;
 
 pub(super) async fn check(target: &HostTarget) -> Result<i32, Box<dyn Error>> {
     execute(target, async |_| Ok(0)).await
@@ -79,20 +82,120 @@ pub(super) async fn exec_detached(
     let payload = command_job_payload(program, args, timeout_seconds);
     execute(target, async |client| {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        let mut stream = client.open_forward(addr).await?;
-        let body = serde_json::to_vec(&payload)?;
-        let request = board_submit_request(addr, &id, body.len());
-        tokio::time::timeout(BOARD_TIMEOUT, async {
-            stream.write_all(request.as_bytes()).await?;
-            stream.write_all(&body).await?;
-            let response = read_board_response(&mut stream).await?;
-            let status = response_status(&response)?;
-            if !(200..300).contains(&status) { return Err(io::Error::other(format!("Apalis Board rejected job submission (HTTP {status}); outcome may be ambiguous; do not retry blindly"))); }
-            Ok::<(), io::Error>(())
-        }).await.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Apalis Board request timed out; submission outcome is unknown; do not retry blindly"))??;
+        if let Some(requested) = timeout_seconds {
+            let mut stream = client.open_forward(addr).await?;
+            let request = board_timeout_capability_request(addr);
+            let response = tokio::time::timeout(BOARD_TIMEOUT, async {
+                stream.write_all(request.as_bytes()).await?;
+                read_board_response(&mut stream).await
+            })
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Apalis Board timeout capability preflight timed out; job was not submitted",
+                )
+            })??;
+            submit_after_timeout_preflight(
+                &response,
+                requested,
+                submit_detached_job(client, addr, &id, &payload),
+            )
+            .await?;
+        } else {
+            submit_detached_job(client, addr, &id, &payload).await?;
+        }
         println!("{id}");
         Ok(0)
-    }).await
+    })
+    .await
+}
+
+async fn submit_detached_job(
+    client: &mut HostConnection,
+    addr: SocketAddr,
+    id: &str,
+    payload: &serde_json::Value,
+) -> io::Result<()> {
+    let mut stream = client.open_forward(addr).await.map_err(io::Error::other)?;
+    let body = serde_json::to_vec(payload).map_err(io::Error::other)?;
+    let request = board_submit_request(addr, id, body.len());
+    tokio::time::timeout(BOARD_TIMEOUT, async {
+        stream.write_all(request.as_bytes()).await?;
+        stream.write_all(&body).await?;
+        let response = read_board_response(&mut stream).await?;
+        let status = response_status(&response)?;
+        if !(200..300).contains(&status) {
+            return Err(io::Error::other(format!(
+                "Apalis Board rejected job submission (HTTP {status}); outcome may be ambiguous; do not retry blindly"
+            )));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Apalis Board request timed out; submission outcome is unknown; do not retry blindly",
+        )
+    })?
+}
+
+fn board_timeout_capability_request(address: SocketAddr) -> String {
+    format!("GET /new HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")
+}
+
+async fn submit_after_timeout_preflight<T>(
+    response: &[u8],
+    requested: u64,
+    submit: impl Future<Output = io::Result<T>>,
+) -> io::Result<T> {
+    validate_timeout_capability(response, requested)?;
+    submit.await
+}
+
+fn validate_timeout_capability(response: &[u8], requested: u64) -> io::Result<()> {
+    let status = response_status(response)?;
+    if status != 200 {
+        return Err(io::Error::other(format!(
+            "Apalis Board timeout capability preflight failed (HTTP {status}); job was not submitted"
+        )));
+    }
+    let (head, _) = split_response(response)?;
+    let mut capabilities = head.lines().skip(1).filter_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case(COMMAND_TIMEOUT_HEADER)
+            .then_some(value.trim())
+    });
+    let value = capabilities.next().ok_or_else(|| {
+        io::Error::other("Agent does not advertise custom command timeouts; job was not submitted")
+    })?;
+    if capabilities.next().is_some() {
+        return Err(io::Error::other(
+            "Agent returned an ambiguous command timeout capability; job was not submitted",
+        ));
+    }
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(io::Error::other(
+            "Agent returned an invalid command timeout capability; job was not submitted",
+        ));
+    }
+    let maximum = value.parse::<u64>().map_err(|_| {
+        io::Error::other(
+            "Agent returned an invalid command timeout capability; job was not submitted",
+        )
+    })?;
+    if maximum == 0 || maximum > COMMAND_TIMEOUT_MAX {
+        return Err(io::Error::other(
+            "Agent returned an out-of-range command timeout capability; job was not submitted",
+        ));
+    }
+    if maximum < requested {
+        return Err(io::Error::other(format!(
+            "Agent supports command timeouts up to {maximum} seconds, below the requested {requested}; job was not submitted"
+        )));
+    }
+    Ok(())
 }
 
 fn command_job_payload(
@@ -288,6 +391,67 @@ mod board_http_tests {
         assert!(request.contains("\r\nContent-Length: 42\r\n"));
         assert!(request.contains("\r\nx-task-max-attempts: 1\r\n"));
         assert!(request.ends_with("\r\n\r\n"));
+        assert!(
+            !request
+                .to_ascii_lowercase()
+                .contains(COMMAND_TIMEOUT_HEADER)
+        );
+    }
+
+    #[test]
+    fn timeout_preflight_uses_the_existing_board_form_with_exact_host() {
+        let address = SocketAddr::from(([127, 0, 0, 1], 23584));
+        assert_eq!(
+            board_timeout_capability_request(address),
+            "GET /new HTTP/1.1\r\nHost: 127.0.0.1:23584\r\nConnection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn accepts_one_valid_timeout_capability_at_or_above_request() {
+        let response = b"HTTP/1.1 200 OK\r\nx-hostlink-command-timeout-max: 14400\r\ncontent-length: 0\r\n\r\n";
+        assert!(validate_timeout_capability(response, 14_400).is_ok());
+        let exact =
+            b"HTTP/1.1 200 OK\r\nX-HostLink-Command-Timeout-Max: 901\r\ncontent-length: 0\r\n\r\n";
+        assert!(validate_timeout_capability(exact, 901).is_ok());
+    }
+
+    #[test]
+    fn rejects_missing_duplicate_corrupt_and_insufficient_capabilities() {
+        let missing = b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n";
+        let duplicate = b"HTTP/1.1 200 OK\r\nx-hostlink-command-timeout-max: 14400\r\nX-HostLink-Command-Timeout-Max: 14400\r\ncontent-length: 0\r\n\r\n";
+        let corrupt = b"HTTP/1.1 200 OK\r\nx-hostlink-command-timeout-max: 14seconds\r\ncontent-length: 0\r\n\r\n";
+        let zero =
+            b"HTTP/1.1 200 OK\r\nx-hostlink-command-timeout-max: 0\r\ncontent-length: 0\r\n\r\n";
+        let over_cap = b"HTTP/1.1 200 OK\r\nx-hostlink-command-timeout-max: 14401\r\ncontent-length: 0\r\n\r\n";
+        let under_limit =
+            b"HTTP/1.1 200 OK\r\nx-hostlink-command-timeout-max: 900\r\ncontent-length: 0\r\n\r\n";
+        let non_200 = b"HTTP/1.1 404 Not Found\r\nx-hostlink-command-timeout-max: 14400\r\ncontent-length: 0\r\n\r\n";
+        let responses: [&[u8]; 7] = [
+            missing,
+            duplicate,
+            corrupt,
+            zero,
+            over_cap,
+            under_limit,
+            non_200,
+        ];
+        for response in responses {
+            assert!(validate_timeout_capability(response, 901).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_timeout_preflight_short_circuits_before_enqueue() {
+        let response = b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n";
+        let submitted = std::cell::Cell::new(false);
+        let result = submit_after_timeout_preflight(response, 901, async {
+            submitted.set(true);
+            Ok(())
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(!submitted.get());
     }
 
     #[test]

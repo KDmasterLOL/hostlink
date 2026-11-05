@@ -46,6 +46,7 @@ hostlink exec --host lab-host --command 'hostname'
 hostlink exec --host lab-host --board-port 39123 --detach --command 'long-running-command'
 # Optional Agent execution timeout (1..=14400 seconds)
 hostlink exec --host lab-host --board-port 39123 --detach --timeout-seconds 3600 --command 'long-running-command'
+# Explicit timeouts require an Agent advertising its supported maximum; without the flag, older Agents remain compatible.
 # Direct --config targets must specify --os linux or --os windows
 hostlink job status --host lab-host --board-port 39123 JOB_ID
 hostlink upload --host lab-host --local ./input.bin --remote input.bin
