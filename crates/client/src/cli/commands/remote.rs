@@ -80,7 +80,7 @@ pub(super) async fn exec_detached(
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let mut stream = client.open_forward(addr).await?;
         let body = serde_json::to_vec(&payload)?;
-        let request = format!("PUT /api/v1/queues/commands/tasks HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\nx-task-id: {id}\r\n\r\n", body.len());
+        let request = board_submit_request(addr, &id, body.len());
         tokio::time::timeout(BOARD_TIMEOUT, async {
             stream.write_all(request.as_bytes()).await?;
             stream.write_all(&body).await?;
@@ -92,6 +92,14 @@ pub(super) async fn exec_detached(
         println!("{id}");
         Ok(0)
     }).await
+}
+
+fn board_submit_request(address: SocketAddr, id: &str, content_length: usize) -> String {
+    // A command may have mutated external state before returning a nonzero
+    // exit code. Do not let Apalis automatically repeat that side effect.
+    format!(
+        "PUT /api/v1/queues/commands/tasks HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {content_length}\r\nx-task-id: {id}\r\nx-task-max-attempts: 1\r\n\r\n"
+    )
 }
 
 pub(super) async fn job_status(
@@ -244,6 +252,17 @@ async fn execute(
 #[cfg(test)]
 mod board_http_tests {
     use super::*;
+
+    #[test]
+    fn detached_jobs_request_exactly_one_upstream_attempt() {
+        let address = SocketAddr::from(([127, 0, 0, 1], 23584));
+        let request = board_submit_request(address, "01ARZ3NDEKTSV4RRFFQ69G5FAV", 42);
+        assert!(request.starts_with("PUT /api/v1/queues/commands/tasks HTTP/1.1\r\n"));
+        assert!(request.contains("\r\nHost: 127.0.0.1:23584\r\n"));
+        assert!(request.contains("\r\nContent-Length: 42\r\n"));
+        assert!(request.contains("\r\nx-task-max-attempts: 1\r\n"));
+        assert!(request.ends_with("\r\n\r\n"));
+    }
 
     #[test]
     fn parses_upstream_empty_ack_and_task_response() {

@@ -49,3 +49,11 @@ async fn origin_guard(
     }
     Ok(next.run(request).await)
 }
+
+#[cfg(test)]
+mod form_tests {
+    #[test]
+    fn operator_form_submits_one_attempt() {
+        assert!(include_str!("new.html").contains("'x-task-max-attempts':'1'"));
+    }
+}
