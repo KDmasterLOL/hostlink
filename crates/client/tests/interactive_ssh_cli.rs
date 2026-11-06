@@ -85,6 +85,9 @@ async fn source_controller_ssh_opens_and_exits_real_managed_pty_shell() {
         shell_quote(direct_config.to_str().unwrap()),
     );
     let mut client = Command::new("script")
+        // util-linux script uses $SHELL for its -c command; run the POSIX
+        // fixture quoting under sh rather than the operator's Nushell.
+        .env("SHELL", "/bin/sh")
         .args(["-q", "-e", "-c", &command, "/dev/null"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -94,10 +97,19 @@ async fn source_controller_ssh_opens_and_exits_real_managed_pty_shell() {
         .expect("launch disposable local PTY for HostLink Controller");
     let mut input = client.stdin.take().unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
-    input
+    if let Err(error) = input
         .write_all(b"echo hostlink-cli-native-marker\nexit 7\n")
         .await
-        .expect("write commands to controller-side terminal");
+    {
+        drop(input);
+        let details = client.wait_with_output().await.unwrap();
+        panic!(
+            "failed to write into local terminal: {error}; child code={:?}; stdout={}; stderr={}",
+            details.status.code(),
+            String::from_utf8_lossy(&details.stdout),
+            String::from_utf8_lossy(&details.stderr),
+        );
+    }
     input.flush().await.unwrap();
 
     let output = tokio::time::timeout(Duration::from_secs(22), client.wait_with_output())
