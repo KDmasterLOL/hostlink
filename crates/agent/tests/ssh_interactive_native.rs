@@ -5,7 +5,9 @@ use hostlink_agent::{AgentConfig, jobs::JobStore, ssh};
 use russh::{
     ChannelMsg, Disconnect,
     client::{self, Handler},
-    keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate, ssh_key::LineEnding},
+    keys::{
+        Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate, ssh_key::LineEnding,
+    },
 };
 use std::{os::unix::fs::PermissionsExt, path::Path, sync::Arc, time::Duration};
 
@@ -54,7 +56,11 @@ async fn pinned_agent_pty_shell_streams_and_preserves_exit_status() {
     let jobs = home.path().join("jobs");
     std::fs::create_dir(&jobs).unwrap();
     std::fs::set_permissions(&jobs, std::fs::Permissions::from_mode(0o700)).unwrap();
-    JobStore::initialize_fresh(&jobs).await.unwrap().close().await;
+    JobStore::initialize_fresh(&jobs)
+        .await
+        .unwrap()
+        .close()
+        .await;
 
     let host = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
     let controller = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
@@ -143,7 +149,10 @@ async fn pinned_agent_pty_shell_streams_and_preserves_exit_status() {
         printed.contains("hostlink-interactive-shell-marker"),
         "no real shell output: {printed}"
     );
-    assert!(printed.contains("33 88"), "PTY geometry was not propagated: {printed}");
+    assert!(
+        printed.contains("33 88"),
+        "PTY geometry was not propagated: {printed}"
+    );
     assert_eq!(code, Some(7), "must preserve remote shell's exit status");
 
     session
