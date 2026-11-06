@@ -2,6 +2,7 @@ mod forward;
 pub(super) mod hosts;
 mod hub;
 mod remote;
+mod ssh;
 
 use crate::cli::args::{Cli, Command, MigrationCommand};
 use std::{
@@ -54,6 +55,7 @@ pub(super) async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         }
         Command::Remove { host, yes } => hub::remove(&host, yes).await,
         Command::Check { host_target } => remote::check(&host_target).await,
+        Command::Ssh { host, config } => ssh::interactive(host.as_deref(), config.as_deref()).await,
         Command::Forward {
             host_target,
             listen,

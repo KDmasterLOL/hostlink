@@ -93,6 +93,15 @@ pub(super) enum Command {
         #[command(flatten)]
         host_target: HostTarget,
     },
+    /// Open an interactive terminal on a registered host over pinned SSH.
+    Ssh {
+        /// Registered Hub host name; omit only when using a direct HostSpec config.
+        #[arg(required_unless_present = "config")]
+        host: Option<String>,
+        /// Direct pinned HostSpec JSON, or Hub settings path when HOST is supplied.
+        #[arg(long, conflicts_with = "host")]
+        config: Option<PathBuf>,
+    },
     /// Forward a loopback TCP port to a target reachable from the SSH host.
     Forward {
         #[command(flatten)]

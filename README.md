@@ -40,6 +40,7 @@ hostlink hub check
 hostlink list
 hostlink list --check
 hostlink verify lab-host
+hostlink ssh lab-host
 hostlink exec --host lab-host --command 'hostname'
 # Optional total foreground SSH deadline (1..=600 seconds) for slow stdin upload
 hostlink exec --host lab-host --exec-timeout-seconds 300 --stdin-file ./artifact.exe --command 'stage-artifact'
@@ -53,6 +54,8 @@ hostlink exec --host lab-host --board-port 39123 --detach --timeout-seconds 3600
 hostlink job status --host lab-host --board-port 39123 JOB_ID
 hostlink upload --host lab-host --local ./input.bin --remote input.bin
 ```
+
+`hostlink ssh HOST` requires terminal stdin/stdout, requests a PTY and shell over the existing pinned SSH connection, and returns the remote SSH exit status. A direct pinned `HostSpec` can be selected with `hostlink ssh --config ./host.json`. The initial terminal size is sent at connection time; live window resizing is not supported yet. Agents that reject PTY or shell requests report an explicit compatibility error; the Controller does not fall back to an external `ssh` executable.
 
 A new machine requires a one-use Hub invitation:
 

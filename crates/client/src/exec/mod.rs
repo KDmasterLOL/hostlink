@@ -1,5 +1,7 @@
 //! Binary standard SSH exec, outputs, and exit status.
 
+mod interactive;
+
 use russh::{ChannelMsg, ChannelWriteHalf, client::Msg};
 use std::time::Duration;
 
