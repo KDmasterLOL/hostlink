@@ -38,7 +38,15 @@ struct EmbeddedSession {
     _connection_slot: Option<tokio::sync::OwnedSemaphorePermit>,
     active_exec: Arc<std::sync::Mutex<HashMap<ChannelId, processkit::CancellationToken>>>,
     session_channels: HashMap<ChannelId, Channel<Msg>>,
+    pending_ptys: HashMap<ChannelId, PtyIntent>,
     authenticated_controller: Option<String>,
+}
+
+#[derive(Clone)]
+struct PtyIntent {
+    term: String,
+    cols: u16,
+    rows: u16,
 }
 
 pub(crate) async fn serve_prepared_until<F>(
@@ -108,6 +116,7 @@ impl russh::server::Server for EmbeddedServer {
             shared: self.shared.clone(),
             active_exec: Arc::new(std::sync::Mutex::new(HashMap::new())),
             session_channels: HashMap::new(),
+            pending_ptys: HashMap::new(),
             authenticated_controller: None,
         }
     }
@@ -124,11 +133,13 @@ impl EmbeddedSession {
     }
 
     fn take_session_channel(&mut self, channel_id: ChannelId) -> Option<Channel<Msg>> {
+        self.pending_ptys.remove(&channel_id);
         self.session_channels.remove(&channel_id)
     }
 
     fn discard_session_channel(&mut self, channel_id: ChannelId) {
         self.session_channels.remove(&channel_id);
+        self.pending_ptys.remove(&channel_id);
     }
 
     fn cancel_exec(&self, channel_id: ChannelId) {
@@ -281,24 +292,109 @@ impl russh::server::Handler for EmbeddedSession {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.discard_session_channel(channel);
-        fail_session_channel(channel, session)?;
+        if self.authenticated_controller.is_none() {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+        let Some(pty) = self.pending_ptys.remove(&channel) else {
+            // Keep the channel available for a correctly ordered PTY + shell request.
+            session.channel_failure(channel)?;
+            return Ok(());
+        };
+        if !self.session_channels.contains_key(&channel)
+            || self
+                .active_exec
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&channel)
+        {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+        let Ok(slot) = self.shared.exec_slots.clone().try_acquire_owned() else {
+            session.channel_failure(channel)?;
+            return Ok(());
+        };
+        let command = match exec::prepare_shell(&pty.term, pty.cols, pty.rows) {
+            Ok(command) => command,
+            Err(_) => {
+                session.channel_failure(channel)?;
+                return Ok(());
+            }
+        };
+        let Some(channel_handle) = self.take_session_channel(channel) else {
+            session.channel_failure(channel)?;
+            return Ok(());
+        };
+        let cancellation = self.shared.exec_shutdown.child_token();
+        self.active_exec
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(channel, cancellation.clone());
+        session.channel_success(channel)?;
+        let active_exec = self.active_exec.clone();
+        tokio::spawn(async move {
+            let _slot = slot;
+            exec::run_shell(channel_handle, command, cancellation).await;
+            active_exec
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&channel);
+        });
         Ok(())
     }
 
     async fn pty_request(
         &mut self,
         channel: ChannelId,
-        _term: &str,
+        term: &str,
+        col_width: u32,
+        row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        modes: &[(russh::Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let valid_term = !term.is_empty()
+            && term.len() <= 64
+            && term.bytes().all(|byte| (0x21..=0x7e).contains(&byte));
+        if self.authenticated_controller.is_none()
+            || !self.session_channels.contains_key(&channel)
+            || self.pending_ptys.contains_key(&channel)
+            || !valid_term
+            || !modes.is_empty()
+            || col_width == 0
+            || row_height == 0
+            || col_width > i16::MAX as u32
+            || row_height > i16::MAX as u32
+        {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+        self.pending_ptys.insert(
+            channel,
+            PtyIntent {
+                term: term.to_owned(),
+                cols: col_width as u16,
+                rows: row_height as u16,
+            },
+        );
+        session.channel_success(channel)?;
+        Ok(())
+    }
+
+    async fn window_change_request(
+        &mut self,
+        channel: ChannelId,
         _col_width: u32,
         _row_height: u32,
         _pix_width: u32,
         _pix_height: u32,
-        _modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.discard_session_channel(channel);
-        fail_session_channel(channel, session)?;
+        // ProcessKit's live process handle is consumed by drain(), so this slice
+        // cannot safely route a later resize. Refuse instead of claiming success.
+        session.channel_failure(channel)?;
         Ok(())
     }
 

@@ -65,10 +65,85 @@ pub(super) fn prepare_command(command: &str) -> io::Result<Command> {
         .timeout_grace(EXEC_TIMEOUT_GRACE))
 }
 
+pub(super) fn prepare_shell(term: &str, cols: u16, rows: u16) -> io::Result<Command> {
+    #[cfg(unix)]
+    let mut child = {
+        let shell = std::env::var_os("SHELL")
+            .filter(|value| !value.is_empty() && value.len() <= 4096)
+            .map(std::path::PathBuf::from)
+            .filter(|path| valid_login_shell(path))
+            .unwrap_or_else(|| std::path::PathBuf::from("/bin/sh"));
+        Command::new(shell).arg("-i")
+    };
+
+    #[cfg(windows)]
+    let mut child = Command::new("powershell.exe").args(["-NoLogo", "-NoProfile"]);
+
+    #[cfg(not(any(unix, windows)))]
+    let child: Command = {
+        let _ = (term, cols, rows);
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "interactive SSH shell is unsupported on this operating system",
+        ));
+    };
+
+    #[cfg(any(unix, windows))]
+    {
+        child = child
+            .env("TERM", term)
+            .use_pty()
+            .pty_size(cols, rows)
+            .keep_stdin_open()
+            // Interactive sessions can outlive any fixed exec timeout. Retain
+            // no transcript; SSH itself applies bounded channel backpressure.
+            .output_buffer(OutputBufferPolicy::bounded(0));
+        Ok(child)
+    }
+}
+
+#[cfg(unix)]
+fn valid_login_shell(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !path.is_absolute()
+        || path
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .any(|byte| *byte < 0x20 || *byte == 0x7f)
+    {
+        return false;
+    }
+    std::fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
 pub(super) async fn run(
     channel: russh::Channel<russh::server::Msg>,
     command: Command,
     cancellation: processkit::CancellationToken,
+) {
+    run_with_start_error(channel, command, cancellation, "SSH exec failed to start\n").await;
+}
+
+pub(super) async fn run_shell(
+    channel: russh::Channel<russh::server::Msg>,
+    command: Command,
+    cancellation: processkit::CancellationToken,
+) {
+    #[cfg(windows)]
+    let message = "SSH PTY shell failed to start; Windows requires ConPTY support (Windows 10 version 1809 or later)\n";
+    #[cfg(not(windows))]
+    let message = "SSH PTY shell failed to start\n";
+    run_with_start_error(channel, command, cancellation, message).await;
+}
+
+async fn run_with_start_error(
+    channel: russh::Channel<russh::server::Msg>,
+    command: Command,
+    cancellation: processkit::CancellationToken,
+    start_error: &'static str,
 ) {
     let (mut remote_input, channel_output) = channel.split();
     let mut command = command.cancel_on(cancellation);
@@ -80,7 +155,7 @@ pub(super) async fn run(
         Ok(child) => child,
         Err(_) => {
             let _ = channel_output
-                .extended_data_bytes(1, b"SSH exec failed to start\n".as_slice())
+                .extended_data_bytes(1, start_error.as_bytes())
                 .await;
             let _ = channel_output.exit_status(127).await;
             let _ = channel_output.eof().await;
@@ -89,6 +164,8 @@ pub(super) async fn run(
         }
     };
     let Some(mut child_stdin) = child.take_stdin() else {
+        let _ = channel_output.exit_status(127).await;
+        let _ = channel_output.eof().await;
         let _ = channel_output.close().await;
         return;
     };
@@ -194,6 +271,52 @@ mod tests {
         assert_eq!(
             validate_command(b"echo ok", 8).expect("valid command"),
             "echo ok"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod pty_tests {
+    use super::prepare_shell;
+    use processkit::Outcome;
+    use std::io;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn processkit_pty_forwards_interactive_input_and_raw_output() {
+        let (writer, mut reader) = tokio::io::duplex(16 * 1024);
+        let mut process = prepare_shell("xterm", 80, 24)
+            .expect("prepare interactive shell")
+            .stdout_raw_tee(writer)
+            .start()
+            .await
+            .expect("start real PTY shell");
+        let mut input = process.take_stdin().expect("PTY input handle");
+        input
+            .write(b"printf 'HOSTLINK_PTY_UNIT_MARKER'; exit 7\n")
+            .await
+            .expect("write command to PTY");
+        drop(input);
+
+        let (outcome, output) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::try_join!(
+                async { process.drain().await.map_err(io::Error::other) },
+                async {
+                    let mut output = Vec::new();
+                    reader.read_to_end(&mut output).await?;
+                    Ok::<_, io::Error>(output)
+                }
+            )
+        })
+        .await
+        .expect("PTY shell deadline")
+        .expect("drain real PTY shell");
+
+        assert_eq!(outcome, Outcome::Exited(7));
+        assert!(
+            output
+                .windows(b"HOSTLINK_PTY_UNIT_MARKER".len())
+                .any(|window| window == b"HOSTLINK_PTY_UNIT_MARKER")
         );
     }
 }
