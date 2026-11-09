@@ -17,22 +17,41 @@ pub(crate) fn create_invite(
         ));
     }
     let name = request.name.map(|n| validate_name(&n)).transpose()?;
+    if request.repair_machine_id.is_some() && request.rotate_machine_id.is_some() {
+        return Err(HubError::bad(
+            "repair and rotation are distinct invite purposes",
+        ));
+    }
     let mut locked = app
         .store
         .lock()
         .map_err(|_| HubError::internal("Hub state unavailable"))?;
-    if let Some(id) = &request.rotate_machine_id
+    let existing_id = request
+        .repair_machine_id
+        .as_ref()
+        .or(request.rotate_machine_id.as_ref());
+    if let Some(id) = existing_id
         && !locked.state.hosts.contains_key(id)
     {
         return Err(HubError::NotFound);
     }
     if let Some(name) = name.as_deref() {
-        ensure_unique_name(
-            &locked.state.hosts,
-            name,
-            request.rotate_machine_id.as_ref(),
-        )?;
+        ensure_unique_name(&locked.state.hosts, name, existing_id)?;
     }
+    let repair_keys = if let Some(id) = &request.repair_machine_id {
+        let host = locked.state.hosts.get(id).ok_or(HubError::NotFound)?;
+        if name.as_deref() != Some(host.name.as_str()) {
+            return Err(HubError::Conflict(
+                "repair requires the exact existing canonical name".into(),
+            ));
+        }
+        Some((
+            host.ssh_public_key.clone(),
+            host.ssh_host_public_key.clone(),
+        ))
+    } else {
+        None
+    };
     let mut raw = [0u8; 32];
     getrandom::fill(&mut raw)
         .map_err(|_| HubError::internal("secure random source unavailable"))?;
@@ -54,6 +73,8 @@ pub(crate) fn create_invite(
             used: false,
             name,
             rotate_machine_id: request.rotate_machine_id,
+            repair_machine_id: request.repair_machine_id,
+            repair_keys,
         },
     );
     locked.state.audit.push(AuditEntry {
@@ -117,7 +138,30 @@ pub(crate) fn enroll(
         return Err(HubError::Unauthorized);
     }
     let existing = locked.state.hosts.contains_key(&id);
-    if invite.rotate_machine_id.as_ref() != if existing { Some(&id) } else { None } {
+    if invite.repair_machine_id.is_some() {
+        let host = locked.state.hosts.get(&id).ok_or(HubError::Unauthorized)?;
+        if invite.repair_machine_id.as_ref() != Some(&id)
+            || invite.repair_keys.as_ref() != Some(&(reverse_key.clone(), host_key.clone()))
+            || host.ssh_public_key != reverse_key
+            || host.ssh_host_public_key != host_key
+            || host.name != name
+        {
+            return Err(HubError::Unauthorized);
+        }
+        let signature: ssh_key::SshSig = request
+            .repair_signature
+            .as_deref()
+            .filter(|value| value.len() <= 4096)
+            .ok_or(HubError::Unauthorized)?
+            .parse()
+            .map_err(|_| HubError::Unauthorized)?;
+        let public: ssh_key::PublicKey = reverse_key.parse().map_err(|_| HubError::Unauthorized)?;
+        public
+            .verify(REPAIR_NAMESPACE, &request.repair_message(), &signature)
+            .map_err(|_| HubError::Unauthorized)?;
+    } else if request.repair_signature.is_some()
+        || invite.rotate_machine_id.as_ref() != if existing { Some(&id) } else { None }
+    {
         return Err(HubError::Conflict(
             "invite does not authorize this identity".into(),
         ));
@@ -177,7 +221,9 @@ pub(crate) fn enroll(
         .used = true;
     locked.state.audit.push(AuditEntry {
         at,
-        action: if invite.rotate_machine_id.is_some() {
+        action: if invite.repair_machine_id.is_some() {
+            "repaired"
+        } else if invite.rotate_machine_id.is_some() {
             "key_rotated"
         } else {
             "enrolled"

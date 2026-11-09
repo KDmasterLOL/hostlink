@@ -1,4 +1,4 @@
-//! Windows offline admission only; self_update owns all bundle publication.
+//! Windows offline admission shared by the raw updater and local invite repair.
 use crate::agent_files::{is_reparse_point, validate_path_has_no_reparse_components};
 use crate::package::invalid;
 use std::{
@@ -7,6 +7,16 @@ use std::{
 };
 
 pub(crate) fn ensure_offline(root: &Path) -> io::Result<()> {
+    ensure_separate_offline(root, true)
+}
+
+// Invite bootstrap runs its SHA-verified image from a private temporary directory,
+// unlike the explicit updater. Both require no task or installed Agent process.
+pub(crate) fn ensure_repair_offline(root: &Path) -> io::Result<()> {
+    ensure_separate_offline(root, false)
+}
+
+fn ensure_separate_offline(root: &Path, updater_beneath_root: bool) -> io::Result<()> {
     crate::service::ensure_update_unregistered(root)?;
     let updater = std::env::current_exe()?;
     validate_path_has_no_reparse_components(&updater)?;
@@ -16,15 +26,20 @@ pub(crate) fn ensure_offline(root: &Path) -> io::Result<()> {
     }
     let updater = updater.canonicalize()?;
     let root = root.canonicalize()?;
-    if !updater.starts_with(&root)
+    let installed = root.join("bin/hostlink-agent.exe");
+    let installed_exists = installed.try_exists()?;
+    if (updater_beneath_root && !updater.starts_with(&root))
         || updater.starts_with(root.join("bin"))
-        || same_file::is_same_file(&updater, root.join("bin/hostlink-agent.exe"))?
+        || (installed_exists && same_file::is_same_file(&updater, &installed)?)
+        || (updater_beneath_root && !installed_exists)
     {
-        return Err(invalid(
-            "Windows update requires a separate executable beneath root, outside bin",
-        ));
+        return Err(invalid(if updater_beneath_root {
+            "Windows update requires a separate executable beneath root, outside bin"
+        } else {
+            "Windows repair requires a separate verified executable outside installed bin"
+        }));
     }
-    reject_running_agent(&root.join("bin/hostlink-agent.exe"))
+    reject_running_agent(&installed)
 }
 
 #[cfg(windows)]
@@ -101,7 +116,12 @@ pub(crate) fn reject_running_agent(installed_executable: &Path) -> io::Result<()
                 )));
             }
             let image = PathBuf::from(std::ffi::OsString::from_wide(&image[..length as usize]));
-            if same_file::is_same_file(&image, installed_executable)? {
+            let matches = if installed_executable.try_exists()? {
+                same_file::is_same_file(&image, installed_executable)?
+            } else {
+                same_windows_path(&image.canonicalize()?, installed_executable)?
+            };
+            if matches {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     "installed Agent process is still active",
@@ -121,4 +141,55 @@ pub(crate) fn reject_running_agent(installed_executable: &Path) -> io::Result<()
         }
     }
     Ok(())
+}
+
+fn same_windows_path(image: &Path, expected: &Path) -> io::Result<bool> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+    // The expected image may be absent. Compare absolute OS-reported paths with
+    // Windows ordinal case semantics, accepting the canonical extended prefix.
+    let mut left = image.as_os_str().encode_wide().collect::<Vec<_>>();
+    let mut right = expected.as_os_str().encode_wide().collect::<Vec<_>>();
+    for path in [&mut left, &mut right] {
+        if path.starts_with(&[92, 92, 63, 92]) {
+            path.drain(..4);
+        }
+    }
+    // SAFETY: both buffers are valid for their explicit UTF-16 lengths; no terminator required.
+    let result = unsafe {
+        CompareStringOrdinal(
+            left.as_ptr(),
+            left.len() as i32,
+            right.as_ptr(),
+            right.len() as i32,
+            1,
+        )
+    };
+    if result == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(result == CSTR_EQUAL)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_image_comparison_uses_windows_ordinal_paths() {
+        assert!(
+            same_windows_path(
+                Path::new(r"C:\Users\Owner\Agent\bin\hostlink-agent.exe"),
+                Path::new(r"\\?\C:\USERS\Owner\Agent\bin\HOSTLINK-AGENT.EXE")
+            )
+            .unwrap()
+        );
+        assert!(
+            !same_windows_path(
+                Path::new(r"C:\Other\hostlink-agent.exe"),
+                Path::new(r"\\?\C:\Users\Owner\Agent\bin\hostlink-agent.exe")
+            )
+            .unwrap()
+        );
+    }
 }

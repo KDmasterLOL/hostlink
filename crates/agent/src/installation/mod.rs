@@ -1,4 +1,6 @@
-//! Fresh binary-only installation at the single stable current-user root.
+//! Binary-only installation and identity-preserving repair at the stable per-user root.
+
+mod repair;
 
 pub use crate::executable::{BinaryIdentity, current_binary_identity};
 use crate::{
@@ -14,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Inputs to a fresh install. The installation directory is never caller-selected.
+/// Inputs to installation or explicitly authorized repair at the stable per-user root.
 #[derive(Clone, Debug)]
 pub struct InstallOptions {
     /// HTTPS Hub origin.
@@ -27,6 +29,11 @@ pub struct InstallOptions {
     pub user: String,
     /// Zero-based index of the selected Hub-approved gateway.
     pub gateway_index: Option<usize>,
+    /// Exact existing Hub identity authorized by the operator's repair invite.
+    /// A missing root is an error when this is supplied; a fresh invite cannot adopt a root.
+    pub machine_id: Option<hostlink_hub::MachineId>,
+    /// Explicit operator-authorized key replacement, additionally confirmed at the target.
+    pub replace_identity: bool,
 }
 
 /// Resolve the stable per-user Agent location, independently of the running executable.
@@ -99,14 +106,15 @@ pub fn validate_installation_root(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Enroll once and publish the already bootstrap-verified running executable.
+/// Enroll once or repair the exact existing identity using the verified running executable.
 ///
 /// The disposable Controller bootstrap owns download and published-SHA verification before
 /// this command starts. No GitHub credential is read here. An uncertain Hub response or a
 /// failed publication leaves the enrollment pending marker for manual reconciliation.
 ///
 /// # Errors
-/// Refuses existing roots, unsafe staging/data paths, failed enrollment or failed publication.
+/// Refuses foreign/damaged roots, identity mismatch, unsafe staging/data paths,
+/// failed enrollment or failed publication. Interrupted repairs require reconciliation.
 pub async fn install(
     options: &InstallOptions,
     hub_ca_cert: Option<&Path>,
@@ -117,10 +125,13 @@ pub async fn install(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
         Ok(_) => {
-            return Err(invalid(
-                "Agent install root already exists; never adopt or retry it",
-            ));
+            return repair::repair(options, hub_ca_cert, &root).await;
         }
+    }
+    if options.machine_id.is_some() || options.replace_identity {
+        return Err(invalid(
+            "repair invite requires the existing installation and private identity; this target is not enrolled",
+        ));
     }
     let mut source = RunningExecutable::open()?;
     let parent = root
@@ -161,6 +172,21 @@ fn ensure_parent(path: &Path) -> io::Result<()> {
         }
         Err(error) => Err(error),
     }
+}
+
+pub(crate) fn ensure_ready(root: &Path) -> io::Result<()> {
+    for marker in ["enrollment.pending", "repair.pending"] {
+        match fs::symlink_metadata(root.join(marker)) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+            Ok(_) => {
+                return Err(invalid(
+                    "Agent transaction pending; preserve state and reconcile the Hub outcome and local backup before retrying or starting",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn publish_executable(root: &Path, source: &mut RunningExecutable) -> io::Result<()> {
@@ -204,5 +230,4 @@ pub(crate) fn publish_executable(root: &Path, source: &mut RunningExecutable) ->
 }
 
 #[cfg(test)]
-#[path = "installation_tests.rs"]
 mod tests;

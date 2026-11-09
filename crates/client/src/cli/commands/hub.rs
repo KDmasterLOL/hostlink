@@ -134,6 +134,7 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
         os,
         bootstrap_hub_ca_cert,
         gateway_index,
+        replace_identity,
     } = args;
     let name = name.or(legacy_name);
     let config_path = default_hub_config_path()?;
@@ -145,7 +146,7 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
         return Err("--ssh-user must match the Controller Hub config ssh_user (SSH protocol login, not the target OS account)".into());
     }
     let client = HubClient::from_config(&config)?;
-    let selection = if token_only {
+    let mut selection = if token_only {
         if name.is_some() && name.as_deref().is_some_and(|value| value.trim().is_empty()) {
             return Err("invitation name cannot be empty".into());
         }
@@ -194,6 +195,25 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
         };
         Some(selections)
     };
+    // Canonical names only: do not adopt a display label or an ID prefix here.
+    let existing = match name.as_deref() {
+        Some(name) if !token_only => client.invitation_identity(name).await?,
+        _ => None,
+    };
+    if let Some(id) = &replace_identity {
+        if existing.as_ref().is_none_or(|host| &host.machine_id != id) {
+            return Err("--replace-identity requires the exact existing canonical name and full machine ID from authenticated inventory".into());
+        }
+        eprintln!(
+            "Explicit SSH identity replacement authorized for {id}; the target will require typed confirmation. The machine ID, assigned port and jobs are retained."
+        );
+    }
+    if let (Some(host), Some(selections)) = (&existing, &mut selection) {
+        for selection in selections {
+            selection.bind_repair(host.machine_id.clone());
+            selection.replace_identity = replace_identity.is_some();
+        }
+    }
     // Resolve the exact raw asset/digest and render before creating a Hub invite.
     // Target-side SHA-256 verification precedes the invite token prompt and install.
     let bootstrap_command = match &selection {
@@ -210,7 +230,13 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
             "WARNING: the command contains a one-use invitation; protect terminal history and clipboard."
         );
     }
-    let pending = Host::create(&client, name, ttl_seconds).await?;
+    let pending = match existing {
+        Some(host) if replace_identity.is_some() => {
+            Host::invite_replacement(&client, &host, ttl_seconds).await?
+        }
+        Some(host) => Host::invite_repair(&client, &host, ttl_seconds).await?,
+        None => Host::create(&client, name, ttl_seconds).await?,
+    };
     let invite = pending.into_invitation();
     if let Some(bootstrap_command) = bootstrap_command {
         println!("{}", bootstrap_command.bind(invite.token.expose_secret())?);

@@ -249,6 +249,7 @@ fn rejects_non_https_and_ambiguous_or_untrusted_response() {
     assert!(validate_response(&duplicate_keys, &id, "test-host", &reverse, &host, None).is_err());
     let secret = "secret-token-must-not-appear-in-debug";
     let request = EnrollRequest {
+        repair_signature: None,
         token: SecretString::from(secret.to_owned()),
         machine_id: id,
         name: "test-host".into(),
@@ -307,6 +308,7 @@ async fn fresh_enrollment_publishes_private_config_once_against_local_hub_v2() {
     .expect("isolated v2 Hub fixture");
     let app = hostlink_hub::router(service);
     let invite_body = serde_json::to_vec(&InviteRequest {
+        repair_machine_id: None,
         ttl_seconds: 900,
         name: Some("enroll-test".into()),
         rotate_machine_id: None,

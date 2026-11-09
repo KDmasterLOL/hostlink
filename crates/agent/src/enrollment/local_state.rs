@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn read_token(path: &Path) -> io::Result<SecretString> {
+pub(crate) fn read_token(path: &Path) -> io::Result<SecretString> {
     // Resolve relative names lexically before selecting the capability root.
     // The file is still opened nofollow via the same checked handle.
     let absolute = std::path::absolute(path)?;
@@ -37,13 +37,13 @@ pub(super) fn read_token(path: &Path) -> io::Result<SecretString> {
     Ok(SecretString::from(token))
 }
 
-pub(super) fn public_key(key: &PrivateKey) -> io::Result<String> {
+pub(crate) fn public_key(key: &PrivateKey) -> io::Result<String> {
     let mut public = key.public_key().clone();
     public.set_comment(String::new());
     public.to_openssh().map_err(io::Error::other)
 }
 
-pub(super) fn write_private_new(path: &Path, contents: &[u8]) -> io::Result<()> {
+pub(crate) fn write_private_new(path: &Path, contents: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid("private file has no parent"))?;
@@ -58,7 +58,7 @@ pub(super) fn write_private_new(path: &Path, contents: &[u8]) -> io::Result<()> 
     file.sync_all().map_err(io::Error::other)
 }
 
-pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
+pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     PrivateDir::open(path)
         .map_err(io::Error::other)?
@@ -126,7 +126,7 @@ pub(super) fn ensure_fresh_root_parent(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn local_hostname() -> String {
+pub(crate) fn local_hostname() -> String {
     ["COMPUTERNAME", "HOSTNAME"]
         .iter()
         .find_map(|key| std::env::var(key).ok())

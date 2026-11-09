@@ -215,6 +215,8 @@ fn selections_from_release(
         .map(|&target| {
             let (agent_url, agent_sha256) = select_asset(release, &target.asset_name())?;
             let selection = ArtifactSelection {
+                machine_id: None,
+                replace_identity: false,
                 agent_url,
                 agent_sha256,
                 target,

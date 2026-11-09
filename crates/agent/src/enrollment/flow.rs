@@ -95,7 +95,7 @@ pub async fn prepare_enrollment_with_ca(
     result
 }
 
-pub(super) async fn prepare_enrollment_using<F, Fut>(
+pub(crate) async fn prepare_enrollment_using<F, Fut>(
     options: &EnrollmentOptions,
     enroll: F,
 ) -> io::Result<EnrollmentResult>
@@ -174,6 +174,7 @@ where
     sync_directory(&stage)?;
 
     let request = EnrollRequest {
+        repair_signature: None,
         token,
         machine_id: machine_id.clone(),
         name: options.name.clone(),
@@ -349,7 +350,7 @@ where
     })
 }
 
-pub(super) async fn enroll_once(
+pub(crate) async fn enroll_once(
     hub_url: &str,
     request: EnrollRequest,
     ca_certificate: Option<&Path>,

@@ -33,6 +33,8 @@ try {
     $installArgs = @('install', '--hub-url', $HubUrl, '--token-file', $tokenFile, '--name', $Name, '--user', $SshUser)
     if (-not [string]::IsNullOrEmpty($HubCaCert)) { $installArgs += @('--hub-ca-cert', $HubCaCert) }
     if (-not [string]::IsNullOrEmpty($GatewayIndex)) { $installArgs += @('--gateway-index', $GatewayIndex) }
+    if ($MachineId) { $installArgs += @('--machine-id', $MachineId) }
+    if ($ReplaceIdentity) { $installArgs += '--replace-identity' }
     & $agentFile @installArgs
     if ($LASTEXITCODE -ne 0) { throw 'Agent install failed.' }
     Remove-Item -LiteralPath $stage -Recurse -Force

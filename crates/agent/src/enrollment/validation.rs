@@ -17,7 +17,7 @@ pub(super) fn parse_hub_url(value: &str) -> io::Result<Url> {
     Ok(url)
 }
 
-pub(super) fn validate_response(
+pub(crate) fn validate_response(
     response: &EnrollResponse,
     machine_id: &MachineId,
     name: &str,
@@ -90,7 +90,7 @@ pub(super) fn validate_response(
     Ok(selected)
 }
 
-pub(super) fn validate_inputs(options: &EnrollmentOptions) -> io::Result<()> {
+pub(crate) fn validate_inputs(options: &EnrollmentOptions) -> io::Result<()> {
     parse_hub_url(&options.hub_url)?;
     if !canonical_name(&options.name) {
         return Err(invalid("Agent name must be canonical lowercase ASCII"));

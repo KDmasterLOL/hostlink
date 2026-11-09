@@ -18,11 +18,19 @@ pub(crate) struct Args {
     /// Additional private Hub CA (PEM); normal certificate verification remains enabled.
     #[arg(long)]
     hub_ca_cert: Option<PathBuf>,
+    /// Exact existing machine identity from the authenticated Controller invitation.
+    #[arg(long)]
+    machine_id: Option<hostlink_hub::MachineId>,
+    /// Replace lost SSH keys only with an explicit operator rotation invite and typed local confirmation.
+    #[arg(long, requires = "machine_id")]
+    replace_identity: bool,
 }
 
 pub(crate) async fn execute(args: Args) -> io::Result<()> {
     let result = install(
         &InstallOptions {
+            machine_id: args.machine_id,
+            replace_identity: args.replace_identity,
             hub_url: args.hub_url,
             token_file: args.token_file,
             name: args.name,

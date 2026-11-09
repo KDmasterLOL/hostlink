@@ -30,6 +30,7 @@ use std::{
 pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
     validate_installation_root(root)?;
     let _update_lock = lock(root, "update.lock")?;
+    crate::installation::ensure_ready(root)?;
     let _runner_lock = lock(&root.join("jobs"), "runner.lock").map_err(|error| {
         if error.kind() == io::ErrorKind::WouldBlock {
             io::Error::new(error.kind(), "stop the running Agent before updating")
@@ -176,7 +177,7 @@ fn public_download_asset(
     Some(ReleaseAsset::new(candidate.name(), url).with_digest(candidate.digest()?))
 }
 
-fn lock(parent: &Path, name: &str) -> io::Result<File> {
+pub(crate) fn lock(parent: &Path, name: &str) -> io::Result<File> {
     let file = PrivateDir::open(parent)
         .and_then(|dir| {
             dir.open_file_with(

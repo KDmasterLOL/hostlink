@@ -8,6 +8,8 @@ fn selections(targets: &[Target]) -> Vec<ArtifactSelection> {
         .iter()
         .enumerate()
         .map(|(i, &target)| ArtifactSelection {
+            machine_id: None,
+            replace_identity: false,
             agent_url: Url::parse(&format!(
                 "https://github.com/KDmasterLOL/hostlink/releases/download/v1.2.3/{}",
                 target.asset_name()
@@ -294,6 +296,24 @@ fn windows_length_is_checked_with_incompressible_digests() {
     let command = result.expect("synthetic digest command must fit");
     eprintln!("synthetic Windows command length: {}", command.0.len());
     assert!(command.0.len() <= CMD_LIMIT);
+    for replacement in [false, true] {
+        for asset in &mut assets {
+            asset.bind_repair(
+                hostlink_hub::MachineId::parse("1d57eaa7-9252-4e11-9a21-dcc190eca950").unwrap(),
+            );
+            asset.replace_identity = replacement;
+        }
+        let command = render_inline(&assets).expect("identity-bound Windows command must fit");
+        eprintln!(
+            "Windows identity-bound command length (replacement={replacement}): {}",
+            command.0.len()
+        );
+        assert!(command.0.len() <= CMD_LIMIT);
+        let script = unpack(&command.0);
+        assert!(script.contains("--machine-id"));
+        assert!(script.contains("$MachineId='1d57eaa7-9252-4e11-9a21-dcc190eca950'"));
+        assert!(script.contains("--replace-identity"));
+    }
 }
 
 #[test]

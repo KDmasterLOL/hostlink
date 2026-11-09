@@ -53,6 +53,10 @@ pub(super) struct InviteArgs {
     /// PEM CA path available on the target during enrollment.
     #[arg(long)]
     pub(super) bootstrap_hub_ca_cert: Option<PathBuf>,
+    /// Explicitly authorize replacement of lost SSH keys for this full existing ID.
+    /// The target also requires typed confirmation; machine ID, port and jobs remain.
+    #[arg(long, conflicts_with = "token_only")]
+    pub(super) replace_identity: Option<hostlink_hub::MachineId>,
 }
 
 #[derive(Subcommand)]

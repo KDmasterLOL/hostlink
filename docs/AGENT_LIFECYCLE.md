@@ -16,6 +16,8 @@ hostlink-agent service remove --root ROOT
 
 `service install` registers the service but does not start it. `service remove` removes only the owned registration, retaining private Agent state, keys and jobs. Service status reports OS registration/running state; it is not an SSH health check.
 
+An exact matching registration is reused by `service install`; it does not stop an already running Agent. A pending enrollment/repair transaction blocks service install/start. The [local invite repair](AGENT_INSTALLATION.md#local-repair-through-the-same-invite) workflow owns stopped publication and invokes the same lifecycle commands after success.
+
 ## Linux
 
 Linux uses a root-bound `systemd --user` unit through `service-manager`. The service runs as the current user. Login lingering is not automatically enabled. The Agent handles systemd SIGTERM and coordinates shutdown with its worker and tunnel.

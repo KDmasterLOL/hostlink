@@ -25,6 +25,7 @@ use retry::{
     AttemptFailure, AttemptPhase, emit_diagnostic, error_class, jitter_cap_ms,
     reset_backoff_after_stable_session, retry_delay, ssh_failure,
 };
+pub(crate) use session::probe;
 pub use session::run;
 #[cfg(test)]
 use session::run_with_backoff;

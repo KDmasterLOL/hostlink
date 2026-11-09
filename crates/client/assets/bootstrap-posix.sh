@@ -25,6 +25,8 @@ unset HL_INVITE
 set -- install --hub-url "$hub_url" --token-file "$token_file" --name "$name" --user "$ssh_user"
 if [ -n "$hub_ca_cert" ]; then set -- "$@" --hub-ca-cert "$hub_ca_cert"; fi
 if [ -n "$gateway_index" ]; then set -- "$@" --gateway-index "$gateway_index"; fi
+if [ -n "$machine_id" ]; then set -- "$@" --machine-id "$machine_id"; fi
+if [ -n "$replace_identity" ]; then set -- "$@" --replace-identity; fi
 "$agent" "$@"
 cleanup
 trap - 0 HUP INT TERM

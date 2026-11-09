@@ -374,6 +374,7 @@ async fn reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&InviteRequest {
+                        repair_machine_id: None,
                         ttl_seconds: 900,
                         name: Some("managed-agent".into()),
                         rotate_machine_id: None,
@@ -398,6 +399,7 @@ async fn reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&EnrollRequest {
+                        repair_signature: None,
                         token: invite.token.clone(),
                         machine_id: MachineId::parse("managed-agent-id").unwrap(),
                         name: "managed-agent".into(),
@@ -474,6 +476,7 @@ async fn reverse_gateway_runs_pinned_nested_ssh_and_rejects_wrong_pins() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&EnrollRequest {
+                        repair_signature: None,
                         token: invite.token,
                         machine_id: MachineId::parse("managed-agent-id").unwrap(),
                         name: "managed-agent".into(),

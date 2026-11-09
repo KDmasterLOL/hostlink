@@ -164,6 +164,10 @@ pub struct InviteRequest {
     /// Supplying a machine ID creates an explicit, operator-approved key rotation invite.
     #[serde(default)]
     pub rotate_machine_id: Option<MachineId>,
+    /// Identity-preserving repair, requiring proof of the registered reverse key.
+    /// Mutually exclusive with key rotation; a fresh invite cannot repair a host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_machine_id: Option<MachineId>,
 }
 fn default_invite_ttl() -> u64 {
     900
@@ -224,6 +228,36 @@ pub struct EnrollRequest {
     pub agent_version: String,
     pub ssh_public_key: String,
     pub ssh_host_public_key: String,
+    /// OpenSSH signature over [`Self::repair_message`] by the existing reverse key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_signature: Option<String>,
+}
+
+/// Domain separator for identity-preserving repair signatures.
+pub const REPAIR_NAMESPACE: &str = "hostlink-repair-v1";
+
+impl EnrollRequest {
+    /// Canonical, length-prefixed transcript binding proof to this one-use token,
+    /// identity, both keys and all submitted inventory fields. Never log these bytes.
+    pub fn repair_message(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for field in [
+            REPAIR_NAMESPACE,
+            self.token.expose_secret(),
+            self.machine_id.as_str(),
+            &self.name,
+            &self.hostname,
+            &self.os,
+            &self.arch,
+            &self.agent_version,
+            &self.ssh_public_key,
+            &self.ssh_host_public_key,
+        ] {
+            bytes.extend_from_slice(&(field.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(field.as_bytes());
+        }
+        bytes
+    }
 }
 fn serialize_secret<S: serde::Serializer>(
     value: &SecretString,

@@ -111,6 +111,7 @@ pub(crate) async fn call_raw(
 }
 pub(crate) async fn invite(app: axum::Router, name: &str, rotate: Option<&str>) -> String {
     let request = InviteRequest {
+        repair_machine_id: None,
         ttl_seconds: 900,
         name: Some(name.into()),
         rotate_machine_id: rotate.map(|id| MachineId::parse(id).unwrap()),
@@ -134,6 +135,7 @@ pub(crate) fn enrollment(
     host_key: String,
 ) -> EnrollRequest {
     EnrollRequest {
+        repair_signature: None,
         token: SecretString::from(token),
         machine_id: MachineId::parse(id).unwrap(),
         name: name.into(),

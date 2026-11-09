@@ -57,7 +57,7 @@ hostlink upload --host lab-host --local ./input.bin --remote input.bin
 
 `hostlink ssh HOST` requires terminal stdin/stdout, requests a PTY and shell over the existing pinned SSH connection, and returns the remote SSH exit status. A direct pinned `HostSpec` can be selected with `hostlink ssh --config ./host.json`. The initial terminal size is sent at connection time; live window resizing is not supported yet. Agents that reject PTY or shell requests report an explicit compatibility error; the Controller does not fall back to an external `ssh` executable.
 
-A new machine requires a one-use Hub invitation:
+Install or repair a machine with one invitation:
 
 ```sh
 hostlink invite lab-win7 --os windows
@@ -66,6 +66,8 @@ hostlink invite lab-win7 --os windows
 The command prints one paste-ready bootstrap containing a one-use invitation. Protect it as a secret. Before issuing it, the Controller selects the sole Hub-approved gateway or the configured `preferred_gateway`; use `--gateway-index N` to explicitly select another approved route. Public release downloads require no GitHub PAT; see [Releases and bootstrap](docs/GITHUB_RELEASES.md) for target shell and platform requirements.
 
 The Agent's SSH protocol login defaults to the Controller Hub configuration's `ssh_user`, independently of the target OS account. If `--ssh-user` is supplied, it must match that configured login.
+
+For an exact existing Hub name, the same command issues an identity-bound repair invitation. Paste it locally or through RDP: existing Agent connectivity is not required. Repair preserves machine ID, both SSH keys, assigned port and Apalis jobs while refreshing approved gateway routes/pins and restoring the owned user service. Lost SSH keys require explicit operator authorization and typed target confirmation; see [installation and repair](docs/AGENT_INSTALLATION.md). Source-bound release publication and native platform acceptance remain separate gates.
 
 ## Documentation
 

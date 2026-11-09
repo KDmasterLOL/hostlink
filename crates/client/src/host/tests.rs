@@ -225,6 +225,7 @@ mod managed {
                 .unwrap();
             assert_eq!(pending.requested_name(), Some(name));
             let request = EnrollRequest {
+                repair_signature: None,
                 token: pending.into_invitation().token,
                 machine_id: MachineId::parse(id).unwrap(),
                 name: name.into(),

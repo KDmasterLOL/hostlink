@@ -75,6 +75,8 @@ pub struct ArtifactSelection {
     pub(super) hub_url: String,
     pub(super) bootstrap_hub_ca_cert: Option<std::path::PathBuf>,
     pub(super) gateway_index: Option<usize>,
+    pub(super) machine_id: Option<hostlink_hub::MachineId>,
+    pub(crate) replace_identity: bool,
 }
 
 #[derive(Debug, Error)]
@@ -86,7 +88,17 @@ pub enum BootstrapError {
 }
 
 impl ArtifactSelection {
+    /// Bind a bootstrap to the authenticated inventory's exact existing machine.
+    pub fn bind_repair(&mut self, machine_id: hostlink_hub::MachineId) {
+        self.machine_id = Some(machine_id);
+    }
+
     pub(super) fn validate(&self) -> Result<(), BootstrapError> {
+        if self.replace_identity && self.machine_id.is_none() {
+            return Err(BootstrapError::Invalid(
+                "identity replacement requires an exact existing machine ID",
+            ));
+        }
         if !canonical_name(&self.name) {
             return Err(BootstrapError::Invalid(
                 "name must be canonical lowercase ASCII",

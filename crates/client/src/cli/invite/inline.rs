@@ -57,6 +57,8 @@ fn render_inline(selections: &[ArtifactSelection]) -> Result<InlineBootstrap, Bo
             || selection.hub_url != first.hub_url
             || selection.bootstrap_hub_ca_cert != first.bootstrap_hub_ca_cert
             || selection.gateway_index != first.gateway_index
+            || selection.machine_id != first.machine_id
+            || selection.replace_identity != first.replace_identity
             || selection.agent_url.path().split('/').nth(5)
                 != first.agent_url.path().split('/').nth(5)
         {
@@ -75,6 +77,11 @@ fn render_inline(selections: &[ArtifactSelection]) -> Result<InlineBootstrap, Bo
         .map(|n| n.to_string())
         .unwrap_or_default();
     let windows = first.target.windows();
+    let machine_id = first
+        .machine_id
+        .as_ref()
+        .map(|id| id.as_str())
+        .unwrap_or_default();
     let script = if windows {
         if selections.len() != 1 && selections.len() != 3 {
             return Err(BootstrapError::Invalid(
@@ -88,6 +95,11 @@ fn render_inline(selections: &[ArtifactSelection]) -> Result<InlineBootstrap, Bo
             ("SshUser", first.ssh_user.as_str()),
             ("HubCaCert", ca.as_ref()),
             ("GatewayIndex", gateway.as_str()),
+            ("MachineId", machine_id),
+            (
+                "ReplaceIdentity",
+                if first.replace_identity { "yes" } else { "" },
+            ),
         ] {
             vars.push_str(&format!("${key}={}\n", quote_ps(value)));
         }
@@ -134,6 +146,11 @@ fn render_inline(selections: &[ArtifactSelection]) -> Result<InlineBootstrap, Bo
             ("ssh_user", first.ssh_user.as_str()),
             ("hub_ca_cert", ca.as_ref()),
             ("gateway_index", gateway.as_str()),
+            ("machine_id", machine_id),
+            (
+                "replace_identity",
+                if first.replace_identity { "yes" } else { "" },
+            ),
             ("agent_url", first.agent_url.as_str()),
             ("agent_sha256", first.agent_sha256.as_str()),
         ] {

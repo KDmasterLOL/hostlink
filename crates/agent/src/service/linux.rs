@@ -19,6 +19,8 @@ use std::{
 /// # Errors
 /// Rejects unsafe paths, legacy/colliding units, or systemd failures.
 pub fn install(root: &Path, config: &Path) -> io::Result<()> {
+    let _lock = crate::update::lock(root, "update.lock")?;
+    crate::installation::ensure_ready(root)?;
     let (root, label) = root_label(root)?;
     // Only installation may conflict with the former launcher. A stale
     // marker must not prevent stopping/removing an already owned unit.
@@ -45,6 +47,21 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
         return Err(io::Error::other("installed executable/config required"));
     }
     let (path, exists) = check_unit(&root, &label, false)?;
+    if exists {
+        // Enabling an exact owned unit is idempotent and does not restart it.
+        // A disabled-but-present unit still needs login persistence restored.
+        let status = Command::new("systemctl")
+            .args([
+                "--user",
+                "enable",
+                &format!("{}.service", label.application),
+            ])
+            .status()?;
+        if !status.success() {
+            return Err(io::Error::other("systemd user service enable failed"));
+        }
+        return Ok(());
+    }
     let manager = SystemdServiceManager::user();
     let contents = unit_text(&root, &label);
     if !exists {
@@ -85,6 +102,8 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
 /// # Errors
 /// Rejects unsafe/missing/modified registrations or systemd failures.
 pub fn start(root: &Path) -> io::Result<()> {
+    let _lock = crate::update::lock(root, "update.lock")?;
+    crate::installation::ensure_ready(root)?;
     let (root, label) = root_label(root)?;
     check_unit(&root, &label, true)?;
     SystemdServiceManager::user().start(ServiceStartCtx {

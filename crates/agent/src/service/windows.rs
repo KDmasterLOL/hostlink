@@ -40,6 +40,7 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
     let _parent = PrivateDir::open(parent).map_err(io::Error::other)?;
     let root = root.canonicalize()?;
     let _lock = mutation_lock(&root)?;
+    crate::installation::ensure_ready(&root)?;
     let (command, arguments) = action(&root)?;
     let executable = root.join("bin/hostlink-agent.exe");
     crate::package::verify_executable(&root.join("bin/hostlink-agent.exe"))?;
@@ -65,6 +66,15 @@ pub fn install(root: &Path, config: &Path) -> io::Result<()> {
     let name = task_name(&root)?;
     let flags = if let Some(task) = registered(&folder, &name)? {
         verify_task(&task, &root)?;
+        // Scheduler can disable a verified task or its logon trigger. Refresh
+        // only that owned registration; an already enabled task keeps running.
+        // SAFETY: read-only live properties of the verified registered task.
+        let enabled = unsafe { task.Enabled().map_err(com_error)?.0 != 0 };
+        // SAFETY: read-only XML query of the same verified task.
+        let xml = unsafe { task.Xml().map_err(com_error)?.to_string() };
+        if enabled && !disabled_logon(&xml)? {
+            return Ok(());
+        }
         stop_task(&task)?;
         owned(&folder, &root)?;
         TASK_UPDATE
@@ -103,6 +113,7 @@ pub fn start(root: &Path) -> io::Result<()> {
     let _parent = PrivateDir::open(parent).map_err(io::Error::other)?;
     let root = root.canonicalize()?;
     let _lock = mutation_lock(&root)?;
+    crate::installation::ensure_ready(&root)?;
     let _apartment = Apartment::new()?;
     let folder = task_folder()?;
     let task = owned(&folder, &root)?;
@@ -128,6 +139,12 @@ pub fn stop(root: &Path) -> io::Result<()> {
 pub fn remove(root: &Path) -> io::Result<()> {
     let root = root.canonicalize()?;
     let _lock = mutation_lock(&root)?;
+    remove_for_repair(&root)
+}
+
+// The installer holds update.lock across service removal and file publication.
+pub(crate) fn remove_for_repair(root: &Path) -> io::Result<()> {
+    let root = root.canonicalize()?;
     let _apartment = Apartment::new()?;
     let folder = task_folder()?;
     stop_task(&owned(&folder, &root)?)?;
@@ -309,6 +326,14 @@ fn verify_task(task: &IRegisteredTask, root: &Path) -> io::Result<()> {
         &current_sid()?,
         run_level == TASK_RUNLEVEL_LUA,
     )
+}
+
+fn disabled_logon(xml: &str) -> io::Result<bool> {
+    let document = roxmltree::Document::parse(xml).map_err(io::Error::other)?;
+    let trigger = child(child(document.root_element(), "Triggers")?, "LogonTrigger")?;
+    Ok(trigger
+        .children()
+        .any(|node| node.has_tag_name((TASK_NAMESPACE, "Enabled")) && node.text() == Some("false")))
 }
 fn active(task: &IRegisteredTask) -> io::Result<bool> {
     // SAFETY: read-only OS state/instance queries on a live interface.

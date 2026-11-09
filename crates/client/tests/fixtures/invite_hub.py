@@ -8,6 +8,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(401); return
         if self.command == 'GET' and self.path == '/v2/info':
             with open(root + '/info.json') as f: body = json.load(f)
+        elif self.command == 'GET' and self.path == '/v2/hosts':
+            body = {'hosts': []}
         elif self.command == 'POST' and self.path == '/v2/invites':
             self.rfile.read(int(self.headers['Content-Length']))
             body = {'token': 'a' * 64, 'expires_at': 4102444800}

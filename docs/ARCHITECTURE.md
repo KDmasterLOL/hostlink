@@ -35,4 +35,6 @@ The Controller currently resolves an exact Agent executable from GitHub Releases
 
 Agent installs use a stable, per-user root. Services are managed through systemd user units on Linux or user Task Scheduler tasks on Windows. Updates preserve enrollment keys and jobs; on Windows the Agent must be stopped and its owned task removed before replacing the executable.
 
+The same invite supports local repair of an exact existing Hub identity through proof of its reverse SSH key. It refreshes approved routes/pins, preserves jobs and identity, and restores only the owned service. Explicitly authorized and locally confirmed lost-key replacement uses the Hub's distinct rotation purpose. See [installation and repair](AGENT_INSTALLATION.md).
+
 See [installation](AGENT_INSTALLATION.md), [GitHub releases](GITHUB_RELEASES.md), [Windows lifecycle](AGENT_LIFECYCLE.md) and [source layout](SOURCE_LAYOUT.md).

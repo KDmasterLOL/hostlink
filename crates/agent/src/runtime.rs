@@ -102,7 +102,7 @@ where
         &crate::installation::installation_root()?,
         &config.jobs_root,
     )?;
-    let lifetime = PrivateDir::open(lock_root)
+    let lifetime = PrivateDir::open(&lock_root)
         .map_err(io::Error::other)?
         .open_file_with(
             "runner.lock",
@@ -115,6 +115,11 @@ where
         .map_err(io::Error::other)?
         .try_clone_std()?;
     lifetime.try_lock().map_err(io::Error::other)?;
+    // Recheck after the shared runner lock, before keys or Apalis are opened.
+    // An interrupted directory publication must never launch a partial install.
+    if lock_root == crate::installation::installation_root()?.join("jobs") {
+        crate::installation::ensure_ready(lock_root.parent().unwrap())?;
+    }
     let prepared = ssh::prepare(config)?;
     let cancellation = processkit::CancellationToken::new();
     let mut ssh = Box::pin(ssh::serve_prepared_until(
@@ -169,7 +174,7 @@ where
 mod tests;
 
 #[cfg(windows)]
-fn ensure_limited_windows_token() -> io::Result<()> {
+pub(crate) fn ensure_limited_windows_token() -> io::Result<()> {
     use std::{
         mem::size_of,
         os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},

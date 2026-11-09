@@ -172,7 +172,7 @@ fn exercise_invites(online: bool) {
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert_eq!(log, "GET /v2/info\nPOST /v2/invites\n");
+            assert_eq!(log, "GET /v2/info\nGET /v2/hosts\nPOST /v2/invites\n");
             let cmd = String::from_utf8(output.stdout).unwrap();
             let cmd = cmd.trim_end();
             assert!(!cmd.contains('\n'));

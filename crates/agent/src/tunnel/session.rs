@@ -6,6 +6,84 @@ struct GatewayHandler {
     forwards: mpsc::Sender<(Channel<Msg>, ChannelOpenHandle)>,
 }
 
+/// Bounded repair preflight with real SSH pin and reverse-identity authentication.
+/// It does not claim the assigned port or require an existing Agent connection.
+pub(crate) async fn probe(config: &AgentConfig) -> io::Result<()> {
+    config.validate()?;
+    let routes = config
+        .gateway
+        .iter()
+        .chain(&config.gateway_alternates)
+        .collect::<Vec<_>>();
+    let keys = routes
+        .iter()
+        .map(|route| load_gateway_key(&route.host_public_key))
+        .collect::<io::Result<Vec<_>>>()?;
+    let primary = routes
+        .first()
+        .ok_or_else(|| io::Error::other("repair has no approved route"))?;
+    let identity = load_identity(&primary.identity)?;
+    let attempts = async {
+        for (route, key) in routes.into_iter().zip(keys) {
+            let (tx, _rx) = mpsc::channel(1);
+            let handler = GatewayHandler {
+                host_key: key,
+                remote_port: route.remote_port,
+                forwards: tx,
+            };
+            let connected = tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                client::connect(
+                    Arc::new(client::Config::default()),
+                    (route.host.as_str(), route.port),
+                    handler,
+                ),
+            )
+            .await;
+            let mut session = match connected {
+                Err(_) => continue,
+                Ok(Err(error)) => {
+                    let failure = ssh_failure(error, AttemptPhase::ConnectHandshake);
+                    if failure.transient {
+                        continue;
+                    }
+                    return Err(failure.error);
+                }
+                Ok(Ok(session)) => session,
+            };
+            let authenticated = session
+                .authenticate_publickey(
+                    route.user.clone(),
+                    PrivateKeyWithHashAlg::new(Arc::new(identity.clone()), None),
+                )
+                .await
+                .map_err(|_| io::Error::other("repair gateway authentication failed"))?;
+            if !authenticated.success() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "repair gateway rejected existing identity",
+                ));
+            }
+            session
+                .disconnect(russh::Disconnect::ByApplication, "", "")
+                .await
+                .map_err(|_| io::Error::other("repair gateway disconnect failed"))?;
+            return Ok(());
+        }
+        Err(io::Error::other(
+            "no Hub-approved repair gateway is reachable; original installation preserved",
+        ))
+    };
+    tokio::time::timeout(Duration::from_secs(30), attempts)
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "approved repair gateway preflight timed out",
+            )
+        })?
+}
+
 impl client::Handler for GatewayHandler {
     type Error = russh::Error;
     async fn check_server_key(

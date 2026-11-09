@@ -114,6 +114,30 @@ pub(super) fn select_host(
     }
 }
 
+pub(super) fn select_invitation_identity(
+    hosts: &[RegisteredHost],
+    name: &str,
+) -> Result<Option<RegisteredHost>, HubClientError> {
+    let matches = hosts
+        .iter()
+        .filter(|host| host.name == name)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [host] => Ok(Some((*host).clone())),
+        [] if hosts.iter().any(|host| {
+            host.machine_id.as_str() == name || host.display_name.as_deref() == Some(name)
+        }) =>
+        {
+            Err(HubClientError::Invalid(
+                "invitation requires the exact canonical machine name, not an ID or display label"
+                    .into(),
+            ))
+        }
+        [] => Ok(None),
+        _ => Err(HubClientError::Ambiguous),
+    }
+}
+
 // Operator tokens are external inputs; retain their legacy permissions policy.
 pub(super) fn read_private_credential(path: &Path) -> Result<String, HubClientError> {
     let before = fs::symlink_metadata(path).map_err(|_| HubClientError::Credential)?;

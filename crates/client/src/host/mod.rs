@@ -65,6 +65,35 @@ impl Host {
         PendingHost::from_invitation(name, invitation)
     }
 
+    /// Creates an identity-preserving invite for one exact registered machine.
+    ///
+    /// # Errors
+    /// Returns Hub authorization/issuance errors or an expired-invitation error.
+    pub async fn invite_repair(
+        hub: &HubClient,
+        host: &hostlink_hub::RegisteredHost,
+        ttl_seconds: u64,
+    ) -> Result<PendingHost, HostError> {
+        let name = Some(host.name.clone());
+        let invitation = hub
+            .invite_with_repair(name.clone(), ttl_seconds, Some(host.machine_id.clone()))
+            .await?;
+        PendingHost::from_invitation(name, invitation)
+    }
+
+    /// Requests explicitly confirmed key replacement for an exact existing host.
+    ///
+    /// # Errors
+    /// Returns Hub authorization/issuance errors or an expired-invitation error.
+    pub async fn invite_replacement(
+        hub: &HubClient,
+        host: &hostlink_hub::RegisteredHost,
+        ttl_seconds: u64,
+    ) -> Result<PendingHost, HostError> {
+        let invitation = hub.invite_replacement(host, ttl_seconds).await?;
+        PendingHost::from_invitation(Some(host.name.clone()), invitation)
+    }
+
     /// Resolves fresh Hub identity and approved routes, then authenticates pinned russh SSH.
     /// Returns the existing transport only after successful authentication.
     ///

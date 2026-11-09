@@ -102,6 +102,18 @@ impl HubClient {
         Ok(self.get_json::<HostsResponse>("/v2/hosts").await?.hosts)
     }
 
+    /// Resolves only an exact canonical invitation name. Display labels and IDs
+    /// cannot accidentally authorize adoption; an absent name means fresh install.
+    ///
+    /// # Errors
+    /// Returns inventory errors or rejects an ambiguous/noncanonical selector.
+    pub async fn invitation_identity(
+        &self,
+        name: &str,
+    ) -> Result<Option<RegisteredHost>, HubClientError> {
+        super::config::select_invitation_identity(&self.list_hosts().await?, name)
+    }
+
     /// Selects an exact canonical name/full ID or a unique machine-ID prefix.
     pub async fn resolve_host(&self, selector: &str) -> Result<RegisteredHost, HubClientError> {
         let selector = selector.trim();
@@ -127,13 +139,50 @@ impl HubClient {
         name: Option<String>,
         ttl_seconds: u64,
     ) -> Result<InviteResponse, HubClientError> {
+        self.invite_with_repair(name, ttl_seconds, None).await
+    }
+
+    /// Issues a repair invite bound to an exact inventory identity, or a fresh invite.
+    /// The Hub rechecks name/ID and captures the keys atomically at issuance.
+    ///
+    /// # Errors
+    /// Returns an authorization, identity conflict or transport error from the Hub.
+    pub async fn invite_with_repair(
+        &self,
+        name: Option<String>,
+        ttl_seconds: u64,
+        repair_machine_id: Option<hostlink_hub::MachineId>,
+    ) -> Result<InviteResponse, HubClientError> {
+        self.request_json(
+            Method::POST,
+            "/v2/invites",
+            Some(&InviteRequest {
+                repair_machine_id,
+                ttl_seconds,
+                name,
+                rotate_machine_id: None,
+            }),
+        )
+        .await
+    }
+
+    /// Issues an explicit operator-authorized key replacement for this exact host.
+    ///
+    /// # Errors
+    /// Returns Hub authorization/identity conflicts or transport errors.
+    pub async fn invite_replacement(
+        &self,
+        host: &hostlink_hub::RegisteredHost,
+        ttl_seconds: u64,
+    ) -> Result<InviteResponse, HubClientError> {
         self.request_json(
             Method::POST,
             "/v2/invites",
             Some(&InviteRequest {
                 ttl_seconds,
-                name,
-                rotate_machine_id: None,
+                name: Some(host.name.clone()),
+                repair_machine_id: None,
+                rotate_machine_id: Some(host.machine_id.clone()),
             }),
         )
         .await

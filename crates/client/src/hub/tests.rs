@@ -29,6 +29,28 @@ fn host(id: &str, name: &str, display_name: Option<&str>) -> RegisteredHost {
     }
 }
 
+#[test]
+fn invitations_select_only_exact_unambiguous_canonical_names() {
+    let hosts = vec![host("machine-one", "work", Some("Workstation"))];
+    let selected = config::select_invitation_identity(&hosts, "work")
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.machine_id.as_str(), "machine-one");
+    assert!(
+        config::select_invitation_identity(&hosts, "new-host")
+            .unwrap()
+            .is_none()
+    );
+    for selector in ["machine-one", "Workstation"] {
+        assert!(config::select_invitation_identity(&hosts, selector).is_err());
+    }
+    let duplicates = vec![hosts[0].clone(), host("machine-two", "work", None)];
+    assert!(matches!(
+        config::select_invitation_identity(&duplicates, "work"),
+        Err(HubClientError::Ambiguous)
+    ));
+}
+
 fn public_key() -> String {
     PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
         .expect("generate disposable Ed25519 key")
@@ -521,6 +543,7 @@ async fn manages_hosts_through_the_in_process_hub_v2_router() {
             Method::POST,
             "/v2/enroll",
             Some(&EnrollRequest {
+                repair_signature: None,
                 token: invite.token,
                 machine_id: MachineId::parse("machine-001").expect("machine ID"),
                 name: "fixture-machine".into(),

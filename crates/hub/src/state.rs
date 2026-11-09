@@ -44,6 +44,11 @@ pub(crate) struct InviteRecord {
     pub used: bool,
     pub name: Option<String>,
     pub rotate_machine_id: Option<MachineId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_machine_id: Option<MachineId>,
+    // Capture the authorized identity at issuance; a later rotation invalidates repair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_keys: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,6 +323,16 @@ fn validate_state(state: &State) -> io::Result<()> {
         }
     }
     for (key, invite) in &state.invites {
+        if invite.repair_machine_id.is_some() != invite.repair_keys.is_some()
+            || (invite.repair_machine_id.is_some() && invite.rotate_machine_id.is_some())
+            || invite.repair_keys.as_ref().is_some_and(|(reverse, host)| {
+                reverse == host
+                    || crate::validate_ed25519_public_key(reverse).is_err()
+                    || crate::validate_ed25519_public_key(host).is_err()
+            })
+        {
+            return Err(invalid("Hub state contains an inconsistent repair purpose"));
+        }
         if key.len() != 64
             || !key
                 .bytes()
