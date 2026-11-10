@@ -2,6 +2,8 @@
 
 The `hostlink` Controller uses the Hub for live inventory, machine identity, approved gateways and revocation. It then opens pinned `russh` sessions for remote commands, SFTP and TCP forwarding. The Hub is not a remote-command proxy.
 
+Authenticated Hub GET requests retry transient connection failures and timeouts up to four attempts, with 250 ms, 500 ms and 1 s delays and a 45 s total budget. HTTP errors, invalid responses and TLS validation failures are not retried. Mutating Hub requests are sent once, since their outcome may be unknown after a transport failure.
+
 ## Configure the Controller
 
 Create a private Hub operator-token file and separate Ed25519 identities, then configure the Controller:

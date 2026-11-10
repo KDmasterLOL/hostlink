@@ -20,6 +20,8 @@ use super::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const GET_BUDGET: Duration = Duration::from_secs(45);
+const GET_ATTEMPTS: usize = 4;
 
 /// Authenticated bounded Hub v2 client. Construction performs no network I/O.
 pub struct HubClient {
@@ -83,6 +85,7 @@ impl HubClient {
         }
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .no_proxy()
             .connect_timeout(Duration::from_secs(5))
             .timeout(REQUEST_TIMEOUT);
@@ -240,14 +243,37 @@ impl HubClient {
             .base
             .join(path)
             .map_err(|_| HubClientError::Invalid("invalid Hub endpoint".into()))?;
-        let mut request = self
-            .client
-            .request(method, url)
-            .bearer_auth(self.token.expose_secret());
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        let response = request.send().await.map_err(|_| HubClientError::Request)?;
+        let is_get = method == Method::GET && body.is_none();
+        let deadline = tokio::time::Instant::now() + GET_BUDGET;
+        let mut attempt = 0;
+        let response = loop {
+            attempt += 1;
+            let mut request = self
+                .client
+                .request(method.clone(), url.clone())
+                .bearer_auth(self.token.expose_secret());
+            if let Some(body) = body {
+                request = request.json(body);
+            }
+            let result = if is_get {
+                tokio::time::timeout_at(deadline, request.send())
+                    .await
+                    .map_err(|_| HubClientError::Request)?
+            } else {
+                request.send().await
+            };
+            match result {
+                Ok(response) => break response,
+                Err(error) if is_get && attempt < GET_ATTEMPTS && retryable_send(&error) => {
+                    let delay = Duration::from_millis(250 * (1 << (attempt - 1)));
+                    if tokio::time::Instant::now() + delay >= deadline {
+                        return Err(HubClientError::Request);
+                    }
+                    tokio::time::sleep(delay).await;
+                }
+                Err(_) => return Err(HubClientError::Request),
+            }
+        };
         let status = response.status();
         if !status.is_success() {
             return Err(
@@ -266,11 +292,16 @@ impl HubClient {
         }
         let mut response = response;
         let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| HubClientError::Request)?
-        {
+        loop {
+            let chunk = if is_get {
+                tokio::time::timeout_at(deadline, response.chunk())
+                    .await
+                    .map_err(|_| HubClientError::Request)?
+            } else {
+                response.chunk().await
+            }
+            .map_err(|_| HubClientError::Request)?;
+            let Some(chunk) = chunk else { break };
             if bytes.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
                 return Err(HubClientError::Response);
             }
@@ -278,6 +309,30 @@ impl HubClient {
         }
         serde_json::from_slice(&bytes).map_err(|_| HubClientError::Response)
     }
+}
+
+pub(super) fn retryable_send(error: &reqwest::Error) -> bool {
+    if error.is_timeout() {
+        return true;
+    }
+    if !error.is_connect() {
+        return false;
+    }
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if let Some(io_error) = cause.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io_error.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::HostUnreachable
+            );
+        }
+        source = cause.source();
+    }
+    false
 }
 
 pub(crate) fn read_ca_certificate(path: &Path) -> Result<reqwest::Certificate, HubClientError> {

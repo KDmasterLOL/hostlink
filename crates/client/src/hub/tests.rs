@@ -6,7 +6,14 @@ use hostlink_hub::{
 };
 use russh::keys::{Algorithm, PrivateKey};
 use secrecy::SecretString;
-use std::{collections::BTreeSet, net::SocketAddr};
+use std::{
+    collections::BTreeSet,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 use tokio::task::JoinHandle;
 
 const OPERATOR_TOKEN: &str = "operator-token-for-hub-client-test-012345";
@@ -431,6 +438,7 @@ fn local_client(base: &str, token: &str, timeout: Duration) -> HubClient {
         token: SecretString::from(token.to_owned()),
         client: reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .no_proxy()
             .timeout(timeout)
             .build()
@@ -449,6 +457,148 @@ async fn serve(app: Router) -> (String, JoinHandle<()>) {
             .expect("serve disposable Hub fixture");
     });
     (format!("http://{address}"), task)
+}
+
+#[tokio::test]
+async fn hub_get_retries_only_send_timeouts_with_bounded_attempts() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let calls = count.clone();
+    let app = Router::new().route(
+        "/v2/hosts",
+        get(move || {
+            let calls = calls.clone();
+            async move {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                "{\"hosts\":[]}"
+            }
+        }),
+    );
+    let (base, server) = serve(app).await;
+    let client = local_client(&base, OPERATOR_TOKEN, Duration::from_millis(100));
+    assert!(client.list_hosts().await.unwrap().is_empty());
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    server.abort();
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let calls = count.clone();
+    let app = Router::new().route(
+        "/v2/hosts",
+        get(move || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<&'static str>().await
+            }
+        }),
+    );
+    let (base, server) = serve(app).await;
+    let client = local_client(&base, OPERATOR_TOKEN, Duration::from_millis(100));
+    let result = tokio::time::timeout(Duration::from_secs(5), client.list_hosts()).await;
+    assert!(matches!(result, Ok(Err(HubClientError::Request))));
+    assert_eq!(count.load(Ordering::SeqCst), 4);
+    server.abort();
+}
+
+#[tokio::test]
+async fn hub_mutation_is_not_replayed_after_lost_response() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let calls = count.clone();
+    let app = Router::new().route(
+        "/v2/invites",
+        axum::routing::any(move || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<&'static str>().await
+            }
+        }),
+    );
+    let (base, server) = serve(app).await;
+    let client = local_client(&base, OPERATOR_TOKEN, Duration::from_millis(100));
+    assert!(matches!(
+        client.invite(None, 900).await,
+        Err(HubClientError::Request)
+    ));
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    for method in [Method::PATCH, Method::DELETE] {
+        let result: Result<serde_json::Value, _> = client
+            .request_json(method, "/v2/invites", None::<&()>)
+            .await;
+        assert!(matches!(result, Err(HubClientError::Request)));
+    }
+    assert_eq!(count.load(Ordering::SeqCst), 3);
+    server.abort();
+}
+
+#[tokio::test]
+async fn hub_get_does_not_retry_http_errors_or_invalid_json() {
+    for (status, body) in [
+        (StatusCode::UNAUTHORIZED, "denied"),
+        (StatusCode::FORBIDDEN, "denied"),
+        (StatusCode::INTERNAL_SERVER_ERROR, "failed"),
+        (StatusCode::OK, "{"),
+    ] {
+        let count = Arc::new(AtomicUsize::new(0));
+        let calls = count.clone();
+        let app = Router::new().route(
+            "/v2/hosts",
+            get(move || {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    (status, body)
+                }
+            }),
+        );
+        let (base, server) = serve(app).await;
+        let client = local_client(&base, OPERATOR_TOKEN, Duration::from_secs(2));
+        assert!(client.list_hosts().await.is_err());
+        assert_eq!(count.load(Ordering::SeqCst), 1, "status {status}");
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn hub_classifies_refused_connections_but_not_tls_failures() {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let error = reqwest::Client::builder()
+        .no_proxy()
+        .retry(reqwest::retry::never())
+        .build()
+        .unwrap()
+        .get(format!("http://{addr}/"))
+        .send()
+        .await
+        .unwrap_err();
+    assert!(client::retryable_send(&error));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    let calls = count.clone();
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await;
+        }
+    });
+    let client = local_client(
+        &format!("https://{addr}"),
+        OPERATOR_TOKEN,
+        Duration::from_secs(2),
+    );
+    assert!(matches!(
+        client.list_hosts().await,
+        Err(HubClientError::Request)
+    ));
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    server.abort();
 }
 
 async fn hub_router(root: &Path) -> Router {
