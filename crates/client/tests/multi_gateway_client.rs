@@ -10,17 +10,27 @@ use russh::{
 use sha2::Digest as _;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 #[derive(Clone)]
 struct Gateway {
     allowed: PublicKey,
     port: u16,
     target: SocketAddr,
+    attempts: Arc<AtomicUsize>,
+    fail_first: usize,
 }
 impl server::Server for Gateway {
     type Handler = Self;
     fn new_client(&mut self, _: Option<SocketAddr>) -> Self {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
         self.clone()
     }
 }
@@ -49,6 +59,10 @@ impl server::Handler for Gateway {
             reply
                 .reject(ChannelOpenFailure::AdministrativelyProhibited)
                 .await;
+            return Ok(());
+        }
+        if self.attempts.load(Ordering::SeqCst) <= self.fail_first {
+            reply.reject(ChannelOpenFailure::ConnectFailed).await;
             return Ok(());
         }
         match tokio::net::TcpStream::connect(self.target).await {
@@ -130,6 +144,21 @@ async fn gateway(
     user_key: PublicKey,
     port: u16,
 ) -> (SocketAddr, String, tokio::task::JoinHandle<()>) {
+    let (address, pin, task, _) = gateway_controlled(target, user_key, port, 0).await;
+    (address, pin, task)
+}
+
+async fn gateway_controlled(
+    target: SocketAddr,
+    user_key: PublicKey,
+    port: u16,
+    fail_first: usize,
+) -> (
+    SocketAddr,
+    String,
+    tokio::task::JoinHandle<()>,
+    Arc<AtomicUsize>,
+) {
     let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
     let pin = key.public_key().to_openssh().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -139,15 +168,18 @@ async fn gateway(
         auth_rejection_time: Duration::ZERO,
         ..Default::default()
     });
+    let attempts = Arc::new(AtomicUsize::new(0));
     let mut handler = Gateway {
         allowed: user_key,
         port,
         target,
+        attempts: attempts.clone(),
+        fail_first,
     };
     let task = tokio::spawn(async move {
         handler.run_on_socket(config, &listener).await.unwrap();
     });
-    (address, pin, task)
+    (address, pin, task, attempts)
 }
 
 #[tokio::test]
@@ -258,6 +290,45 @@ async fn unavailable_primary_fails_over_and_pinned_nested_agent_execs_and_sftp()
     assert_eq!(host.sftp_download(&name).await.unwrap(), data);
     host.close().await.unwrap();
 
+    // The same pinned route initially has no reverse listener, then recovers.
+    let (retry_addr, retry_pin, retry_task, retry_attempts) = gateway_controlled(
+        agent_address,
+        gateway_user.public_key().clone(),
+        reverse_port,
+        1,
+    )
+    .await;
+    let mut retry = spec.clone();
+    let primary = retry.gateway.as_mut().unwrap();
+    primary.address = retry_addr;
+    primary.host_public_key = retry_pin;
+    primary.alternates.clear();
+    let mut host = HostConnection::connect(&retry)
+        .await
+        .expect("retry same approved pinned route");
+    assert_eq!(retry_attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(host.exec("exit 7", &[]).await.unwrap().exit_code, 7);
+    host.close().await.unwrap();
+
+    let (exhausted_addr, exhausted_pin, exhausted_task, exhausted_attempts) = gateway_controlled(
+        agent_address,
+        gateway_user.public_key().clone(),
+        reverse_port,
+        3,
+    )
+    .await;
+    let mut exhausted = retry.clone();
+    let primary = exhausted.gateway.as_mut().unwrap();
+    primary.address = exhausted_addr;
+    primary.host_public_key = exhausted_pin;
+    assert!(matches!(
+        HostConnection::connect(&exhausted).await,
+        Err(hostlink::connect::SshClientError::Russh(
+            russh::Error::ChannelOpenFailure(ChannelOpenFailure::ConnectFailed)
+        ))
+    ));
+    assert_eq!(exhausted_attempts.load(Ordering::SeqCst), 3);
+
     // The primary authenticates, but its target socket has no listener.
     let (refused_addr, refused_pin, refused_task) =
         gateway(dead_addr, gateway_user.public_key().clone(), reverse_port).await;
@@ -278,10 +349,11 @@ async fn unavailable_primary_fails_over_and_pinned_nested_agent_execs_and_sftp()
     host.close().await.unwrap();
 
     // A policy rejection must not reach the healthy alternate.
-    let (policy_addr, policy_pin, policy_task) = gateway(
+    let (policy_addr, policy_pin, policy_task, policy_attempts) = gateway_controlled(
         agent_address,
         gateway_user.public_key().clone(),
         reverse_port + 1,
+        0,
     )
     .await;
     let mut policy = spec.clone();
@@ -295,6 +367,7 @@ async fn unavailable_primary_fails_over_and_pinned_nested_agent_execs_and_sftp()
             russh::Error::ChannelOpenFailure(ChannelOpenFailure::AdministrativelyProhibited)
         ))
     ));
+    assert_eq!(policy_attempts.load(Ordering::SeqCst), 1);
 
     // A healthy alternate is never consulted after the selected gateway presents the wrong key.
     let mut wrong_pin = spec.clone();
@@ -303,6 +376,19 @@ async fn unavailable_primary_fails_over_and_pinned_nested_agent_execs_and_sftp()
     gateway.host_public_key = wrong_key.public_key().to_openssh().unwrap();
     gateway.alternates = vec![route(second_addr, second_pin.clone(), "gateway")];
     assert!(HostConnection::connect(&wrong_pin).await.is_err());
+
+    let mut wrong_retry_pin = retry.clone();
+    wrong_retry_pin.gateway.as_mut().unwrap().host_public_key =
+        wrong_key.public_key().to_openssh().unwrap();
+    let before = retry_attempts.load(Ordering::SeqCst);
+    assert!(HostConnection::connect(&wrong_retry_pin).await.is_err());
+    assert_eq!(retry_attempts.load(Ordering::SeqCst), before + 1);
+
+    let mut rejected_identity = retry.clone();
+    rejected_identity.gateway.as_mut().unwrap().user = "other-owner".into();
+    let before = retry_attempts.load(Ordering::SeqCst);
+    assert!(HostConnection::connect(&rejected_identity).await.is_err());
+    assert_eq!(retry_attempts.load(Ordering::SeqCst), before + 1);
 
     // Route user ownership is part of the approved record and cannot be silently corrected.
     let mut wrong_owner = spec.clone();
@@ -330,4 +416,6 @@ async fn unavailable_primary_fails_over_and_pinned_nested_agent_execs_and_sftp()
     second_task.abort();
     refused_task.abort();
     policy_task.abort();
+    retry_task.abort();
+    exhausted_task.abort();
 }

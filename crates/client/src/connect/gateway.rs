@@ -98,9 +98,7 @@ pub(super) fn is_transient_gateway_connect_error(error: &SshClientError) -> bool
                 | std::io::ErrorKind::BrokenPipe
                 | std::io::ErrorKind::UnexpectedEof
         ),
-        SshClientError::Russh(
-            russh::Error::ConnectionTimeout | russh::Error::HUP | russh::Error::Disconnect,
-        ) => true,
+        SshClientError::Russh(russh::Error::ConnectionTimeout | russh::Error::HUP) => true,
         SshClientError::Russh(russh::Error::IO(error)) => matches!(
             error.kind(),
             std::io::ErrorKind::ConnectionRefused

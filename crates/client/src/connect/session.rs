@@ -104,52 +104,66 @@ impl HostConnection {
         if let Some(gateway) = &spec.gateway {
             let routes = validate_gateway_routes(gateway)?;
             let mut connected = None;
-            for (index, (address, user, identity, key)) in routes.into_iter().enumerate() {
-                let gateway_session =
-                    match connect_authenticated(address, &user, identity, key).await {
-                        Ok(session) => session,
-                        Err(error)
-                            if index + 1 < 1 + gateway.alternates.len()
-                                && is_transient_gateway_connect_error(&error) =>
+            let delays = [Duration::from_millis(400), Duration::from_millis(900)];
+            'cycles: for cycle in 0..=delays.len() {
+                for (index, (address, user, identity, key)) in routes.iter().enumerate() {
+                    let gateway_session =
+                        match connect_authenticated(*address, user, identity.clone(), key.clone())
+                            .await
                         {
-                            continue;
-                        }
-                        Err(error) => return Err(error),
-                    };
-                // Only a confirmed missing listener permits trying another approved route.
-                let channel = match tokio::time::timeout(
-                    CONNECT_TIMEOUT,
-                    gateway_session.channel_open_direct_tcpip(
-                        "127.0.0.1",
-                        u32::from(gateway.reverse_port),
-                        "127.0.0.1",
-                        0,
-                    ),
-                )
-                .await
-                {
-                    Ok(Ok(channel)) => channel,
-                    Ok(Err(error)) => {
-                        close_session(gateway_session, "gateway forwarding rejected").await?;
-                        if index + 1 < 1 + gateway.alternates.len()
-                            && matches!(
+                            Ok(session) => session,
+                            Err(error) if is_transient_gateway_connect_error(&error) => {
+                                if index + 1 < routes.len() {
+                                    continue;
+                                }
+                                if cycle < delays.len() {
+                                    break;
+                                }
+                                return Err(error);
+                            }
+                            Err(error) => return Err(error),
+                        };
+                    // Only a confirmed missing listener permits trying another approved route.
+                    let channel = match tokio::time::timeout(
+                        CONNECT_TIMEOUT,
+                        gateway_session.channel_open_direct_tcpip(
+                            "127.0.0.1",
+                            u32::from(gateway.reverse_port),
+                            "127.0.0.1",
+                            0,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(Ok(channel)) => channel,
+                        Ok(Err(error)) => {
+                            close_session(gateway_session, "gateway forwarding rejected").await?;
+                            if matches!(
                                 error,
                                 russh::Error::ChannelOpenFailure(
                                     russh::ChannelOpenFailure::ConnectFailed
                                 )
-                            )
-                        {
-                            continue;
+                            ) {
+                                if index + 1 < routes.len() {
+                                    continue;
+                                }
+                                if cycle < delays.len() {
+                                    break;
+                                }
+                            }
+                            return Err(error.into());
                         }
-                        return Err(error.into());
-                    }
-                    Err(_) => {
-                        close_session(gateway_session, "gateway forwarding timed out").await?;
-                        return Err(SshClientError::Timeout);
-                    }
-                };
-                connected = Some((gateway_session, channel));
-                break;
+                        Err(_) => {
+                            close_session(gateway_session, "gateway forwarding timed out").await?;
+                            return Err(SshClientError::Timeout);
+                        }
+                    };
+                    connected = Some((gateway_session, channel));
+                    break 'cycles;
+                }
+                if let Some(delay) = delays.get(cycle) {
+                    tokio::time::sleep(*delay).await;
+                }
             }
             let (gateway_session, channel) = connected.ok_or_else(|| {
                 SshClientError::Invalid("no approved gateway route connected".into())

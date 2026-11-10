@@ -55,6 +55,8 @@ hostlink job status --host lab-host --board-port 39123 JOB_ID
 hostlink upload --host lab-host --local ./input.bin --remote input.bin
 ```
 
+Before a command, the Controller can retry transient gateway connection failures across the same approved pinned routes; `list --check` can therefore take longer when gateways are unavailable. See [multi-gateway routing](docs/MULTI_GATEWAY.md#controller-behavior).
+
 `hostlink ssh HOST` requires terminal stdin/stdout, requests a PTY and shell over the existing pinned SSH connection, and returns the remote SSH exit status. A direct pinned `HostSpec` can be selected with `hostlink ssh --config ./host.json`. The initial terminal size is sent at connection time; live window resizing is not supported yet. Agents that reject PTY or shell requests report an explicit compatibility error; the Controller does not fall back to an external `ssh` executable.
 
 Windows 7 target Agents reject interactive SSH PTY requests; ordinary non-interactive exec remains available. Modern Windows Agents retain ConPTY support.

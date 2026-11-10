@@ -60,6 +60,11 @@ approved edges are attempted after transient gateway connection failures or an
 explicit `ConnectFailed` response when opening the loopback reverse port, after
 the failed gateway session has been closed. Other forwarding rejections,
 including administrative policy denial, are permanent, as are authentication
-denial, pin mismatch, and nested Agent pin or authentication failure. A started
-command or durable job is never replayed after route loss. See
+denial, pin mismatch, and nested Agent pin or authentication failure. If all
+approved routes fail transiently, the Controller retries the same ordered list
+up to twice, after 400 ms and 900 ms. Each gateway connection and forwarding
+open retains its own 15-second deadline; session cleanup has a separate bound,
+so multiple routes can make a failed connection take substantially longer,
+including for `hosts --check`. An ambiguous SSH disconnect fails closed. A
+started command or durable job is never replayed after route loss. See
 [CLIENT_HUB.md](CLIENT_HUB.md) for the Client CLI and configuration details.

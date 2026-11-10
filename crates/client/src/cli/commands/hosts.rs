@@ -7,7 +7,6 @@ use hostlink::{
 use std::{
     error::Error,
     io::{self, Write},
-    time::Duration,
 };
 
 #[derive(serde::Serialize)]
@@ -67,23 +66,16 @@ pub(super) async fn list_command(check: bool, json: bool) -> Result<i32, Box<dyn
                         // remote host's public key changed.
                         Err(hostlink::hub::HubClientError::Invalid(_)) => "unknown",
                         Err(_) => "unknown",
-                        Ok(spec) => {
-                            match tokio::time::timeout(
-                                Duration::from_secs(20),
-                                HostConnection::connect(&spec),
-                            )
-                            .await
-                            {
-                                Ok(Ok(connection)) => match connection.close().await {
-                                    Ok(()) => "online",
-                                    Err(_) => "unknown",
-                                },
-                                Ok(Err(SshClientError::Russh(russh::Error::UnknownKey))) => {
-                                    "identity_mismatch"
-                                }
-                                Ok(Err(_)) | Err(_) => "unreachable",
+                        Ok(spec) => match HostConnection::connect(&spec).await {
+                            Ok(connection) => match connection.close().await {
+                                Ok(()) => "online",
+                                Err(_) => "unknown",
+                            },
+                            Err(SshClientError::Russh(russh::Error::UnknownKey)) => {
+                                "identity_mismatch"
                             }
-                        }
+                            Err(_) => "unreachable",
+                        },
                     }
                 }
             };
