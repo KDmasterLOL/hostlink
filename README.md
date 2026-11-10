@@ -57,6 +57,8 @@ hostlink upload --host lab-host --local ./input.bin --remote input.bin
 
 `hostlink ssh HOST` requires terminal stdin/stdout, requests a PTY and shell over the existing pinned SSH connection, and returns the remote SSH exit status. A direct pinned `HostSpec` can be selected with `hostlink ssh --config ./host.json`. The initial terminal size is sent at connection time; live window resizing is not supported yet. Agents that reject PTY or shell requests report an explicit compatibility error; the Controller does not fall back to an external `ssh` executable.
 
+Windows 7 target Agents reject interactive SSH PTY requests; ordinary non-interactive exec remains available. Modern Windows Agents retain ConPTY support.
+
 Install or repair a machine with one invitation:
 
 ```sh

@@ -358,7 +358,8 @@ impl russh::server::Handler for EmbeddedSession {
         let valid_term = !term.is_empty()
             && term.len() <= 64
             && term.bytes().all(|byte| (0x21..=0x7e).contains(&byte));
-        if self.authenticated_controller.is_none()
+        if cfg!(target_vendor = "win7")
+            || self.authenticated_controller.is_none()
             || !self.session_channels.contains_key(&channel)
             || self.pending_ptys.contains_key(&channel)
             || !valid_term

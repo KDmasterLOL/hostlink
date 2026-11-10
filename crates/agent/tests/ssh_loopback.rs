@@ -285,68 +285,72 @@ async fn loopback_auth_and_exec_keep_binary_streams_and_exit_status() {
         .expect("request interactive PTY");
     loop {
         match shell.wait().await {
-            Some(ChannelMsg::Success) => break,
+            Some(ChannelMsg::Success) if !cfg!(target_vendor = "win7") => break,
+            Some(ChannelMsg::Failure) if cfg!(target_vendor = "win7") => break,
+            Some(ChannelMsg::Success) => panic!("Win7 PTY request accepted"),
             Some(ChannelMsg::Failure) => panic!("valid PTY request rejected"),
             Some(_) => {}
             None => panic!("channel ended before PTY acknowledgement"),
         }
     }
-    shell
-        .request_pty(true, "xterm", 80, 24, 0, 0, &[])
-        .await
-        .expect("send duplicate PTY request");
-    loop {
-        match shell.wait().await {
-            Some(ChannelMsg::Failure) => break,
-            Some(ChannelMsg::Success) | None => panic!("duplicate PTY request was accepted"),
-            Some(_) => {}
-        }
-    }
-    shell.request_shell(true).await.expect("request PTY shell");
-    loop {
-        match shell.wait().await {
-            Some(ChannelMsg::Success) => break,
-            Some(ChannelMsg::Failure) => panic!("PTY shell request rejected"),
-            Some(_) => {}
-            None => panic!("channel ended before shell acknowledgement"),
-        }
-    }
-    #[cfg(unix)]
-    shell
-        .data(&b"printf 'HOSTLINK_PTY_MARKER'; exit 7\n"[..])
-        .await
-        .expect("send command through PTY");
-    #[cfg(windows)]
-    shell
-        .data(&b"Write-Output HOSTLINK_PTY_MARKER; exit 7\r\n"[..])
-        .await
-        .expect("send command through ConPTY");
-    let (mut shell_output, mut shell_exit, mut shell_eof, mut shell_close) =
-        (Vec::new(), None, false, false);
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while !shell_close {
+    if !cfg!(target_vendor = "win7") {
+        shell
+            .request_pty(true, "xterm", 80, 24, 0, 0, &[])
+            .await
+            .expect("send duplicate PTY request");
+        loop {
             match shell.wait().await {
-                Some(ChannelMsg::Data { data }) => shell_output.extend_from_slice(&data),
-                Some(ChannelMsg::ExtendedData { data, .. }) => {
-                    shell_output.extend_from_slice(&data)
-                }
-                Some(ChannelMsg::ExitStatus { exit_status }) => shell_exit = Some(exit_status),
-                Some(ChannelMsg::Eof) => shell_eof = true,
-                Some(ChannelMsg::Close) => shell_close = true,
+                Some(ChannelMsg::Failure) => break,
+                Some(ChannelMsg::Success) | None => panic!("duplicate PTY request was accepted"),
                 Some(_) => {}
-                None => break,
             }
         }
-    })
-    .await
-    .expect("interactive PTY shell deadline");
-    assert!(
-        shell_output
-            .windows(b"HOSTLINK_PTY_MARKER".len())
-            .any(|window| window == b"HOSTLINK_PTY_MARKER")
-    );
-    assert_eq!(shell_exit, Some(7));
-    assert!(shell_eof && shell_close);
+        shell.request_shell(true).await.expect("request PTY shell");
+        loop {
+            match shell.wait().await {
+                Some(ChannelMsg::Success) => break,
+                Some(ChannelMsg::Failure) => panic!("PTY shell request rejected"),
+                Some(_) => {}
+                None => panic!("channel ended before shell acknowledgement"),
+            }
+        }
+        #[cfg(unix)]
+        shell
+            .data(&b"printf 'HOSTLINK_PTY_MARKER'; exit 7\n"[..])
+            .await
+            .expect("send command through PTY");
+        #[cfg(windows)]
+        shell
+            .data(&b"Write-Output HOSTLINK_PTY_MARKER; exit 7\r\n"[..])
+            .await
+            .expect("send command through ConPTY");
+        let (mut shell_output, mut shell_exit, mut shell_eof, mut shell_close) =
+            (Vec::new(), None, false, false);
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !shell_close {
+                match shell.wait().await {
+                    Some(ChannelMsg::Data { data }) => shell_output.extend_from_slice(&data),
+                    Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        shell_output.extend_from_slice(&data)
+                    }
+                    Some(ChannelMsg::ExitStatus { exit_status }) => shell_exit = Some(exit_status),
+                    Some(ChannelMsg::Eof) => shell_eof = true,
+                    Some(ChannelMsg::Close) => shell_close = true,
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+        })
+        .await
+        .expect("interactive PTY shell deadline");
+        assert!(
+            shell_output
+                .windows(b"HOSTLINK_PTY_MARKER".len())
+                .any(|window| window == b"HOSTLINK_PTY_MARKER")
+        );
+        assert_eq!(shell_exit, Some(7));
+        assert!(shell_eof && shell_close);
+    }
     session
         .disconnect(Disconnect::ByApplication, "test complete", "en")
         .await

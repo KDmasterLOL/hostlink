@@ -65,6 +65,7 @@ pub(super) fn prepare_command(command: &str) -> io::Result<Command> {
         .timeout_grace(EXEC_TIMEOUT_GRACE))
 }
 
+#[cfg(not(target_vendor = "win7"))]
 pub(super) fn prepare_shell(term: &str, cols: u16, rows: u16) -> io::Result<Command> {
     #[cfg(unix)]
     let mut child = {
@@ -99,6 +100,27 @@ pub(super) fn prepare_shell(term: &str, cols: u16, rows: u16) -> io::Result<Comm
             // no transcript; SSH itself applies bounded channel backpressure.
             .output_buffer(OutputBufferPolicy::bounded(0));
         Ok(child)
+    }
+}
+
+#[cfg(target_vendor = "win7")]
+pub(super) fn prepare_shell(_term: &str, _cols: u16, _rows: u16) -> io::Result<Command> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "interactive SSH PTY is unsupported on Windows 7 targets",
+    ))
+}
+
+#[cfg(all(test, target_vendor = "win7"))]
+mod win7_pty_tests {
+    #[test]
+    fn interactive_shell_is_unsupported() {
+        let error = match super::prepare_shell("xterm", 80, 24) {
+            Err(error) => error,
+            Ok(_) => panic!("Win7 PTY unexpectedly accepted"),
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("Windows 7"));
     }
 }
 

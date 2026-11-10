@@ -24,7 +24,7 @@ thiserror.workspace = true
 uuid.workspace = true
 ulid.workspace = true
 secrecy.workspace = true
-processkit = { workspace = true, features = ["pty"] }
+processkit.workspace = true
 rand.workspace = true
 self_update = { version = "=1.3.1", default-features = false, features = ["rustls", "ureq", "checksums", "github"] }
 hostlink-hub = { path = "../hub", default-features = false }
@@ -42,6 +42,9 @@ tower-http.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 service-manager = { version = "=0.11.0", default-features = false }
+
+[target.'cfg(not(target_vendor = "win7"))'.dependencies]
+processkit = { workspace = true, features = ["pty"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"

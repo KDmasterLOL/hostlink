@@ -155,6 +155,10 @@ verify-candidate:
           echo 'Forbidden Win7 DLL import' >&2
           exit 1
         fi
+        if awk 'tolower($1) == "name:" && tolower($2) ~ /\.dll$/ { kernel = (tolower($2) == "kernel32.dll") } kernel && $1 == "Symbol:" && $2 ~ /^(CreatePseudoConsole|ClosePseudoConsole|ResizePseudoConsole)$/ { found = 1 } END { exit !found }' <<< "$pe"; then
+          echo "Forbidden Win7 kernel32 ConPTY import: $f" >&2
+          exit 1
+        fi
       fi
     done
 

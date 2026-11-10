@@ -28,7 +28,7 @@ for target in x86_64-win7-windows-msvc i686-win7-windows-msvc; do
 done
 ```
 
-Review each PE report: machine must be `0x8664` for x64 or `0x14c` for x86; subsystem version must be 6.0. Imports must exclude dynamic CRT DLLs (`api-ms-win-crt*`, `ucrtbase.dll`, `msvcrt.dll`, `vcruntime*`, `msvcp*`, `concrt*`) and `combase.dll`. Record reports and hashes with the source SHA and tool versions. Inspect the reports locally and reject a candidate that fails any of these conditions. Check that the PE subsystem is console (`0x3`) and that the import list is nonempty. Cross-compilation does not establish native compatibility. Package the raw Agent executables as described in [artifact packaging](ARTIFACTS_AND_INVITES.md).
+Review each PE report: machine must be `0x8664` for x64 or `0x14c` for x86; subsystem version must be 6.0. Imports must exclude dynamic CRT DLLs (`api-ms-win-crt*`, `ucrtbase.dll`, `msvcrt.dll`, `vcruntime*`, `msvcp*`, `concrt*`) and `combase.dll`, as well as kernel32's `CreatePseudoConsole`, `ClosePseudoConsole` and `ResizePseudoConsole`. The candidate verifier enforces these checks for both Win7 assets. Win7 target Agents reject interactive SSH PTY requests; non-interactive exec remains available. Modern Windows retains ConPTY. Record reports and hashes with the source SHA and tool versions. Inspect the reports locally and reject a candidate that fails any of these conditions. Check that the PE subsystem is console (`0x3`) and that the import list is nonempty. Cross-compilation does not establish native compatibility. Package the raw Agent executables as described in [artifact packaging](ARTIFACTS_AND_INVITES.md).
 
 ## PowerShell 2 syntax
 
