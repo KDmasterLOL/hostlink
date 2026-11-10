@@ -9,6 +9,7 @@ use std::{
     os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle},
     ptr,
 };
+const INHERITED_ACE_FLAG: u8 = 0x10;
 
 #[derive(Clone, Debug)]
 pub(super) struct Sid(Vec<u32>);
@@ -141,9 +142,18 @@ impl Drop for SecurityInfo {
     }
 }
 pub(super) fn verify(handle: impl AsHandle, user: &Sid, directory: bool) -> Result<()> {
-    inspect(handle, user, true, directory)
+    inspect(handle, user, true, directory, false)
 }
-fn inspect(handle: impl AsHandle, user: &Sid, check_acl: bool, directory: bool) -> Result<()> {
+pub(super) fn verify_inherited_file(handle: impl AsHandle, user: &Sid) -> Result<()> {
+    inspect(handle, user, true, false, true)
+}
+fn inspect(
+    handle: impl AsHandle,
+    user: &Sid,
+    check_acl: bool,
+    directory: bool,
+    inherited_file: bool,
+) -> Result<()> {
     let mut owner = ptr::null_mut();
     let mut acl = ptr::null_mut();
     let mut raw = ptr::null_mut();
@@ -179,10 +189,8 @@ fn inspect(handle: impl AsHandle, user: &Sid, check_acl: bool, directory: bool) 
     let mut revision = 0;
     // SAFETY: initialized security descriptor and writable scalar outputs.
     bool_result(unsafe { GetSecurityDescriptorControl(info.0, &mut control, &mut revision) })?;
-    if control & (SE_DACL_PROTECTED | SE_DACL_PRESENT) as u16
-        != (SE_DACL_PROTECTED | SE_DACL_PRESENT) as u16
-        || acl.is_null()
-    {
+    let protected = control & SE_DACL_PROTECTED as u16 != 0;
+    if control & SE_DACL_PRESENT as u16 == 0 || acl.is_null() || (!protected && !inherited_file) {
         return Err(Error::InsecureAcl);
     }
     // SAFETY: a non-null ACL inside the successful GetSecurityInfo allocation.
@@ -196,6 +204,8 @@ fn inspect(handle: impl AsHandle, user: &Sid, check_acl: bool, directory: bool) 
         let sid_offset = size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>();
         let expected_flags = if directory {
             (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8
+        } else if !protected && inherited_file {
+            INHERITED_ACE_FLAG
         } else {
             0
         };
@@ -228,7 +238,7 @@ fn inspect(handle: impl AsHandle, user: &Sid, check_acl: bool, directory: bool) 
 }
 
 pub(super) fn harden(handle: impl AsHandle, user: &Sid, directory: bool) -> Result<()> {
-    inspect(handle.as_handle(), user, false, directory)?;
+    inspect(handle.as_handle(), user, false, directory, false)?;
     let descriptor = Descriptor::new(user, directory)?;
     // SAFETY: descriptor retains the ACL, handle remains live, and only the DACL
     // is changed. Owner mismatch must fail before mutation, never be repaired.

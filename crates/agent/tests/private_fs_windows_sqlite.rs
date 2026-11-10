@@ -41,6 +41,7 @@ async fn sqlite_files_inherit_only_the_agent_user() {
     let store = JobStore::initialize_fresh(&jobs)
         .await
         .expect("create Apalis SQLite database");
+    let jobs_dir = PrivateDir::open(&jobs).expect("verify jobs directory");
     let mut saw_database = false;
     for entry in fs::read_dir(&jobs).expect("list SQLite files") {
         let entry = entry.expect("SQLite file entry");
@@ -48,6 +49,18 @@ async fn sqlite_files_inherit_only_the_agent_user() {
         if name.to_string_lossy().starts_with("jobs.db") {
             saw_database |= name == "jobs.db";
             assert_owner_only_acl(&entry.path());
+            if name == "jobs.db" {
+                assert!(
+                    matches!(
+                        jobs_dir.open_file(&name),
+                        Err(private_fs::Error::InsecureAcl)
+                    ),
+                    "SQLite database must reproduce the strict ACL rejection"
+                );
+            }
+            jobs_dir
+                .verify_file_with_inherited_owner_acl(&name)
+                .expect("repair preflight accepts only the private inherited ACL");
         }
     }
     assert!(saw_database, "SQLite database must have been created");

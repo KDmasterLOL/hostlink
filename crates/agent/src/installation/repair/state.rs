@@ -210,13 +210,17 @@ impl Snapshot {
         // Apalis owns its schema and jobs. Validate the private container and the
         // existing database without opening/migrating/truncating any SQLite data.
         let jobs = PrivateDir::open(root.join("jobs")).map_err(io::Error::other)?;
-        jobs.open_file("jobs.db").map_err(io::Error::other)?;
+        verify_sqlite_file(&jobs, "jobs.db")?;
         for name in ["jobs.db-wal", "jobs.db-shm", "runner.lock"] {
             match fs::symlink_metadata(root.join("jobs").join(name)) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
                 Ok(_) => {
-                    jobs.open_file(name).map_err(io::Error::other)?;
+                    if name == "runner.lock" {
+                        jobs.open_file(name).map_err(io::Error::other)?;
+                    } else {
+                        verify_sqlite_file(&jobs, name)?;
+                    }
                 }
             }
         }
@@ -333,6 +337,15 @@ impl Snapshot {
         );
         Ok(files)
     }
+}
+
+fn verify_sqlite_file(dir: &PrivateDir, name: &str) -> io::Result<()> {
+    #[cfg(windows)]
+    dir.verify_file_with_inherited_owner_acl(name)
+        .map_err(io::Error::other)?;
+    #[cfg(not(windows))]
+    dir.open_file(name).map_err(io::Error::other)?;
+    Ok(())
 }
 
 fn bytes<'a>(files: &'a BTreeMap<String, Vec<u8>>, name: &str) -> io::Result<&'a [u8]> {

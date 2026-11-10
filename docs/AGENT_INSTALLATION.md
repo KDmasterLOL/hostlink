@@ -23,6 +23,8 @@ The bootstrap retains its fixed GitHub release URL, exact RAW SHA-256 check and 
 
 The installer verifies the stable private root, manifest-bound state, exact machine name/ID and SSH login, both private SSH identities, assigned port, gateway pin files, jobs directory/database, and OS service ownership. It preserves the SSH listener/Board addresses and Controller authorization file. A stopped or missing owned service is registered/started by the same bootstrap. An already matching service registration is reused. Foreign tasks/units, unsafe links/ACLs, corrupt manifests, changed identity, and uncertain earlier attempts fail before publication.
 
+On Windows, repair preflight also accepts SQLite database and WAL/SHM files with the single current-user-only full-access ACE inherited from the verified private jobs directory. It checks each existing file through a handle without changing its ACL or contents; other files still require the protected private ACL. SQLite can recreate sidecars during normal operation, so each repair checks whichever sidecars exist at that time.
+
 The installer obtains current approved routes and Ed25519 pins from the authenticated Hub, verifies unchanged identity/port, and authenticates the existing reverse key to at least one approved gateway before replacing files. It holds `update.lock`, removes only an owned service when publication is necessary, and acquires the canonical `jobs/runner.lock` before publication. Windows publication additionally requires an independently running staged image and removal of the owned Scheduler task. Jobs remain outside the transaction; repair does not migrate or initialize Apalis.
 
 ### Lost SSH keys

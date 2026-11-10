@@ -164,6 +164,18 @@ impl PrivateDir {
     pub fn open_file(&self, path: impl AsRef<Path>) -> Result<PrivateFile> {
         self.open_file_with(path, OpenOptions::default())
     }
+    /// Read-only preflight for an existing file with either the canonical private
+    /// ACL or one inherited owner-only ACE from a verified private directory.
+    /// Does not alter the file or grant a reusable file capability.
+    pub fn verify_file_with_inherited_owner_acl(&self, path: impl AsRef<Path>) -> Result<()> {
+        let (parent, name) = self.parent(path.as_ref())?;
+        nt::volume(&parent)?;
+        let handle = nt::open_file(&parent, name, FILE_OPEN as u32, None, false, false)?;
+        nt::metadata(&handle, false, None)?;
+        security::verify_inherited_file(&handle, &self.user)?;
+        nt::validate(&parent, true, None, &self.user)?;
+        Ok(())
+    }
     /// Exclusively create a readable and writable private file.
     pub fn create(&self, path: impl AsRef<Path>) -> Result<PrivateFile> {
         self.open_file_with(

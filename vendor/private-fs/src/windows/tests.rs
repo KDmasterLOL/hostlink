@@ -109,6 +109,10 @@ fn forced_open_fallback_rejects_file_symlink_before_truncation_or_creation() {
     let target = outside.path().join("data");
     std::fs::write(&target, b"unchanged").unwrap();
     std::os::windows::fs::symlink_file(&target, temp.path().join("private/link")).unwrap();
+    assert!(matches!(
+        dir.verify_file_with_inherited_owner_acl("link"),
+        Err(Error::PathRedirect)
+    ));
     with_open_status(STATUS_INVALID_INFO_CLASS, || {
         for creation in [FileCreation::Existing, FileCreation::OpenOrCreate] {
             assert!(matches!(
@@ -1075,6 +1079,67 @@ fn empty_and_null_dacls_and_inheritable_aces_are_rejected() {
     assert!(matches!(dir.create("new-key"), Err(Error::InsecureAcl)));
     dir.harden().unwrap();
     dir.create("new-key").unwrap();
+}
+
+#[test]
+fn inherited_file_preflight_rejects_foreign_acl_null_acl_and_hardlinks() {
+    let (temp, dir) = fixture();
+    let file = dir.create("key").unwrap();
+    dir.verify_file_with_inherited_owner_acl("key").unwrap();
+    let other = world();
+    set_acl(
+        &file,
+        &[
+            (&dir.user, FILE_ALL_ACCESS as u32, 0),
+            (&other, FILE_READ_DATA as u32, 0),
+        ],
+        true,
+    );
+    assert!(matches!(
+        dir.verify_file_with_inherited_owner_acl("key"),
+        Err(Error::InsecureAcl)
+    ));
+    set_acl(
+        &file,
+        &[
+            (&dir.user, FILE_ALL_ACCESS as u32, 0),
+            (&other, FILE_READ_DATA as u32, 0),
+        ],
+        false,
+    );
+    assert!(matches!(
+        dir.verify_file_with_inherited_owner_acl("key"),
+        Err(Error::InsecureAcl)
+    ));
+    // SAFETY: deliberately set a null DACL on this disposable test file.
+    assert_eq!(
+        unsafe {
+            SetSecurityInfo(
+                nt::security_handle(&file).unwrap().as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION as u32 | PROTECTED_DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null(),
+                ptr::null(),
+            )
+        },
+        0
+    );
+    assert!(matches!(
+        dir.verify_file_with_inherited_owner_acl("key"),
+        Err(Error::InsecureAcl)
+    ));
+    file.harden().unwrap();
+    std::fs::hard_link(temp.path().join("private/key"), temp.path().join("alias")).unwrap();
+    assert!(matches!(
+        dir.verify_file_with_inherited_owner_acl("key"),
+        Err(Error::MultipleHardLinks { .. })
+    ));
+    assert!(matches!(
+        security::verify_inherited_file(&file, &other),
+        Err(Error::OwnerMismatch)
+    ));
 }
 
 #[test]
