@@ -8,6 +8,7 @@ pub(super) struct Snapshot {
     pub identity: EnrollmentIdentity,
     pub config: AgentConfig,
     pub reverse_key: PrivateKey,
+    selected_user: String,
     replacement_keys: Option<(Vec<u8>, Vec<u8>)>,
 }
 
@@ -126,7 +127,6 @@ impl Snapshot {
         if identity.format != 1
             || &identity.machine_id != expected
             || identity.name != name
-            || config.user != user
             || config.jobs_root != root.join("jobs")
             || config.host_key != Path::new("host_key")
             || config.authorized_keys != Path::new("authorized_keys")
@@ -229,6 +229,7 @@ impl Snapshot {
             identity,
             config,
             reverse_key,
+            selected_user: user.to_owned(),
             replacement_keys,
         })
     }
@@ -283,7 +284,10 @@ impl Snapshot {
             files.insert("host_key".into(), host.clone());
         }
         files.retain(|name, _| !name.starts_with("gateway_host_key"));
+        // The bootstrap-selected protocol login is published only with the
+        // Hub-validated candidate; the manifest below binds the new bytes.
         let mut config = self.config.clone();
+        config.user.clone_from(&self.selected_user);
         let mut routes = Vec::new();
         for (index, gateway) in gateways.iter().enumerate() {
             let pin = pin_name(index);

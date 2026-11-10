@@ -13,6 +13,8 @@ Before issuing a runnable bootstrap invitation, the Controller reads the authent
 
 The bootstrap uses the Controller Hub configuration's `ssh_user` as the Agent's SSH protocol login, independently of the target Windows or Linux OS account. An explicit `--ssh-user` must match that configured login; a mismatch is rejected before any Hub or GitHub request and before an invitation is created. `--token-only` remains a manual flow and cannot be combined with `--ssh-user`.
 
+An identity-preserving repair may update an older Agent's SSH protocol login to this selected value. The installer validates the old state and proves possession of its reverse key, then stages the selected login with refreshed manifest hashes after the Hub response. The existing service account and SSH keys remain unchanged.
+
 An enrollment request may succeed on the Hub before local publication finishes. When `enrollment.pending` remains, inspect the Hub inventory and reconcile the attempt; do not replay the original one-use token.
 
 ## Existing-host authorization

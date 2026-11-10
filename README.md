@@ -67,7 +67,7 @@ The command prints one paste-ready bootstrap containing a one-use invitation. Pr
 
 The Agent's SSH protocol login defaults to the Controller Hub configuration's `ssh_user`, independently of the target OS account. If `--ssh-user` is supplied, it must match that configured login.
 
-For an exact existing Hub name, the same command issues an identity-bound repair invitation. Paste it locally or through RDP: existing Agent connectivity is not required. Repair preserves machine ID, both SSH keys, assigned port and Apalis jobs while refreshing approved gateway routes/pins and restoring the owned user service. Lost SSH keys require explicit operator authorization and typed target confirmation; see [installation and repair](docs/AGENT_INSTALLATION.md). Source-bound release publication and native platform acceptance remain separate gates.
+For an exact existing Hub name, the same command issues an identity-bound repair invitation. Paste it locally or through RDP: existing Agent connectivity is not required. Repair preserves machine ID, both SSH keys, assigned port and Apalis jobs while refreshing approved gateway routes/pins and restoring the owned user service. It can also migrate the Agent's SSH protocol login to the Controller-configured login without changing the OS account. Lost SSH keys require explicit operator authorization and typed target confirmation; see [installation and repair](docs/AGENT_INSTALLATION.md). Source-bound release publication and native platform acceptance remain separate gates.
 
 Windows repair checks SQLite's owner-only inherited ACLs without rewriting the database or its permissions; the other private state still requires protected ACLs.
 

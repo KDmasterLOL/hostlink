@@ -64,6 +64,10 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_user("agent").await
+    }
+
+    async fn with_user(user: &str) -> Self {
         let temp = tempfile::tempdir().unwrap();
         // Create protected Windows ACLs as well as Unix private modes.
         fs::remove_dir(temp.path()).unwrap();
@@ -91,7 +95,7 @@ impl Fixture {
             token_file: token,
             install_root: root.clone(),
             name: "offline".into(),
-            user: "agent".into(),
+            user: user.into(),
             gateway_index: None,
             retain_pending: true,
         };
@@ -118,7 +122,7 @@ impl Fixture {
         }
         let identity: enrollment::EnrollmentIdentity =
             serde_json::from_slice(&fs::read(root.join("state/machine.json")).unwrap()).unwrap();
-        let snapshot = Snapshot::read(&root, &identity.machine_id, "offline", "agent").unwrap();
+        let snapshot = Snapshot::read(&root, &identity.machine_id, "offline", user).unwrap();
         let ssh_dir = dir.create_dir("gateway").unwrap();
         let gateway_root = temp.path().join("gateway");
         let new_pin = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
@@ -203,6 +207,54 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn authorized_login_migration_preserves_identity_and_is_idempotent() {
+    let f = Fixture::with_user("TIS").await;
+    let selected = Snapshot::read(
+        &f.root,
+        &f.snapshot.identity.machine_id,
+        "offline",
+        "1c_badov",
+    )
+    .unwrap();
+    let database = fs::read(f.root.join("jobs/jobs.db")).unwrap();
+    let (_temp, mut image) = test_image();
+    let transaction = Transaction::prepare(&f.root, &selected, &mut image).unwrap();
+    transaction.mark_pending().unwrap();
+    let response = f.repair_response().await;
+    transaction
+        .write_candidate(&selected, &response, None)
+        .await
+        .unwrap();
+    assert!(transaction.changed(&selected).unwrap());
+    selected.assert_unchanged(&f.root).unwrap();
+    transaction.publish().unwrap();
+    transaction.finish().unwrap();
+    let after = Snapshot::read(
+        &f.root,
+        &selected.identity.machine_id,
+        "offline",
+        "1c_badov",
+    )
+    .unwrap();
+    assert_eq!(after.config.user, "1c_badov");
+    assert_eq!(after.identity.machine_id, selected.identity.machine_id);
+    assert_eq!(after.identity.remote_port, selected.identity.remote_port);
+    for name in ["host_key", "gateway_identity", "authorized_keys"] {
+        assert_eq!(after.files[name], selected.files[name]);
+    }
+    assert_eq!(fs::read(f.root.join("jobs/jobs.db")).unwrap(), database);
+    let (_temp, mut image) = test_image();
+    let repeat = Transaction::prepare(&f.root, &after, &mut image).unwrap();
+    repeat.mark_pending().unwrap();
+    repeat
+        .write_candidate(&after, &response, None)
+        .await
+        .unwrap();
+    assert!(!repeat.changed(&after).unwrap());
+    repeat.finish_unchanged().unwrap();
+}
+
+#[tokio::test]
 async fn authorized_stale_route_repair_preserves_identity_jobs_and_private_state() {
     use apalis_core::backend::TaskSink;
     let f = Fixture::new().await;
@@ -280,7 +332,7 @@ async fn damaged_foreign_mismatched_and_pending_roots_are_preserved() {
         .is_err()
     );
     assert!(Snapshot::read(&f.root, &f.snapshot.identity.machine_id, "other", "agent").is_err());
-    assert!(Snapshot::read(&f.root, &f.snapshot.identity.machine_id, "offline", "other").is_err());
+    assert!(Snapshot::read(&f.root, &f.snapshot.identity.machine_id, "offline", "other").is_ok());
     for marker in ["enrollment.pending", "repair.pending"] {
         enrollment::write_private_new(&f.root.join(marker), b"uncertain").unwrap();
         assert!(
@@ -294,6 +346,11 @@ async fn damaged_foreign_mismatched_and_pending_roots_are_preserved() {
     assert!(Snapshot::read(&f.root, &f.snapshot.identity.machine_id, "offline", "agent").is_err());
     assert_eq!(fs::read(&host).unwrap(), b"damaged");
     fs::write(host, original).unwrap();
+    let manifest = f.root.join("state/manifest.json");
+    let original = fs::read(&manifest).unwrap();
+    fs::write(&manifest, b"corrupt").unwrap();
+    assert!(Snapshot::read(&f.root, &f.snapshot.identity.machine_id, "offline", "other").is_err());
+    fs::write(manifest, original).unwrap();
     let foreign = f._temp.path().join("foreign");
     PrivateDir::ensure(&foreign).unwrap();
     enrollment::write_private_new(&foreign.join("owner"), b"foreign").unwrap();
@@ -310,14 +367,82 @@ async fn damaged_foreign_mismatched_and_pending_roots_are_preserved() {
 }
 
 #[tokio::test]
+async fn login_change_cannot_bypass_repair_key_proof() {
+    let f = Fixture::new().await;
+    let selected = Snapshot::read(
+        &f.root,
+        &f.snapshot.identity.machine_id,
+        "offline",
+        "new-login",
+    )
+    .unwrap();
+    let (status, invite) = call(
+        f.app.clone(),
+        "/v2/invites",
+        json!({"name":"offline", "repair_machine_id":selected.identity.machine_id}),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let mut request = selected
+        .request(invite["token"].as_str().unwrap().to_owned().into())
+        .unwrap();
+    let foreign_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+    request.repair_signature = Some(
+        foreign_key
+            .sign(REPAIR_NAMESPACE, HashAlg::Sha256, &request.repair_message())
+            .unwrap()
+            .to_string(),
+    );
+    let (status, _) = call(
+        f.app.clone(),
+        "/v2/enroll",
+        serde_json::to_value(request).unwrap(),
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    selected.assert_unchanged(&f.root).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn login_change_rejects_insecure_private_key_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new().await;
+    let key = f.root.join("state/gateway_identity");
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        Snapshot::read(
+            &f.root,
+            &f.snapshot.identity.machine_id,
+            "offline",
+            "new-login"
+        )
+        .is_err()
+    );
+    assert_eq!(
+        fs::metadata(key).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+}
+
+#[tokio::test]
 async fn partial_publication_rolls_back_and_missing_binary_can_be_restored() {
     let f = Fixture::new().await;
+    let selected = Snapshot::read(
+        &f.root,
+        &f.snapshot.identity.machine_id,
+        "offline",
+        "new-login",
+    )
+    .unwrap();
     let (_temp, mut image) = test_image();
     let transaction = Transaction::prepare(&f.root, &f.snapshot, &mut image).unwrap();
     transaction.mark_pending().unwrap();
     let response = f.repair_response().await;
     transaction
-        .write_candidate(&f.snapshot, &response, None)
+        .write_candidate(&selected, &response, None)
         .await
         .unwrap();
     let stage = fs::read_dir(&f.root)
