@@ -1501,7 +1501,7 @@ dependencies = [
 
 [[package]]
 name = "hostlink"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1534,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "hostlink-agent"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "apalis-board-api",
  "apalis-core",
@@ -1578,7 +1578,7 @@ dependencies = [
 
 [[package]]
 name = "hostlink-hub"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "axum",
  "base64 0.22.1",
