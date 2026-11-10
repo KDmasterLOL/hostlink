@@ -697,3 +697,39 @@ async fn mismatched_candidate_and_concurrently_changed_executable_are_preserved(
     assert_eq!(fs::read(binary).unwrap(), b"concurrently-changed");
     assert!(f.root.join("repair.pending").exists());
 }
+
+// The executable is not manifest-bound. An owner-current file with a foreign
+// writer must not become trusted merely because its directory is private.
+#[cfg(windows)]
+#[tokio::test]
+async fn foreign_writable_executable_fails_before_hub_and_preserves_state() {
+    let f = Fixture::new().await;
+    let binary = f.root.join("bin").join(EXECUTABLE_NAME);
+    let original = fs::read(&binary).unwrap();
+    let result = std::process::Command::new("icacls.exe")
+        .arg(&binary)
+        .args(["/grant", "*S-1-1-0:F"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "icacls failed: {:?}",
+        result.status
+    );
+    let (_temp, mut image) = test_image();
+    let error = match Transaction::prepare(&f.root, &f.snapshot, &mut image) {
+        Ok(_) => panic!("foreign-writable executable was accepted"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("insecure ACL"));
+    assert!(!f.root.join("repair.pending").exists());
+    assert_eq!(fs::read(&binary).unwrap(), original);
+    f.snapshot.assert_unchanged(&f.root).unwrap();
+    assert!(!fs::read_dir(&f.root).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".repair-")
+    }));
+}

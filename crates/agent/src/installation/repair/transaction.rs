@@ -25,7 +25,12 @@ impl Transaction {
                     None
                 } else if names == [std::ffi::OsString::from(EXECUTABLE_NAME)] {
                     #[cfg(windows)]
-                    _bin.open_file(EXECUTABLE_NAME).map_err(io::Error::other)?;
+                    _bin.open_file(EXECUTABLE_NAME).map_err(|error| match error {
+                        private_fs::Error::InsecureAcl => invalid(
+                            "installed Agent executable has an insecure ACL; repair stopped before Hub authorization to avoid executing untrusted bytes",
+                        ),
+                        error => io::Error::other(error),
+                    })?;
                     verify_executable(&root.join("bin").join(EXECUTABLE_NAME))?;
                     Some(hash_file(
                         &root.join("bin").join(EXECUTABLE_NAME),
