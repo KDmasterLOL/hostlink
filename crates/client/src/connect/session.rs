@@ -123,7 +123,7 @@ impl HostConnection {
                             }
                             Err(error) => return Err(error),
                         };
-                    // Only a confirmed missing listener permits trying another approved route.
+                    // Retry a missing listener or a timeout only after session cleanup.
                     let channel = match tokio::time::timeout(
                         CONNECT_TIMEOUT,
                         gateway_session.channel_open_direct_tcpip(
@@ -155,6 +155,12 @@ impl HostConnection {
                         }
                         Err(_) => {
                             close_session(gateway_session, "gateway forwarding timed out").await?;
+                            if index + 1 < routes.len() {
+                                continue;
+                            }
+                            if cycle < delays.len() {
+                                break;
+                            }
                             return Err(SshClientError::Timeout);
                         }
                     };

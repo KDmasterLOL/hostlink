@@ -57,8 +57,8 @@ For Hub-managed commands, the controller requires an exact
 contains multiple routes. It validates the entire bounded route list and every
 Ed25519 host pin before connecting. The selected primary is tried first; other
 approved edges are attempted after transient gateway connection failures or an
-explicit `ConnectFailed` response when opening the loopback reverse port, after
-the failed gateway session has been closed. Other forwarding rejections,
+explicit `ConnectFailed` response or timeout when opening the loopback reverse
+port, after the failed gateway session has been closed. Other forwarding rejections,
 including administrative policy denial, are permanent, as are authentication
 denial, pin mismatch, and nested Agent pin or authentication failure. If all
 approved routes fail transiently, the Controller retries the same ordered list

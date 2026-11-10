@@ -26,6 +26,7 @@ struct Gateway {
     target: SocketAddr,
     attempts: Arc<AtomicUsize>,
     fail_first: usize,
+    stall: bool,
 }
 impl server::Server for Gateway {
     type Handler = Self;
@@ -59,6 +60,13 @@ impl server::Handler for Gateway {
             reply
                 .reject(ChannelOpenFailure::AdministrativelyProhibited)
                 .await;
+            return Ok(());
+        }
+        if self.stall {
+            tokio::spawn(async move {
+                let _reply = reply;
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            });
             return Ok(());
         }
         if self.attempts.load(Ordering::SeqCst) <= self.fail_first {
@@ -159,6 +167,21 @@ async fn gateway_controlled(
     tokio::task::JoinHandle<()>,
     Arc<AtomicUsize>,
 ) {
+    gateway_behavior(target, user_key, port, fail_first, false).await
+}
+
+async fn gateway_behavior(
+    target: SocketAddr,
+    user_key: PublicKey,
+    port: u16,
+    fail_first: usize,
+    stall: bool,
+) -> (
+    SocketAddr,
+    String,
+    tokio::task::JoinHandle<()>,
+    Arc<AtomicUsize>,
+) {
     let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
     let pin = key.public_key().to_openssh().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -175,6 +198,7 @@ async fn gateway_controlled(
         target,
         attempts: attempts.clone(),
         fail_first,
+        stall,
     };
     let task = tokio::spawn(async move {
         handler.run_on_socket(config, &listener).await.unwrap();
@@ -288,6 +312,28 @@ async fn unavailable_primary_fails_over_and_pinned_nested_agent_execs_and_sftp()
     let name = format!("{:x}.upload", sha2::Sha256::digest(data));
     host.sftp_upload(&name, data).await.unwrap();
     assert_eq!(host.sftp_download(&name).await.unwrap(), data);
+    host.close().await.unwrap();
+
+    // A gateway that never answers the direct-tcpip open must be closed before
+    // the approved alternate is tried.
+    let (stall_addr, stall_pin, stall_task, stall_attempts) = gateway_behavior(
+        agent_address,
+        gateway_user.public_key().clone(),
+        reverse_port,
+        0,
+        true,
+    )
+    .await;
+    let mut stalled = spec.clone();
+    let primary = stalled.gateway.as_mut().unwrap();
+    primary.address = stall_addr;
+    primary.host_public_key = stall_pin;
+    primary.alternates = vec![route(active_addr, active_pin.clone(), "gateway")];
+    let mut host = HostConnection::connect(&stalled)
+        .await
+        .expect("timed-out forward advances to approved route");
+    assert_eq!(stall_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(host.exec("exit 7", &[]).await.unwrap().exit_code, 7);
     host.close().await.unwrap();
 
     // The same pinned route initially has no reverse listener, then recovers.
@@ -418,4 +464,5 @@ async fn unavailable_primary_fails_over_and_pinned_nested_agent_execs_and_sftp()
     policy_task.abort();
     retry_task.abort();
     exhausted_task.abort();
+    stall_task.abort();
 }
