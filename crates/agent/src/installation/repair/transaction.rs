@@ -307,29 +307,115 @@ impl Transaction {
     }
 }
 
-// GitHub immutable release v0.1.2 raw asset metadata, pinned by size and SHA-256.
-// https://api.github.com/repos/KDmasterLOL/hostlink/releases/tags/v0.1.2
+// Immutable GitHub Releases raw asset sizes and SHA-256 digests. To extend,
+// verify immutable metadata at https://api.github.com/repos/KDmasterLOL/hostlink/releases/tags/<tag>.
+#[cfg(any(test, all(windows, target_arch = "x86_64")))]
+const LEGACY_X64: &[(u64, &str)] = &[
+    // v0.1.0 x86_64-pc-windows-msvc
+    (
+        20630016,
+        "48e9c91aa7b2cdfdb17da91bed601ae0d5be2613ab92aa227c70411a5c9fffe5",
+    ),
+    // v0.1.0 x86_64-win7-windows-msvc
+    (
+        20617728,
+        "9a037642694f44a6ab3a4edfb7d36f7f188d5b40f8ca0496aba59b4b81f8511e",
+    ),
+    // v0.1.1 x86_64-pc-windows-msvc
+    (
+        20465664,
+        "c0befbd19766815c53620faac2c2675ab1a8df732c7964cd8e3a360f6063bf59",
+    ),
+    // v0.1.1 x86_64-win7-windows-msvc
+    (
+        20633088,
+        "89f2db475adfb4805a50bc63c6ac38ac662915a82a4d874b8b4397d81910ac63",
+    ),
+    // v0.1.2 x86_64-pc-windows-msvc
+    (
+        20487680,
+        "9246a322627b2c0251d7122df8eacdecb17a99a19bbef45e908a828e2b368952",
+    ),
+    // v0.1.2 x86_64-win7-windows-msvc
+    (
+        20622336,
+        "d2a2f81bd983a3a84db4cac78f3af2ef11d0fcfc2c3642134dd85d20a4cf77dd",
+    ),
+    // v0.2.0 x86_64-pc-windows-msvc
+    (
+        21262848,
+        "e6d58e0ba5c56a93c27aaa260e71a1f8704da24dd8d6efd496fdc3400617bbe4",
+    ),
+    // v0.2.0 x86_64-win7-windows-msvc
+    (
+        21407744,
+        "c96271128aab2e80c2e188df2056b547af2a250d4058f847484a0b0cfe8c6303",
+    ),
+    // v0.2.1 x86_64-pc-windows-msvc
+    (
+        21255680,
+        "5ce5f21904683ee0c279c712dfda59e20e3d45dbfd224d7d8e4c82879863a054",
+    ),
+    // v0.2.1 x86_64-win7-windows-msvc
+    (
+        21414400,
+        "96c86093d6e94866d73c5038bde5ec2e8e27664b4744a109d755796df0458b3b",
+    ),
+    // v0.2.2 x86_64-pc-windows-msvc
+    (
+        21263360,
+        "57d6529842e48f2e6ebfa544a6001034de9bace7fe0c1acba0d3c7add9b717c7",
+    ),
+    // v0.2.2 x86_64-win7-windows-msvc
+    (
+        21414400,
+        "e97c557c3448adbc88044a4451f50f5c1d8df5ef7110cfe3055eb8e4b33e37b9",
+    ),
+];
+
+#[cfg(any(test, all(windows, target_arch = "x86")))]
+const LEGACY_X86: &[(u64, &str)] = &[
+    // v0.1.0 i686-win7-windows-msvc
+    (
+        17071104,
+        "99759053062c87f05f3ef1720da7f104681435d676cfbd6aedaaec245fc504a3",
+    ),
+    // v0.1.1 i686-win7-windows-msvc
+    (
+        17072640,
+        "7d83e4731262bf8855de9f29fcc36387463ed1b4cfcb7ddc56a12b35c525a0d1",
+    ),
+    // v0.1.2 i686-win7-windows-msvc
+    (
+        17084928,
+        "3ee0ef347eeb3c01e5b3a30966056d4f115dd3846aff85c7a13765d5965ea84d",
+    ),
+    // v0.2.0 i686-win7-windows-msvc
+    (
+        17615872,
+        "e35387fabf987c578e0ec86832acaa4fceaea4f88301436feb09db19218614c9",
+    ),
+    // v0.2.1 i686-win7-windows-msvc
+    (
+        17615872,
+        "03686bbb46b1ac123cd9c009e6975241b25ef80389dbdb95f4e01e266275efb5",
+    ),
+    // v0.2.2 i686-win7-windows-msvc
+    (
+        17616896,
+        "5c0bdfec363881b383fa5f51ed9964b97b201eb27bb238bc07524203560eb471",
+    ),
+];
+
 #[cfg(windows)]
 fn legacy_releases() -> &'static [(u64, &'static str)] {
     #[cfg(target_arch = "x86_64")]
     {
-        &[
-            (
-                20_487_680,
-                "9246a322627b2c0251d7122df8eacdecb17a99a19bbef45e908a828e2b368952",
-            ),
-            (
-                20_622_336,
-                "d2a2f81bd983a3a84db4cac78f3af2ef11d0fcfc2c3642134dd85d20a4cf77dd",
-            ),
-        ]
+        LEGACY_X64
     }
     #[cfg(target_arch = "x86")]
     {
-        &[(
-            17_084_928,
-            "3ee0ef347eeb3c01e5b3a30966056d4f115dd3846aff85c7a13765d5965ea84d",
-        )]
+        LEGACY_X86
     }
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     {
@@ -385,5 +471,50 @@ fn open_legacy(path: &Path) -> io::Result<fs::File> {
     match private_fs::verify(&file) {
         Err(private_fs::Error::InsecureAcl) | Ok(()) => Ok(file),
         Err(error) => Err(io::Error::other(error)),
+    }
+}
+
+#[cfg(test)]
+mod release_metadata_tests {
+    use super::*;
+
+    // Fingerprints cover ordered size:sha256 pairs read from the immutable
+    // GitHub release metadata, independently of the table's Rust syntax.
+    #[test]
+    fn immutable_release_tuples_match_recorded_metadata() {
+        for (entries, expected_count, expected_fingerprint) in [
+            (
+                LEGACY_X64,
+                12,
+                "2dcc4cca55c38c942b4f7843522e11c93fbf67d04fcc6a101ac545fecd075966",
+            ),
+            (
+                LEGACY_X86,
+                6,
+                "87ce324261084daf9ccda9281156290a9c4373237b8daa2976070219fedb774c",
+            ),
+        ] {
+            assert_eq!(entries.len(), expected_count);
+            let mut receipt = String::new();
+            let mut unique = std::collections::HashSet::new();
+            for &(size, sha) in entries {
+                assert!(size > 0 && size <= MAX_EXECUTABLE_BYTES);
+                assert_eq!(sha.len(), 64);
+                assert!(
+                    sha.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                );
+                assert!(unique.insert((size, sha)));
+                receipt.push_str(&format!("{size}:{sha}\n"));
+            }
+            assert_eq!(
+                format!("{:x}", Sha256::digest(receipt.as_bytes())),
+                expected_fingerprint
+            );
+        }
+        assert!(LEGACY_X64.contains(&(
+            20_487_680,
+            "9246a322627b2c0251d7122df8eacdecb17a99a19bbef45e908a828e2b368952"
+        )));
     }
 }
