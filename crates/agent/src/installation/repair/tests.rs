@@ -733,3 +733,136 @@ async fn foreign_writable_executable_fails_before_hub_and_preserves_state() {
             .starts_with(".repair-")
     }));
 }
+
+#[cfg(windows)]
+fn expose_test_binary(binary: &Path) {
+    let result = std::process::Command::new("icacls.exe")
+        .arg(binary)
+        .args(["/grant", "*S-1-1-0:F"])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn legacy_copy_is_private_and_rollback_never_restores_original() {
+    let f = Fixture::new().await;
+    let binary = f.root.join("bin").join(EXECUTABLE_NAME);
+    let bytes = b"previous historical fixture".to_vec();
+    fs::write(&binary, &bytes).unwrap();
+    let sha = format!("{:x}", Sha256::digest(&bytes));
+    expose_test_binary(&binary);
+    // Retain a handle granted before hardening or replacement, as an attacker can.
+    let mut foreign_writer = fs::OpenOptions::new().write(true).open(&binary).unwrap();
+    let (_temp, mut image) = test_image();
+    let transaction = Transaction::prepare_test_legacy(
+        &f.root,
+        &f.snapshot,
+        &mut image,
+        &[(bytes.len() as u64, &sha)],
+    )
+    .unwrap();
+    transaction.mark_pending().unwrap();
+    let response = f.repair_response().await;
+    transaction
+        .write_candidate(&f.snapshot, &response, None)
+        .await
+        .unwrap();
+    assert!(transaction.changed(&f.snapshot).unwrap());
+    transaction.publish().unwrap();
+    PrivateDir::open(f.root.join("bin"))
+        .unwrap()
+        .open_file(EXECUTABLE_NAME)
+        .unwrap();
+    assert_eq!(
+        fs::read(&binary).unwrap(),
+        crate::executable::TEST_IMAGE_BYTES
+    );
+    // A pre-existing writer can still modify the quarantined inode.
+    foreign_writer.write_all(b"foreign mutation").unwrap();
+    drop(foreign_writer);
+    transaction.rollback().unwrap();
+    transaction.finish().unwrap();
+    let restored = PrivateDir::open(f.root.join("bin")).unwrap();
+    restored.open_file(EXECUTABLE_NAME).unwrap();
+    assert_eq!(fs::read(&binary).unwrap(), bytes);
+    f.snapshot.assert_unchanged(&f.root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn legacy_rollback_before_publication_quarantines_original() {
+    let f = Fixture::new().await;
+    let binary = f.root.join("bin").join(EXECUTABLE_NAME);
+    let bytes = b"previous historical fixture".to_vec();
+    fs::write(&binary, &bytes).unwrap();
+    let sha = format!("{:x}", Sha256::digest(&bytes));
+    expose_test_binary(&binary);
+    let (_temp, mut image) = test_image();
+    let transaction = Transaction::prepare_test_legacy(
+        &f.root,
+        &f.snapshot,
+        &mut image,
+        &[(bytes.len() as u64, &sha)],
+    )
+    .unwrap();
+    transaction.mark_pending().unwrap();
+    transaction.rollback().unwrap();
+    transaction.finish().unwrap();
+    PrivateDir::open(f.root.join("bin"))
+        .unwrap()
+        .open_file(EXECUTABLE_NAME)
+        .unwrap();
+    assert_eq!(fs::read(binary).unwrap(), bytes);
+    f.snapshot.assert_unchanged(&f.root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn legacy_hardlink_is_rejected_before_marker() {
+    let f = Fixture::new().await;
+    let binary = f.root.join("bin").join(EXECUTABLE_NAME);
+    fs::hard_link(&binary, f.root.join("alias")).unwrap();
+    expose_test_binary(&binary);
+    let (_temp, mut image) = test_image();
+    assert!(Transaction::prepare_test_legacy(&f.root, &f.snapshot, &mut image, &[]).is_err());
+    assert!(!f.root.join("repair.pending").exists());
+    f.snapshot.assert_unchanged(&f.root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn legacy_does_not_relax_private_state_acl() {
+    let f = Fixture::new().await;
+    let key = f.root.join("state/gateway_identity");
+    expose_test_binary(&key);
+    assert!(Snapshot::read(&f.root, &f.snapshot.identity.machine_id, "offline", "agent").is_err());
+    assert!(!f.root.join("repair.pending").exists());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn legacy_modified_bytes_are_not_allowlisted() {
+    let f = Fixture::new().await;
+    let binary = f.root.join("bin").join(EXECUTABLE_NAME);
+    let expected = fs::read(&binary).unwrap();
+    let sha = format!("{:x}", Sha256::digest(&expected));
+    let mut modified = expected.clone();
+    modified[0] ^= 1;
+    fs::write(&binary, &modified).unwrap();
+    expose_test_binary(&binary);
+    let (_temp, mut image) = test_image();
+    assert!(
+        Transaction::prepare_test_legacy(
+            &f.root,
+            &f.snapshot,
+            &mut image,
+            &[(expected.len() as u64, &sha)]
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(binary).unwrap(), modified);
+    assert!(!f.root.join("repair.pending").exists());
+    f.snapshot.assert_unchanged(&f.root).unwrap();
+}
