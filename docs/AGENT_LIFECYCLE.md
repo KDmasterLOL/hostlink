@@ -24,7 +24,7 @@ Linux uses a root-bound `systemd --user` unit through `service-manager`. The ser
 
 ## Windows
 
-Windows uses a current-user Task Scheduler logon task, with a limited interactive-user token and no stored password. The task is scoped to the Agent installation root. The Agent refuses to run with elevated privileges.
+Windows uses a current-user Task Scheduler logon task with an interactive-user token and no stored password. The task is scoped to the Agent installation root. Windows can run the task elevated for the built-in Administrator account or when UAC is disabled; remote commands then have administrator rights.
 
 Ownership verification accepts Scheduler's SID or fully qualified account form for the logon trigger only when it resolves to the current user's exact SID. The principal must retain that SID, and the live Scheduler principal must report a limited run level, including when Scheduler omits its default from XML. Foreign, ambiguous, group and elevated registrations are rejected.
 

@@ -31,7 +31,7 @@ The installer validates the response and approved routes over the Controller-con
 
 The digest is supplied by GitHub release metadata over HTTPS; it is not an independent publisher signature. All bootstrap and enrollment HTTPS connections validate certificate chains and hostnames. An optional `--hub-ca-cert` adds an operator-controlled CA without disabling ordinary validation.
 
-Linux installs use a user-owned private root and keys. Windows installs use protected current-user-only ACLs and an unelevated interactive bootstrap. The Agent refuses an elevated runtime even if enrollment was completed by another authorized workflow.
+Linux installs use a user-owned private root and keys. Windows installs use protected current-user-only ACLs and an interactive bootstrap. An elevated Agent runs remote commands with administrator rights.
 
 `state/manifest.json` records enrollment-key identity and persists across executable updates.
 

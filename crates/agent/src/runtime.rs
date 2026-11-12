@@ -87,7 +87,7 @@ where
 {
     config.validate()?;
     #[cfg(windows)]
-    ensure_limited_windows_token()?;
+    ensure_windows_user()?;
     let bound = listener.local_addr()?;
     if bound != config.listen || !bound.ip().is_loopback() {
         return Err(io::Error::new(
@@ -174,49 +174,12 @@ where
 mod tests;
 
 #[cfg(windows)]
-pub(crate) fn ensure_limited_windows_token() -> io::Result<()> {
-    use std::{
-        mem::size_of,
-        os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
-    };
-    use windows_sys::Win32::{
-        Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
-        System::Threading::{GetCurrentProcess, OpenProcessToken},
-    };
-
+pub(crate) fn ensure_windows_user() -> io::Result<()> {
     let sid = windows_permissions::utilities::current_process_sid()?.to_string();
     if matches!(sid.as_str(), "S-1-5-18" | "S-1-5-19" | "S-1-5-20") {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "remote Agent commands cannot run as a Windows service account",
-        ));
-    }
-    let mut handle = std::ptr::null_mut();
-    // SAFETY: current process pseudo-handle, and a valid writable output pointer.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut handle) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: OpenProcessToken returned an owned kernel handle.
-    let token = unsafe { OwnedHandle::from_raw_handle(handle) };
-    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
-    let mut written = 0;
-    // SAFETY: valid token and writable TOKEN_ELEVATION/output-length pointers.
-    if unsafe {
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenElevation,
-            (&mut elevation as *mut TOKEN_ELEVATION).cast(),
-            size_of::<TOKEN_ELEVATION>() as u32,
-            &mut written,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    if elevation.TokenIsElevated != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "remote Agent execution requires a non-elevated Windows token",
         ));
     }
     Ok(())

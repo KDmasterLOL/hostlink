@@ -25,7 +25,7 @@ pub(super) async fn repair(
     ))?;
     enrollment::validate_inputs(&enrollment_options(options, root.to_owned()))?;
     #[cfg(windows)]
-    crate::runtime::ensure_limited_windows_token()?;
+    crate::runtime::ensure_windows_user()?;
     let snapshot = if options.replace_identity {
         confirm_replacement(expected)?;
         Snapshot::read_replacement(root, expected, &options.name, &options.user)?

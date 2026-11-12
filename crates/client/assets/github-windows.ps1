@@ -37,8 +37,7 @@ function Assert-PrivateDirectory([string]$Path, [Security.Principal.SecurityIden
 function Get-BootstrapIdentity {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     if ($null -eq $identity -or $null -eq $identity.User -or @('S-1-5-18','S-1-5-19','S-1-5-20') -contains $identity.User.Value) { throw 'Bootstrap requires a normal interactive user.' }
-    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
-    if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'Bootstrap must run unelevated in the current user session.' }
+    if ([Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'Bootstrap must run in an interactive user session.' }
     return $identity
 }
 function Write-PrivateSecret([string]$Path, [Security.Principal.SecurityIdentifier]$Sid, [string]$Prompt, [string]$Characters, [int]$Minimum, [int]$Maximum, [string]$EmbeddedToken) {
