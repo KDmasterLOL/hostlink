@@ -67,7 +67,7 @@ impl Snapshot {
         user: &str,
         replace_keys: bool,
     ) -> io::Result<Self> {
-        crate::agent_files::validate_user_owned_root(root)?;
+        PrivateDir::open(root).map_err(io::Error::other)?;
         crate::installation::ensure_ready(root)?;
         let state = PrivateDir::open(root.join("state")).map_err(io::Error::other)?;
         let manifest_bytes = read(&state, "manifest.json")?;

@@ -1,0 +1,501 @@
+# Supervision
+
+[‹ docs index](README.md)
+
+Where [`retry`](timeouts-and-cancellation.md#retries) answers *"run this once,
+replaying on failure"*, a `Supervisor` answers the different question *"keep
+this alive"*: restart a child per policy whenever it exits, with bounded
+restarts, exponential backoff, and jitter — a minimal `runit`/`systemd`-style
+keeper, platform-agnostic because it sits entirely on the
+[`ProcessRunner` seam](testing.md#the-processrunner-seam).
+
+- [The shape](#the-shape)
+- [Policies: what counts as a crash](#policies-what-counts-as-a-crash)
+- [Backoff and jitter](#backoff-and-jitter)
+- [Failure storms](#failure-storms)
+- [Liveness health checks](#liveness-health-checks)
+- [Stopping](#stopping)
+- [Giving up on permanent failures](#giving-up-on-permanent-failures)
+- [Outcomes](#outcomes)
+- [Live sessions: `start()`](#live-sessions-start)
+- [Supervising inside a shared group](#supervising-inside-a-shared-group)
+- [Errors and cancellation](#errors-and-cancellation)
+
+## The shape
+
+```rust,no_run
+use processkit::{Command, RestartPolicy, Supervisor};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let outcome = Supervisor::new(Command::new("my-server").args(["--port", "8080"]))
+        .restart(RestartPolicy::OnCrash)           // default
+        .max_restarts(5)                           // default: unlimited
+        .backoff(Duration::from_millis(200), 2.0)  // default: 200ms × 2.0
+        .max_backoff(Duration::from_secs(30))      // default: 30s cap
+        .jitter(true)                              // default: on
+        .stop_when(|res| res.code() == Some(0))    // optional exit condition
+        .run()
+        .await?;
+
+    println!(
+        "ended after {} restarts, reason: {:?}, last exit: {:?}",
+        outcome.restarts, outcome.stopped, outcome.final_result.code(),
+    );
+    Ok(())
+}
+```
+
+Each *incarnation* is one full captured run of the command (so the command's
+own `timeout`, stdin, env, … all apply per run — with the usual
+[one-shot-stdin caveat](commands.md#standard-input) for the second run
+onward).
+
+## Policies: what counts as a crash
+
+A **crash** is any run that is not a *success* (`ProcessResult::is_success`,
+which honors the command's `ok_codes`): an exit code outside the accepted set
+(default `{0}`), a timeout, a signal-kill, or a spawn failure. A command with
+`ok_codes([0, 2])` that exits `2` is a success, so `OnCrash` treats it as clean,
+not a crash.
+
+| `RestartPolicy` | Restarts after… |
+|---|---|
+| `OnCrash` *(default)* | crashes only; a clean exit ends supervision (`PolicySatisfied`) |
+| `Always` | every completed run, clean or not — pair it with `stop_when`/`max_restarts` or it loops forever |
+| `Never` | nothing: one run, reported as-is |
+
+## Backoff and jitter
+
+The *n*-th restart (0-based) sleeps
+
+```text
+delay(n) = min(base × factor^n, max_backoff) × jitter
+```
+
+with `jitter` drawn uniformly from `[0.5, 1.5)` per restart. Jitter is **on by
+default** so a fleet of supervised workers restarted by the same incident
+doesn't stampede back in lockstep; `jitter(false)` gives deterministic delays
+(useful in tests with a paused tokio clock). A non-finite or `< 1.0` factor is
+treated as `1.0` — constant delay, never a shrinking one.
+
+```text
+base=200ms, factor=2.0, cap=30s:
+restart #0 → ~200ms   #1 → ~400ms   #2 → ~800ms … #7 → ~25.6s   #8+ → 30s (cap)
+```
+
+The exponent *n* is **not** the lifetime restart count — it **resets** whenever a
+run stays up at least as long as `max_backoff`. So a long-lived service that
+crashes now and then restarts near `base` each time (it demonstrated health
+between crashes), while only a tight loop — each incarnation shorter than the cap
+— climbs to the ceiling. The floor is on **uptime, not exit kind**: under `Always`
+a worker that exits (cleanly or not) in under `max_backoff` is treated as
+flapping and escalates, which is what stops an `exit 0` spin loop from hammering
+at the base delay. A single jittered delay can reach up to `1.5 × max_backoff`.
+
+## Failure storms
+
+Backoff spaces *individual* restarts; `max_restarts` is a *lifetime* cap.
+Neither distinguishes a service that fails once a day from one that is
+suddenly crash-looping. The opt-in **storm guard** does (a design borrowed
+from Go's [`suture`](https://github.com/thejerf/suture) supervisor — the
+idea, not the code):
+
+```rust,no_run
+use processkit::{Command, Supervisor};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let outcome = Supervisor::new(Command::new("worker"))
+        .storm_pause(Duration::from_secs(15))     // master switch — off by default
+        .failure_decay(Duration::from_secs(30))   // score half-life (default 30s)
+        .failure_threshold(5.0)                   // trip point (default 5.0)
+        .run()
+        .await?;
+
+    println!("storm pauses taken: {}", outcome.storm_pauses);
+    Ok(())
+}
+```
+
+Each failed run adds `1` to a score that **halves every `failure_decay`**:
+
+```text
+score = score × 0.5^(Δt / failure_decay) + 1
+```
+
+- *Fails rarely*: the score decays back toward `1` between failures and never
+  reaches the threshold — the guard stays out of the way.
+- *Failure storm*: failures arrive faster than the half-life drains them, the
+  score climbs past `failure_threshold`, and the supervisor takes **one
+  collective pause** of `storm_pause` (jittered into `[0.5, 1.5)` like the
+  backoff), resets the score, and resumes.
+
+Only failures feed the score — crashes and spawn errors, not clean exits
+restarted under `RestartPolicy::Always`. The pause stacks with (runs before)
+the per-restart backoff, and the `max_restarts` budget is checked first, so a
+storm pause never extends an exhausted budget. Pauses taken are reported in
+`SupervisionOutcome::storm_pauses`.
+
+## Liveness health checks
+
+A `RestartPolicy` only ever reacts to a child that **exits**. It is blind to a
+child that is still *alive* but *wedged* — a deadlocked server, a stuck event
+loop, a process that stopped serving but never dies. From the policy's view that
+child is "running", so it is never restarted. The opt-in **health check** adds
+the missing dimension — the analogue of systemd's `WatchdogSec` and a container
+liveness probe:
+
+```rust,no_run
+use processkit::{Command, Supervisor};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let outcome = Supervisor::new(Command::new("my-server").args(["--port", "8080"]))
+        .health_check(
+            // Any async predicate: `true` = healthy. A port connect here; an
+            // HTTP `/healthz` request, a heartbeat file, a custom check elsewhere.
+            || async { tokio::net::TcpStream::connect("127.0.0.1:8080").await.is_ok() },
+            Duration::from_secs(5),       // probe cadence
+        )
+        .health_check_failures(3)         // consecutive misses tolerated (default 3)
+        .max_restarts(10)
+        .run()
+        .await?;
+
+    println!("liveness kills: {}", outcome.liveness_kills);
+    Ok(())
+}
+```
+
+The probe re-runs every `interval` for the life of each incarnation, in the same
+shape as the readiness [`wait_for`](testing.md#the-processrunner-seam) check (it
+takes no handle — it observes the child out-of-band, over a port/endpoint/file).
+The first probe fires one `interval` *after* the incarnation starts, so a booting
+child gets that long before liveness is judged; a healthy child then loops here
+untouched for its whole lifetime. A zero (or otherwise degenerate) `interval` is
+clamped to a small safe minimum rather than passed through as-is — it neither
+panics nor turns the probe loop into a busy-spin, and the startup-grace promise
+above still holds.
+
+When the probe fails `health_check_failures` times **in a row** (any healthy
+probe resets the streak, so a single blip is forgiven), the wedged incarnation is
+**force-killed** — dropped, which kills it on drop under the default `JobRunner`
+(the shared-group caveat from [Errors and cancellation](#errors-and-cancellation)
+applies) — and treated as a **crash**: it flows through the `RestartPolicy`,
+backoff, the storm guard and `max_restarts` exactly like a real crash, and its
+synthetic final result carries `Outcome::Signalled`. It does **not** consult
+`stop_when` (there is no cleanly-completed run to evaluate). The effective grace
+before a kill is roughly `interval × health_check_failures`.
+
+A liveness kill counts toward the backoff escalation using how long the
+incarnation actually stayed up before wedging — so a service that runs healthy
+for a long stretch and only occasionally wedges restarts near `base`, while one
+that wedges promptly after each restart self-throttles (the same uptime floor as
+[Backoff and jitter](#backoff-and-jitter)). Force-kills are counted in
+`SupervisionOutcome::liveness_kills`. Under `RestartPolicy::Never` — a single
+"run once, but kill it if it goes unresponsive" bound — the force-killed run ends
+supervision with `StopReason::Unhealthy`. Left unset (the default), a supervisor
+behaves exactly as it did before health-checking existed.
+
+## Stopping
+
+Four gates, checked in this order after every completed run:
+
+1. **`stop_when(predicate)`** — sees the run's `ProcessResult`; returning
+   `true` ends supervision *regardless of policy* (→ `StopReason::Predicate`).
+   "Exit 0 is done, anything else is a crash" is the classic:
+   `stop_when(|res| res.code() == Some(0))` under `RestartPolicy::Always`.
+2. **The policy** — `OnCrash` stops on a clean exit (→ `PolicySatisfied`).
+3. **`give_up_when(classifier)`** — only consulted for a crash the policy
+   would otherwise restart; recognizing it as *permanent* ends supervision
+   (→ `StopReason::GaveUp`). See
+   [Giving up on permanent failures](#giving-up-on-permanent-failures).
+4. **`max_restarts(n)`** — at most *n* restarts = *n + 1* total runs; an
+   exhausted budget reports the last result (→ `RestartsExhausted`).
+   `max_restarts(0)` means exactly one run.
+
+`give_up_when` is checked *before* `max_restarts`, so a recognized-permanent
+crash reports the more specific `GaveUp` even when the budget hasn't run out
+yet — and before the [failure-storm guard](#failure-storms), so giving up
+never pays for a storm pause it was going to end anyway.
+
+A [liveness kill](#liveness-health-checks) is not a completed run, so it skips
+gate 1 (`stop_when`) but still runs through the policy and gates 3–4 as a crash;
+under `RestartPolicy::Never` it ends supervision with `StopReason::Unhealthy`.
+
+## Giving up on permanent failures
+
+Without more, the supervisor cannot tell a *transient* crash from a
+*permanent* one — a command that can never succeed (a missing binary, a
+config error that crashes on startup, a permanently-taken port) restarts
+**forever** under the default unlimited `OnCrash`, throttled only by backoff.
+`give_up_when` lets you recognize the unrecoverable case and stop instead:
+
+```rust,no_run
+use processkit::{Command, GiveUpAttempt, Supervisor};
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let outcome = Supervisor::new(Command::new("maybe-typo'd-binary"))
+        .give_up_when(|attempt| match attempt {
+            // The child never even started — e.g. ENOENT for a mistyped name.
+            GiveUpAttempt::Failed(err) => err.is_not_found(),
+            // A completed crash your own domain knows is permanent, e.g. a
+            // documented "config invalid, do not restart" exit code.
+            GiveUpAttempt::Crashed(res) => res.code() == Some(78),
+            _ => false,
+        })
+        .run()
+        .await?;
+    println!("stopped: {:?}", outcome.stopped);
+    Ok(())
+}
+```
+
+`GiveUpAttempt` distinguishes the two shapes a permanent failure can take:
+
+- **`Crashed(&ProcessResult<String>)`** — a completed run that counts as a
+  crash. A match reports `StopReason::GaveUp` in the `SupervisionOutcome`,
+  same as any other stop reason.
+- **`Failed(&Error)`** — the child never started at all (spawn/IO failure,
+  e.g. `ENOENT`). There is no `ProcessResult` to report here, so a match
+  surfaces the classified error directly as `run()`'s `Err` — the same
+  contract an exhausted budget already has on this path (see
+  [Errors and cancellation](#errors-and-cancellation)).
+
+Unset by default: a permanent failure restarts forever exactly as before,
+bounded only by `max_restarts` / the storm guard — adding `give_up_when` never
+changes existing behavior until you set it.
+
+## Fallible control predicates
+
+The control predicates above are infallible — `stop_when` and `give_up_when`
+return `bool`, `health_check` resolves to `bool`. When your predicate can itself
+**fail** (an I/O probe, a classification that parses something, or — the driving
+case — a callback in a wrapper over a language where any callback can throw),
+each has a `try_*` twin that returns `Result<bool, E>` for any
+`E: Into<Box<dyn Error + Send + Sync>>`:
+
+| infallible | fallible twin | predicate returns |
+| --- | --- | --- |
+| `stop_when` | `try_stop_when` | `Result<bool, E>` |
+| `give_up_when` | `try_give_up_when` | `Result<bool, E>` |
+| `health_check` | `try_health_check` | `impl Future<Output = Result<bool, E>>` |
+
+`Ok(true)` / `Ok(false)` behave **exactly** as the infallible twin's `true` /
+`false`. An `Err`, however, **aborts** supervision and surfaces to the caller as
+`run()`'s `Err` — an `ErrorReason::Predicate` (kind `ErrorKind::Predicate`)
+carrying your predicate's own error **verbatim** as its `source`:
+
+```rust,no_run
+use processkit::{Command, Supervisor};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let outcome = Supervisor::new(Command::new("my-server"))
+        // The probe may itself fail — e.g. a health endpoint whose body your
+        // parser rejects. An `Err` aborts supervision (surfaced as an
+        // `ErrorReason::Predicate`) instead of voting "unhealthy".
+        .try_health_check(|| async { probe_health().await }, Duration::from_secs(5))
+        .run()
+        .await?;
+    println!("stopped: {:?}", outcome.stopped);
+    Ok(())
+}
+
+# #[derive(Debug)] struct ProbeError;
+# impl std::fmt::Display for ProbeError {
+#     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "probe error") }
+# }
+# impl std::error::Error for ProbeError {}
+# async fn probe_health() -> Result<bool, ProbeError> { Ok(true) }
+```
+
+The distinction is deliberate: a predicate error is **never** a fabricated
+verdict. A normal `stop_when`/`try_stop_when` match (`Ok(true)`) ends supervision
+with a benign `SupervisionOutcome` (`StopReason::Predicate`); a predicate `Err`
+ends it with a *failure* the caller can tell apart by `err.kind() ==
+ErrorKind::Predicate` and recover the original error from
+`err.reason()`'s `Predicate { source, .. }`. A failing `try_health_check` probe
+still tears the live incarnation down by the same kill a liveness failure uses —
+so aborting on a probe error leaks no child.
+
+Each twin is purely additive: setting `try_stop_when` (etc.) replaces its
+infallible sibling on the same slot, and the infallible builders are unchanged.
+
+## Outcomes
+
+`run()` resolves to a `SupervisionOutcome`:
+
+```rust,no_run
+use processkit::{Command, Supervisor};
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let outcome = Supervisor::new(Command::new("job")).run().await?;
+
+    outcome.final_result;  // ProcessResult<String> of the LAST run
+    outcome.restarts;      // how many restarts happened (not counting run #1)
+    outcome.stopped;       // StopReason::{Predicate, PolicySatisfied, GaveUp, RestartsExhausted, Unhealthy, Stopped}
+    outcome.storm_pauses;  // failure-storm pauses taken (0 unless storm_pause is set)
+    outcome.liveness_kills; // incarnations force-killed by a health check (0 unless health_check is set)
+    Ok(())
+}
+```
+
+Note `run()` returning `Ok` does **not** mean the child succeeded — it means
+supervision *concluded*. Inspect `final_result` (or `ensure_success()` it) for
+the child's own verdict.
+
+## Live sessions: `start()`
+
+`run()` owns supervision from start to finish and only hands back a
+`SupervisionOutcome` at the very end — there is no handle to watch or steer it
+while it runs. For a daemon / process-manager that needs a *live* view, call
+`start()` instead of `run()`. It returns a `SupervisionSession`, a `Send` handle
+to supervision running on a background task:
+
+- **`status()`** — a consistent snapshot (`SupervisionStatus`): whether
+  supervision is still active, the live restart count, whether a failure-storm
+  pause is in effect right now, and the current incarnation's `pid` / start time
+  (both `None` between incarnations, during a backoff, or for a capture-only test
+  double). Poll it any time; it never races the loop.
+- **`events()`** — take the session's typed, one-consumer `SupervisionEvents`
+  stream. It reports incarnation starts and outcomes, launch-error classes,
+  scheduled backoffs, storm pauses, health-check failures, give-up decisions,
+  and the terminal reason. Each variant has a stable `name()` for structured
+  logs and metrics. The history is bounded at 128 events; a slow consumer gets
+  an explicit `SupervisionEvent::Lagged { skipped }` marker and resumes from the
+  oldest retained event instead of growing the supervisor without limit.
+- **`stop(grace)`** — stop the current child *gracefully* (its normal
+  `SIGTERM` → wait `grace` → `SIGKILL` path, under the default own-group
+  runner) and end supervision with `StopReason::Stopped` — a deliberate,
+  honest reason distinct from a crash, an exhausted budget, a cancellation, or a
+  `stop_when` match. A stop taken *during a backoff* (no child alive right now)
+  cuts the sleep short and ends at once, launching no further incarnation. An
+  incarnation with **no own group** to shut down (a shared-`ProcessGroup` or a
+  capture-only child) is stopped by firing its cancel token instead — so give the
+  supervised command a
+  [`cancel_grace`](timeouts-and-cancellation.md#graceful-cancellation) if that
+  child, too, should get a soft signal and a window rather than an outright kill.
+- **`wait()`** — await the final `SupervisionOutcome`, exactly what `run()`
+  would have returned.
+
+```rust,no_run
+use processkit::prelude::StreamExt;
+use processkit::{Command, RestartPolicy, SupervisionEvent, Supervisor};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let mut session = Supervisor::new(Command::new("my-server"))
+        .restart(RestartPolicy::Always)
+        .start(); // supervision runs in the background from here
+
+    // Take the stream once and drain it independently of the session handle.
+    let mut events = session.events()?;
+    tokio::spawn(async move {
+        while let Some(event) = events.next().await {
+            match event {
+                SupervisionEvent::RestartScheduled { restart, delay } => {
+                    println!("restart {restart} after {delay:?}");
+                }
+                other => println!("supervision event: {}", other.name()),
+            }
+        }
+    });
+
+    // ... elsewhere: observe it live ...
+    let status = session.status();
+    println!("active={}, restarts={}", status.is_active(), status.restarts());
+
+    // ... on shutdown: stop gracefully and read the final outcome ...
+    let outcome = session.stop(Duration::from_secs(5)).await?;
+    println!("stopped: {:?}", outcome.stopped); // StopReason::Stopped
+    Ok(())
+}
+```
+
+Live status and events are **additions** to the exit-driven policy and callbacks,
+not replacements — supervision behaves identically to `run()`. Only a session `stop()` produces
+`StopReason::Stopped`; `run()` never does.
+
+Two handle contracts round it out: **dropping** a `SupervisionSession` without
+`wait()`/`stop()` aborts the background task (no orphaned supervision task, and
+under the default `JobRunner` the in-flight incarnation is killed on drop), and
+`start()` needs a `'static` runner because supervision moves onto a spawned task
+— the borrowed shared-group form (`with_runner(&group)`) is available through
+`run()`; own the group (by value, or an `Arc<ProcessGroup>`) to drive a shared
+group from a session.
+
+## Supervising inside a shared group
+
+The supervisor runs through any `ProcessRunner`. The headline production
+variant injects a [`ProcessGroup`](process-groups.md) so every incarnation —
+and everything it spawns — lives in one kill-on-drop container:
+
+```rust,no_run
+use processkit::{Command, ProcessGroup, RestartPolicy, Supervisor};
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let group = ProcessGroup::new()?;
+
+    let outcome = Supervisor::new(Command::new("worker"))
+        .with_runner(&group)                 // &group is itself a ProcessRunner
+        .restart(RestartPolicy::OnCrash)
+        .max_restarts(10)
+        .run()
+        .await?;
+
+    // The group outlives supervision: drop it (or shutdown) to reap any strays.
+    Ok(())
+}
+```
+
+Mind one interaction: don't supervise into a group you've
+[suspended](process-groups.md#suspending-and-resuming) — under the cgroup
+mechanism the restarted child would start frozen (and the spawn itself can
+block). Resume first.
+
+The same injection point makes supervision logic **hermetically testable** —
+script a sequence of fake results and assert the restart/stop behavior with
+no real process; see [Testing your code](testing.md#scripting-replies).
+
+## Errors and cancellation
+
+A run that produces no result at all (spawn/IO failure) can't be judged by
+`stop_when` (it needs a `ProcessResult`) — but it *is* visible to
+`give_up_when` as `GiveUpAttempt::Failed`. The policy treats it as a crash and
+restarts (with backoff) unless the policy is `Never`, `give_up_when`
+classifies it as permanent, or the budget is exhausted — any of those surfaces
+the error itself as `run()`'s `Err`.
+
+A [cancelled](timeouts-and-cancellation.md#cancellation) incarnation is
+**terminal**: `run()` returns
+`Err(ErrorReason::Cancelled)` immediately. The token never un-cancels, so a restart
+could only produce another instantly-cancelled run — the supervisor refuses
+the futile loop.
+
+An `ErrorReason::Teardown` incarnation is terminal too: its child or descendants
+may still be alive because the required kill/escalation/reap was not confirmed,
+so starting a replacement would violate the supervisor's one-incarnation-at-a-time
+contract. The original teardown error is returned without consulting restart
+policy or `give_up_when`.
+
+A [fallible control predicate](#fallible-control-predicates) (`try_stop_when` /
+`try_give_up_when` / `try_health_check`) that returns `Err` is likewise terminal:
+`run()` returns `Err(ErrorReason::Predicate)` — kind `ErrorKind::Predicate`,
+carrying your predicate's own error verbatim as its `source` — rather than a
+fabricated stop/unhealthy verdict.
+
+---
+
+Next: [Testing your code](testing.md) ·
+[Timeouts, retries & cancellation](timeouts-and-cancellation.md) ·
+[Process groups](process-groups.md)

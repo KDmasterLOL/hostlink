@@ -65,7 +65,32 @@ impl HostConnection {
         if input.len() > MAX_TRANSFER_BYTES {
             return Err(SshClientError::TransferTooLarge);
         }
-        self.exec_inner(command, input, timeout).await
+        self.exec_inner(command, input, timeout, false).await
+    }
+
+    /// Runs a trusted command while allowing its children to escape the Windows job.
+    /// Escaped descendants are not managed or terminated by HostLink. The agent must
+    /// explicitly acknowledge the request before the command is sent.
+    ///
+    /// # Errors
+    /// Returns an error when the option is rejected or not acknowledged, in addition
+    /// to the errors documented by [`Self::exec_with_timeout`].
+    pub async fn exec_with_child_breakaway(
+        &mut self,
+        command: &str,
+        input: &[u8],
+        timeout: Duration,
+    ) -> Result<ExecOutput, SshClientError> {
+        if !(MIN_EXEC_TIMEOUT..=MAX_EXEC_TIMEOUT).contains(&timeout) {
+            return Err(SshClientError::Invalid(
+                "SSH exec timeout must be between 1 and 600 seconds".into(),
+            ));
+        }
+        validate_command(command)?;
+        if input.len() > MAX_TRANSFER_BYTES {
+            return Err(SshClientError::TransferTooLarge);
+        }
+        self.exec_inner(command, input, timeout, true).await
     }
 
     async fn exec_inner(
@@ -73,6 +98,7 @@ impl HostConnection {
         command: &str,
         input: &[u8],
         timeout: Duration,
+        allow_child_breakaway: bool,
     ) -> Result<ExecOutput, SshClientError> {
         let deadline = tokio::time::Instant::now() + timeout;
         let channel = tokio::time::timeout_at(deadline, self.session.channel_open_session())
@@ -83,6 +109,38 @@ impl HostConnection {
         let mut stderr = Vec::new();
         let mut exit_code = None;
         let mut remote_closed = false;
+
+        if allow_child_breakaway {
+            let requested = tokio::time::timeout_at(
+                deadline,
+                writer.set_env(true, "HOSTLINK_ALLOW_CHILD_BREAKAWAY", "1"),
+            )
+            .await;
+            match requested {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    close_channel(&writer).await;
+                    return Err(error.into());
+                }
+                Err(_) => {
+                    close_channel(&writer).await;
+                    return Err(SshClientError::Timeout);
+                }
+            }
+            match tokio::time::timeout_at(deadline, reader.wait()).await {
+                Ok(Some(ChannelMsg::Success)) => {}
+                Err(_) => {
+                    close_channel(&writer).await;
+                    return Err(SshClientError::Timeout);
+                }
+                _ => {
+                    close_channel(&writer).await;
+                    return Err(SshClientError::Invalid(
+                        "agent did not acknowledge child breakaway; command was not sent".into(),
+                    ));
+                }
+            }
+        }
 
         match tokio::time::timeout_at(deadline, writer.exec(true, command.as_bytes())).await {
             Ok(Ok(())) => {}

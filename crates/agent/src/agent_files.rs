@@ -1,25 +1,12 @@
 //! Private filesystem operations shared by Agent update paths.
 
 use crate::package::invalid;
-use private_fs::PrivateDir;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
     io::{self, Read},
     path::{Component, Path, PathBuf},
 };
-
-pub(super) fn validate_user_owned_root(root: &Path) -> io::Result<()> {
-    validate_path_has_no_reparse_components(root)?;
-    PrivateDir::open(root).map_err(io::Error::other)?;
-    #[cfg(not(windows))]
-    {
-        if fs::canonicalize(root)? != root {
-            return Err(invalid("Agent install root must not use a symlinked path"));
-        }
-    }
-    Ok(())
-}
 
 // The updater has an exact per-user install location; keep profile lookup
 // independent of caller-provided environment variables. SHGetFolderPathW

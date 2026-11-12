@@ -26,6 +26,7 @@ enum ServerBehavior {
     CloseWithoutStatus,
     CloseDuringInput,
     SlowExecRequest,
+    AcceptBreakaway,
 }
 
 struct EchoHandler {
@@ -35,6 +36,24 @@ struct EchoHandler {
 
 impl server::Handler for EchoHandler {
     type Error = russh::Error;
+
+    async fn env_request(
+        &mut self,
+        channel: russh::ChannelId,
+        name: &str,
+        value: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if matches!(self.behavior, ServerBehavior::AcceptBreakaway)
+            && name == "HOSTLINK_ALLOW_CHILD_BREAKAWAY"
+            && value == "1"
+        {
+            session.channel_success(channel)?;
+        } else {
+            session.channel_failure(channel)?;
+        }
+        Ok(())
+    }
 
     async fn auth_publickey(&mut self, _user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
         Ok(if key == &self.authorized_key {
@@ -81,7 +100,10 @@ impl server::Handler for EchoHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if matches!(self.behavior, ServerBehavior::Echo) {
+        if matches!(
+            self.behavior,
+            ServerBehavior::Echo | ServerBehavior::AcceptBreakaway
+        ) {
             session.data(channel, data.to_vec())?;
         } else if matches!(self.behavior, ServerBehavior::CloseDuringInput) {
             session.close(channel)?;
@@ -94,13 +116,42 @@ impl server::Handler for EchoHandler {
         channel: russh::ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if matches!(self.behavior, ServerBehavior::Echo) {
+        if matches!(
+            self.behavior,
+            ServerBehavior::Echo | ServerBehavior::AcceptBreakaway
+        ) {
             session.eof(channel)?;
             session.exit_status_request(channel, 0)?;
             session.close(channel)?;
         }
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn child_breakaway_is_rejected_before_exec_when_agent_does_not_accept_it() {
+    let (mut connection, server, _, _) = authenticated_pair(ServerBehavior::Echo).await;
+    let result = connection
+        .exec_with_child_breakaway("must-not-run", &[], Duration::from_secs(3))
+        .await;
+    assert!(
+        matches!(result, Err(SshClientError::Invalid(message)) if message.contains("command was not sent"))
+    );
+    drop(connection);
+    server.abort();
+}
+
+#[tokio::test]
+async fn child_breakaway_runs_only_after_agent_acknowledgement() {
+    let (mut connection, server, _, _) = authenticated_pair(ServerBehavior::AcceptBreakaway).await;
+    let result = connection
+        .exec_with_child_breakaway("trusted-command", b"ok", Duration::from_secs(3))
+        .await
+        .expect("acknowledged command");
+    assert_eq!(result.stdout, b"ok");
+    assert_eq!(result.exit_code, 0);
+    drop(connection);
+    server.abort();
 }
 
 async fn spawn_server(

@@ -48,6 +48,6 @@ The Linux bootstrap allows at most 600 seconds for its bounded raw Agent downloa
 
 ## Updating
 
-`hostlink-agent update` currently uses the `self_update` GitHub RAW backend and a public GitHub release, without a PAT. Update admission is serialized and Windows replacement requires the Agent stopped with its owned task unregistered. See [Windows offline update](AGENT_UPDATE_WINDOWS.md).
+`hostlink-agent update` uses the `self_update` GitHub RAW backend and a public GitHub release, without a PAT. Update admission is serialized; the Windows helper stops the Agent and unregisters its task before replacement. See [Windows Agent update](AGENT_UPDATE_WINDOWS.md).
 
 The release digest ties the downloaded bytes to GitHub metadata. It is not an independent publisher signature.

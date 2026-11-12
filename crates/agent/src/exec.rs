@@ -145,8 +145,16 @@ pub(super) async fn run(
     channel: russh::Channel<russh::server::Msg>,
     command: Command,
     cancellation: processkit::CancellationToken,
+    allow_child_breakaway: bool,
 ) {
-    run_with_start_error(channel, command, cancellation, "SSH exec failed to start\n").await;
+    run_with_start_error(
+        channel,
+        command,
+        cancellation,
+        "SSH exec failed to start\n",
+        allow_child_breakaway,
+    )
+    .await;
 }
 
 pub(super) async fn run_shell(
@@ -158,7 +166,7 @@ pub(super) async fn run_shell(
     let message = "SSH PTY shell failed to start; Windows requires ConPTY support (Windows 10 version 1809 or later)\n";
     #[cfg(not(windows))]
     let message = "SSH PTY shell failed to start\n";
-    run_with_start_error(channel, command, cancellation, message).await;
+    run_with_start_error(channel, command, cancellation, message, false).await;
 }
 
 async fn run_with_start_error(
@@ -166,6 +174,7 @@ async fn run_with_start_error(
     command: Command,
     cancellation: processkit::CancellationToken,
     start_error: &'static str,
+    allow_child_breakaway: bool,
 ) {
     let (mut remote_input, channel_output) = channel.split();
     let mut command = command.cancel_on(cancellation);
@@ -173,7 +182,25 @@ async fn run_with_start_error(
         .stdout_raw_tee(channel_output.make_writer())
         .stderr_raw_tee(channel_output.make_writer_ext(Some(1)));
 
-    let mut child = match command.start().await {
+    #[cfg(windows)]
+    let result = if allow_child_breakaway {
+        processkit::JobRunner::new()
+            .start_with_options(
+                &command,
+                processkit::ProcessGroupOptions::default().windows_allow_breakaway(true),
+            )
+            .await
+    } else {
+        command.start().await
+    };
+    #[cfg(not(windows))]
+    let result = if allow_child_breakaway {
+        // The SSH layer rejects this mode on unsupported platforms.
+        return;
+    } else {
+        command.start().await
+    };
+    let mut child = match result {
         Ok(child) => child,
         Err(_) => {
             let _ = channel_output

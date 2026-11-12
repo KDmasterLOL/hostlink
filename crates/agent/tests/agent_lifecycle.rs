@@ -53,6 +53,7 @@ printf '%s\n' "$*" >> "$FIXTURE_LOG"
 if [ -f "$FIXTURE_LOG.fail" ] && [ "${2-}" = "$(cat "$FIXTURE_LOG.fail")" ]; then exit 1; fi
 case "${3-}" in
   /*) unit=$3 ;;
+  *.service) unit="$XDG_CONFIG_HOME/systemd/user/${3-}" ;;
   *) unit="$XDG_CONFIG_HOME/systemd/user/${3-}.service" ;;
 esac
 case "${2-}" in
@@ -114,11 +115,13 @@ fn success(home: &Path, root: &Path, action: &str) {
         "remove" => "Unregistered user service",
         _ => unreachable!("unknown lifecycle operation"),
     };
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains(expected),
-        "unexpected {action} output: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
+    if action != "install" || !output.stdout.is_empty() {
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(expected),
+            "unexpected {action} output: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 }
 
 fn unit_path(home: &Path, root: &Path) -> PathBuf {

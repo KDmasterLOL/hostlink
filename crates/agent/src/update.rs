@@ -1,14 +1,14 @@
 //! GitHub-only raw executable updates; self_update owns download, verification and replacement.
 
 use crate::{
-    executable::{asset_name, read_identity, read_installed},
-    installation::validate_installation_root,
-    package::{EXECUTABLE_NAME, invalid, verify_executable},
+    agent_files::hash_file,
+    executable::{RunningExecutable, asset_name, current_binary_identity, read_identity},
+    installation::InstallationRoot,
+    package::{EXECUTABLE_NAME, MAX_EXECUTABLE_BYTES, invalid, verify_executable},
     private_fs::PrivateFileExt,
 };
 use private_fs::{FileAccess, FileCreation, OpenOptions, PrivateDir};
 use self_update::{
-    Checksum,
     backends::github::Update,
     update::{Release, ReleaseAsset},
 };
@@ -20,15 +20,17 @@ use std::{
     time::Duration,
 };
 
-/// Update a stopped Agent from the fixed public repository. An exact version may downgrade;
-/// omitting it selects GitHub's latest stable release. Installed identity comes from the
-/// installed executable even when a separate offline Windows updater is running.
+#[cfg(windows)]
+pub use crate::update_managed::{run_managed_update, start_managed_update};
+
+/// Update this Agent from the fixed public repository. An exact version may
+/// downgrade; omitting it selects GitHub's latest stable release.
 ///
 /// # Errors
 /// Refuses unsafe or alternate roots, active Agents,
 /// ambiguous/missing raw assets, checksum failures and unsuccessful replacement.
-pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
-    validate_installation_root(root)?;
+pub fn update(root: &InstallationRoot, requested: Option<&Version>) -> io::Result<bool> {
+    let root = root.as_path();
     let _update_lock = lock(root, "update.lock")?;
     crate::installation::ensure_ready(root)?;
     let _runner_lock = lock(&root.join("jobs"), "runner.lock").map_err(|error| {
@@ -41,7 +43,16 @@ pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
     #[cfg(windows)]
     crate::service::ensure_agent_offline(root)?;
 
-    let (installed, installed_sha) = read_installed(root)?;
+    let bin = root.join("bin");
+    PrivateDir::open(&bin).map_err(io::Error::other)?;
+    let executable = bin.join(EXECUTABLE_NAME);
+    verify_executable(&executable)?;
+    let running = RunningExecutable::open()?;
+    let installed_sha = hash_file(&executable, MAX_EXECUTABLE_BYTES)?;
+    if running.sha256 != installed_sha {
+        return Err(invalid("running updater differs from the installed Agent"));
+    }
+    let installed = current_binary_identity();
     let mut github = Update::configure();
     github
         .repo_owner("KDmasterLOL")
@@ -111,15 +122,14 @@ pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
     let status = github
         .release_tag(format!("v{version}"))
         // Re-fetching a tag must not change the exact selected asset or its digest.
+        // The matcher preserves the required digest for self_update to verify.
         .asset_matcher(move |assets| public_download_asset(assets, &asset, &download_version))
-        .verify_checksum(Checksum::Sha256(sha.clone()))
         .verify_binary(move |binary| {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(binary, fs::Permissions::from_mode(0o700))?;
             }
-            verify_executable(binary)?;
             if read_identity(binary)? != verified_identity {
                 return Err(
                     invalid("downloaded Agent build differs from the selected release").into(),
@@ -136,8 +146,7 @@ pub fn update(root: &Path, requested: Option<&Version>) -> io::Result<bool> {
             "self_update did not install the exact selected GitHub release",
         ));
     }
-    let (actual, actual_sha) = read_installed(root)?;
-    if actual != expected || actual_sha != sha {
+    if hash_file(&executable, MAX_EXECUTABLE_BYTES)? != sha {
         return Err(invalid(
             "installed Agent differs from the selected GitHub release",
         ));
@@ -164,10 +173,7 @@ fn public_download_asset(
         .iter()
         .filter(|candidate| candidate.name() == selected.name());
     let candidate = matches.next()?;
-    if matches.next().is_some()
-        || candidate.digest() != selected.digest()
-        || candidate.download_url() != selected.download_url()
-    {
+    if matches.next().is_some() || candidate.digest() != selected.digest() {
         return None;
     }
     let url = format!(
@@ -208,18 +214,6 @@ fn selected_asset(assets: &[ReleaseAsset], target: &str) -> io::Result<(ReleaseA
         .ok_or_else(|| invalid("GitHub release lacks the exact Agent raw asset"))?;
     if matches.next().is_some() {
         return Err(invalid("GitHub release has ambiguous Agent raw assets"));
-    }
-    // self_update's GitHub backend exposes the API `url`, not `browser_download_url`.
-    // Accept only the canonical repository asset endpoint with a numeric GitHub asset ID.
-    let id = asset
-        .download_url()
-        .strip_prefix("https://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/")
-        .ok_or_else(|| invalid("invalid GitHub Agent asset URL"))?;
-    if id.starts_with('0')
-        || !id.bytes().all(|byte| byte.is_ascii_digit())
-        || id.parse::<u64>().is_err()
-    {
-        return Err(invalid("invalid GitHub Agent asset URL"));
     }
     let digest = asset
         .digest()

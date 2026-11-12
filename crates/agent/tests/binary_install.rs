@@ -163,8 +163,7 @@ fn cli_pending_repair_blocks_offline_launch_update_and_service_start() {
     assert!(diagnostic.contains("transaction pending"), "{diagnostic}");
     let diagnostic = error(
         command(temp.path(), &executable)
-            .args(["update", "--root"])
-            .arg(&root)
+            .arg("update")
             .output()
             .unwrap(),
     );
@@ -205,17 +204,22 @@ fn cli_update_checks_root_and_installed_image_before_release_network_io() {
     dir.create_dir("jobs").unwrap();
     dir.create_dir("bin").unwrap();
     copy_executable(&executable, &root.join("bin/hostlink-agent"));
-    let alternate = temp.path().join("other-Agent");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(root.join("bin/hostlink-agent"))
+        .unwrap()
+        .write_all(b"different image")
+        .unwrap();
     let diagnostic = error(
         command(temp.path(), &executable)
             .arg("update")
-            .arg("--root")
-            .arg(&alternate)
             .output()
             .unwrap(),
     );
-    assert!(diagnostic.contains("stable current-user"), "{diagnostic}");
-    assert!(!alternate.exists());
+    assert!(
+        diagnostic.contains("differs from the installed Agent"),
+        "{diagnostic}"
+    );
     // A corrupt installed image must fail locally before any public GitHub
     // release discovery, including on completely offline machines.
     fs::write(root.join("bin/hostlink-agent"), b"").unwrap();
@@ -230,4 +234,25 @@ fn cli_update_checks_root_and_installed_image_before_release_network_io() {
         "{diagnostic}"
     );
     assert!(!temp.path().join("config").exists());
+}
+
+#[test]
+fn update_rejects_linked_installation_root() {
+    use std::os::unix::fs::symlink;
+
+    let (temp, executable) = fixture();
+    let root = private_root(temp.path());
+    let alternate = temp.path().join("other-Agent");
+    PrivateDir::ensure(&alternate).unwrap();
+    fs::remove_dir(&root).unwrap();
+    symlink(&alternate, &root).unwrap();
+    assert!(
+        !command(temp.path(), &executable)
+            .arg("update")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(!alternate.join("update.lock").exists());
 }

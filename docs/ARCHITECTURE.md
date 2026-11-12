@@ -33,7 +33,7 @@ Apalis may retry an interrupted job. Job handlers must tolerate duplicate side e
 
 The Controller currently resolves an exact Agent executable from GitHub Releases and renders a disposable PowerShell 2 or POSIX bootstrap. The bootstrap verifies the raw executable digest before passing the one-use invitation to Rust `hostlink-agent install`.
 
-Agent installs use a stable, per-user root. Services are managed through systemd user units on Linux or user Task Scheduler tasks on Windows. Updates preserve enrollment keys and jobs; on Windows the Agent must be stopped and its owned task removed before replacing the executable.
+Agent installs use a stable, per-user root. Services are managed through systemd user units on Linux or user Task Scheduler tasks on Windows. Updates preserve enrollment keys and jobs; on Windows the update helper stops the Agent and removes its owned task before replacement, then restores the task.
 
 The same invite supports local repair of an exact existing Hub identity through proof of its reverse SSH key. It refreshes approved routes/pins, preserves jobs and identity, and restores only the owned service. Explicitly authorized and locally confirmed lost-key replacement uses the Hub's distinct rotation purpose. See [installation and repair](AGENT_INSTALLATION.md).
 

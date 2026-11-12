@@ -77,6 +77,7 @@ pub(super) async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
         Command::Exec {
             host_target,
             detach,
+            allow_child_breakaway,
             exec_timeout_seconds,
             timeout_seconds,
             board_port,
@@ -127,6 +128,7 @@ pub(super) async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
                     &command,
                     stdin_file.as_deref(),
                     exec_timeout_seconds,
+                    allow_child_breakaway,
                 )
                 .await
             }

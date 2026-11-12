@@ -6,7 +6,14 @@ use russh::{
     server::{Auth, Msg, Server as _, Session},
 };
 use sha2::{Digest as _, Sha256};
-use std::{collections::HashMap, future::Future, io, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    io,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::Semaphore;
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
@@ -39,6 +46,7 @@ struct EmbeddedSession {
     active_exec: Arc<std::sync::Mutex<HashMap<ChannelId, processkit::CancellationToken>>>,
     session_channels: HashMap<ChannelId, Channel<Msg>>,
     pending_ptys: HashMap<ChannelId, PtyIntent>,
+    pending_breakaway: HashSet<ChannelId>,
     authenticated_controller: Option<String>,
 }
 
@@ -117,6 +125,7 @@ impl russh::server::Server for EmbeddedServer {
             active_exec: Arc::new(std::sync::Mutex::new(HashMap::new())),
             session_channels: HashMap::new(),
             pending_ptys: HashMap::new(),
+            pending_breakaway: HashSet::new(),
             authenticated_controller: None,
         }
     }
@@ -134,12 +143,14 @@ impl EmbeddedSession {
 
     fn take_session_channel(&mut self, channel_id: ChannelId) -> Option<Channel<Msg>> {
         self.pending_ptys.remove(&channel_id);
+        self.pending_breakaway.remove(&channel_id);
         self.session_channels.remove(&channel_id)
     }
 
     fn discard_session_channel(&mut self, channel_id: ChannelId) {
         self.session_channels.remove(&channel_id);
         self.pending_ptys.remove(&channel_id);
+        self.pending_breakaway.remove(&channel_id);
     }
 
     fn cancel_exec(&self, channel_id: ChannelId) {
@@ -362,6 +373,7 @@ impl russh::server::Handler for EmbeddedSession {
             || self.authenticated_controller.is_none()
             || !self.session_channels.contains_key(&channel)
             || self.pending_ptys.contains_key(&channel)
+            || self.pending_breakaway.contains(&channel)
             || !valid_term
             || !modes.is_empty()
             || col_width == 0
@@ -399,6 +411,28 @@ impl russh::server::Handler for EmbeddedSession {
         Ok(())
     }
 
+    async fn env_request(
+        &mut self,
+        channel: ChannelId,
+        name: &str,
+        value: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if cfg!(windows)
+            && self.authenticated_controller.is_some()
+            && self.session_channels.contains_key(&channel)
+            && !self.pending_ptys.contains_key(&channel)
+            && name == "HOSTLINK_ALLOW_CHILD_BREAKAWAY"
+            && value == "1"
+            && self.pending_breakaway.insert(channel)
+        {
+            session.channel_success(channel)?;
+        } else {
+            session.channel_failure(channel)?;
+        }
+        Ok(())
+    }
+
     async fn exec_request(
         &mut self,
         channel: ChannelId,
@@ -420,6 +454,7 @@ impl russh::server::Handler for EmbeddedSession {
             fail_session_channel(channel, session)?;
             return Ok(());
         };
+        let allow_child_breakaway = self.pending_breakaway.contains(&channel);
         let Some(channel_handle) = self.take_session_channel(channel) else {
             fail_session_channel(channel, session)?;
             return Ok(());
@@ -434,7 +469,7 @@ impl russh::server::Handler for EmbeddedSession {
         let active_exec = self.active_exec.clone();
         tokio::spawn(async move {
             let _slot = slot;
-            exec::run(channel_handle, command, cancellation).await;
+            exec::run(channel_handle, command, cancellation, allow_child_breakaway).await;
             active_exec
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)

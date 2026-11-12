@@ -15,6 +15,8 @@ pub mod sftp;
 pub mod ssh;
 pub mod tunnel;
 pub mod update;
+#[cfg(windows)]
+mod update_managed;
 
 use serde::{Deserialize, Serialize};
 use std::io;

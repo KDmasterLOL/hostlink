@@ -217,6 +217,21 @@ fn foreground_exec_timeout_is_bounded_optional_and_conflicts_with_detach() {
 }
 
 #[test]
+fn child_breakaway_requires_foreground_execution() {
+    let command = [
+        "hostlink",
+        "exec",
+        "--host",
+        "fixture",
+        "--command",
+        "echo ok",
+        "--allow-child-breakaway",
+    ];
+    assert!(Cli::try_parse_from(command).is_ok());
+    assert!(Cli::try_parse_from(command.into_iter().chain(["--detach"])).is_err());
+}
+
+#[test]
 fn migration_preflight_requires_all_local_explicit_inputs() {
     let cli = Cli::try_parse_from([
         "hostlink",

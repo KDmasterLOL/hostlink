@@ -1,0 +1,998 @@
+# Process groups
+
+[‹ docs index](README.md)
+
+A `ProcessGroup` ties the lifetime of a whole child-process **tree** to a Rust
+value: every process spawned into the group — and everything *those* processes
+spawn — is killed when the group is dropped. An exiting, panicking, or
+`?`-returning owner never leaks subprocesses; the kernel object enforcing this
+(Job Object / cgroup / POSIX process group) catches even grandchildren you
+never knew about. (Killing grandchildren is the problem `duct.py`'s gotchas
+list files under "currently unsolved" for pipe-based designs — kernel
+containment is the solution, and the reason this crate exists.)
+
+- [Creating a group](#creating-a-group)
+- [Putting processes in](#putting-processes-in)
+- [Tearing down: drop, terminate, shutdown](#tearing-down-drop-terminate-shutdown)
+- [Signalling the whole tree](#signalling-the-whole-tree)
+- [Asking whether a soft stop is available](#asking-whether-a-soft-stop-is-available)
+- [Suspending and resuming](#suspending-and-resuming)
+- [Listing members](#listing-members)
+- [Resource limits](#resource-limits)
+- [Stats and sampling](#stats-and-sampling)
+
+## Creating a group
+
+```rust,no_run
+use processkit::{ProcessGroup, ProcessGroupOptions};
+use std::time::Duration;
+
+fn main() -> processkit::Result<()> {
+    // Defaults: 2s graceful-shutdown grace, escalate to SIGKILL.
+    let group = ProcessGroup::new()?;
+
+    // Tuned:
+    let group = ProcessGroup::with_options(
+        ProcessGroupOptions::default()
+            .shutdown_timeout(Duration::from_secs(10))
+            .escalate_to_kill(true),
+    )?;
+
+    // Which kernel mechanism is actually containing the tree?
+    println!("{:?}", group.mechanism()); // JobObject | CgroupV2 | ProcessGroup
+    Ok(())
+}
+```
+
+`mechanism()` reports what you actually got: `CgroupV2` quietly falls back to
+`ProcessGroup` on Linux hosts without cgroup delegation (see
+[Platform support](platform-support.md)).
+
+You rarely create a group explicitly for one-shot runs: every
+`Command::run()`-style call makes a private group automatically. Reach for an
+explicit group when several children should share one fate, or when you need
+the group verbs below.
+
+## Putting processes in
+
+Four doors, in order of preference:
+
+```rust,no_run
+use processkit::{Command, ProcessGroup};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let group = ProcessGroup::new()?;
+
+    // 1. start(): the full Command experience (capture, streaming, timeouts) in a
+    //    SHARED group. The handle does not own the group — dropping the handle
+    //    kills that child, dropping the group kills everyone.
+    let server = group.start(&Command::new("dev-server")).await?;
+
+    // 2. spawn(): the raw escape hatch for a tokio::process::Command you already
+    //    have. You get the bare Child back; pipes and reaping are your problem.
+    //    spawn() takes the command BY VALUE (reuse would stack pre-exec hooks).
+    let raw = tokio::process::Command::new("background-helper");
+    let child = group.spawn(raw)?;
+
+    // 3. adopt(): contain a child that was spawned OUTSIDE the group, while you
+    //    still hold its Child handle (and stay responsible for reaping it).
+    let external = tokio::process::Command::new("legacy-launcher").spawn()?;
+    group.adopt(&external)?;
+
+    // 4. adopt_external(): contain a process you have only a pid for — one an
+    //    outside supervisor started, or one you forked but never handed over.
+    //    Nothing here will ever reap it; the group can only signal it.
+    let pid_from_elsewhere: u32 = 4321;
+    let _ = group.adopt_external(pid_from_elsewhere);
+    let _ = (server, child);
+    Ok(())
+}
+```
+
+Both adoption doors move only the named process: descendants it *already* has
+keep their old containment (future forks are captured — on Windows/cgroup). A few
+sharp edges worth knowing:
+
+- A child that already exited **but has not been reaped** (no `wait()` yet — a
+  zombie whose pid/handle is still valid) is a successful **no-op**: there is
+  nothing left to contain, so `adopt` returns `Ok` on the containment backends.
+- A child that already exited **and was reaped** (`wait()`ed) has no pid left —
+  `adopt` returns an error rather than silently tracking nothing.
+- On the POSIX process-group mechanism, a child that has already `exec`'d
+  can't be re-grouped (POSIX forbids it), so it is tracked *individually*: the
+  child itself is signalled/killed with the group, but its future forks are
+  not. The caller keeps the `Child` handle and is responsible for reaping.
+
+### Adopting by pid (`adopt_external`)
+
+`adopt` needs a live `tokio::process::Child`, which a non-Rust consumer cannot
+construct at all. `adopt_external(pid)` takes the one identifier such a caller
+does have — and treats it as an *address*, not as a handle, because the OS may
+give a reaped process's number to an unrelated one:
+
+- the crate captures an **identity anchor of its own** for the process the number
+  currently names, during the call: the process **object** behind an `OpenProcess`
+  on Windows, kernel cgroup membership (plus a `/proc` start-time read on either
+  side of the write) on Linux cgroup v2, the start-time token on the POSIX
+  process-group backends. From then on the group's probes, signals and teardown are
+  bound to that, so a process that recycles the number afterwards is not a member
+  and is not signalled;
+- a number recycled **during the call itself** is detected by that closing read and
+  reported as an error — but the two unix mechanisms are left in different states,
+  which the error message spells out. The process-group backends have nothing to
+  undo (the entry they made is identity-gated and is pruned unsignalled). Linux
+  cgroup v2 has already migrated a task, so the call tries to move the number back
+  out into the cgroup this group's own directory lives in; where a host refuses that
+  move, the process holding the number stays a member of this group and this group's
+  teardown will kill it. Windows cannot reach this state — it uses the number once,
+  for `OpenProcess`;
+- **adoption is not neutral for containment the process already has**, and the
+  direction differs per mechanism: on Windows the process keeps its existing job and
+  *this* group's job becomes a child of it (so the outer job's terminate/close then
+  reaches this group's members, including ones started later, and its limits bind
+  them — and whether the assign succeeds at all depends on this group's own state,
+  so adopt before you start); on Linux cgroup v2 the process **loses** its previous
+  cgroup, since v2 membership is exclusive and nothing can restore it; on the
+  process-group backends nothing is taken away. See
+  [platform support](platform-support.md#capability-matrices) for the full note;
+- what no crate can check is the window *before* the call — whether the pid still
+  named the process you meant when you looked it up. Look it up as late as you
+  can, and use `process_is_alive(pid, start_time)` to re-check an instance later;
+- **nothing here ever reaps it.** No exit status for an adopted-by-pid process
+  appears anywhere in this API; the group can signal it and list it, and that is
+  all. Reaping stays with whoever is its actual parent — this process, an outside
+  supervisor, or `init`;
+- **FreeBSD and the other BSDs return `Unsupported`.** No start-time reader is
+  wired up there, so there is no anchor to capture, and the crate refuses rather
+  than tracking a bare number it would later `SIGKILL`. `adopt` is unaffected —
+  the `Child` you hold un-reaped is what keeps its number from being recycled.
+
+`pid == 0` and this process's own pid are refused everywhere: both would point
+the group's own teardown at the caller.
+
+## Tearing down: drop, terminate, shutdown
+
+| Verb | What happens | When |
+|---|---|---|
+| `drop(group)` | Immediate **hard kill** of the whole tree (kill-on-close) | The safety net — always on |
+| `group.kill_all()` | The same hard kill; **on success** the group stays usable (cgroup-`kill` / Job Object / process-group backends). Where the per-pid `SIGKILL` fallback runs instead — a **pre-5.14 Linux kernel** lacking `cgroup.kill`, or a refused `cgroup.kill` write — it returns `Err` if the tree doesn't drain (a fork bomb still out-spawning, or `D`-state zombies), and also when the tree *did* drain but the freeze guarding the sweep could not be cleared and the cgroup reads frozen: the tree is dead, the group is left unusable for further spawns (see [Upgrading](upgrading.md)) | Explicit teardown mid-flight; idempotent |
+| `group.shutdown().await` | Unix: `SIGTERM` → wait `shutdown_timeout` → `SIGKILL` survivors (if `escalate_to_kill`); Windows: atomic job kill when `escalate_to_kill`, else the survivors are **spared** (handle closed without kill-on-close) — unless a child opted into `windows_graceful_ctrl_break` (see below), which gives Windows a real `CTRL_BREAK` → wait → kill tier. Consumes the group (`shutdown_ref(&self)` is the same teardown, borrowing — for a group held behind an `Arc`/supervisor) | Graceful service stop |
+| `group.stop(grace, escalate).await` | The **observable** graceful stop (needs `process-control`): the *same* teardown as `shutdown_ref`, with an explicit `grace`/`escalate`, returning a `ShutdownReport` — the attempted soft signal (and whether it landed), member counts before/after, whether the tree drained within the grace or was hard-killed, and the actual elapsed. Borrows the group (usable afterwards) | You own the end-of-run race and want the observed facts — or a "kill and wait" via `stop(Duration::ZERO, true)` |
+
+```rust,no_run
+use processkit::{Command, ProcessGroup, ProcessGroupOptions};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let group = ProcessGroup::with_options(
+        ProcessGroupOptions::default()
+            .shutdown_timeout(Duration::from_secs(5))
+            .escalate_to_kill(true),
+    )?;
+    let _service = group.start(&Command::new("my-service")).await?;
+
+    // SIGTERM, give it 5s to flush and exit, SIGKILL stragglers:
+    group.shutdown().await?;
+    Ok(())
+}
+```
+
+A child that handles `SIGTERM` ends the grace **early** — `shutdown` returns
+as soon as the tree is empty, not after the full timeout. One subtlety: the
+liveness probe sees an exited-but-unreaped child (a zombie) as alive on the
+process-group backends, so keep `wait()`ing your handles concurrently if you
+want the early return. `Drop` can't `await`, which is why the graceful tier
+lives in this async method — dropping without calling it performs only the
+hard kill.
+
+### Windows: the graceful soft tier (`WM_CLOSE`, opt-in `CTRL_BREAK`)
+
+A Windows `shutdown` has no POSIX `SIGTERM`, but it still tries to *trigger* a
+clean exit before the atomic Job Object kill. For a **windowed** child (Electron
+app, desktop tool, windowed service) this is automatic: `WM_CLOSE` is *posted*
+(never *sent*, so a hung window can't block us) to every top-level window a live
+member owns, then the *same* signal → wait → escalate ladder runs — the child
+gets the `shutdown_timeout` to flush and exit, else `TerminateJobObject`. A
+**console** child has no window, so opt in per child with
+[`Command::windows_graceful_ctrl_break()`](https://docs.rs/processkit/latest/processkit/struct.Command.html#method.windows_graceful_ctrl_break):
+the direct child is spawned in its own console process group
+(`CREATE_NEW_PROCESS_GROUP`), and `shutdown` then sends it
+`GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)`, waits the `shutdown_timeout`,
+and `TerminateJobObject`s any survivor — the very same signal → wait → escalate
+ladder as Unix, so a console child that handles `CTRL_BREAK` shuts down softly.
+
+```rust,no_run
+use processkit::{Command, ProcessGroup, ProcessGroupOptions};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let group = ProcessGroup::with_options(
+        ProcessGroupOptions::default().shutdown_timeout(Duration::from_secs(5)),
+    )?;
+    // CTRL_BREAK is sent on shutdown; a console child gets 5s to exit, else kill.
+    let _service = group
+        .start(&Command::new("my-service").windows_graceful_ctrl_break())
+        .await?;
+    group.shutdown().await?;
+    Ok(())
+}
+```
+
+The `CTRL_BREAK` opt-in is **console-only**: a child spawned
+[`create_no_window`](https://docs.rs/processkit/latest/processkit/struct.Command.html#method.create_no_window)
+or `DETACHED_PROCESS` does not share this process's console, so it never receives
+the event and rides the grace to the `TerminateJobObject` fallback. Only the
+*direct* child is addressed by `CTRL_BREAK` — an
+[`adopt`](https://docs.rs/processkit/latest/processkit/struct.ProcessGroup.html#method.adopt)ed
+child is not — and the event is `CTRL_BREAK`, not `CTRL_C` (a new process group
+disables `CTRL_C`). The automatic `WM_CLOSE` path is the complement: it reaches
+any live member that owns a top-level window (including forked descendants and
+adopted children), needs no console and no opt-in, but only a member that actually
+has a window. A member with neither a window nor the console opt-in is hard-killed
+promptly at the deadline. Off Windows the builder is a no-op.
+
+### Observing the teardown: `stop` and `ShutdownReport`
+
+> Requires the default-on **`process-control`** feature (the report carries a
+> `Signal`).
+
+`shutdown`/`shutdown_ref` are fire-and-forget — they report only success or an
+error. When you own your *own* end-of-run race (a timeout ⨯ Ctrl-C ⨯
+control-socket race, not a `Command::timeout`) you usually want to stop the instant
+the tree is empty rather than always spend the whole grace, and to report the tier
+the kernel *observed* rather than what you *tried*. `ProcessGroup::stop(grace,
+escalate)` is that verb: the same `SIGTERM` / `CTRL_BREAK` / `WM_CLOSE` → wait →
+escalate ladder, taking `grace`/`escalate` explicitly and returning a
+[`ShutdownReport`](https://github.com/ZelAnton/ProcessKit-rs/blob/main/src/shutdown_report.rs).
+
+```rust,no_run
+use processkit::{Command, ProcessGroup};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let group = ProcessGroup::new()?;
+    let _service = group.start(&Command::new("my-service")).await?;
+
+    // SIGTERM, up to 5s to drain, then SIGKILL survivors — and report what happened.
+    let report = group.stop(Duration::from_secs(5), true).await?;
+    if report.drained_within_grace() {
+        println!("clean exit in {:?}", report.elapsed());
+    } else if report.escalated() {
+        let survivors = report.members_after().unwrap_or(0);
+        eprintln!("hard-killed {survivors} survivor(s) after the grace");
+    }
+    if let Some(sig) = report.attempted_signal() {
+        println!("attempted soft signal: {sig:?}");
+    }
+    Ok(())
+}
+```
+
+The report is honest per platform. `members_before`/`members_after` count the same
+member set as [`members`](#listing-members) — the whole
+tree on the Job Object / cgroup mechanisms, the tracked group *leaders* on the
+process-group fallback (where an unreaped zombie still counts, so reap your handles
+for a true `members_after`). The `soft_signal()` verdict is three-way —
+`SoftSignal::Sent(sig)`, `SoftSignal::Failed(sig)`, or `SoftSignal::Unsupported`;
+the last arises **only** on a windowless Windows Job Object with no console-CTRL
+leader (every Unix mechanism always has a real `SIGTERM` tier). `stop(Duration::ZERO,
+true)` is the "**kill and wait**" path: it hard-kills at once (a zero grace waits
+not at all) and reports what was still live — where bare `kill_all` returns as soon
+as the kill is *issued*. `shutdown`/`shutdown_ref` are unchanged; `stop` is purely
+additive.
+
+`ShutdownReport` is the teardown facts as a typed value *after* the teardown
+returns. For the same transitions **live** — stamped the instant each one happens —
+enable the `tracing` feature: the teardown driver narrates `soft_signal →
+grace_started → drained | escalated | spared` (each in a stable `phase` field) on
+the `processkit` target, for every graceful path (`stop`, `shutdown`, a run-level
+`timeout_grace`, a supervisor's graceful stop). The two are one seam read two ways
+(both derive from the same driver outcome); neither can influence the teardown, and
+neither carries argv/env.
+
+## Deliberately detaching a child (`spawn_detached`)
+
+**This inverts the crate's headline guarantee — on purpose.** Everything above is
+about *keeping* a tree contained so nothing escapes. `Command::spawn_detached` is
+the crate's one deliberate escape hatch for the opposite need: a child that
+**must outlive its launcher** — daemonizing, a `nohup`-style long-lived helper, a
+handoff to a process you want to keep running after this one exits.
+
+```rust,no_run
+use processkit::Command;
+
+# fn main() -> processkit::Result<()> {
+// Launch a helper that survives this process. Its stdout goes to a file — never
+// a pipe, which would deadlock the child once nothing is left to drain it.
+let child = Command::new("my-daemon")
+    .arg("--serve")
+    .stdout_file("/var/log/my-daemon.log")
+    .spawn_detached()?;
+println!("detached daemon pid = {}", child.pid());
+// Dropping `child` does NOT kill the daemon — the crate is done with it.
+# Ok(())
+# }
+```
+
+For a safe runnable demonstration whose detached child exits by itself, see
+[`examples/detached.rs`](https://github.com/ZelAnton/ProcessKit-rs/blob/main/examples/detached.rs).
+
+What it does, and what it deliberately does **not**:
+
+- **Detach at birth.** Unix — a **new session** (`setsid`), no controlling
+  terminal. Windows — the child is **not assigned** to this crate's Job Object.
+  It is *not* made to break away from a Job Object / cgroup the host already put
+  *your* process in (a CI runner, a `systemd` scope, this crate's own supervisor):
+  that would be hostile to whoever set up the host containment. So a detached
+  child escapes **this crate's** per-run containment, not a broader host one it
+  inherits.
+- **A separate, non-interchangeable type.** You get a `DetachedChild` carrying
+  only the `pid` — no public kill, wait, timeout, capture, or control/teardown APIs
+  — because it is no longer contained. Dropping it does nothing to the child. On
+  Unix, a private background reaper owns the detached `Child` and collects its exit
+  status so it does not become a zombie; that bookkeeping is not a public wait or
+  control API. Windows and other non-Unix targets use their normal process-handle
+  cleanup instead.
+  (Left as a bare code span, not a `docs.rs` link: this type ships in the next
+  release, so a `docs.rs` URL would 404 until then.)
+- **stdio is null, or a file — never a pipe.** With no owner left to drain it, a
+  pipe would deadlock the child the moment its buffer fills. stdout/stderr are
+  null by default; the only alternative is a file redirect (`stdout_file` /
+  `stderr_file`). stdin is always null.
+- **Incompatible knobs are refused loudly.** A `Command` carrying a timeout,
+  capture wiring (`on_stdout_line`/tees/`capture_policy`), an interactive stdin
+  (`keep_stdin_open`/`inherit_stdin`/a `stdin` source), `retry`, `cancel_on`,
+  `kill_on_parent_death` (its exact opposite), `windows_graceful_ctrl_break`,
+  `cpu_affinity`, or Linux `io_priority` is
+  rejected with a typed `ErrorReason::Unsupported` naming it — never silently
+  ignored. Program/args/env/working-directory and the privilege-drop knobs
+  (`uid`/`gid`/`groups`/`umask`/`priority`) **are** honored.
+
+Reach for `spawn_detached` **only** when you truly want a child to outlive its
+launcher. For everything else, `start`/`run`/`output_*` keep the child contained.
+
+## Signalling the whole tree
+
+> `signal`/`suspend`/`resume`/`members`/`adopt` — this section and the two
+> below — require the default-on **`process-control`** feature. The teardown
+> verbs above are core and always present.
+
+```rust,no_run
+use processkit::{Command, ProcessGroup, Signal};
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let group = ProcessGroup::new()?;
+    let _server = group.start(&Command::new("my-server")).await?;
+
+    group.signal(Signal::Hup)?;        // "reload your configuration"
+    group.signal(Signal::Usr1)?;       // whatever the tool defines
+    group.signal(Signal::Other(34))?;  // raw signal number escape hatch
+    Ok(())
+}
+```
+
+| Platform | Deliverable signals |
+|---|---|
+| Linux (cgroup or pgroup), FreeBSD reaper, macOS/other BSD | Any — `Term`, `Kill`, `Int`, `Hup`, `Quit`, `Usr1`, `Usr2`, `Other(n)` |
+| Windows | `Kill` (Job Object terminate); `Int`/`Term` as a best-effort soft close (`CTRL_BREAK` to console leaders + `WM_CLOSE` to windowed members) — `ErrorReason::Unsupported` only when neither exists; every other signal → `ErrorReason::Unsupported` |
+
+`Signal::Kill` always takes the same *atomic* whole-tree kill path as `kill_all`
+(`cgroup.kill` / `PROC_REAP_KILL` / `killpg` / job terminate), so it cannot miss
+a process forked mid-broadcast. Other signals are a per-member broadcast —
+best-effort against a tree that is forking at that exact moment. On Windows,
+`Signal::Int`/`Signal::Term` do not wait or escalate (they only *trigger* a soft
+close — contrast the graceful `shutdown`, which then waits the grace and
+escalates). An empty group accepts any deliverable signal trivially — except
+Windows `Int`/`Term`, which report `Unsupported` on an empty group (no member,
+hence no console or windowed target to soft-close). On **every** Unix mechanism a
+real send failure is surfaced as an `Err` rather than swallowed — an `EINVAL` (an
+out-of-range `Other(n)`) always, and an `EPERM` against a **live, non-zombie**
+member (a `sudo`/setuid child that rejects the signal, or a seccomp/container
+restriction). The **process-group** mechanism (macOS/the other BSDs,
+Linux-without-cgroup) reaches the same verdict as the cgroup one by checking the
+target's run state after an `EPERM`, so a harmless zombie-only `EPERM` — and, on
+the bare BSDs where no state reader exists, every `EPERM` — stays swallowed. The
+**FreeBSD reaper** makes that discrimination too, from the kernel's own zombie flag
+on the member `PROC_REAP_KILL` names as the failing one — so unlike the bare-BSD
+process-group path it does surface a live member's `EPERM`. An `ESRCH` race (the
+member already exited) is still success. `Signal::Other(0)` is the POSIX
+existence probe: it returns `Ok` having **delivered nothing** (a live target was
+reached, not signalled) — and because that probe never takes a delivery path
+(FreeBSD routes it back through the process group, which has no state reader on
+any BSD but macOS), the `EPERM` rule above does not reach it everywhere: on
+FreeBSD and the bare BSDs a live target that rejects even the null signal still
+answers `Ok`, where Linux and macOS surface the `EPERM`. `suspend`/`resume` on
+the process-group mechanism now use the same honest delivery verdict for
+`SIGSTOP`/`SIGCONT`: a live-member `EPERM` surfaces as an `Err`, while `ESRCH`,
+zombie-only `EPERM`, an empty group, and BSD-without-state-reader `EPERM`
+remain `Ok`. The FreeBSD reaper applies that verdict to freezing and thawing
+too — `SIGSTOP`/`SIGCONT` ride the same `PROC_REAP_KILL` classification as any
+other signal there. The older-kernel cgroup per-process fallback reports its
+`SIGSTOP`/`SIGCONT` failures the same way.
+
+## Asking whether a soft stop is available
+
+Before you fire a soft stop (`signal(Signal::Term)` / `Signal::Int`), you can ask
+the group whether one will actually reach anything — `soft_stop_scope()` returns a
+`SoftStopScope` **capability report**, so a caller cancelling a run on *its own*
+schedule (a UI Cancel, a control-socket command, a timeout it owns) can decide up
+front whether to attempt a graceful stop and can tell its user the real reach,
+instead of firing a `signal`, catching `ErrorReason::Unsupported`, and reverse-engineering
+the scope. It is the group-axis sibling of
+`Command::kill_on_parent_death_scope() -> ParentDeathCleanup`, but read from the
+group's **live membership** (not fixed per platform) and **side-effect-free** — it
+delivers no signal, posts no `WM_CLOSE`, spawns nothing, and does not mutate the
+group.
+
+```rust,no_run
+use processkit::{Command, ProcessGroup, Signal, SoftStopScope};
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let group = ProcessGroup::new()?;
+    let _server = group
+        .start(&Command::new("my-server").windows_graceful_ctrl_break())
+        .await?;
+
+    // Decide BEFORE attempting — no ErrorReason::Unsupported to parse back.
+    match group.soft_stop_scope() {
+        SoftStopScope::WholeTree | SoftStopScope::OptInMembers => {
+            group.signal(Signal::Term)?; // a soft stop will reach a member
+        }
+        SoftStopScope::Unsupported => {
+            group.kill_all()?; // no soft tier here — go straight to the hard kill
+        }
+        other => eprintln!("unknown soft-stop scope: {}", other.name()),
+    }
+    Ok(())
+}
+```
+
+| Mechanism | `soft_stop_scope()` | Why |
+|---|---|---|
+| Linux cgroup v2, macOS/other BSD, Linux pgroup fallback | `WholeTree` | `signal(Int/Term)` reaches every member of the tree (the cgroup, or every tracked process group via `killpg`); never `Unsupported` |
+| FreeBSD reaper | `WholeTree` | `PROC_REAP_KILL` delivers to every descendant the reaper sees — including one that `setsid`ed out of its process group; never `Unsupported` |
+| Windows, with a live console-CTRL leader (`windows_graceful_ctrl_break`) or a windowed member | `OptInMembers` | a soft close reaches only members it can *trigger* — a curated subset, not the whole tree |
+| Windows, with neither | `Unsupported` | a Job Object has no POSIX signal and there is nothing to soft-close, so `signal(Int/Term)` would return `ErrorReason::Unsupported` |
+
+Consistent with `signal` by construction: it reads the very same live-membership
+primitives `signal(Int/Term)` acts on, so what it reports matches what a real soft
+stop would then reach. It describes the *soft* tier only — the unconditional hard
+kill (`Signal::Kill`, `kill_all`, dropping the group) always tears the whole tree
+down regardless. `SoftStopScope` is `#[non_exhaustive]` and carries a stable
+`name()` / `from_name()` machine identifier (`whole_tree` / `opt_in_members` /
+`none`), like the other reporting enums.
+
+## Suspending and resuming
+
+Freeze a tree (to snapshot it, to starve a runaway while you investigate, to
+pause background work), then thaw it:
+
+```rust,no_run
+use processkit::{Command, ProcessGroup};
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let group = ProcessGroup::new()?;
+    let _cruncher = group.start(&Command::new("cpu-hog")).await?;
+
+    group.suspend()?;   // the whole tree stops consuming CPU
+    // … inspect, snapshot, wait for the user …
+    group.resume()?;
+    Ok(())
+}
+```
+
+Per-platform machinery — and its visible differences:
+
+| Platform | Mechanism | Notes |
+|---|---|---|
+| Linux cgroup | one `cgroup.freeze` write | Atomic over the subtree; freeze is **group state** |
+| Linux pgroup, macOS/other BSD | `SIGSTOP` / `SIGCONT` broadcast | Idempotent (level-triggered) |
+| FreeBSD reaper | `SIGSTOP` / `SIGCONT` through `PROC_REAP_KILL` | Idempotent; covers the **whole subtree**, a `setsid` escapee included; a refused delivery surfaces as an `Err` |
+| Windows | per-thread `SuspendThread` walk | **Counted**: N suspends need N resumes; best-effort against mid-walk thread churn |
+
+Two caveats that bite in practice:
+
+- **Spawning into a suspended group diverges.** Under the cgroup mechanism a
+  child spawned or adopted while the group is frozen **starts frozen** — and
+  `start()` *may never return* until `resume` (the forked child joins the
+  cgroup before `exec`, so it can freeze before completing the spawn
+  handshake). Windows and the pgroup backends freeze only members present at
+  the call. Rule of thumb: resume before starting new work.
+- A suspended tree can still be **hard-killed** (drop / `kill_all` /
+  `Signal::Kill` all act on frozen processes), but a graceful `shutdown`
+  starts with a `SIGTERM` the frozen tree can't act on — it would wait out the
+  whole grace. Resume first for a clean shutdown.
+
+## Listing members
+
+```rust,no_run
+use processkit::{Command, ProcessGroup};
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let group = ProcessGroup::new()?;
+    let _a = group.start(&Command::new("worker-a")).await?;
+    let _b = group.start(&Command::new("worker-b")).await?;
+
+    let pids: Vec<u32> = group.members()?;
+    println!("live members: {pids:?}");
+    Ok(())
+}
+```
+
+What "members" means depends on the mechanism: Windows and Linux-cgroup list
+the **whole tree** (every descendant pid); the POSIX process-group backends
+list the tracked group *leaders* (one pid per started/adopted child) — their
+descendants are contained but not enumerated. An exited child still counts
+until it is reaped. The snapshot is point-in-time: a tree that is forking
+races it.
+
+To *wait* on members rather than list them, race the handles with
+[`wait_any`](streaming.md#racing-children-with-wait_any).
+
+### Enriched snapshot: `members_info`
+
+When bare pids aren't enough — a diagnostic `members_snapshot` event, a
+process-tree view — `members_info` returns the same member set as `members`,
+but each pid comes wrapped in a `MemberInfo` carrying best-effort **parent
+pid**, **image name**, and **start time**:
+
+```rust,no_run
+use processkit::{Command, ProcessGroup};
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let group = ProcessGroup::new()?;
+    let _a = group.start(&Command::new("worker-a")).await?;
+
+    for m in group.members_info()? {
+        println!(
+            "pid={} ppid={:?} exe={:?} start={:?}",
+            m.pid(),
+            m.ppid(),
+            m.exe_name(),
+            m.start_time(),
+        );
+    }
+    Ok(())
+}
+```
+
+The fields are read where the platform can report them and are `None`
+otherwise — never a fabricated value. Windows and Linux (both the cgroup and
+`/proc` fallback paths) and macOS fill all four; on the bare BSDs only the pid
+is reported and the rest are `None`. `start_time` is an **opaque** identity
+anchor (its unit and epoch differ per platform), not a wall-clock timestamp —
+its use is pairing with the pid to tell a recycled number apart from the
+original process, not display. The raw command line is **deliberately never**
+included on any platform: it routinely carries secrets, and redaction is the
+consumer's policy to own.
+
+Same point-in-time contract as `members`, with one addition: if a member exits
+between its pid being enumerated and its metadata being read, that pid is
+**skipped** rather than reported with fabricated fields — a single vanished
+member never fails the whole call.
+
+### Identifying a process by pid (outside a group)
+
+Sometimes the pid you care about is **not** a member of any group you own — a pid
+saved to disk between runs, a launch registry checking whether the owner of a
+crash-surviving entry is still alive, an e2e probe watching a process from outside
+its container. For that, the crate publishes the *same* identity query as a
+free-standing function (needs `process-control`):
+
+```rust,no_run
+# fn main() -> processkit::Result<()> {
+let pid = 4321;
+
+// Look up an arbitrary pid — the standalone twin of `members_info`, returning the
+// same best-effort `MemberInfo` (parent pid, image name, start time).
+match processkit::process_info(pid)? {
+    Some(info) => println!(
+        "pid={} ppid={:?} exe={:?} start={:?}",
+        info.pid(), info.ppid(), info.exe_name(), info.start_time(),
+    ),
+    None => println!("pid {pid} is not running"),
+}
+# Ok(())
+# }
+```
+
+`process_info` returns **three** distinct outcomes, and the distinction is the
+point:
+
+- `Ok(Some(info))` — the process exists; fields are best-effort `Option` exactly as
+  in `members_info`.
+- `Ok(None)` — the pid names **no** process: an honest negative, the "it's gone"
+  answer a liveness check wants.
+- `Err` — the process may well exist, but you couldn't inspect it (no permission —
+  a Windows protected/`System` process, a Linux `hidepid` mount, a macOS restricted
+  process — or an OS read error). **Never read this as "dead."** That is the whole
+  reason it is an error rather than `Ok(None)`.
+
+It reads no argv/environment, on any platform — the same "never argv/env" stance
+`MemberInfo` documents.
+
+#### Reuse-safe liveness: `process_is_alive`
+
+Because the OS reuses pid *numbers*, "is pid N still alive?" is the wrong question
+for a saved pid: a stranger may have recycled the number after your process exited.
+Pair the pid with the **start-time token** and ask instead "is the *same* process
+still running?":
+
+```rust,no_run
+# fn main() -> processkit::Result<()> {
+// Earlier: record identity.
+let pid = 4321;
+let saved_start = processkit::process_info(pid)?.and_then(|i| i.start_time());
+
+// Later (perhaps after a restart): is that same process still alive?
+if processkit::process_is_alive(pid, saved_start)? {
+    println!("the original process {pid} is still alive");
+} else {
+    println!("process {pid} is gone (exited, or its number was recycled)");
+}
+# Ok(())
+# }
+```
+
+`process_is_alive` is `Ok(true)` only when the process exists **and** its current
+start time matches the saved one; a **different** start time on the same number
+(the number was recycled) reads as `Ok(false)`, and so does a nonexistent pid. A
+permission `Err` propagates just like `process_info` — again, never "dead". The
+start time is an opaque identity anchor (unit/epoch differ per platform), used only
+for this pairing, never displayed. Where the platform reports **no** start time
+(the bare BSDs, where `start_time()` is `None`), the check degrades to bare-pid
+liveness — exactly the number-only check you'd otherwise write by hand, no weaker,
+and never a false "dead".
+
+## Resource limits
+
+Requires the **`limits`** feature. Caps are a property of the group, set at
+creation (and adjustable later — see [Updating a live
+group](#updating-a-live-group)) and enforced by the same kernel object that
+contains the tree:
+
+```rust,no_run
+use processkit::{Command, ProcessGroup, ProcessGroupOptions};
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let group = ProcessGroup::with_options(
+        ProcessGroupOptions::default()
+            .max_memory(512 * 1024 * 1024) // bytes, whole tree
+            .max_processes(64)             // fork-bomb ceiling
+            .cpu_quota(0.5),               // half of one core
+    )?;
+    let _sandboxed = group.start(&Command::new("untrusted-tool")).await?;
+    Ok(())
+}
+```
+
+| Capability | Windows Job Object | Linux cgroup v2 | pgroup / macOS / other BSD | FreeBSD reaper |
+|---|---|---|---|---|
+| Memory cap | ✅ whole-tree | ✅ whole-tree (`memory.max`) | ❌ | ❌ |
+| Process-count cap | ✅ | ✅ (`pids.max`) | ❌ | ❌ |
+| CPU quota | 🟡 approximate (rate vs. total CPU) | ✅ (`cpu.max`) | ❌ | ❌ |
+
+`cpu_quota` is a fraction of a **single** core (`2.0` = two cores). Limits
+need a real container; when a requested cap can't be enforced — no Job
+Object/cgroup, or a Linux cgroup whose controllers can't be enabled —
+`with_options` returns `ErrorReason::ResourceLimit { kind, reason, detail }` instead
+of handing back a silently-unbounded group: `kind` names the limit
+(`max_memory`/`max_processes`/`cpu_quota`), `reason` says whether the value was
+simply invalid, no mechanism with whole-tree resource *accounting* exists here
+(`Unsupported` — the pgroup mechanisms, which have no whole-tree container at all,
+and the FreeBSD reaper, which contains a tree without accounting for it), or a
+mechanism exists but rejected this request
+(`Unenforceable`) — branch on these instead of parsing `detail`. On Linux this
+needs the process to run at the
+**real cgroup-v2 root**: the crate enables the controllers in this process's own
+cgroup, which cgroup v2's "no internal processes" rule allows only for the real
+hierarchy root — *not* a cgroup-namespace root (so an ordinary container fails
+too), *not* under systemd — and the crate doesn't migrate your process. See the
+limits prerequisites in
+[Platform support](platform-support.md#containment-mechanisms). The `uid()`-drop
+interaction lives under its [Caveats](platform-support.md#caveats).
+
+### Updating a live group
+
+`ProcessGroup::update_limits(ResourceLimits)` re-applies a fresh set of caps to
+an **already-running** group — without recreating the container or restarting
+its children — for adaptive resource management (tighten a slumping batch's
+memory, widen a long-lived worker pool's CPU quota):
+
+```rust,no_run
+use processkit::{ProcessGroup, ResourceLimits};
+
+# fn main() -> processkit::Result<()> {
+let mut group = ProcessGroup::new()?;
+
+// Later, adapt the caps on the already-running group:
+let mut limits = ResourceLimits::default();
+limits.max_memory = Some(256 * 1024 * 1024); // tighten to 256 MiB
+limits.cpu_quota = Some(2.0);                 // widen CPU to two cores
+group.update_limits(limits)?; // max_processes left None → that cap is lifted
+# Ok(())
+# }
+```
+
+The new value is a **full replacement**, not a merge: an axis left `None` is
+lifted back to unbounded — it does *not* keep its previous cap — so always
+describe the complete desired state (start from `ResourceLimits::default()` and
+set the axes you want capped). On Windows the live Job Object's caps are
+reissued; on Linux cgroup v2 the `memory.max` / `pids.max` / `cpu.max` files are
+rewritten (a removed axis written back to `max`). It routes through the same
+live container the tree-control verbs use, so the same platform matrix and
+`ErrorReason::ResourceLimit { kind, reason, detail }` classification apply — a
+process-group mechanism (macOS/the other BSDs, the Linux fallback) and the FreeBSD
+reaper refuse any requested cap with `Unsupported` rather than silently dropping
+it, while lifting *all* caps there is a trivial success.
+
+**A failure is not a rollback.** The caps are written axis by axis — on Windows
+one Job Object call for the memory and process caps and a second for the CPU cap,
+on cgroup v2 `memory.max`, then `pids.max`, then `cpu.max` — and nothing about
+that is transactional. A call that fails part-way can leave the container carrying
+a *mix* of old and new caps, including an axis the request meant to lift that has
+already been lifted; only the group's reflected options (what `Debug` shows) stay
+on the previous set, and the error doesn't say how far the write got. Re-issue the
+complete desired set (a full replacement, so retrying is idempotent) or tear the
+group down. An `Invalid` value is the one case guaranteed to change nothing: it is
+rejected before the OS is touched. Evidence stays honest across all of this —
+every axis a request names joins the group's sticky cap record whether the call
+succeeds or fails, so an axis that did land before the failure is still read from
+the kernel's counters by `limit_evidence()` rather than reported `NotTripped` with
+nothing behind it.
+
+### Did the cap actually fire? (`limit_evidence`)
+
+The caps above answer "may this tree use more?". They don't, by themselves, tell
+you afterwards whether one of them *stopped* something — and a plain exit status
+can't either: a child OOM-killed under `max_memory` and a child that crashed on
+its own both surface as an ordinary non-zero exit (a `SIGKILL` on Unix). `stats`
+reports peak and cumulative samples, which is a measurement, not a verdict.
+
+`ProcessGroup::limit_evidence()` closes that gap. It returns a `LimitEvidence`
+report carrying one `LimitVerdict` per axis, read from the kernel/OS container
+the crate owns:
+
+```rust,no_run
+use processkit::{Command, LimitVerdict, ProcessGroup, ProcessGroupOptions};
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let group = ProcessGroup::with_options(
+        ProcessGroupOptions::default().max_memory(512 * 1024 * 1024),
+    )?;
+    let outcome = group.start(&Command::new("untrusted-tool")).await?
+        .output_string().await?;
+
+    if !outcome.is_success() {
+        match group.limit_evidence().memory() {
+            LimitVerdict::Tripped => eprintln!("killed by its memory cap"),
+            LimitVerdict::NotTripped => eprintln!("the tool failed on its own"),
+            // `LimitVerdict` is `#[non_exhaustive]`; treat anything new the way
+            // you treat `Unknown` — as "no answer", never as a "no".
+            _ => eprintln!("this platform can't say"),
+        }
+    }
+    Ok(())
+}
+```
+
+**Two different questions.** `ErrorReason::ResourceLimit` is *admission*: "the
+cap you asked for could not be **applied**" (`Invalid` / `Unsupported` /
+`Unenforceable`). `with_options` returns it instead of running anything at all —
+it hands back no group, so there is nothing left to ask. `update_limits` returns
+it against an already-running tree, where it undoes nothing that already landed
+(see [A failure is not a rollback](#updating-a-live-group) above).
+`limit_evidence` is the other side: did a cap on this axis then **fire**?
+Nothing about the error's behaviour changes — but on a live group the two can
+meet on the same axis: after a failed `update_limits` the error says the
+requested set could not be applied whole, while the evidence still answers what
+actually fired, read from the counters rather than assumed away.
+
+**Three-valued on purpose, and never a guess.** `Tripped` is returned *only* on
+authoritative kernel/OS evidence recorded by this group's own container.
+`NotTripped` means the evidence says it did not fire — or that the axis never
+carried a cap, so nothing could. `Unknown` means **no evidence is available**,
+and is deliberately not folded into a "no". Exit codes and signals are never
+consulted: they cannot separate a cap-driven kill from a self-inflicted one.
+
+| Mechanism | Memory | Processes | CPU | Evidence |
+|---|---|---|---|---|
+| Linux cgroup v2 | ✅ | ✅ | ✅ | `memory.events`' `oom`, `pids.events`' `max`, `cpu.stat`'s `nr_throttled` |
+| Windows Job Object | ❓ `Unknown` | ❓ `Unknown` | ❓ `Unknown` | the mechanism keeps no post-mortem record — see below |
+| pgroup / macOS / other BSD | ❓ `Unknown` | ❓ `Unknown` | ❓ `Unknown` | no whole-tree resource accounting exists at all |
+| FreeBSD reaper | ❓ `Unknown` | ❓ `Unknown` | ❓ `Unknown` | contains the tree, accounts for nothing in it |
+
+What "fired" means differs by axis, because the OS's own behaviour does: memory
+means the container hit **its own** cap and the kernel had to OOM inside it;
+processes means a fork was refused; CPU means the quota throttled the tree at
+least once — a CPU cap slows work rather than stopping it, so a `Tripped` CPU
+verdict reads as "the quota bound this workload", not "the quota broke it".
+
+The memory axis keys on cgroup v2's `oom` counter and deliberately **not** on
+`oom_kill`, which the kernel documents as processes of this cgroup killed by
+*any* OOM killer — a host-wide out-of-memory kill would otherwise be reported as
+"your cap killed it".
+
+**A `NotTripped` memory verdict on a host with swap** deserves one caveat, and it
+is the kernel's, not the report's: `memory.max` caps *memory*, not memory + swap.
+Where swap is available to the tree (`memory.swap.max` defaults to `max`, and the
+crate sets no swap cap), the kernel may page a hog out instead of OOM-killing it —
+the cap engages, nothing dies, and `NotTripped` is the truthful answer. If you
+need "over the cap means death", take swap off the tree externally
+(`memory.swap.max`, or a swapless host/container — which is what most containers
+already are).
+
+**Windows is a measured negative, not an oversight.** A Job Object enforces all
+three caps but preserves nothing about them afterwards: the active-process cap
+refuses the offending process without ever counting it as a member (the job
+accounting's "terminated because of a limit violation" tally is measurably
+unmoved by a real violation), the memory cap fails a *commit* rather than
+killing and is surfaced only as a live IO-completion-port notification, and the
+CPU hard cap throttles with no counter at all. Reading any of them would mean
+attaching a completion port and a drain thread to every group — new machinery on
+the containment object itself, purely for reporting — which this crate does not
+do. Inferring from `PeakJobMemoryUsed` or an exit code is refused as a guess, so
+a capped axis reports `Unknown` there. (On the process-group mechanism the
+answer is `Unknown` too, for a different reason: it has no accounting to read —
+and it refuses to carry a cap in the first place.)
+
+**Read it before the group goes away.** The evidence lives in the container, so
+call `limit_evidence()` while the group is still alive; dropping it (or the
+consuming `shutdown()`) removes the cgroup / closes the job handle and takes the
+counters with it. Reading is free of side effects and repeatable: it sends no
+signal, kills nothing, writes nothing, and cannot perturb teardown or
+kill-on-drop whenever you call it. The counters are cumulative and are not reset
+by reading, by a teardown, or by `update_limits` — an axis whose cap was later
+lifted still reports that it fired while the cap was in force, and so does an
+axis named by an `update_limits` call that *failed* (see above: that call is not
+a rollback, so the axis may have been applied before the failure). An axis that
+never carried a cap is answered without touching the OS at all, so a group
+created without caps performs no evidence I/O whatsoever.
+
+(`LimitEvidence` and `LimitVerdict` are left as bare code spans, not `docs.rs`
+links: they ship in the next release, so a `docs.rs` URL would 404 until then.)
+
+## Stats and sampling
+
+Requires the opt-in **`stats`** feature (`features = ["stats"]`, or `limits`).
+
+```rust,no_run
+use processkit::prelude::StreamExt;
+use processkit::{Command, ProcessGroup};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let group = ProcessGroup::new()?;
+    let _worker = group.start(&Command::new("worker")).await?;
+
+    // Point-in-time:
+    let snap = group.stats()?;
+    println!(
+        "procs={} cpu={:?} peak_rss={:?}",
+        snap.active_process_count, snap.total_cpu_time, snap.peak_memory_bytes,
+    );
+    println!(
+        "io_read={:?} io_write={:?} peak_procs={:?}",
+        snap.io_read_bytes, snap.io_write_bytes, snap.peak_process_count,
+    );
+
+    // …or a series: first sample immediate, then every 250ms; missed ticks are
+    // skipped; the stream ends when the group can no longer report.
+    let mut samples = group.sample_stats(Duration::from_millis(250));
+    while let Some(s) = samples.next().await {
+        println!("rss now: {:?}", s.peak_memory_bytes);
+    }
+    Ok(())
+}
+```
+
+CPU time and peak memory are available where the kernel accounts for the
+whole tree (Windows, Linux cgroup); the process-group backends report the
+member **count** only — the `Option` fields stay `None`. The sampler borrows
+the group, so it can neither outlive it nor keep it (and the kill-on-drop
+guarantee) alive. For a *single run's* end-to-end summary, see
+[`profile`](streaming.md#per-run-telemetry).
+
+### What each measurement is, and where it comes from
+
+`None` never means zero anywhere in this snapshot: it means *this mechanism does
+not account for that*. Which fields carry a number depends on the mechanism, and
+on **two different kinds of source** — a counter the container itself keeps
+(whole-tree and cumulative, exited members included), or a sum over the members
+that are live right now (a member that exits takes its share out of the next
+snapshot):
+
+| Field | Windows Job Object | Linux cgroup v2 | Process group / FreeBSD reaper |
+|---|---|---|---|
+| `active_process_count` | job's `ActiveProcesses` | live `cgroup.procs` members | tracked entries (reaper: whole tree) |
+| `total_cpu_time` | job counter, cumulative | sum over live members (`/proc`) | `None` |
+| `peak_memory_bytes` | job counter (commit charge) | sum of live members' `VmHWM` | `None` |
+| `io_read_bytes` / `io_write_bytes` | job `IO_COUNTERS`, cumulative | `io.stat` `rbytes`/`wbytes`, cumulative — needs the `io` controller | `None` |
+| `peak_process_count` | `None` — no such counter | `pids.peak` — needs the `pids` controller | `None` |
+
+Three caveats are worth reading before comparing numbers across hosts:
+
+- **The I/O counters measure different traffic per platform.** Windows counts the
+  bytes the job's read/write operations moved against *any* target — file, pipe,
+  device. A cgroup's `io.stat` counts what reached the **block layer**, so a read
+  served from the page cache or traffic over a pipe or socket is not in it, and a
+  write is counted when the kernel writes the page back — possibly after the
+  member that dirtied it exited, and not yet at all in a snapshot taken before
+  that. A short write-and-exit run can therefore report fewer bytes than it handed
+  to `write(2)`.
+- **A cgroup reports these only where the controller is enabled** for the group's
+  cgroup (in its parent's `cgroup.subtree_control`). processkit enables exactly
+  the controllers a requested resource cap needs — `memory`, `pids`, `cpu` — and
+  never `io`, so on a host that has not enabled `io` itself the byte counters are
+  honestly `None` rather than a zero.
+- **`peak_process_count` is a peak of what the pids controller counts**, which is
+  *tasks*: every thread of a multi-threaded member counts towards it, so it equals
+  a process count only while the members are single-threaded. Windows reports
+  `None` here rather than a substitute — a job's `ActiveProcesses` is how many are
+  in it now and `TotalProcesses` how many ever were, and neither is a peak.
+
+### An owning, `'static` sampler
+
+Because `sample_stats` borrows the group, its `StatsSampler` is tied to that
+borrow — it can't be moved into a [`tokio::spawn`]ed task or handed across an FFI
+boundary, both of which need a `'static` value. When the group already lives
+behind a shared [`Arc`] (a long-lived service, a supervisor, an FFI wrapper),
+reach instead for `OwnedStatsSampler`, the owning twin — the sampling analogue of
+how [`shutdown_ref`](#tearing-down-drop-terminate-shutdown) is the non-consuming
+twin of `shutdown`:
+
+```rust,no_run
+use std::sync::Arc;
+use std::time::Duration;
+
+use processkit::prelude::StreamExt;
+use processkit::{Command, OwnedStatsSampler, ProcessGroup};
+
+#[tokio::main]
+async fn main() -> processkit::Result<()> {
+    let group = Arc::new(ProcessGroup::new()?);
+    let _worker = group.start(&Command::new("worker")).await?;
+
+    // `Send + 'static`: build it from `&Arc<…>` (the caller keeps the `Arc`) and
+    // move it into a task. Same cadence as `sample_stats` — first sample
+    // immediate, then one per interval, missed ticks skipped.
+    let mut samples = OwnedStatsSampler::new(&group, Duration::from_millis(250));
+    tokio::spawn(async move {
+        while let Some(s) = samples.next().await {
+            println!("rss now: {:?}", s.peak_memory_bytes);
+        }
+        // The series ended: either the container can no longer report, or every
+        // `Arc` to the group was dropped and the tree is gone.
+    });
+    Ok(())
+}
+```
+
+It holds the group only **weakly**, so — exactly like the borrowing
+`StatsSampler` — it never keeps the group or its kill-on-drop guarantee alive; a
+sampler left running in a detached task can't pin a tree that should have been
+torn down. That makes its behaviour when the group goes away well-defined: the
+stream ends — yields `None`, and stays ended (it is fused) — on the first tick
+that can't produce a snapshot, whether because the container was torn down (a
+failed `stats()`, same as the borrowing sampler) **or** because every strong
+`Arc` to the group was released while the sampler ran (the weak handle no longer
+upgrades). It never silently repeats the last snapshot and never leaves the task
+awaiting a tick that will never come.
+
+---
+
+Next: [Streaming & interactive I/O](streaming.md) ·
+[Platform support](platform-support.md) ·
+[Supervision](supervision.md)

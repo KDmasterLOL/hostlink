@@ -73,30 +73,12 @@ fn published_sha256_is_mandatory_and_must_be_exactly_32_bytes() {
 }
 
 #[test]
-fn asset_api_url_is_exact_and_public_download_is_bound_to_release() {
+fn public_download_is_bound_to_release_not_asset_api_url() {
     let target = "x86_64-unknown-linux-gnu";
     let name = asset_name(target).unwrap();
-    let prefix = "https://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/";
-    for url in [
-        "http://api.github.com/repos/KDmasterLOL/hostlink/releases/assets/1".to_owned(),
-        "https://user@api.github.com/repos/KDmasterLOL/hostlink/releases/assets/1".to_owned(),
-        "https://api.github.com.evil.test/repos/KDmasterLOL/hostlink/releases/assets/1".to_owned(),
-        "https://api.github.com:443/repos/KDmasterLOL/hostlink/releases/assets/1".to_owned(),
-        "https://api.github.com/repos/other/hostlink/releases/assets/1".to_owned(),
-        prefix.to_owned(),
-        format!("{prefix}0"),
-        format!("{prefix}0001"),
-        format!("{prefix}+1"),
-        format!("{prefix}184467440737095516160"),
-        format!("{prefix}1/extra"),
-        format!("{prefix}1?query=1"),
-        format!("{prefix}1#fragment"),
-        format!("{prefix}%31"),
-    ] {
-        let bad = ReleaseAsset::new(&name, &url).with_digest(format!("sha256:{}", "ab".repeat(32)));
-        assert!(selected_asset(&[bad], target).is_err(), "accepted {url}");
-    }
-    let selected = selected_asset(&[asset(&name)], target).unwrap().0;
+    let ignored_url = ReleaseAsset::new(&name, "https://example.invalid/untrusted")
+        .with_digest(format!("sha256:{}", "ab".repeat(32)));
+    let selected = selected_asset(&[ignored_url], target).unwrap().0;
     let version = Version::parse("1.2.3").unwrap();
     let download =
         public_download_asset(std::slice::from_ref(&selected), &selected, &version).unwrap();
@@ -116,14 +98,13 @@ fn asset_api_url_is_exact_and_public_download_is_bound_to_release() {
         )
         .is_none()
     );
-    assert!(
-        public_download_asset(
-            &[ReleaseAsset::new(&name, format!("{prefix}2"))
-                .with_digest(selected.digest().unwrap())],
-            &selected,
-            &version
-        )
-        .is_none()
+    let changed_api_url = ReleaseAsset::new(&name, "https://another.invalid/ignored")
+        .with_digest(selected.digest().unwrap());
+    assert_eq!(
+        public_download_asset(&[changed_api_url], &selected, &version)
+            .unwrap()
+            .download_url(),
+        format!("https://github.com/KDmasterLOL/hostlink/releases/download/v1.2.3/{name}")
     );
 }
 

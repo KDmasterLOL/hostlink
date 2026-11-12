@@ -1,13 +1,15 @@
-//! Identity comes from the installed executable, never a release sidecar or updater version.
+//! Build identity and bounded executable verification.
 
+#[cfg(test)]
+use crate::package::EXECUTABLE_NAME;
 use crate::{
     agent_files::hash_file,
-    package::{EXECUTABLE_NAME, MAX_EXECUTABLE_BYTES, invalid, verify_executable},
+    package::{MAX_EXECUTABLE_BYTES, invalid, verify_executable},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File},
+    fs::File,
     io::{self, Read, Seek, SeekFrom},
     path::Path,
     time::Duration,
@@ -26,7 +28,7 @@ pub struct BinaryIdentity {
 /// Return this executable's build identity without accessing credentials or the network.
 pub fn current_binary_identity() -> BinaryIdentity {
     BinaryIdentity {
-        version: env!("CARGO_PKG_VERSION").into(),
+        version: self_update::cargo_crate_version!().into(),
         target: self_update::get_target().into(),
     }
 }
@@ -91,29 +93,6 @@ pub(crate) fn read_identity(path: &Path) -> io::Result<BinaryIdentity> {
         ));
     }
     Ok(identity)
-}
-
-pub(crate) fn read_installed(root: &Path) -> io::Result<(BinaryIdentity, String)> {
-    match fs::symlink_metadata(root.join("enrollment.pending")) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-        Ok(_) => return Err(invalid("Agent enrollment is pending reconciliation")),
-    }
-    let bin = root.join("bin");
-    private_fs::PrivateDir::open(&bin).map_err(io::Error::other)?;
-    let names = fs::read_dir(&bin)?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<io::Result<Vec<_>>>()?;
-    if names != [std::ffi::OsString::from(EXECUTABLE_NAME)] {
-        return Err(invalid(
-            "Agent bin must contain only the installed executable",
-        ));
-    }
-    let path = bin.join(EXECUTABLE_NAME);
-    Ok((
-        read_identity(&path)?,
-        hash_file(&path, MAX_EXECUTABLE_BYTES)?,
-    ))
 }
 
 /// Retain the running image through enrollment so a staging pathname cannot change its bytes.

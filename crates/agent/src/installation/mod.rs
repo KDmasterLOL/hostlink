@@ -4,7 +4,7 @@ mod repair;
 
 pub use crate::executable::{BinaryIdentity, current_binary_identity};
 use crate::{
-    agent_files::{hash_file, validate_path_has_no_reparse_components, validate_user_owned_root},
+    agent_files::{hash_file, validate_path_has_no_reparse_components},
     enrollment::{EnrollmentOptions, EnrollmentResult, prepare_enrollment_with_ca},
     executable::RunningExecutable,
     package::{EXECUTABLE_NAME, MAX_EXECUTABLE_BYTES, invalid, verify_executable},
@@ -79,31 +79,51 @@ fn root_from_data(xdg: Option<&Path>, home: Option<&Path>) -> io::Result<PathBuf
     Ok(root)
 }
 
-/// Enforce the one installation root and private filesystem ownership before updating it.
+/// The current user's installed Agent root, checked when opened.
 ///
-/// # Errors
-/// Refuses alternate, linked, missing or non-private installation directories.
-pub fn validate_installation_root(root: &Path) -> io::Result<()> {
-    let expected = installation_root()?;
-    #[cfg(not(windows))]
-    if root != expected {
-        return Err(invalid(
-            "Agent root must be the stable current-user data location",
-        ));
+/// The retained private directory protects the opened object; callers using
+/// its path must still use the relevant filesystem checks for later operations.
+pub struct InstallationRoot {
+    path: PathBuf,
+    _directory: PrivateDir,
+}
+
+impl InstallationRoot {
+    /// Open the installed root, optionally checking a caller-supplied path.
+    ///
+    /// # Errors
+    /// Refuses alternate, linked, missing or non-private installation directories.
+    pub fn open(requested: Option<&Path>) -> io::Result<Self> {
+        let expected = installation_root()?;
+        let root = requested.unwrap_or(&expected);
+        #[cfg(not(windows))]
+        if root != expected {
+            return Err(invalid(
+                "Agent root must be the stable current-user data location",
+            ));
+        }
+        let directory = PrivateDir::open(root).map_err(io::Error::other)?;
+        #[cfg(windows)]
+        if root.canonicalize()? != expected.canonicalize()? {
+            return Err(invalid(
+                "Agent root must be current-user LocalAppData/HostLink/Agent",
+            ));
+        }
+        PrivateDir::open(
+            root.parent()
+                .ok_or_else(|| invalid("Agent root has no parent"))?,
+        )
+        .map_err(io::Error::other)?;
+        Ok(Self {
+            path: root.to_owned(),
+            _directory: directory,
+        })
     }
-    validate_user_owned_root(root)?;
-    #[cfg(windows)]
-    if root.canonicalize()? != expected.canonicalize()? {
-        return Err(invalid(
-            "Agent root must be current-user LocalAppData/HostLink/Agent",
-        ));
+
+    /// Path used by system APIs that do not accept directory handles.
+    pub fn as_path(&self) -> &Path {
+        &self.path
     }
-    PrivateDir::open(
-        root.parent()
-            .ok_or_else(|| invalid("Agent root has no parent"))?,
-    )
-    .map_err(io::Error::other)?;
-    Ok(())
 }
 
 /// Enroll once or repair the exact existing identity using the verified running executable.

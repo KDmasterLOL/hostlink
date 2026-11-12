@@ -137,6 +137,9 @@ pub(super) enum Command {
         host_target: HostTarget,
         #[arg(long)]
         detach: bool,
+        /// Allow trusted child processes to leave the Windows job; HostLink cannot terminate escaped descendants.
+        #[arg(long, conflicts_with = "detach")]
+        allow_child_breakaway: bool,
         /// Total foreground SSH exec deadline in seconds (1..=600); cannot be used with --detach.
         #[arg(long, conflicts_with = "detach", value_parser = clap::value_parser!(u64).range(1..=600))]
         exec_timeout_seconds: Option<u64>,

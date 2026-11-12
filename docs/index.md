@@ -7,7 +7,7 @@
 - [Agent enrollment](ENROLLMENT.md) — installation and one-use Hub registration.
 - [Agent installation and updates](AGENT_INSTALLATION.md) — user-scoped roots and binary update.
 - [Windows Agent lifecycle](AGENT_LIFECYCLE.md) — user services and Task Scheduler.
-- [Windows offline updates](AGENT_UPDATE_WINDOWS.md) — stop, update and restart.
+- [Windows Agent update](AGENT_UPDATE_WINDOWS.md) — update and restart.
 - [Multi-gateway routing](MULTI_GATEWAY.md) and [TCP forwarding](TCP_FORWARDING.md).
 
 ## Develop HostLink

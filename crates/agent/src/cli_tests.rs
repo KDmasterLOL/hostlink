@@ -5,7 +5,7 @@ fn all_cli_commands_retain_their_arguments() {
     let valid = [
         vec!["check", "--config", "agent.json"],
         vec!["run", "--config", "agent.json"],
-        vec!["update", "--root", "agent", "--version", "1.0.0"],
+        vec!["update", "--version", "1.0.0"],
         vec![
             "enroll",
             "--hub-url",
@@ -63,7 +63,6 @@ fn github_update_accepts_latest_or_exact_version_without_a_root() {
             .expect("GitHub release selection must parse without resolving an install root");
         assert!(matches!(parsed.command, Command::Update(_)));
     }
-    assert!(Cli::try_parse_from(["hostlink-agent", "update", "--root", "agent"]).is_ok());
 }
 
 #[test]

@@ -21,13 +21,13 @@ enum Command {
     Check(commands::check::Args),
     /// Serve SSH/SFTP and optional outbound reverse SSH until terminated.
     Run(commands::run::Args),
-    /// Update a stopped Agent from GitHub Releases using its private credential file.
+    /// Update the Agent from GitHub Releases.
     Update(commands::update::Args),
     /// Enroll a fresh user-owned Agent root with a one-use Hub invitation.
     Enroll(commands::enroll::Args),
     /// Install this bootstrap-verified binary and enroll at the stable per-user location.
     Install(commands::install::Args),
-    /// Machine-readable build identity used by the offline updater.
+    /// Machine-readable build identity used to verify release binaries.
     #[command(hide = true)]
     BinaryInfo,
     /// Manage the new Agent in the current user's service manager.

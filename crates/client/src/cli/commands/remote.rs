@@ -49,6 +49,7 @@ pub(super) async fn exec(
     command: &str,
     stdin_file: Option<&str>,
     timeout_seconds: Option<u64>,
+    allow_child_breakaway: bool,
 ) -> Result<i32, Box<dyn Error>> {
     execute(target, async |client| {
         let payload = match stdin_file {
@@ -56,13 +57,23 @@ pub(super) async fn exec(
             Some(path) => read_existing_file(Path::new(path), MAX_FILE_BYTES)?,
             None => Vec::new(),
         };
-        let response = match timeout_seconds {
-            Some(seconds) => {
-                client
-                    .exec_with_timeout(command, &payload, Duration::from_secs(seconds))
-                    .await?
+        let response = if allow_child_breakaway {
+            client
+                .exec_with_child_breakaway(
+                    command,
+                    &payload,
+                    Duration::from_secs(timeout_seconds.unwrap_or(60)),
+                )
+                .await?
+        } else {
+            match timeout_seconds {
+                Some(seconds) => {
+                    client
+                        .exec_with_timeout(command, &payload, Duration::from_secs(seconds))
+                        .await?
+                }
+                None => client.exec(command, &payload).await?,
             }
-            None => client.exec(command, &payload).await?,
         };
         io::stdout().lock().write_all(&response.stdout)?;
         io::stderr().lock().write_all(&response.stderr)?;

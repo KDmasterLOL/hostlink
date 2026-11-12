@@ -32,4 +32,4 @@ Windows requires an interactive sign-in for the logon task. Stopping a task is n
 
 ## Updates
 
-Stop the Agent and remove its owned task before replacing a Windows executable. Updates do not recreate service registrations automatically. Preserve the installation root and enrollment state. See [Windows offline update](AGENT_UPDATE_WINDOWS.md) and [installation](AGENT_INSTALLATION.md).
+Windows updates stop the Agent and attempt to restore its owned task automatically. Preserve the installation root and enrollment state. See [Windows Agent update](AGENT_UPDATE_WINDOWS.md) and [installation](AGENT_INSTALLATION.md).

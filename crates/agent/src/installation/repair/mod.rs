@@ -17,7 +17,8 @@ pub(super) async fn repair(
     ca: Option<&Path>,
     root: &Path,
 ) -> io::Result<EnrollmentResult> {
-    validate_installation_root(root)?;
+    let installation = InstallationRoot::open(Some(root))?;
+    let root = installation.as_path();
     super::ensure_ready(root)?;
     let expected = options.machine_id.as_ref().ok_or_else(|| invalid(
         "Agent root already exists; existing Agent requires an identity-bound invite from the operator; a fresh invite cannot adopt this root",

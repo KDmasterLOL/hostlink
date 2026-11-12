@@ -3,7 +3,7 @@ members = ["crates/agent", "crates/client", "crates/hub", "vendor/private-fs"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 rust-version = "1.98.1"
 license = "MIT"
@@ -12,7 +12,7 @@ repository = "https://github.com/KDmasterLOL/hostlink"
 [workspace.dependencies]
 russh = { version = "=0.63.3", default-features = false, features = ["ring", "flate2"] }
 russh-sftp = "=3.0.0"
-tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.54.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7.19", features = ["rt"] }
 clap = { version = "=4.6.6", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -43,3 +43,6 @@ apalis-core = "=1.0.0"
 apalis-sqlite = { version = "=1.0.0", default-features = false, features = ["migrate", "json"] }
 sqlx = { version = "=0.9.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
 futures = "0.3.34"
+
+[patch.crates-io]
+processkit = { path = "vendor/processkit" }

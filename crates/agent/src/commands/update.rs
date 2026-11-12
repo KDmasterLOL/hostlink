@@ -1,27 +1,39 @@
 use clap::Args as ClapArgs;
-use hostlink_agent::{installation::installation_root, update::update};
-use std::{io, path::PathBuf};
+use hostlink_agent::installation::InstallationRoot;
+#[cfg(not(windows))]
+use hostlink_agent::update::update;
+use std::io;
 
 #[derive(ClapArgs)]
 pub(crate) struct Args {
-    /// Installed Agent root; defaults to the domain's verified installation location.
-    #[arg(long)]
-    root: Option<PathBuf>,
     /// Exact release version (allows downgrade); defaults to latest stable on GitHub.
     #[arg(long)]
     version: Option<semver::Version>,
+    #[cfg(windows)]
+    #[arg(long, hide = true)]
+    supervisor: Option<uuid::Uuid>,
 }
 
 pub(crate) fn execute(args: Args) -> io::Result<()> {
-    let root = match args.root {
-        Some(root) => root,
-        None => installation_root()?,
-    };
-    let updated = update(&root, args.version.as_ref())?;
-    if updated {
-        println!("Agent binary verified and installed");
-    } else {
-        println!("Agent binary already current");
+    let root = InstallationRoot::open(None)?;
+    #[cfg(windows)]
+    if let Some(operation) = args.supervisor {
+        return hostlink_agent::update::run_managed_update(&root, operation, args.version.as_ref());
     }
-    Ok(())
+    #[cfg(windows)]
+    {
+        hostlink_agent::update::start_managed_update(&root, args.version.as_ref())?;
+        println!("Agent update started; reconnect to verify the version");
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let updated = update(&root, args.version.as_ref())?;
+        if updated {
+            println!("Agent binary verified and installed");
+        } else {
+            println!("Agent binary already current");
+        }
+        Ok(())
+    }
 }
