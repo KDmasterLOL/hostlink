@@ -21,6 +21,10 @@ An explicit version selects `vX.Y.Z`; otherwise the Client uses the latest publi
 
 Build and verify a candidate locally from one clean, committed source revision as described in [artifact packaging](ARTIFACTS_AND_INVITES.md). An operator explicitly invokes `just publish`; it verifies the candidate and uses `gh release create` to upload the four raw assets above, then checks the published inventory and SHA-256 digests. Keep the source-bound receipt private and local. GitHub hosts the public release; GitHub Actions does not build or upload it.
 
+For a pre-release available only by explicit version selection, invoke
+`HOSTLINK_PRERELEASE=true just publish`. Once native acceptance succeeds, the
+same immutable assets may be promoted by changing the GitHub pre-release flag.
+
 ## Installation
 
 ### Repair rollout contract

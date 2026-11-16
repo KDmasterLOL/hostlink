@@ -194,9 +194,15 @@ publish: verify-candidate
     releases=$(gh api repos/KDmasterLOL/hostlink/releases --paginate --slurp)
     jq -e --arg tag "$tag" 'all(.[][]; .tag_name != $tag)' <<< "$releases" >/dev/null
     dir="$release_root/release-candidate/$sha"
-    gh release create "$tag" --verify-tag --notes-from-tag "$dir/hostlink-agent-x86_64-unknown-linux-gnu" "$dir/hostlink-agent-x86_64-pc-windows-msvc.exe" "$dir/hostlink-agent-x86_64-win7-windows-msvc.exe" "$dir/hostlink-agent-i686-win7-windows-msvc.exe"
+    flags=()
+    case "${HOSTLINK_PRERELEASE:-false}" in
+      true) flags+=(--prerelease) ;;
+      false) ;;
+      *) echo 'HOSTLINK_PRERELEASE must be true or false' >&2; exit 1 ;;
+    esac
+    gh release create "$tag" --verify-tag --notes-from-tag "${flags[@]}" "$dir/hostlink-agent-x86_64-unknown-linux-gnu" "$dir/hostlink-agent-x86_64-pc-windows-msvc.exe" "$dir/hostlink-agent-x86_64-win7-windows-msvc.exe" "$dir/hostlink-agent-i686-win7-windows-msvc.exe"
     release=$(gh api "repos/KDmasterLOL/hostlink/releases/tags/$tag")
-    jq -e '.immutable == true and (.assets | length == 4)' <<< "$release" >/dev/null
+    jq -e --argjson prerelease "${HOSTLINK_PRERELEASE:-false}" '.immutable == true and .prerelease == $prerelease and (.assets | length == 4)' <<< "$release" >/dev/null
     while read -r digest name; do
       jq -e --arg name "$name" --arg digest "sha256:$digest" '[.assets[] | select(.name == $name and .digest == $digest)] | length == 1' <<< "$release" >/dev/null
     done < "$dir/SHA256SUMS"
