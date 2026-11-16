@@ -76,12 +76,82 @@ pub async fn prepare_enrollment_with_ca(
     options: &EnrollmentOptions,
     ca_certificate: Option<&Path>,
 ) -> io::Result<EnrollmentResult> {
+    let ca_certificate = load_hub_ca_certificate(ca_certificate)?;
+    prepare_enrollment_for_machine_id(options, None, ca_certificate).await
+}
+
+/// Enroll a replacement installation with fresh keys while retaining its Hub machine ID.
+///
+/// The caller must have validated the explicit replacement invite and local confirmation.
+pub(crate) async fn prepare_replacement_enrollment_with_ca(
+    options: &EnrollmentOptions,
+    machine_id: &MachineId,
+    ca_certificates: Option<Vec<reqwest::Certificate>>,
+) -> io::Result<EnrollmentResult> {
+    prepare_enrollment_for_machine_id(options, Some(machine_id.clone()), ca_certificates).await
+}
+
+/// Read and validate an optional private Hub CA before installation side effects begin.
+pub(crate) fn load_hub_ca_certificate(
+    path: Option<&Path>,
+) -> io::Result<Option<Vec<reqwest::Certificate>>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| invalid("Hub CA certificate is unavailable"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| invalid("Hub CA certificate is unavailable"))?;
+    if !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return Err(invalid("Hub CA certificate is unsafe or oversized"));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(64 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid("Hub CA certificate is unavailable"))?;
+    if bytes.len() > 64 * 1024 {
+        return Err(invalid("Hub CA certificate is unsafe or oversized"));
+    }
+    let certificates = reqwest::Certificate::from_pem_bundle(&bytes)
+        .map_err(|_| invalid("Hub CA certificate is invalid"))?;
+    if certificates.is_empty() {
+        return Err(invalid("Hub CA certificate is invalid"));
+    }
+    // reqwest defers rustls's DER checks until it builds the client TLS config;
+    // validate that config now, before creating a root or stopping an old task.
+    let mut builder = Client::builder().use_rustls_tls();
+    for certificate in &certificates {
+        builder = builder.add_root_certificate(certificate.clone());
+    }
+    builder
+        .build()
+        .map_err(|_| invalid("Hub CA certificate is invalid"))?;
+    Ok(Some(certificates))
+}
+
+async fn prepare_enrollment_for_machine_id(
+    options: &EnrollmentOptions,
+    machine_id: Option<MachineId>,
+    ca_certificates: Option<Vec<reqwest::Certificate>>,
+) -> io::Result<EnrollmentResult> {
     let hub_url = options.hub_url.clone();
-    let ca_certificate = ca_certificate.map(Path::to_path_buf);
-    let result = prepare_enrollment_using(options, move |_, request| {
+    let result = prepare_enrollment_using_machine_id(options, machine_id, move |_, request| {
         let hub_url = hub_url.clone();
-        let ca_certificate = ca_certificate.clone();
-        async move { enroll_once(&hub_url, request, ca_certificate.as_deref()).await }
+        async move { enroll_once(&hub_url, request, ca_certificates.as_deref()).await }
     })
     .await;
     if let Err(error) = result {
@@ -95,8 +165,34 @@ pub async fn prepare_enrollment_with_ca(
     result
 }
 
+#[cfg(test)]
 pub(crate) async fn prepare_enrollment_using<F, Fut>(
     options: &EnrollmentOptions,
+    enroll: F,
+) -> io::Result<EnrollmentResult>
+where
+    F: FnOnce(&str, EnrollRequest) -> Fut,
+    Fut: std::future::Future<Output = io::Result<EnrollResponse>>,
+{
+    prepare_enrollment_using_machine_id(options, None, enroll).await
+}
+
+#[cfg(test)]
+pub(crate) async fn prepare_replacement_enrollment_using<F, Fut>(
+    options: &EnrollmentOptions,
+    machine_id: &MachineId,
+    enroll: F,
+) -> io::Result<EnrollmentResult>
+where
+    F: FnOnce(&str, EnrollRequest) -> Fut,
+    Fut: std::future::Future<Output = io::Result<EnrollResponse>>,
+{
+    prepare_enrollment_using_machine_id(options, Some(machine_id.clone()), enroll).await
+}
+
+async fn prepare_enrollment_using_machine_id<F, Fut>(
+    options: &EnrollmentOptions,
+    machine_id: Option<MachineId>,
     enroll: F,
 ) -> io::Result<EnrollmentResult>
 where
@@ -114,7 +210,10 @@ where
     ensure_fresh_root_parent(&options.install_root)?;
     let token = read_token(&options.token_file)?;
 
-    let machine_id = MachineId::parse(Uuid::new_v4().to_string()).map_err(invalid_data)?;
+    let machine_id = match machine_id {
+        Some(machine_id) => machine_id,
+        None => MachineId::parse(Uuid::new_v4().to_string()).map_err(invalid_data)?,
+    };
     let reverse_key =
         PrivateKey::random(&mut rng(), Algorithm::Ed25519).map_err(io::Error::other)?;
     let host_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).map_err(io::Error::other)?;
@@ -353,7 +452,7 @@ where
 pub(crate) async fn enroll_once(
     hub_url: &str,
     request: EnrollRequest,
-    ca_certificate: Option<&Path>,
+    ca_certificates: Option<&[reqwest::Certificate]>,
 ) -> io::Result<EnrollResponse> {
     let mut url = parse_hub_url(hub_url)?;
     url.set_path(ENROLLMENT_PATH);
@@ -363,38 +462,10 @@ pub(crate) async fn enroll_once(
         .redirect(Policy::none())
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT);
-    if let Some(path) = ca_certificate {
-        let mut options = OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    if let Some(certificates) = ca_certificates {
+        for certificate in certificates {
+            builder = builder.add_root_certificate(certificate.clone());
         }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            options.custom_flags(0x0020_0000);
-        }
-        let file = options
-            .open(path)
-            .map_err(|_| invalid("Hub CA certificate is unavailable"))?;
-        let metadata = file
-            .metadata()
-            .map_err(|_| invalid("Hub CA certificate is unavailable"))?;
-        if !metadata.is_file() || metadata.len() > 64 * 1024 {
-            return Err(invalid("Hub CA certificate is unsafe or oversized"));
-        }
-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        file.take(64 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| invalid("Hub CA certificate is unavailable"))?;
-        if bytes.len() > 64 * 1024 {
-            return Err(invalid("Hub CA certificate is unsafe or oversized"));
-        }
-        let certificate = reqwest::Certificate::from_pem(&bytes)
-            .map_err(|_| invalid("Hub CA certificate is invalid"))?;
-        builder = builder.add_root_certificate(certificate);
     }
     let client = builder
         .build()

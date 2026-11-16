@@ -20,7 +20,11 @@ pub use linux::{install, remove, start, status, stop};
 pub use windows::{install, remove, start, status, stop};
 
 #[cfg(target_os = "linux")]
+pub(crate) use linux::prepare_missing_root_reinstall;
+#[cfg(target_os = "linux")]
 pub(crate) use linux::remove as remove_for_repair;
+#[cfg(windows)]
+pub(crate) use windows::prepare_missing_root_reinstall;
 #[cfg(windows)]
 pub(crate) use windows::remove_for_repair;
 
@@ -32,3 +36,5 @@ compile_error!("HostLink Agent service lifecycle supports Linux and Windows only
 pub(crate) use offline::ensure_offline as ensure_agent_offline;
 #[cfg(windows)]
 pub(crate) use offline::ensure_repair_offline;
+#[cfg(windows)]
+pub(crate) use offline::reject_running_agent;

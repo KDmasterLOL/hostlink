@@ -35,10 +35,14 @@ build-all: build-linux build-windows build-win7-x64 build-win7-x86
 _build target:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Use rustup directly: the mise cargo shim would replace this recipe's
+    # source-specific CARGO_TARGET_DIR with the interactive development cache.
+    export PATH="$HOME/.cargo/bin:$PATH"
     test -z "$(git status --porcelain=v1 --untracked-files=all)" || { echo 'Commit all changes before building' >&2; exit 1; }
     sha=$(git rev-parse HEAD)
+    release_root="${XDG_CACHE_HOME:-$HOME/.cache}/rust-build/hostlink/releases/$(printf '%s' "$PWD" | sha256sum | cut -c1-12)"
     target='{{target}}'
-    export CARGO_TARGET_DIR="$PWD/target/local-build/$sha/$target"
+    export CARGO_TARGET_DIR="$release_root/local-build/$sha/$target"
     mkdir -p "$CARGO_TARGET_DIR"
     rm -f "$CARGO_TARGET_DIR/build.sha256" "$CARGO_TARGET_DIR/toolchain"
     unset CARGO_ENCODED_RUSTFLAGS RUSTFLAGS
@@ -92,11 +96,12 @@ stage:
     umask 077
     test -z "$(git status --porcelain=v1 --untracked-files=all)"
     sha=$(git rev-parse HEAD)
-    dir="$PWD/target/release-candidate/$sha"
+    release_root="${XDG_CACHE_HOME:-$HOME/.cache}/rust-build/hostlink/releases/$(printf '%s' "$PWD" | sha256sum | cut -c1-12)"
+    dir="$release_root/release-candidate/$sha"
     test ! -e "$dir" || { echo 'Candidate already exists' >&2; exit 1; }
     # Check every input before creating a candidate, so a missing build is retryable.
     for target in x86_64-unknown-linux-gnu x86_64-pc-windows-msvc x86_64-win7-windows-msvc i686-win7-windows-msvc; do
-      root="$PWD/target/local-build/$sha/$target"
+      root="$release_root/local-build/$sha/$target"
       suffix=.exe; test "$target" != x86_64-unknown-linux-gnu || suffix=
       src="$root/$target/release/hostlink-agent$suffix"
       test -f "$src" && test ! -L "$src" && test -s "$src" && test "$(wc -c < "$src")" -le 268435456
@@ -105,7 +110,7 @@ stage:
     done
     mkdir -p "$dir"
     for target in x86_64-unknown-linux-gnu x86_64-pc-windows-msvc x86_64-win7-windows-msvc i686-win7-windows-msvc; do
-      root="$PWD/target/local-build/$sha/$target"
+      root="$release_root/local-build/$sha/$target"
       suffix=.exe; test "$target" != x86_64-unknown-linux-gnu || suffix=
       src="$root/$target/release/hostlink-agent$suffix"
       cp "$src" "$dir/hostlink-agent-$target$suffix"
@@ -125,7 +130,8 @@ verify-candidate:
     set -euo pipefail
     test -z "$(git status --porcelain=v1 --untracked-files=all)"
     sha=$(git rev-parse HEAD)
-    dir="$PWD/target/release-candidate/$sha"
+    release_root="${XDG_CACHE_HOME:-$HOME/.cache}/rust-build/hostlink/releases/$(printf '%s' "$PWD" | sha256sum | cut -c1-12)"
+    dir="$release_root/release-candidate/$sha"
     test "$(cat "$dir/SOURCE_SHA")" = "$sha"
     cd "$dir"
     shopt -s nullglob dotglob
@@ -170,6 +176,7 @@ publish: verify-candidate
     export GH_REPO=KDmasterLOL/hostlink
     test "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" = "$GH_REPO"
     sha=$(git rev-parse HEAD)
+    release_root="${XDG_CACHE_HOME:-$HOME/.cache}/rust-build/hostlink/releases/$(printf '%s' "$PWD" | sha256sum | cut -c1-12)"
     version=$(cargo +1.99.1 metadata --locked --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "hostlink-agent") | .version')
     tag="v$version"
     test "$(git rev-parse "refs/tags/$tag^{commit}")" = "$sha"
@@ -186,7 +193,7 @@ publish: verify-candidate
     # API errors other than 404 also refuse publication.
     releases=$(gh api repos/KDmasterLOL/hostlink/releases --paginate --slurp)
     jq -e --arg tag "$tag" 'all(.[][]; .tag_name != $tag)' <<< "$releases" >/dev/null
-    dir="target/release-candidate/$sha"
+    dir="$release_root/release-candidate/$sha"
     gh release create "$tag" --verify-tag --notes-from-tag "$dir/hostlink-agent-x86_64-unknown-linux-gnu" "$dir/hostlink-agent-x86_64-pc-windows-msvc.exe" "$dir/hostlink-agent-x86_64-win7-windows-msvc.exe" "$dir/hostlink-agent-i686-win7-windows-msvc.exe"
     release=$(gh api "repos/KDmasterLOL/hostlink/releases/tags/$tag")
     jq -e '.immutable == true and (.assets | length == 4)' <<< "$release" >/dev/null

@@ -23,9 +23,13 @@ The Hub does not execute remote commands or host the Agent's jobs database. The 
 | Windows 7 / Server 2008 R2 x86-64 | `x86_64-win7-windows-msvc` |
 | Windows 7 x86 | `i686-win7-windows-msvc` |
 
-The bootstrap selects NT 10 x86-64 from build 10240; native acceptance remains separate. macOS is not implemented. The exact native acceptance criteria are in [Windows 7 compatibility](docs/WIN7_REWRITE_ACCEPTANCE.md).
+The bootstrap selects the Windows 7 x86-64 Agent on NT 10 builds 10240–17762 and the Windows 10 / 11 Agent starting with build 17763. Native acceptance remains separate. macOS is not implemented. The exact native acceptance criteria are in [Windows 7 compatibility](docs/WIN7_REWRITE_ACCEPTANCE.md).
 
 ## Build and test
+
+Run Cargo and `just` recipes through `mise exec --` to use the Copier-managed,
+per-worktree build cache, for example `mise exec -- just check`. Release build
+and candidate files also use the external cache.
 
 Build and verification run locally through the root `Justfile`; GitHub Actions is not used. Run `just check` for the workspace check, and `just test` and `just clippy` for the corresponding local tests and lint. Use `just --list` for available recipes.
 
@@ -72,6 +76,8 @@ The command prints one paste-ready bootstrap containing a one-use invitation. Pr
 The Agent's SSH protocol login defaults to the Controller Hub configuration's `ssh_user`, independently of the target OS account. If `--ssh-user` is supplied, it must match that configured login.
 
 For an exact existing Hub name, the same command issues an identity-bound repair invitation. Paste it locally or through RDP: existing Agent connectivity is not required. Repair preserves machine ID, both SSH keys, assigned port and Apalis jobs while refreshing approved gateway routes/pins and restoring the owned user service. It can also migrate the Agent's SSH protocol login to the Controller-configured login without changing the OS account. Lost SSH keys require explicit operator authorization and typed target confirmation; see [installation and repair](docs/AGENT_INSTALLATION.md). Source-bound release publication and native platform acceptance remain separate gates.
+
+If the Agent installation root was deleted, use `hostlink invite lumenvat --os windows --reinstall` with that exact existing Hub name. This uses a Hub identity-rotation invitation and requires typed confirmation on the target. Reinstall requires Agent v0.2.7 or newer; the Controller checks both an explicitly selected release and the resolved `latest` before issuing an invitation. The Hub machine ID and assigned port are retained; the deleted local root's SSH identity, state and queued jobs cannot be recovered. Unknown names are rejected before gateway lookup or invitation issuance.
 
 Windows repair checks SQLite's owner-only inherited ACLs without rewriting the database or its permissions; the other private state still requires protected ACLs.
 

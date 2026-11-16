@@ -184,6 +184,31 @@ pub fn status(root: &Path) -> io::Result<ServiceStatus> {
     })
 }
 
+/// Stop the owned task for a missing installation without deleting its registration.
+///
+/// The task is verified against the canonical future root, so this works when its
+/// executable directory has already been removed. A task with a different command
+/// or owner is treated as a collision and is never changed.
+pub(crate) fn prepare_missing_root_reinstall(root: &Path) -> io::Result<()> {
+    let absolute = std::path::absolute(root)?;
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| invalid("Agent root has no parent"))?;
+    PrivateDir::open(parent).map_err(io::Error::other)?;
+    let file_name = absolute
+        .file_name()
+        .ok_or_else(|| invalid("Agent root has no file name"))?;
+    let expected_root = parent.canonicalize()?.join(file_name);
+    let _apartment = Apartment::new()?;
+    let folder = task_folder()?;
+    if let Some(task) = registered(&folder, &task_name(&expected_root)?)? {
+        verify_task(&task, &expected_root)?;
+        stop_task(&task)?;
+    }
+    crate::service::reject_running_agent(&expected_root.join("bin/hostlink-agent.exe"))?;
+    Ok(())
+}
+
 /// Read-only updater guard; the updater holds update.lock for its transaction.
 pub(crate) fn ensure_update_unregistered(root: &Path) -> io::Result<()> {
     // The updater validates its install root before calling this read-only guard.

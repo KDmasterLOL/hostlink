@@ -1,0 +1,19 @@
+# Layout selected when this additive component was rendered by Copier.
+# Run cargo inside `mise exec -- ...` or an activated mise environment.
+# Project mode is intended for a single checkout. Use worktree mode when
+# multiple checkouts exist: even sequential builds can reuse stale binaries.
+
+[env]
+CARGO_TARGET_DIR = "{{ xdg_cache_home }}/rust-build/hostlink/worktrees/{{ config_root | hash(len=12) }}/target"
+
+
+# cargo-sweep is an optional, user-installed Cargo subcommand.
+# These tasks affect only the resolved current target, not every Rust cache.
+# NEVER run cleanup while a Cargo build is active against that target.
+[tasks.cache-preview]
+description = "Preview cargo-sweep cleanup for this Cargo target, without deleting files"
+run = "cargo sweep --dry-run --maxsize 40GiB"
+
+[tasks.cache-sweep]
+description = "Explicitly clean the current Cargo target with cargo-sweep; run only when no build is active"
+run = "cargo sweep --maxsize 40GiB"

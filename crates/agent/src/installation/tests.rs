@@ -139,6 +139,7 @@ fn install_forwards_explicit_gateway_selection_to_enrollment() {
         let options = InstallOptions {
             machine_id: None,
             replace_identity: false,
+            reinstall: false,
             hub_url: "https://hub.test".into(),
             token_file: "token".into(),
             name: "host".into(),
@@ -149,4 +150,39 @@ fn install_forwards_explicit_gateway_selection_to_enrollment() {
         assert_eq!(enrollment.gateway_index, index);
         assert!(enrollment.retain_pending);
     }
+}
+
+#[test]
+fn missing_root_reinstall_requires_explicit_replacement_and_exact_machine_id() {
+    let machine_id =
+        hostlink_hub::MachineId::parse("00000000-0000-4000-8000-000000000001".to_owned()).unwrap();
+    let options = InstallOptions {
+        machine_id: Some(machine_id.clone()),
+        replace_identity: true,
+        reinstall: true,
+        hub_url: "https://hub.test".into(),
+        token_file: "token".into(),
+        name: "host".into(),
+        user: "agent".into(),
+        gateway_index: None,
+    };
+    assert_eq!(
+        replacement_identity_for_missing_root(&options).unwrap(),
+        &machine_id
+    );
+    assert!(reject_reinstall_of_existing_root(&options).is_err());
+
+    let mut no_rotation = options.clone();
+    no_rotation.replace_identity = false;
+    assert!(replacement_identity_for_missing_root(&no_rotation).is_err());
+    assert!(reject_reinstall_of_existing_root(&no_rotation).is_err());
+
+    let mut no_id = options.clone();
+    no_id.machine_id = None;
+    assert!(replacement_identity_for_missing_root(&no_id).is_err());
+
+    for answer in ["", "wrong-id", &format!("{} ", machine_id)] {
+        assert!(validate_reinstall_confirmation(&machine_id, answer).is_err());
+    }
+    assert!(validate_reinstall_confirmation(&machine_id, machine_id.as_str()).is_ok());
 }

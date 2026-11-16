@@ -8,7 +8,11 @@ if ($version.Major -eq 6 -and $version.Minor -eq 1) {
     elseif ($arch -eq 'x86') { $Target = 'i686-win7-windows-msvc'; $AgentSha256 = $ShaWin7X86 }
     else { throw 'Unsupported Windows architecture.' }
 } elseif ($version.Major -eq 10 -and [int]$os.BuildNumber -ge 10240 -and $arch -eq 'AMD64') {
-    $Target = 'x86_64-pc-windows-msvc'; $AgentSha256 = $ShaWin11X64
+    if ([int]$os.BuildNumber -lt 17763) {
+        $Target = 'x86_64-win7-windows-msvc'; $AgentSha256 = $ShaWin7X64
+    } else {
+        $Target = 'x86_64-pc-windows-msvc'; $AgentSha256 = $ShaWin11X64
+    }
 } else { throw 'Unsupported Windows version or architecture.' }
 if ($RequestedTarget -and $RequestedTarget -ne $Target) { throw 'Selected target does not match this Windows system.' }
 if ($AgentSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'No matching release digest.' }
@@ -35,6 +39,7 @@ try {
     if (-not [string]::IsNullOrEmpty($GatewayIndex)) { $installArgs += @('--gateway-index', $GatewayIndex) }
     if ($MachineId) { $installArgs += @('--machine-id', $MachineId) }
     if ($ReplaceIdentity) { $installArgs += '--replace-identity' }
+    if ($Reinstall) { $installArgs += '--reinstall' }
     & $agentFile @installArgs
     if ($LASTEXITCODE -ne 0) { throw 'Agent install failed.' }
     Remove-Item -LiteralPath $stage -Recurse -Force

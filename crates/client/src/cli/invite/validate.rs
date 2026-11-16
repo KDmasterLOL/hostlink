@@ -77,6 +77,7 @@ pub struct ArtifactSelection {
     pub(super) gateway_index: Option<usize>,
     pub(super) machine_id: Option<hostlink_hub::MachineId>,
     pub(crate) replace_identity: bool,
+    pub(crate) reinstall: bool,
 }
 
 #[derive(Debug, Error)]
@@ -99,6 +100,11 @@ impl ArtifactSelection {
                 "identity replacement requires an exact existing machine ID",
             ));
         }
+        if self.reinstall && (!self.replace_identity || self.machine_id.is_none()) {
+            return Err(BootstrapError::Invalid(
+                "reinstall requires replacement authorization and an exact existing machine ID",
+            ));
+        }
         if !canonical_name(&self.name) {
             return Err(BootstrapError::Invalid(
                 "name must be canonical lowercase ASCII",
@@ -118,6 +124,23 @@ impl ArtifactSelection {
         }
         // Release names and published digests are checked by the metadata resolver.
         validate_github_asset_url(&self.agent_url, self.target)?;
+        if self.reinstall {
+            let tag = self
+                .agent_url
+                .path()
+                .split('/')
+                .nth(5)
+                .ok_or(BootstrapError::Invalid("missing release tag"))?;
+            let version = tag
+                .strip_prefix('v')
+                .and_then(|value| semver::Version::parse(value).ok())
+                .ok_or(BootstrapError::Invalid("invalid release tag"))?;
+            if version < semver::Version::new(0, 2, 7) {
+                return Err(BootstrapError::Invalid(
+                    "--reinstall requires an Agent release v0.2.7 or newer",
+                ));
+            }
+        }
         Ok(())
     }
 }

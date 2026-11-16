@@ -10,6 +10,7 @@ fn selections(targets: &[Target]) -> Vec<ArtifactSelection> {
         .map(|(i, &target)| ArtifactSelection {
             machine_id: None,
             replace_identity: false,
+            reinstall: false,
             agent_url: Url::parse(&format!(
                 "https://github.com/KDmasterLOL/hostlink/releases/download/v1.2.3/{}",
                 target.asset_name()
@@ -73,6 +74,9 @@ fn inline_commands_bind_fixed_token_and_verify_before_install() {
                 assert!(script.contains("Read-Host $Prompt -AsSecureString"));
                 assert!(script.contains("$version.Major -eq 6 -and $version.Minor -eq 1"));
                 assert!(script.contains("$os.BuildNumber -ge 10240"));
+                assert!(script.contains("$os.BuildNumber -lt 17763"));
+                assert!(script.contains("$AgentSha256 = $ShaWin7X64"));
+                assert!(script.contains("$AgentSha256 = $ShaWin11X64"));
                 assert!(
                     script.find("Agent executable SHA-256 mismatch").unwrap()
                         < script.find("Write-PrivateSecret $tokenFile").unwrap()
@@ -299,7 +303,7 @@ fn windows_length_is_checked_with_incompressible_digests() {
     for replacement in [false, true] {
         for asset in &mut assets {
             asset.bind_repair(
-                hostlink_hub::MachineId::parse("1d57eaa7-9252-4e11-9a21-dcc190eca950").unwrap(),
+                hostlink_hub::MachineId::parse("00000000-0000-4000-8000-000000000001").unwrap(),
             );
             asset.replace_identity = replacement;
         }
@@ -311,9 +315,36 @@ fn windows_length_is_checked_with_incompressible_digests() {
         assert!(command.0.len() <= CMD_LIMIT);
         let script = unpack(&command.0);
         assert!(script.contains("--machine-id"));
-        assert!(script.contains("$MachineId='1d57eaa7-9252-4e11-9a21-dcc190eca950'"));
+        assert!(script.contains("$MachineId='00000000-0000-4000-8000-000000000001'"));
         assert!(script.contains("--replace-identity"));
+        assert!(script.contains("$Reinstall=''"));
     }
+
+    for asset in &mut assets {
+        asset.reinstall = true;
+    }
+    let command = render_inline(&assets).expect("reinstall Windows command must fit");
+    let script = unpack(&command.0);
+    assert!(script.contains("$ReplaceIdentity='yes'"));
+    assert!(script.contains("$Reinstall='yes'"));
+    assert!(script.contains("--replace-identity"));
+    assert!(script.contains("--reinstall"));
+}
+
+#[test]
+fn reinstall_is_forwarded_as_a_distinct_posix_agent_flag() {
+    let mut asset = selections(&[Target::LinuxX64]).remove(0);
+    asset.bind_repair(
+        hostlink_hub::MachineId::parse("00000000-0000-4000-8000-000000000001").unwrap(),
+    );
+    asset.replace_identity = true;
+    asset.reinstall = true;
+
+    let script = unpack(&render_inline(&[asset]).unwrap().0);
+    assert!(script.contains("machine_id='00000000-0000-4000-8000-000000000001'"));
+    assert!(script.contains("--machine-id \"$machine_id\""));
+    assert!(script.contains("--replace-identity"));
+    assert!(script.contains("--reinstall"));
 }
 
 #[test]

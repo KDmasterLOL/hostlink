@@ -271,6 +271,7 @@ async fn authorized_stale_route_repair_preserves_identity_jobs_and_private_state
         args: vec![],
         cwd: None,
         timeout_seconds: None,
+        allow_child_breakaway: false,
     })
     .await
     .unwrap();

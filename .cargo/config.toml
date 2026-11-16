@@ -1,0 +1,17 @@
+# Developer-build defaults; package-specific opt-levels stay in Cargo.toml.
+# The cache layout is controlled by the generated mise.toml (not CARGO_HOME).
+[profile.dev]
+
+debug = 0
+incremental = false
+
+
+[profile.dev.package."*"]
+debug = 0
+
+
+# Optional: requires an installed sccache executable. Incremental Rust
+# compiler invocations are not cached by sccache.
+[build]
+rustc-wrapper = "sccache"
+build-dir = "{cargo-cache-home}/build/{workspace-path-hash}"

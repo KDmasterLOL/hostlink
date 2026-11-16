@@ -24,6 +24,9 @@ pub(crate) struct Args {
     /// Replace lost SSH keys only with an explicit operator rotation invite and typed local confirmation.
     #[arg(long, requires = "machine_id")]
     replace_identity: bool,
+    /// Recreate a missing root using new keys while preserving the Hub machine ID; requires explicit confirmation.
+    #[arg(long, requires_all = ["machine_id", "replace_identity"])]
+    reinstall: bool,
 }
 
 pub(crate) async fn execute(args: Args) -> io::Result<()> {
@@ -31,6 +34,7 @@ pub(crate) async fn execute(args: Args) -> io::Result<()> {
         &InstallOptions {
             machine_id: args.machine_id,
             replace_identity: args.replace_identity,
+            reinstall: args.reinstall,
             hub_url: args.hub_url,
             token_file: args.token_file,
             name: args.name,

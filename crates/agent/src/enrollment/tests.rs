@@ -471,6 +471,7 @@ async fn fresh_enrollment_publishes_private_config_once_against_local_hub_v2() {
     assert_eq!(fs::read_dir(install_root.join("bin")).unwrap().count(), 1);
     let replay = replay_request.lock().unwrap().take().unwrap();
     let replay_response = replay_app
+        .clone()
         .oneshot(
             Request::post("/v2/enroll")
                 .header("content-type", "application/json")
@@ -488,6 +489,7 @@ async fn fresh_enrollment_publishes_private_config_once_against_local_hub_v2() {
         "existing root must not be adopted or reenrolled"
     );
     let hosts_response = inventory_app
+        .clone()
         .oneshot(
             Request::get("/v2/hosts")
                 .header("authorization", format!("Bearer {operator}"))
@@ -503,4 +505,168 @@ async fn fresh_enrollment_publishes_private_config_once_against_local_hub_v2() {
     )
     .unwrap();
     assert_eq!(hosts["hosts"].as_array().unwrap().len(), 1);
+
+    let rotation_invite = inventory_app
+        .clone()
+        .oneshot(
+            Request::post("/v2/invites")
+                .header("authorization", format!("Bearer {operator}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&InviteRequest {
+                        repair_machine_id: None,
+                        ttl_seconds: 900,
+                        name: Some("enroll-test".into()),
+                        rotate_machine_id: Some(identity.machine_id.clone()),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rotation_invite.status(), axum::http::StatusCode::CREATED);
+    let rotation_invite: hostlink_hub::InviteResponse = serde_json::from_slice(
+        &to_bytes(rotation_invite.into_body(), MAX_RESPONSE_BYTES)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let rotation_token = fixture.path().join("rotation-token");
+    write_private_new(
+        &rotation_token,
+        rotation_invite.token.expose_secret().as_bytes(),
+    )
+    .unwrap();
+    let replacement_root = fixture.path().join("replacement-agent");
+    let replacement_options = EnrollmentOptions {
+        hub_url: "https://hub.invalid".into(),
+        token_file: rotation_token,
+        install_root: replacement_root.clone(),
+        name: "enroll-test".into(),
+        user: "agent-user".into(),
+        gateway_index: Some(1),
+        retain_pending: true,
+    };
+    let replacement_result = prepare_replacement_enrollment_using(
+        &replacement_options,
+        &identity.machine_id,
+        move |_, request| async move {
+            let response = replay_app
+                .oneshot(
+                    Request::post("/v2/enroll")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .map_err(io::Error::other)?;
+            if response.status() != axum::http::StatusCode::CREATED {
+                return Err(io::Error::other(format!(
+                    "Hub rejected replacement enrollment: {}",
+                    response.status()
+                )));
+            }
+            serde_json::from_slice(
+                &to_bytes(response.into_body(), MAX_RESPONSE_BYTES)
+                    .await
+                    .map_err(io::Error::other)?,
+            )
+            .map_err(io::Error::other)
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        replacement_result.machine_id,
+        identity.machine_id.to_string()
+    );
+    let replacement_identity: EnrollmentIdentity =
+        serde_json::from_slice(&fs::read(replacement_root.join("state/machine.json")).unwrap())
+            .unwrap();
+    assert_eq!(replacement_identity.machine_id, identity.machine_id);
+    assert_ne!(replacement_identity.ssh_public_key, identity.ssh_public_key);
+    assert_ne!(
+        replacement_identity.ssh_host_public_key,
+        identity.ssh_host_public_key
+    );
+}
+
+#[tokio::test]
+async fn replacement_enrollment_uncertain_result_keeps_pending_root_and_exact_machine_id() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::remove_dir(temp.path()).unwrap();
+    PrivateDir::ensure(temp.path()).unwrap();
+    let token_file = temp.path().join("invite-token");
+    write_private_new(&token_file, "ab".repeat(32).as_bytes()).unwrap();
+    let machine_id = MachineId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+    let install_root = temp.path().join("Agent");
+    let options = EnrollmentOptions {
+        hub_url: "https://hub.invalid".into(),
+        token_file,
+        install_root: install_root.clone(),
+        name: "host".into(),
+        user: "agent".into(),
+        gateway_index: None,
+        retain_pending: true,
+    };
+    let expected_id = machine_id.clone();
+    let error =
+        prepare_replacement_enrollment_using(&options, &machine_id, |_, request| async move {
+            assert_eq!(request.machine_id, expected_id);
+            Err(io::Error::new(io::ErrorKind::TimedOut, "fixture timeout"))
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("outcome is uncertain"),
+        "unexpected replacement error: {error}"
+    );
+    assert!(install_root.join("enrollment.pending").is_file());
+    let stage = fs::read_dir(&install_root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.file_name().to_string_lossy().starts_with(".stage-"))
+        .expect("uncertain Hub result retains staged key material");
+    assert!(stage.path().join("enrollment-attempt.json").is_file());
+    let retry = prepare_replacement_enrollment_using(&options, &machine_id, |_, _| async {
+        panic!("uncertain one-use invite must not be retried")
+    })
+    .await;
+    assert!(retry.is_err());
+}
+
+#[tokio::test]
+async fn invalid_hub_ca_is_rejected_before_creating_root_or_pending_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::remove_dir(temp.path()).unwrap();
+    PrivateDir::ensure(temp.path()).unwrap();
+    let token_file = temp.path().join("invite-token");
+    write_private_new(&token_file, "ab".repeat(32).as_bytes()).unwrap();
+    let install_root = temp.path().join("Agent");
+    let options = EnrollmentOptions {
+        hub_url: "https://hub.invalid".into(),
+        token_file,
+        install_root: install_root.clone(),
+        name: "host".into(),
+        user: "agent".into(),
+        gateway_index: None,
+        retain_pending: true,
+    };
+
+    for (index, ca_bytes) in [
+        b"not a PEM certificate".as_slice(),
+        b"-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydA==\n-----END CERTIFICATE-----\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ca_file = temp.path().join(format!("hub-ca-{index}.pem"));
+        write_private_new(&ca_file, ca_bytes).unwrap();
+        let error = prepare_enrollment_with_ca(&options, Some(&ca_file))
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Hub CA certificate is invalid");
+        assert!(!install_root.exists());
+    }
 }

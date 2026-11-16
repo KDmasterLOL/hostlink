@@ -5,6 +5,7 @@ fn selection(target: Target) -> ArtifactSelection {
     ArtifactSelection {
         machine_id: None,
         replace_identity: false,
+        reinstall: false,
         agent_url: Url::parse(&format!(
             "https://github.com/KDmasterLOL/hostlink/releases/download/v1.2.3/{}",
             target.asset_name()

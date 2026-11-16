@@ -2,6 +2,7 @@ use super::*;
 use axum::http::StatusCode;
 use hostlink_hub::router;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 #[test]
 fn aborted_enrollment_keeps_invite_unused_and_can_be_manually_reconciled() {
@@ -227,6 +228,117 @@ async fn fresh_invite_cannot_hijack_and_rotation_is_explicit() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(response["host"]["ssh_public_key"], replacement);
+}
+
+#[tokio::test]
+async fn newest_rotation_invite_supersedes_previous_pending_invite() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = router(service(dir.path(), key()));
+    let token = invite(app.clone(), "node", None).await;
+    let (status, _) = call(
+        app.clone(),
+        "POST",
+        "/v2/enroll",
+        None,
+        serde_json::to_value(enrollment(token, "machine-002", "node", key(), key())).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let older = invite(app.clone(), "node", Some("machine-002")).await;
+    let newest = invite(app.clone(), "node", Some("machine-002")).await;
+    let before = persisted(dir.path());
+    let (status, _) = call(
+        app.clone(),
+        "POST",
+        "/v2/enroll",
+        None,
+        serde_json::to_value(enrollment(older, "machine-002", "node", key(), key())).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(persisted(dir.path()), before);
+
+    let (status, _) = call(
+        app,
+        "POST",
+        "/v2/enroll",
+        None,
+        serde_json::to_value(enrollment(newest, "machine-002", "node", key(), key())).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn successful_rotation_invalidates_legacy_pending_rotation_invites() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = router(service(dir.path(), key()));
+    let token = invite(app.clone(), "node", None).await;
+    let (status, _) = call(
+        app.clone(),
+        "POST",
+        "/v2/enroll",
+        None,
+        serde_json::to_value(enrollment(token, "machine-002", "node", key(), key())).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let accepted = invite(app.clone(), "node", Some("machine-002")).await;
+    let accepted_digest = hex::encode(Sha256::digest(accepted.as_bytes()));
+    let state_path = dir.path().join("hostlink-hub-v2/registry-v2.json");
+    let state_after_first_invite: Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    let accepted_record = state_after_first_invite["invites"][&accepted_digest].clone();
+
+    let stale = invite(app.clone(), "node", Some("machine-002")).await;
+    let stale_digest = hex::encode(Sha256::digest(stale.as_bytes()));
+
+    // Recreate a pre-fix persisted state containing both still-valid rotations.
+    let mut legacy_state: Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    legacy_state["invites"]
+        .as_object_mut()
+        .unwrap()
+        .insert(accepted_digest.clone(), accepted_record);
+    std::fs::write(&state_path, serde_json::to_vec(&legacy_state).unwrap()).unwrap();
+
+    let replacement = key();
+    let (status, response) = call(
+        app.clone(),
+        "POST",
+        "/v2/enroll",
+        None,
+        serde_json::to_value(enrollment(
+            accepted,
+            "machine-002",
+            "node",
+            replacement.clone(),
+            key(),
+        ))
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{response}");
+    let after_rotation = persisted(dir.path());
+    assert_eq!(
+        after_rotation["hosts"]["machine-002"]["ssh_public_key"],
+        replacement
+    );
+    assert_eq!(after_rotation["invites"][&accepted_digest]["used"], true);
+    assert!(after_rotation["invites"].get(&stale_digest).is_none());
+
+    let (status, _) = call(
+        app,
+        "POST",
+        "/v2/enroll",
+        None,
+        serde_json::to_value(enrollment(stale, "machine-002", "node", key(), key())).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(persisted(dir.path()), after_rotation);
 }
 
 #[tokio::test]

@@ -8,7 +8,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{Request, StatusCode, header},
     middleware::{self, Next},
-    response::{Html, Response},
+    response::{Html, IntoResponse, Response},
     routing::get,
 };
 use tower_http::validate_request::ValidateRequestHeaderLayer;
@@ -22,13 +22,19 @@ pub(super) fn router(store: &JobStore, address: std::net::SocketAddr) -> Router 
         .route(
             "/new",
             get(|| async {
-                (
-                    [(
-                        "x-hostlink-command-timeout-max",
-                        MAX_COMMAND_TIMEOUT_SECONDS.to_string(),
-                    )],
-                    Html(include_str!("new.html")),
-                )
+                let mut response = Html(include_str!("new.html")).into_response();
+                let timeout_max = MAX_COMMAND_TIMEOUT_SECONDS.to_string();
+                response.headers_mut().insert(
+                    "x-hostlink-command-timeout-max",
+                    axum::http::HeaderValue::from_str(&timeout_max)
+                        .expect("numeric command timeout is a valid header value"),
+                );
+                #[cfg(windows)]
+                response.headers_mut().insert(
+                    "x-hostlink-command-child-breakaway",
+                    axum::http::HeaderValue::from_static("true"),
+                );
+                response
             }),
         )
         .fallback_service(ServeUI::new())

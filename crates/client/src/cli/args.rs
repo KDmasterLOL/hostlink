@@ -55,8 +55,12 @@ pub(super) struct InviteArgs {
     pub(super) bootstrap_hub_ca_cert: Option<PathBuf>,
     /// Explicitly authorize replacement of lost SSH keys for this full existing ID.
     /// The target also requires typed confirmation; machine ID, port and jobs remain.
-    #[arg(long, conflicts_with = "token_only")]
+    #[arg(long, conflicts_with_all = ["token_only", "reinstall"])]
     pub(super) replace_identity: Option<hostlink_hub::MachineId>,
+    /// Reinstall a missing local Agent root for an exact existing Hub host.
+    /// Retains the Hub machine ID and assigned port; deleted local jobs cannot be recovered.
+    #[arg(long, conflicts_with_all = ["token_only", "replace_identity"])]
+    pub(super) reinstall: bool,
 }
 
 #[derive(Subcommand)]
@@ -138,7 +142,8 @@ pub(super) enum Command {
         #[arg(long)]
         detach: bool,
         /// Allow trusted child processes to leave the Windows job; HostLink cannot terminate escaped descendants.
-        #[arg(long, conflicts_with = "detach")]
+        /// Detached Windows jobs require an Agent that advertises this capability.
+        #[arg(long)]
         allow_child_breakaway: bool,
         /// Total foreground SSH exec deadline in seconds (1..=600); cannot be used with --detach.
         #[arg(long, conflicts_with = "detach", value_parser = clap::value_parser!(u64).range(1..=600))]

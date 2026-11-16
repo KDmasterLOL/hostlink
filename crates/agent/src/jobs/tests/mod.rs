@@ -15,6 +15,7 @@ fn command_job_timeout_is_optional_and_legacy_payloads_remain_compatible() {
     let legacy: CommandJob =
         serde_json::from_str(r#"{"program":"example","args":[],"cwd":null}"#).unwrap();
     assert_eq!(legacy.timeout_seconds, None);
+    assert!(!legacy.allow_child_breakaway);
     assert_eq!(
         command_timeout_seconds(legacy.timeout_seconds).unwrap(),
         900
@@ -29,10 +30,22 @@ fn command_job_timeout_is_optional_and_legacy_payloads_remain_compatible() {
         args: Vec::new(),
         cwd: None,
         timeout_seconds: Some(1),
+        allow_child_breakaway: false,
     };
     assert_eq!(
         serde_json::to_value(configured).unwrap()["timeout_seconds"],
         1
+    );
+    let opted_in = CommandJob {
+        program: "example".into(),
+        args: Vec::new(),
+        cwd: None,
+        timeout_seconds: None,
+        allow_child_breakaway: true,
+    };
+    assert_eq!(
+        serde_json::to_value(opted_in).unwrap()["allow_child_breakaway"],
+        true
     );
 }
 
@@ -58,6 +71,7 @@ async fn worker_rejects_invalid_timeout_before_process_group_creation() {
             args: Vec::new(),
             cwd: None,
             timeout_seconds: Some(0),
+            allow_child_breakaway: false,
         },
         apalis_core::task::data::Data(super::worker::ExecutionContext {
             stop: processkit::CancellationToken::new(),
@@ -66,6 +80,26 @@ async fn worker_rejects_invalid_timeout_before_process_group_creation() {
     )
     .await;
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn worker_rejects_child_breakaway_off_windows() {
+    let result = super::worker::execute(
+        CommandJob {
+            program: "example".into(),
+            args: Vec::new(),
+            cwd: None,
+            timeout_seconds: None,
+            allow_child_breakaway: true,
+        },
+        apalis_core::task::data::Data(super::worker::ExecutionContext {
+            stop: processkit::CancellationToken::new(),
+            uncertain: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }),
+    )
+    .await;
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Unsupported);
 }
 
 #[cfg(target_os = "linux")]
@@ -84,6 +118,7 @@ async fn worker_enforces_short_command_timeout_with_processkit_containment() {
             args: vec!["-c".into(), "sleep 5".into()],
             cwd: None,
             timeout_seconds: Some(1),
+            allow_child_breakaway: false,
         },
         apalis_core::task::data::Data(super::worker::ExecutionContext {
             stop: processkit::CancellationToken::new(),
@@ -201,6 +236,21 @@ async fn board_advertises_bounded_command_timeout_without_submitting_a_job() {
             .get("x-hostlink-command-timeout-max")
             .unwrap(),
         "14400"
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        response
+            .headers()
+            .get("x-hostlink-command-child-breakaway")
+            .unwrap(),
+        "true"
+    );
+    #[cfg(not(windows))]
+    assert!(
+        response
+            .headers()
+            .get("x-hostlink-command-child-breakaway")
+            .is_none()
     );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM Jobs")
         .fetch_one(&store.pool)
@@ -477,6 +527,7 @@ async fn board_marks_zero_exit_done_and_nonzero_exit_failed() {
                     args: vec!["-c".into(), command.into()],
                     cwd: None,
                     timeout_seconds: None,
+                    allow_child_breakaway: false,
                 })
                 .send()
                 .await

@@ -12,8 +12,8 @@ use std::{
 use windows_sys::Win32::{
     Foundation::{ERROR_ALREADY_EXISTS, GetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::Threading::{
-        CreateEventW, OpenEventW, OpenProcess, PROCESS_SYNCHRONIZE, SYNCHRONIZATION_SYNCHRONIZE,
-        SetEvent, WaitForMultipleObjects, WaitForSingleObject,
+        CREATE_BREAKAWAY_FROM_JOB, CreateEventW, OpenEventW, OpenProcess, PROCESS_SYNCHRONIZE,
+        SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
     },
 };
 
@@ -198,6 +198,7 @@ async fn board_marks_windows_zero_exit_done_and_nonzero_exit_failed() {
                 args: vec!["/C".into(), format!("exit /B {code}")],
                 cwd: None,
                 timeout_seconds: None,
+                allow_child_breakaway: false,
             },
         )
         .await;
@@ -360,6 +361,7 @@ async fn shutdown_terminates_windows_job_object_process_tree() {
                 ],
                 cwd: Some(root.to_str().unwrap().into()),
                 timeout_seconds: None,
+                allow_child_breakaway: false,
             },
         )
         .await;
@@ -424,4 +426,54 @@ async fn shutdown_terminates_windows_job_object_process_tree() {
     .await
     .expect("process tree test exceeded its bounded evidence phase");
     guard.signal().expect("signal fixture cleanup event");
+}
+
+#[tokio::test]
+async fn worker_requires_opt_in_for_windows_child_breakaway() {
+    require_job_object();
+    let fixture = std::env::current_exe().unwrap();
+    let args = vec![
+        "--ignored".into(),
+        "--exact".into(),
+        "jobs::tests::windows::breakaway_request_fixture".into(),
+    ];
+    let run = |allow_child_breakaway| {
+        let mut command = CommandJob {
+            program: fixture.to_str().unwrap().into(),
+            args: args.clone(),
+            cwd: None,
+            timeout_seconds: None,
+            allow_child_breakaway,
+        };
+        // The fixture is inert when invoked directly by cargo test; this test-
+        // harness argument marks the worker-launched invocation.
+        command.args.push("--nocapture".into());
+        command
+    };
+    let context = || {
+        apalis_core::task::data::Data(super::super::worker::ExecutionContext {
+            stop: processkit::CancellationToken::new(),
+            uncertain: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
+    };
+    let denied = super::super::worker::execute(run(false), context()).await;
+    assert!(denied.is_err(), "breakaway must be denied by default");
+    let allowed = super::super::worker::execute(run(true), context()).await;
+    assert_eq!(allowed.unwrap(), 0, "opt-in must permit child breakaway");
+}
+
+#[test]
+#[ignore]
+fn breakaway_request_fixture() {
+    if !std::env::args().any(|arg| arg == "--nocapture") {
+        return;
+    }
+    let interpreter = std::env::var("ComSpec").expect("ComSpec must be set");
+    use std::os::windows::process::CommandExt;
+    let mut child = std::process::Command::new(interpreter)
+        .args(["/C", "exit /B 0"])
+        .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
+        .spawn()
+        .expect("CREATE_BREAKAWAY_FROM_JOB child creation must be allowed");
+    assert!(child.wait().unwrap().success());
 }

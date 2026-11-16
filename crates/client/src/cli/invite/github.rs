@@ -217,6 +217,7 @@ fn selections_from_release(
             let selection = ArtifactSelection {
                 machine_id: None,
                 replace_identity: false,
+                reinstall: false,
                 agent_url,
                 agent_sha256,
                 target,

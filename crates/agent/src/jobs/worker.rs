@@ -28,8 +28,20 @@ pub(super) async fn execute(job: CommandJob, ctx: Data<ExecutionContext>) -> io:
             "invalid command bounds",
         ));
     }
+    #[cfg(not(windows))]
+    if job.allow_child_breakaway {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "child breakaway is supported only on Windows",
+        ));
+    }
     let timeout = Duration::from_secs(command_timeout_seconds(job.timeout_seconds)?);
-    let group = processkit::ProcessGroup::new().map_err(io::Error::other)?;
+    #[cfg(windows)]
+    let options = processkit::ProcessGroupOptions::default()
+        .windows_allow_breakaway(job.allow_child_breakaway);
+    #[cfg(not(windows))]
+    let options = processkit::ProcessGroupOptions::default();
+    let group = processkit::ProcessGroup::with_options(options).map_err(io::Error::other)?;
     let trusted = match group.mechanism() {
         #[cfg(target_os = "linux")]
         processkit::Mechanism::CgroupV2 => true,

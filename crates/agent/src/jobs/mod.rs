@@ -22,6 +22,14 @@ pub struct CommandJob {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
+    /// Allow Windows descendants to explicitly escape the command Job Object.
+    /// Escaped processes are outside the worker's timeout and shutdown cleanup.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_child_breakaway: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 fn command_timeout_seconds(timeout_seconds: Option<u64>) -> io::Result<u64> {

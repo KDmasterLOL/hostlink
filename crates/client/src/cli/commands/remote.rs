@@ -17,6 +17,7 @@ const BOARD_TIMEOUT: Duration = Duration::from_secs(10);
 const BOARD_MAX_RESPONSE: usize = 64 * 1024;
 const COMMAND_TIMEOUT_HEADER: &str = "x-hostlink-command-timeout-max";
 const COMMAND_TIMEOUT_MAX: u64 = 14_400;
+const COMMAND_CHILD_BREAKAWAY_HEADER: &str = "x-hostlink-command-child-breakaway";
 
 pub(super) async fn check(target: &HostTarget) -> Result<i32, Box<dyn Error>> {
     execute(target, async |_| Ok(0)).await
@@ -94,14 +95,15 @@ pub(super) async fn exec_detached(
     command: &str,
     target_os: &str,
     timeout_seconds: Option<u64>,
+    allow_child_breakaway: bool,
 ) -> Result<i32, Box<dyn Error>> {
     let (program, args) = shell_command(command, target_os)?;
     // Apalis uses ULIDs as its native task identifiers.
     let id = ulid::Ulid::generate().to_string();
-    let payload = command_job_payload(program, args, timeout_seconds);
+    let payload = command_job_payload(program, args, timeout_seconds, allow_child_breakaway);
     execute(target, async |client| {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        if let Some(requested) = timeout_seconds {
+        if timeout_seconds.is_some() || allow_child_breakaway {
             let mut stream = client.open_forward(addr).await?;
             let request = board_timeout_capability_request(addr);
             let response = tokio::time::timeout(BOARD_TIMEOUT, async {
@@ -112,12 +114,13 @@ pub(super) async fn exec_detached(
             .map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "Apalis Board timeout capability preflight timed out; job was not submitted",
+                    "Apalis Board capability preflight timed out; job was not submitted",
                 )
             })??;
-            submit_after_timeout_preflight(
+            submit_after_capability_preflight(
                 &response,
-                requested,
+                timeout_seconds,
+                allow_child_breakaway,
                 submit_detached_job(client, addr, &id, &payload),
             )
             .await?;
@@ -164,12 +167,58 @@ fn board_timeout_capability_request(address: SocketAddr) -> String {
     format!("GET /new HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")
 }
 
-async fn submit_after_timeout_preflight<T>(
+fn validate_detached_capabilities(
     response: &[u8],
-    requested: u64,
+    requested_timeout: Option<u64>,
+    allow_child_breakaway: bool,
+) -> io::Result<()> {
+    if let Some(requested) = requested_timeout {
+        validate_timeout_capability(response, requested)?;
+    } else {
+        let status = response_status(response)?;
+        if status != 200 {
+            return Err(io::Error::other(format!(
+                "Apalis Board child breakaway capability preflight failed (HTTP {status}); job was not submitted"
+            )));
+        }
+    }
+    if allow_child_breakaway {
+        validate_child_breakaway_capability(response)?;
+    }
+    Ok(())
+}
+
+fn validate_child_breakaway_capability(response: &[u8]) -> io::Result<()> {
+    let status = response_status(response)?;
+    if status != 200 {
+        return Err(io::Error::other(format!(
+            "Apalis Board child breakaway capability preflight failed (HTTP {status}); job was not submitted"
+        )));
+    }
+    let (head, _) = split_response(response)?;
+    let mut capabilities = head.lines().skip(1).filter_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case(COMMAND_CHILD_BREAKAWAY_HEADER)
+            .then_some(value.trim())
+    });
+    let value = capabilities.next().ok_or_else(|| {
+        io::Error::other("Agent does not advertise child breakaway support; job was not submitted")
+    })?;
+    if capabilities.next().is_some() || value != "true" {
+        return Err(io::Error::other(
+            "Agent returned an invalid child breakaway capability; job was not submitted",
+        ));
+    }
+    Ok(())
+}
+
+async fn submit_after_capability_preflight<T>(
+    response: &[u8],
+    requested_timeout: Option<u64>,
+    allow_child_breakaway: bool,
     submit: impl Future<Output = io::Result<T>>,
 ) -> io::Result<T> {
-    validate_timeout_capability(response, requested)?;
+    validate_detached_capabilities(response, requested_timeout, allow_child_breakaway)?;
     submit.await
 }
 
@@ -221,10 +270,14 @@ fn command_job_payload(
     program: String,
     args: Vec<String>,
     timeout_seconds: Option<u64>,
+    allow_child_breakaway: bool,
 ) -> serde_json::Value {
     let mut payload = serde_json::json!({"program": program, "args": args, "cwd": null});
     if let Some(timeout_seconds) = timeout_seconds {
         payload["timeout_seconds"] = serde_json::json!(timeout_seconds);
+    }
+    if allow_child_breakaway {
+        payload["allow_child_breakaway"] = serde_json::json!(true);
     }
     payload
 }
@@ -474,10 +527,19 @@ mod board_http_tests {
     }
 
     #[tokio::test]
-    async fn invalid_timeout_preflight_short_circuits_before_enqueue() {
+    async fn invalid_capability_preflight_rejects_before_enqueue() {
         let response = b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n";
         let submitted = std::cell::Cell::new(false);
-        let result = submit_after_timeout_preflight(response, 901, async {
+        let result = submit_after_capability_preflight(response, Some(901), true, async {
+            submitted.set(true);
+            Ok(())
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(!submitted.get());
+
+        let timeout_only = b"HTTP/1.1 200 OK\r\nx-hostlink-command-timeout-max: 14400\r\ncontent-length: 0\r\n\r\n";
+        let result = submit_after_capability_preflight(timeout_only, Some(901), true, async {
             submitted.set(true);
             Ok(())
         })
@@ -488,15 +550,41 @@ mod board_http_tests {
 
     #[test]
     fn command_job_timeout_is_optional_for_legacy_agents() {
-        let old = command_job_payload("sh".into(), vec!["-c".into(), "true".into()], None);
+        let old = command_job_payload("sh".into(), vec!["-c".into(), "true".into()], None, false);
         assert_eq!(
             old,
             serde_json::json!({"program":"sh", "args":["-c", "true"], "cwd":null})
         );
         assert!(old.get("timeout_seconds").is_none());
 
-        let new = command_job_payload("sh".into(), vec!["-c".into(), "true".into()], Some(901));
+        let new = command_job_payload(
+            "sh".into(),
+            vec!["-c".into(), "true".into()],
+            Some(901),
+            false,
+        );
         assert_eq!(new["timeout_seconds"], 901);
+
+        let breakaway = command_job_payload("powershell.exe".into(), vec![], None, true);
+        assert_eq!(breakaway["allow_child_breakaway"], true);
+        assert!(old.get("allow_child_breakaway").is_none());
+    }
+
+    #[test]
+    fn child_breakaway_preflight_requires_one_exact_true_advertisement() {
+        let valid = b"HTTP/1.1 200 OK\r\nx-hostlink-command-child-breakaway: true\r\ncontent-length: 0\r\n\r\n";
+        assert!(validate_detached_capabilities(valid, None, true).is_ok());
+        assert!(validate_detached_capabilities(valid, None, false).is_ok());
+
+        for invalid in [
+            b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nx-hostlink-command-child-breakaway: false\r\ncontent-length: 0\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nx-hostlink-command-child-breakaway: True\r\ncontent-length: 0\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nx-hostlink-command-child-breakaway: true\r\nX-HostLink-Command-Child-Breakaway: true\r\ncontent-length: 0\r\n\r\n",
+            b"HTTP/1.1 404 Not Found\r\nx-hostlink-command-child-breakaway: true\r\ncontent-length: 0\r\n\r\n",
+        ] {
+            assert!(validate_detached_capabilities(invalid, None, true).is_err());
+        }
     }
 
     #[test]

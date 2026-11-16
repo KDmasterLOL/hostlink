@@ -32,13 +32,14 @@ mod flow;
 mod local_state;
 mod validation;
 
-#[cfg(test)]
-pub(crate) use flow::prepare_enrollment_using;
 pub use flow::{
     EnrollmentIdentity, EnrollmentOptions, EnrollmentResult, prepare_enrollment,
     prepare_enrollment_with_ca,
 };
 pub(crate) use flow::{EnrollmentManifest, FileDigest, enroll_once};
+pub(crate) use flow::{load_hub_ca_certificate, prepare_replacement_enrollment_with_ca};
+#[cfg(test)]
+pub(crate) use flow::{prepare_enrollment_using, prepare_replacement_enrollment_using};
 pub(crate) use local_state::*;
 pub(crate) use validation::*;
 

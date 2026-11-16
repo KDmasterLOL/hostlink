@@ -52,6 +52,13 @@ pub(crate) fn create_invite(
     } else {
         None
     };
+    if let Some(id) = request.rotate_machine_id.as_ref() {
+        // A newly issued rotation supersedes any still-pending rotation for this host.
+        locked
+            .state
+            .invites
+            .retain(|_, invite| invite.rotate_machine_id.as_ref() != Some(id));
+    }
     let mut raw = [0u8; 32];
     getrandom::fill(&mut raw)
         .map_err(|_| HubError::internal("secure random source unavailable"))?;
@@ -219,6 +226,13 @@ pub(crate) fn enroll(
         .get_mut(&digest)
         .expect("validated invite")
         .used = true;
+    if invite.rotate_machine_id.is_some() {
+        // Legacy state may contain several rotation invites created before the
+        // single-current-invite rule; consume them with the rotation atomically.
+        locked.state.invites.retain(|other_digest, other| {
+            other_digest == &digest || other.rotate_machine_id.as_ref() != Some(&id)
+        });
+    }
     locked.state.audit.push(AuditEntry {
         at,
         action: if invite.repair_machine_id.is_some() {

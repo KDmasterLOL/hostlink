@@ -135,6 +135,7 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
         bootstrap_hub_ca_cert,
         gateway_index,
         replace_identity,
+        reinstall,
     } = args;
     let name = name.or(legacy_name);
     let config_path = default_hub_config_path()?;
@@ -146,6 +147,15 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
         return Err("--ssh-user must match the Controller Hub config ssh_user (SSH protocol login, not the target OS account)".into());
     }
     let client = HubClient::from_config(&config)?;
+    // Resolve first so reinstall cannot fall through to a new-host invite. For an
+    // unknown name this is the only Hub request: no gateway lookup or invite is made.
+    let existing = match name.as_deref() {
+        Some(name) if !token_only => client.invitation_identity(name).await?,
+        _ => None,
+    };
+    if reinstall && (token_only || name.is_none() || existing.is_none()) {
+        return Err("--reinstall requires the exact canonical name of an existing host in authenticated Hub inventory".into());
+    }
     let mut selection = if token_only {
         if name.is_some() && name.as_deref().is_some_and(|value| value.trim().is_empty()) {
             return Err("invitation name cannot be empty".into());
@@ -195,11 +205,6 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
         };
         Some(selections)
     };
-    // Canonical names only: do not adopt a display label or an ID prefix here.
-    let existing = match name.as_deref() {
-        Some(name) if !token_only => client.invitation_identity(name).await?,
-        _ => None,
-    };
     if let Some(id) = &replace_identity {
         if existing.as_ref().is_none_or(|host| &host.machine_id != id) {
             return Err("--replace-identity requires the exact existing canonical name and full machine ID from authenticated inventory".into());
@@ -208,10 +213,18 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
             "Explicit SSH identity replacement authorized for {id}; the target will require typed confirmation. The machine ID, assigned port and jobs are retained."
         );
     }
+    if reinstall {
+        eprintln!(
+            "Reinstall authorized for the existing Hub host; the target will replace its SSH identity after typed confirmation. Hub machine ID and assigned port are retained; local Agent state and queued jobs lost with the deleted root cannot be recovered."
+        );
+    }
+    let replace_identity = replace_identity.is_some();
+    let rotate_identity = replace_identity || reinstall;
     if let (Some(host), Some(selections)) = (&existing, &mut selection) {
         for selection in selections {
             selection.bind_repair(host.machine_id.clone());
-            selection.replace_identity = replace_identity.is_some();
+            selection.replace_identity = rotate_identity;
+            selection.reinstall = reinstall;
         }
     }
     // Resolve the exact raw asset/digest and render before creating a Hub invite.
@@ -231,7 +244,7 @@ pub(super) async fn invite(args: InviteArgs) -> Result<i32, Box<dyn Error>> {
         );
     }
     let pending = match existing {
-        Some(host) if replace_identity.is_some() => {
+        Some(host) if rotate_identity => {
             Host::invite_replacement(&client, &host, ttl_seconds).await?
         }
         Some(host) => Host::invite_repair(&client, &host, ttl_seconds).await?,

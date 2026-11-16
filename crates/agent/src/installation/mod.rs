@@ -5,7 +5,10 @@ mod repair;
 pub use crate::executable::{BinaryIdentity, current_binary_identity};
 use crate::{
     agent_files::{hash_file, validate_path_has_no_reparse_components},
-    enrollment::{EnrollmentOptions, EnrollmentResult, prepare_enrollment_with_ca},
+    enrollment::{
+        EnrollmentOptions, EnrollmentResult, load_hub_ca_certificate, prepare_enrollment_with_ca,
+        prepare_replacement_enrollment_with_ca,
+    },
     executable::RunningExecutable,
     package::{EXECUTABLE_NAME, MAX_EXECUTABLE_BYTES, invalid, verify_executable},
 };
@@ -34,6 +37,8 @@ pub struct InstallOptions {
     pub machine_id: Option<hostlink_hub::MachineId>,
     /// Explicit operator-authorized key replacement, additionally confirmed at the target.
     pub replace_identity: bool,
+    /// Recreate a missing installation using new keys and the existing Hub machine ID.
+    pub reinstall: bool,
 }
 
 /// Resolve the stable per-user Agent location, independently of the running executable.
@@ -145,8 +150,30 @@ pub async fn install(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
         Ok(_) => {
+            reject_reinstall_of_existing_root(options)?;
             return repair::repair(options, hub_ca_cert, &root).await;
         }
+    }
+    if options.reinstall {
+        let expected = replacement_identity_for_missing_root(options)?;
+        confirm_reinstall(expected)?;
+        let mut source = RunningExecutable::open()?;
+        let parent = root
+            .parent()
+            .ok_or_else(|| invalid("Agent root has no parent"))?;
+        ensure_parent(parent)?;
+        PrivateDir::open(parent).map_err(io::Error::other)?;
+        let enrollment = enrollment_options(options, root.clone());
+        crate::enrollment::validate_inputs(&enrollment)?;
+        crate::enrollment::read_token(&enrollment.token_file)?;
+        let hub_ca = load_hub_ca_certificate(hub_ca_cert)?;
+        // A surviving, verified Task Scheduler task or user unit is stopped and retained.
+        // Foreign or mismatched registrations fail before the one-use rotate invite is sent.
+        crate::service::prepare_missing_root_reinstall(&root)?;
+        let result = prepare_replacement_enrollment_with_ca(&enrollment, expected, hub_ca).await?;
+        publish_executable(&root, &mut source).map_err(|error| io::Error::other(format!(
+            "Agent reinstall incomplete; preserve enrollment.pending and reconcile the Hub before retrying ({error})")))?;
+        return Ok(result);
     }
     if options.machine_id.is_some() || options.replace_identity {
         return Err(invalid(
@@ -164,6 +191,59 @@ pub async fn install(
     publish_executable(&root, &mut source).map_err(|error| io::Error::other(format!(
         "Agent installation incomplete; preserve enrollment.pending and reconcile the Hub before retrying ({error})")))?;
     Ok(result)
+}
+
+fn reject_reinstall_of_existing_root(options: &InstallOptions) -> io::Result<()> {
+    if options.reinstall {
+        Err(invalid(
+            "--reinstall requires the Agent installation root to be absent; existing installations use identity repair",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn replacement_identity_for_missing_root(
+    options: &InstallOptions,
+) -> io::Result<&hostlink_hub::MachineId> {
+    if !options.replace_identity {
+        return Err(invalid(
+            "--reinstall requires an explicit --replace-identity rotation invite",
+        ));
+    }
+    options
+        .machine_id
+        .as_ref()
+        .ok_or_else(|| invalid("--reinstall requires the exact existing --machine-id"))
+}
+
+fn confirm_reinstall(expected: &hostlink_hub::MachineId) -> io::Result<()> {
+    use std::io::{BufRead, IsTerminal};
+    let input = io::stdin();
+    if !input.is_terminal() {
+        return Err(invalid(
+            "Agent reinstall requires an interactive local/RDP session and typed full machine ID",
+        ));
+    }
+    eprintln!(
+        "Reinstall missing Agent root for {expected}? This rotates both SSH keys; the Hub machine ID and assigned port remain, while deleted local configuration and jobs cannot be restored. Type the full machine ID to confirm:"
+    );
+    let mut answer = String::new();
+    io::BufReader::new(input.lock().take(130)).read_line(&mut answer)?;
+    validate_reinstall_confirmation(expected, &answer)
+}
+
+fn validate_reinstall_confirmation(
+    expected: &hostlink_hub::MachineId,
+    answer: &str,
+) -> io::Result<()> {
+    if answer.trim_end_matches(['\r', '\n']) == expected.as_str() {
+        Ok(())
+    } else {
+        Err(invalid(
+            "Agent reinstall was not confirmed; no Hub request was sent",
+        ))
+    }
 }
 
 fn enrollment_options(options: &InstallOptions, root: PathBuf) -> EnrollmentOptions {

@@ -100,3 +100,39 @@ fn release_requires_exact_published_version_unique_asset_and_digest() {
     value["assets"].as_array_mut().unwrap().push(duplicate);
     assert!(select_asset(&parse(&value).unwrap(), &Target::LinuxX64.asset_name()).is_err());
 }
+
+#[test]
+fn reinstall_requires_supported_agent_for_exact_and_latest_release_selection() {
+    let validate = |tag: &str, requested: Option<&str>, reinstall: bool| {
+        let mut value = metadata();
+        value["tag_name"] = json!(tag);
+        let release = parse_release(&serde_json::to_vec(&value).unwrap(), requested).unwrap();
+        let mut selected = selections_from_release(
+            &release,
+            &[Target::LinuxX64],
+            "host".into(),
+            "hostlink".into(),
+            "https://hub.example".into(),
+            None,
+            None,
+        )
+        .unwrap()
+        .remove(0);
+        selected.machine_id =
+            Some(hostlink_hub::MachineId::parse("00000000-0000-4000-8000-000000000001").unwrap());
+        selected.replace_identity = reinstall;
+        selected.reinstall = reinstall;
+        selected.validate()
+    };
+
+    for (tag, requested) in [("v0.2.6", Some("0.2.6")), ("v0.2.6", None)] {
+        assert_eq!(
+            validate(tag, requested, true).unwrap_err().to_string(),
+            "invalid bootstrap selection: --reinstall requires an Agent release v0.2.7 or newer"
+        );
+        validate(tag, requested, false).expect("ordinary invites keep supporting older Agents");
+    }
+    for (tag, requested) in [("v0.2.7", Some("0.2.7")), ("v0.2.7", None)] {
+        validate(tag, requested, true).expect("v0.2.7 supports missing-root reinstall");
+    }
+}

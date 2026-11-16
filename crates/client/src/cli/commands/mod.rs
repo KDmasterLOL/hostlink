@@ -114,8 +114,21 @@ pub(super) async fn run(cli: Cli) -> Result<i32, Box<dyn Error>> {
                 if stdin_file.is_some() {
                     return Err("--stdin-file cannot be used with --detach".into());
                 }
-                remote::exec_detached(&host_target, port, &command, &target_os, timeout_seconds)
-                    .await
+                if allow_child_breakaway && target_os != "windows" {
+                    return Err(
+                        "--allow-child-breakaway is supported only for Windows detached jobs"
+                            .into(),
+                    );
+                }
+                remote::exec_detached(
+                    &host_target,
+                    port,
+                    &command,
+                    &target_os,
+                    timeout_seconds,
+                    allow_child_breakaway,
+                )
+                .await
             } else {
                 if board_port.is_some() || os.is_some() || timeout_seconds.is_some() {
                     return Err(

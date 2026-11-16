@@ -164,6 +164,39 @@ pub fn status(root: &Path) -> io::Result<ServiceStatus> {
     })
 }
 
+/// Stop the owned user unit for a missing installation, retaining its registration.
+///
+/// The unit is checked against the canonical future root. A unit whose contents do
+/// not match HostLink's expected command is treated as a collision and left alone.
+pub(crate) fn prepare_missing_root_reinstall(root: &Path) -> io::Result<()> {
+    let absolute = std::path::absolute(root)?;
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| io::Error::other("Agent root has no parent"))?;
+    PrivateDir::open(parent).map_err(io::Error::other)?;
+    let file_name = absolute
+        .file_name()
+        .ok_or_else(|| io::Error::other("Agent root has no file name"))?;
+    let expected_root = parent.canonicalize()?.join(file_name);
+    if absolute != expected_root {
+        return Err(io::Error::other("unsafe Agent root path"));
+    }
+    let hash = Sha256::digest(expected_root.as_os_str().as_encoded_bytes());
+    let digest = format!("{hash:x}");
+    let label = format!("hostlink-agent-{}", &digest[..20]).parse()?;
+    let (_, exists) = check_unit(&expected_root, &label, false)?;
+    let state = SystemdServiceManager::user().status(ServiceStatusCtx {
+        label: label.clone(),
+    })?;
+    if exists != !matches!(state, OsStatus::NotInstalled) {
+        return Err(io::Error::other("OS/unit registration mismatch"));
+    }
+    if matches!(state, OsStatus::Running) {
+        SystemdServiceManager::user().stop(ServiceStopCtx { label })?;
+    }
+    Ok(())
+}
+
 fn root_label(root: &Path) -> io::Result<(PathBuf, ServiceLabel)> {
     // SAFETY: geteuid reads only this process's effective user identity.
     if unsafe { libc::geteuid() } == 0

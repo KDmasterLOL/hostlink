@@ -209,7 +209,10 @@ fn exercise_invites(online: bool) {
         } else {
             assert!(!output.status.success());
             assert!(output.stdout.is_empty());
-            assert_eq!(log, "GET /v2/info\n");
+            // Invite resolution first fetches inventory to distinguish repair
+            // from creation, then validates the selected approved gateway.
+            // Exact log matching also proves no invitation was minted.
+            assert_eq!(log, "GET /v2/hosts\nGET /v2/info\n");
             let stderr = String::from_utf8_lossy(&output.stderr);
             let guidance = if count == 0 {
                 "no approved gateway"

@@ -24,6 +24,7 @@ pub(super) async fn repair(
         "Agent root already exists; existing Agent requires an identity-bound invite from the operator; a fresh invite cannot adopt this root",
     ))?;
     enrollment::validate_inputs(&enrollment_options(options, root.to_owned()))?;
+    let ca_certificate = enrollment::load_hub_ca_certificate(ca)?;
     #[cfg(windows)]
     crate::runtime::ensure_windows_user()?;
     let snapshot = if options.replace_identity {
@@ -53,7 +54,7 @@ pub(super) async fn repair(
     transaction.mark_pending()?;
     // Any error after send (including an invalid reply) retains the marker.
     // Neither a fresh invite nor this token is automatically retried.
-    let response = enrollment::enroll_once(&options.hub_url, request, ca).await
+    let response = enrollment::enroll_once(&options.hub_url, request, ca_certificate.as_deref()).await
         .map_err(|_| invalid("repair Hub outcome uncertain; preserve repair.pending and reconcile the exact Hub identity before retrying"))?;
     transaction
         .write_candidate(&snapshot, &response, options.gateway_index)

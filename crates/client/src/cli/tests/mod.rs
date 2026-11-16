@@ -74,6 +74,35 @@ fn invite_family_and_legacy_flags_are_exclusive() {
 }
 
 #[test]
+fn reinstall_requires_a_runnable_named_invite_and_is_distinct_from_key_rotation() {
+    let base = ["hostlink", "invite", "lumenvat", "--os", "windows"];
+    let parsed = Cli::try_parse_from(base.into_iter().chain(["--reinstall"]))
+        .expect("explicit reinstall should parse");
+    assert!(matches!(
+        parsed.command,
+        Command::Invite(crate::cli::args::InviteArgs {
+            reinstall: true,
+            ..
+        })
+    ));
+
+    for args in [
+        vec!["--token-only", "--reinstall"],
+        vec![
+            "lumenvat",
+            "--os",
+            "windows",
+            "--reinstall",
+            "--replace-identity",
+            "machine-id",
+        ],
+        vec!["--reinstall"],
+    ] {
+        assert!(Cli::try_parse_from(["hostlink", "invite"].into_iter().chain(args)).is_err());
+    }
+}
+
+#[test]
 fn invitation_target_is_parsed_into_the_existing_bootstrap_type() {
     for target in [
         Target::Win7X86,
@@ -217,7 +246,7 @@ fn foreground_exec_timeout_is_bounded_optional_and_conflicts_with_detach() {
 }
 
 #[test]
-fn child_breakaway_requires_foreground_execution() {
+fn child_breakaway_is_explicit_and_available_for_detached_jobs() {
     let command = [
         "hostlink",
         "exec",
@@ -228,7 +257,7 @@ fn child_breakaway_requires_foreground_execution() {
         "--allow-child-breakaway",
     ];
     assert!(Cli::try_parse_from(command).is_ok());
-    assert!(Cli::try_parse_from(command.into_iter().chain(["--detach"])).is_err());
+    assert!(Cli::try_parse_from(command.into_iter().chain(["--detach"])).is_ok());
 }
 
 #[test]

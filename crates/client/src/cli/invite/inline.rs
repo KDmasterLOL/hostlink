@@ -59,6 +59,7 @@ fn render_inline(selections: &[ArtifactSelection]) -> Result<InlineBootstrap, Bo
             || selection.gateway_index != first.gateway_index
             || selection.machine_id != first.machine_id
             || selection.replace_identity != first.replace_identity
+            || selection.reinstall != first.reinstall
             || selection.agent_url.path().split('/').nth(5)
                 != first.agent_url.path().split('/').nth(5)
         {
@@ -100,6 +101,7 @@ fn render_inline(selections: &[ArtifactSelection]) -> Result<InlineBootstrap, Bo
                 "ReplaceIdentity",
                 if first.replace_identity { "yes" } else { "" },
             ),
+            ("Reinstall", if first.reinstall { "yes" } else { "" }),
         ] {
             vars.push_str(&format!("${key}={}\n", quote_ps(value)));
         }
@@ -151,6 +153,7 @@ fn render_inline(selections: &[ArtifactSelection]) -> Result<InlineBootstrap, Bo
                 "replace_identity",
                 if first.replace_identity { "yes" } else { "" },
             ),
+            ("reinstall", if first.reinstall { "yes" } else { "" }),
             ("agent_url", first.agent_url.as_str()),
             ("agent_sha256", first.agent_sha256.as_str()),
         ] {

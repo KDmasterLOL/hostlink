@@ -1,0 +1,15 @@
+# Managed by Copier. This stores the original repository path and Git
+# revision, not the temporary clone used during a versioned copy/update.
+_src_path: ../project-templates/templates/rust/project
+cache_layout: worktree
+cache_project_id: hostlink
+compiler_cache: sccache
+debugging_profile: true
+development_mode: compact
+generate_toolchain: false
+package_name: ''
+project_kind: none
+release_lto: 'off'
+rust_channel: stable
+rust_edition: '2024'
+sweep_max_size: 40GiB

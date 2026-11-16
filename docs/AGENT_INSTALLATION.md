@@ -39,6 +39,12 @@ hostlink invite lab-host --os windows --replace-identity FULL_MACHINE_ID
 
 The full ID must match that canonical name in the authenticated inventory. The target requires an interactive terminal and typing the same full ID before generating replacement keys. The Hub issues a distinct rotation invitation. Machine ID, assigned port and jobs remain; both SSH keys change, including the Controller's Agent host pin. Replacement tolerates missing or corrupt **private SSH key files only**. The manifest, machine record, config and all other state must still validate. An unidentified or more broadly damaged root requires authenticated reconciliation; the installer does not delete or silently adopt it.
 
+### Deleted installation
+
+If the entire Agent root is absent, use `hostlink invite NAME --os windows --reinstall` to request an explicitly authorized identity replacement for that exact existing Hub host. The target requires the operator to type its full machine ID before generating new keys. The Hub keeps the machine ID and port, but both SSH keys change and a fresh local job database is created; deleted local configuration and jobs cannot be recovered. A partially present or foreign root still fails closed and is never deleted automatically. Interrupted enrollment leaves its normal pending marker and must be reconciled before retrying.
+
+Stop any manually launched copies of the old Agent before reinstalling. The installer stops a matching registered service; it cannot identify every manually launched or renamed copy. Use a Hub with the rotation-invite supersession fix and keep only the newest invitation for that host.
+
 ### Interrupted repair and rollback
 
 Before sending a one-use request, the installer durably writes `repair.pending` and `.repair-UUID/attempt/` with the attempted keys and public identity; it never saves the invite token there. A failed/unacknowledged HTTPS response, invalid reply, or failed approved-gateway probe leaves these files for reconciliation and retains the original installation. Do not resend that token or remove the marker merely to retry. Installed runtime, updater and service start/install refuse a pending transaction.
